@@ -16,8 +16,15 @@ dispatch (deny / `require_approval`→deny / allow), signed `Decision` on every 
 agent-side re-check (`internal/agent/guardrail`), and audit rows (`policy.create`,
 `policy.delete`, `policy.deny`). No new flags or env vars; the server generates a
 `server_identity.key` under `<db-dir>/identity/` on first run.
-**Not yet in v0.1/v0.2:** Web UI, host provisioning over fleet SSH, elevation, files &
-sessions, jobs/scheduling, Postgres backend, offline spool, secret store, MCP.
+**What v0.3 adds (M1):** host provisioning over fleet SSH (PRD R17) —
+`partout ctl provision new --host user@host` drives a server-side 5-step run
+(connect + no-silent-TOFU `key_confirm` gate → preflight → transfer → install →
+wait-enroll). The server spawns the system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen`
+(`PARTOUT_SSH_DIR` overrides the SSH dir, default the service user's `$HOME/.ssh`;
+`PARTOUT_SERVER_HOST` sets the address written into the new agent's `agent.env`).
+New env vars: `PARTOUT_SSH_DIR`, `PARTOUT_SERVER_HOST`.
+**Not yet in v0.3:** Web UI, elevation, files & sessions, jobs/scheduling, Postgres
+backend, offline spool, secret store, MCP.
 
 ---
 
@@ -104,10 +111,10 @@ RestartSec=3
 First run: create the service account, then `systemctl enable --now partout-server`.
 Verify: `curl -sf http://localhost:8443/healthz` → `{"status":"ok"}`.
 
-> *Proposed (not in v0.1):* `--create-admin=<name>` interactive bootstrap (replaced in
-> v0.1 by RBAC bearer tokens, §4.1), and server-side agent provisioning over the
-> operator's fleet SSH (`PARTOUT_SSH_DIR`, PRD R17). Until then, install agents by hand
-> (§3.2).
+> *Implemented in v0.3:* server-side agent provisioning over the operator's fleet SSH
+> (`PARTOUT_SSH_DIR`, PRD R17) — `partout ctl provision new --host user@host`.
+> *Proposed (not yet):* `--create-admin=<name>` interactive bootstrap (replaced in v0.1 by
+> RBAC bearer tokens, §4.1). Manual agent install (§3.2) remains the fallback.
 
 ### 3.2 Bare binary + systemd — **agent** *(implemented — `deploy/systemd/`)*
 
@@ -244,6 +251,8 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_TOKEN_OPERATOR` / `--operator-token` | *(empty)* | operator bearer token |
 | `PARTOUT_TOKEN_VIEWER` / `--viewer-token` | *(empty)* | viewer bearer token |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for output blobs / extern cache (M1+) — not used by the server in v0.1 |
+| `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout |
+| `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning (the listen address `:8443` is not usable by remote agents) |
 
 RBAC: when no token is set the server runs in **single-user local mode** (no auth);
 hierarchy viewer < operator < admin.
@@ -258,7 +267,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | facts refresh seconds (floor 30) |
 
-### 4.3 `partout ctl` — wired in v0.1
+### 4.3 `partout ctl` — wired in v0.1 (policy + provision added in v0.2/v0.3)
 
 | Var / Flag | Notes |
 |---|---|
@@ -267,12 +276,20 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_TLS_CA` / `--ca-file` | server root CA (PEM) → HTTPS |
 
 Commands: `enroll-token [--ttl S]`, `hosts`, `run --selector S -- CMD [ARGS…]`,
-`exec EXEC_ID`, `audit [--kind K] [--actor A] [--limit N]`, `ca`. Global flags may be
-given before or after the subcommand.
+`exec EXEC_ID`, `audit [--kind K] [--actor A] [--limit N]`,
+`policy <list|create|delete>` (v0.2), `provision <new|list|get|key|cancel>` (v0.3,
+admin), `ca`. Global flags may be given before or after the subcommand.
 
-### 4.4 Planned — documented, **not wired** in v0.1
+`provision` drives fleet-SSH host provisioning (PRD R17): `new --host user@host
+[--mode fresh|join]` starts a run; `get RUN_ID` shows state + per-step output; when a
+host key is new to `known_hosts` the run pauses at `key_confirm` until `key RUN_ID
+confirm|deny`; `cancel RUN_ID` aborts. States: `queued → connecting → key_confirm →
+preflight → transfer → install → enrolling → connected` (terminals `failed`/`handoff`/
+`cancelled`; `handoff` = non-systemd host, manual install).
 
-These are PRD/architecture targets. They are **not parsed** by the v0.1 binary; setting
+### 4.4 Planned — documented, **not wired** in v0.3
+
+These are PRD/architecture targets. They are **not parsed** by the v0.3 binary; setting
 them has no effect. (The v0.1 config package deliberately refuses to parse vars without
 an implementation.)
 
@@ -282,7 +299,6 @@ an implementation.)
 | `PARTOUT_H2C` | false | explicit cleartext-h2 acceptance flag |
 | `PARTOUT_DB` | `sqlite:$PARTOUT_DATA_DIR/db.partout` | Postgres backend (R9) |
 | `PARTOUT_SECRET_KEY_FILE` / `PARTOUT_SECRET_KEY` | none | secret store (PRD §5.7) |
-| `PARTOUT_SSH_DIR` | `$HOME/.ssh` | server-side provisioning over fleet SSH (R17) |
 | `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` | false | air-gap switch |
 | `PARTOUT_RETENTION_*` (output/sessions/runs/facts days) | 30/30/90/90 | retention (PRD §9) |
 | `PARTOUT_MAX_OUTPUT_MB` / `PARTOUT_MAX_TRANSFER_MB` | 16 / 256 | size limits |
@@ -310,7 +326,7 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 ### 5.1 Solo: one server VPS + a few boxes
 
 - Server on the VPS (§3.1) behind Caddy; set the three RBAC bearer tokens; enroll agents
-  by hand (§3.2) or (once M1 provisioning lands) via the UI.
+  by hand (§3.2) or via fleet SSH provision (`partout ctl provision new --host user@host`).
 - Everything else defaults. This is the reference deployment for the solo persona (PRD §2.3).
 
 ### 5.2 Fleet: tens-to-hundreds

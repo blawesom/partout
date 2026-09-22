@@ -103,6 +103,6 @@ either TLS or h2c, not both.
   the gRPC agent stream is **mTLS** (see `docs/architecture.md` §3.6).
 - The agent connects **outbound only** — no inbound ports on managed hosts.
 - The same binary is scp'ed to every host and runs in `--mode=agent`
-  (provisioning via fleet SSH is M1).
+  (v0.3 fleet-SSH provisioning does this via `partout ctl provision`; deployment §4.1).
 - SQLite with WAL is the default storage; a Postgres backend is planned
   for v1.

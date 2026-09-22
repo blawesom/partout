@@ -18,8 +18,11 @@ incident response, capacity, compliance, and a go-live checklist.
 >   `<data dir>/agent/` (cached policy bundle + server pubkey, v0.2).
 > - **v0.2.0 adds the policy deny-list engine** (rule CRUD, dispatch gating, signed decisions,
 >   agent re-check). Steps below marked *(v0.2)* are live on tag `v0.2.0`.
+> - **v0.3 adds host provisioning over fleet SSH** (PRD R17): `partout ctl provision new
+>   --host user@host` (server-side 5-step run, `key_confirm` gate). New vars
+>   `PARTOUT_SSH_DIR` / `PARTOUT_SERVER_HOST` (deployment §4.1).
 > - No Web UI in v0.1: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
-> - Not wired in v0.1 (planned, see deployment §4.4): `PARTOUT_SSH_DIR`, `PARTOUT_SECRET_KEY*`,
+> - Not wired in v0.3 (planned, see deployment §4.4): `PARTOUT_SECRET_KEY*`,
 >   `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation hardcoded `none`), `PARTOUT_SPOOL_*`,
 >   `PARTOUT_RETENTION_*`, `PARTOUT_MAX_*`, `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH`,
 >   `PARTOUT_MCP_ENABLED`, `PARTOUT_LOG_LEVEL`.
@@ -73,12 +76,13 @@ Step-by-step bring-up, also referenced in deployment §6:
    ```
    Start restrictive; loosen later. The audit log captures everything
    (`policy.create`/`policy.delete`/`policy.deny`, PRD §5.8).
-5. **Add your first host** *(provisioning via fleet SSH is M1+, not in v0.1)*:
-   - **v0.1 manual path**: mint a one-time token (`partout ctl enroll-token`), install the
-     binary + agent unit on the host (§3.2 of deployment) with that token.
-   - **Proposed**: `Provision → Add host` in the UI → address or `~/.ssh/config` alias, install
-     mode (systemd), labels → the server copies the binary, installs the unit, starts the agent,
-     and waits for enrollment; every step recorded in the audit log (`provision` kind).
+5. **Add your first host** *(fleet SSH provisioning, v0.3; manual install still works)*:
+   - **v0.3 auto path** (fleet SSH): `partout ctl provision new --host user@host`
+     starts the server-side run — a key_confirm gate pauses until the admin reviews
+     and confirms the fingerprint, then preflight → scp binary → install unit → wait-enroll.
+     `partout ctl provision get <id>` polls progress; `key <id> confirm` confirms.
+   - **v0.1 manual path**: mint a token (`partout ctl enroll-token`), install the binary
+     + agent unit on the host (§3.2) with that token.
    - Host should appear with facts in `<10 s` (PRD §5.1 acceptance).
 6. **Run a test command**: `whoami` or `hostname` against the new host. Verify the audit log
    has a row with your principal.
@@ -92,11 +96,12 @@ Step-by-step bring-up, also referenced in deployment §6:
 
 ### 3.1 Host lifecycle
 
-- **Enroll / provision**: preferred — `Provision → Add host` (PRD R17): the server installs
-  and starts the agent over the operator's existing fleet SSH; confirm host-key fingerprints
-  for hosts new to `known_hosts`; re-provisioning an installed host updates the binary
-  (identity untouched), with `fresh` wiping agent state after revocation. Manual alternative:
-  mint a short-TTL token → run enrollment on the host.
+- **Enroll / provision**: preferred (v0.3) — `partout ctl provision new --host user@host`
+  (PRD R17): the server installs and starts the agent over the operator's existing fleet
+  SSH; confirm the host-key fingerprint for hosts new to `known_hosts` (the run pauses at
+  `key_confirm` until an admin confirms). Re-provisioning an installed host updates the
+  binary (identity untouched); `--mode fresh` wipes agent state after revocation. Manual
+  alternative: mint a short-TTL token → run enrollment on the host.
   Tags/roles assigned. Agent writes `identity.json` (0600); server marks `connected`.
 - **Tag / role / group**: done in the UI, API, or via an MCP tool. Groups are saved
   selectors (PRD §5.1).
@@ -259,8 +264,9 @@ Partout observes **hosts**; you also need to observe the control plane:
 
 ```
 1. DELETE /api/v1/agents/{old_id} → cascade-purges rows.
-2. On the (same or new) host: re-provision via the wizard with **fresh** (wipes the stale
-   `identity.json`/spool so a new identity is generated — architecture §3.5), or by hand:
+2. On the (same or new) host: re-provision via `partout ctl provision new --host user@host
+   --mode fresh` (wipes the stale `identity.json`/spool so a new identity is generated —
+   architecture §3.5), or by hand:
    install the binary, run `partout --mode=agent --server=... --token=par_enr_new`
    (fresh token).
 3. Agent generates a new keypair; writes identity.json (0600); connects.

@@ -220,7 +220,7 @@ SSE step log.
   `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` — except the initial *fingerprint
   capture* connect, which uses `StrictHostKeyChecking=no UserKnownHostsFile=/dev/null`
   and trusts nothing.
-- The wizard's "host" field is an address **or a `~/.ssh/config` alias**; the alias used is
+- The operator provides a host address **or a `~/.ssh/config` alias**; the alias used is
   recorded in `provision_runs`.
 
 **Fingerprint gate (no silent TOFU).** If the target is not in `known_hosts`, the run pauses
@@ -232,9 +232,12 @@ cancelled, nothing changed on the host.
 
 ```
 queued → connecting → key_confirm → preflight → transferring → installing
-       → starting → enrolling → connected
+       → enrolling → connected
 any step → failed | cancelled | handoff
 ```
+
+(`installing` includes starting the unit — the install script runs
+`systemctl enable --now partout-agent`, so there is no separate `starting` state.)
 
 **Steps** (each audited under taxonomy kind `provision`, streamed as `provision.step` SSE
 events with a bounded output excerpt):
@@ -250,29 +253,41 @@ events with a bounded output excerpt):
 4. **install** — one `ssh 'sudo -n bash -s'` script: verify sha256; `install -m 0755` →
    `/usr/local/bin/partout`; create `partout` user/group; `mkdir -p /var/lib/partout/agent`
    (0750 `partout:partout`); write `/etc/partout/agent.env` (0640) with `PARTOUT_SERVER`, a
-   fresh short-TTL one-time `PARTOUT_TOKEN`, and labels from the wizard; write the systemd
+   fresh short-TTL one-time `PARTOUT_TOKEN`, and labels from the run; write the systemd
    unit (deployment §3.2); `systemctl daemon-reload`; `systemctl enable --now partout-agent`.
-   The script **never touches** an existing `identity.json`/`spool.db` unless the run is
-   `fresh` (explicit "wipe agent state" in the wizard — re-provisioning after revocation,
-   ops runbook 6.2).
+   The script **never touches** an existing `identity.json`/`spool.db` (the install is
+   idempotent; a re-run overwrites the binary and unit, keeps agent state). The `fresh`
+   destructive path — explicit wipe of `identity.json`/spool.db for post-revocation
+   re-provisioning — is the next provisioning increment.
 5. **wait-enroll** — server waits (≤ 60 s) for `RegisterAgent` with the run's token →
    `agent_id` linked to the run → `connected` once the stream authenticates.
 6. **handoff** (terminal, non-error): hosts the v1 server cannot install — unreachable,
    non-systemd init (v1: systemd + bare binary only), Docker-host sidecar (manual), or
-   air-gapped. The UI prints the exact manual recipe: binary download + one-line install
-   command with the one-time token (PRD §5.1).
+   air-gapped. `partout ctl provision get` prints the exact manual recipe: binary download
+   + one-line install command with the one-time token (PRD §5.1).
 
 **Update path:** re-provisioning an installed, connected host replaces the binary (when the
 version differs) and restarts the unit; identity and spool are untouched; audited with
 `mode=update`. (Post-v1 option: agent self-update over a gRPC `AgentUpdate` envelope would
 remove the SSH dependency for upgrades entirely — noted in PRD Decision 11.)
 
-**Security properties (regression-tested, §14):** `provision` is `admin`-only (RBAC) and
-policy-evaluable (action class `provision`; default-deny applies like any write). No run
+> *v0.3 simplification:* the `--mode` flag (`fresh` | `join`, default `fresh`) is recorded
+> on the run and in the audit trail, but the state machine does not yet branch on it — the
+> install script is idempotent (overwrites binary + unit, keeps `identity.json`), so a
+> re-run over an installed host acts as an in-place update. The `fresh` destructive path
+> (explicit wipe of `identity.json`/spool.db, per step 4 above) and the version-diff update
+> check are the next provisioning increments.
+
+**Security properties (regression-tested, §14):** `provision` is `admin`-only (RBAC). No run
 reads, copies, or logs private key material — step logs capture command lines with
 identity-file *names*, never contents. A failed run leaves no usable state: the token is
-one-time + short-TTL, a partial install is overwritten idempotently by a re-run, and `fresh`
-is the only destructive path and requires an explicit confirmation.
+one-time + short-TTL, a partial install is overwritten idempotently by a re-run.
+
+> *v0.3 deviation:* policy **action-class** gating for `provision` (so a policy rule can
+> deny/require-approval a provisioning run, default-deny like any other write) lands with
+> the M4 policy engine. In v0.3 the run is gated by **RBAC (admin) only** — there is no
+> policy rule for it yet. The destructive `fresh` wipe path is not implemented (see above),
+> so no explicit-confirmation gate exists yet either.
 
 ### 3.6 TLS / mTLS bootstrap (implemented)
 
@@ -789,27 +804,28 @@ offline (server unreachable): default → step fails closed "secret unavailable"
 ### 12.4 Host provisioning (end-to-end)
 
 ```
-operator (UI):  Add host "web01" (alias from ~/.ssh/config), systemd, label env=prod
-server:         RBAC: admin ✓ → policy: action=provision, target=web01 → allow
-                (or require_approval) → audit provision.requested
-step 1 connect: ssh -o BatchMode=yes -o StrictHostKeyChecking=no
-                   -o UserKnownHostsFile=/dev/null web01 true
-                → host key not in known_hosts → run → key_confirm (SSE)
-operator (UI):  fingerprint shown → confirm
-server:         fingerprint hashed → appended to known_hosts
+operator (CLI):  `partout ctl provision new --host web01`
+server:          RBAC: admin ✓ → policy: action=provision, target=web01 → allow
+                 (or require_approval) → audit provision.requested
+step 1 connect:  ssh -o BatchMode=yes -o StrictHostKeyChecking=no
+                  -o UserKnownHostsFile=/dev/null web01 true
+                 → host key not in known_hosts → run → key_confirm (SSE)
+operator (CLI):  `provision get <id>` shows fingerprint → confirm via
+                 `provision key <id> confirm`
+server:          fingerprint hashed → appended to known_hosts
 step 2 preflight: ssh web01: os-release, arch, systemctl?, whoami + sudo -n true,
-                free disk, curl -sI <server>/healthz, existing partout? → plan
+                  free disk, curl -sI <server>/healthz, existing partout? → plan
 step 3 transfer: scp /usr/local/bin/partout web01:/tmp/partout-<sha12>
 step 4 install:  ssh web01 'sudo -n bash -s': verify sha256 → install -m0755
-                /usr/local/bin/partout → useradd partout → agent dir (0750) →
-                agent.env (0640: PARTOUT_SERVER + PARTOUT_TOKEN + labels) → unit →
-                daemon-reload → systemctl enable --now partout-agent
+                  /usr/local/bin/partout → useradd partout → agent dir (0750) →
+                  agent.env (0640: PARTOUT_SERVER + PARTOUT_TOKEN + labels) → unit →
+                  daemon-reload → systemctl enable --now partout-agent
 step 5 enroll:   agent (on host) generates keypair → RegisterAgent{par_enr_…}
-                → stream handshake → connected; run → connected;
-                audit: provision.completed + per-step rows (principal, alias, key file
-                name, host, duration)
-any failure:    run → failed with step + bounded stderr excerpt; token (one-time,
-                short-TTL) expires unused; partial install idempotent under re-run
+                  → stream handshake → connected; run → connected;
+                  audit: provision.completed + per-step rows (principal, alias, key file
+                  name, host, duration)
+any failure:     run → failed with step + bounded stderr excerpt; token (one-time,
+                  short-TTL) expires unused; partial install idempotent under re-run
 ```
 
 Any single check failing (RBAC, policy, fingerprint deny, sudo probe, sha256, enrollment

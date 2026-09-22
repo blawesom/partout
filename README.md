@@ -56,7 +56,7 @@ off and the docs become the implementation contract.
 - ✅ `internal/agent/facts` — host fact collection (hostname, OS, arch, CPU, memory, uptime, IP)
 - ✅ `internal/agent/enroll.go` — REST enrollment client
 - ✅ `internal/agent/agent.go` — run loop: backoff, heartbeat, facts, command exec, policy, revoke, cancel
-- ✅ `internal/api` — REST v1: 16 API routes (15 JSON + SSE), RBAC (viewer/operator/admin), structured errors, cursor pagination, `/healthz` + `/readyz`
+- ✅ `internal/api` — REST v1: 26 API routes (25 JSON + SSE), RBAC (viewer/operator/admin), structured errors, cursor pagination, `/healthz` + `/readyz`
 - ✅ `internal/control` — dispatch orchestration, cancel, finalize, audit
 - ✅ `internal/id` — opaque TEXT keys (`prefix_` + 12 hex)
 - ✅ 117 tests, race detector clean
