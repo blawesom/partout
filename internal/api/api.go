@@ -37,6 +37,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// REST v1 endpoints (PRD §10).
 	handler.RegisterExecutions(mux)
 	handler.RegisterHosts(mux)
+	handler.RegisterPolicies(mux)
 
 	// GET /api/v1/events — SSE event stream.
 	mux.Handle("/api/v1/events", sseB)
@@ -93,4 +94,10 @@ func (h *Handler) SetTLS(ca *certutil.CA) {
 // Store returns the underlying store (for tests).
 func (h *Handler) Store() *store.Store {
 	return h.st
+}
+
+// Control returns the control plane (for main.go to install the server
+// signing identity).
+func (h *Handler) Control() *control.Control {
+	return h.ctrl
 }

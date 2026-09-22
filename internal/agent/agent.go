@@ -16,6 +16,7 @@ import (
 
 	"github.com/blawesom/partout/internal/agent/exec"
 	"github.com/blawesom/partout/internal/agent/facts"
+	"github.com/blawesom/partout/internal/agent/guardrail"
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
@@ -43,6 +44,7 @@ type Agent struct {
 	start     time.Time
 	factset   map[string]string
 	policyDir string
+	guard     *guardrail.Guard
 
 	// activeMu guards activeRunners.  Each entry is a context.CancelFunc for
 	// a run in progress.  The server CANCEL envelope uses this map to kill
@@ -57,6 +59,11 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	if lg == nil {
 		lg = log.Default()
 	}
+	policyDir := filepath.Join(cfg.DataDir, "agent")
+	g := guardrail.NewGuard(id.UUID, policyDir)
+	if err := g.Load(); err != nil {
+		lg.Printf("agent: load guardrail: %v", err)
+	}
 	return &Agent{
 		id:            id,
 		cfg:           cfg,
@@ -64,9 +71,16 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		streamC:       stream.New(id, stream.Config{ServerURL: cfg.ServerURL, CAFile: cfg.TLSCAFile, CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile}, lg),
 		start:         time.Now(),
 		factset:       facts.Collector(id, cfg.FactsInterval),
-		policyDir:     filepath.Join(cfg.DataDir, "agent"),
+		policyDir:     policyDir,
+		guard:         g,
 		activeRunners: make(map[string]context.CancelFunc),
 	}
+}
+
+// GuardLoaded reports whether the agent has received (and cached) a policy
+// bundle.  Exported so tests can wait for it deterministically.
+func (a *Agent) GuardLoaded() bool {
+	return a.guard.Loaded()
 }
 
 // Run blocks until ctx is canceled or the agent is revoked. It manages the
@@ -184,6 +198,22 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 	case env.GetCommand() != nil:
 		cmd := env.GetCommand()
 		a.log.Printf("agent: command %s (%s %v)", cmd.RunId, cmd.Cmd, cmd.Args)
+
+		// Guardrail re-check (architecture §5.3).  Fails closed: no bundle,
+		// no decision, bad signature, or local eval denies → ACK_DENIED_AGENT.
+		if ok, reason := a.guard.Recheck(cmd); !ok {
+			a.log.Printf("agent: guardrail DENIED %s: %s", cmd.RunId, reason)
+			_ = a.streamC.Send(ctx, &pb.Envelope{
+				Kind: pb.EnvelopeKind_ACK,
+				Payload: &pb.Envelope_Ack{Ack: &pb.Ack{
+					EnvelopeId: env.Id,
+					Status:     pb.AckStatus_ACK_DENIED_AGENT,
+					Detail:     reason,
+				}},
+			})
+			return nil
+		}
+
 		// ACK delivery.
 		_ = a.streamC.Send(ctx, &pb.Envelope{
 			Kind: pb.EnvelopeKind_ACK,
@@ -213,9 +243,10 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		}
 
 	case env.GetPolicyBundle() != nil:
-		pb := env.GetPolicyBundle()
-		a.log.Printf("agent: policy bundle v%d received", pb.Version)
-		if err := a.savePolicy(pb); err != nil {
+		bundle := env.GetPolicyBundle()
+		a.log.Printf("agent: policy bundle v%d received", bundle.Version)
+		a.guard.OnBundle(bundle)
+		if err := a.savePolicy(bundle); err != nil {
 			a.log.Printf("agent: save policy: %v", err)
 		}
 

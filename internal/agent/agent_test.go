@@ -93,6 +93,16 @@ func TestAgentRunLoop(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	// Wait for the agent to receive the policy bundle (pushed on connect),
+	// so the guardrail is effective before we dispatch.
+	deadline = time.Now().Add(5 * time.Second)
+	for !ag.GuardLoaded() {
+		if time.Now().After(deadline) {
+			t.Fatal("agent did not receive policy bundle within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	// Dispatch a command.
 	res, err := ctl.Dispatch(ctx, control.DispatchRequest{
 		Selector: "role:web", Cmd: "echo", Args: []string{"agent-loop-works"},

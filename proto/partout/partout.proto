@@ -138,6 +138,7 @@ message Decision {
   string effect = 3;         // "allow" | "deny" | "require_approval"
   repeated string matched_rules = 4;
   bytes sig = 5;             // server Ed25519 signature (agent verifies)
+  string actor_role = 6;     // requester RBAC role (for agent re-eval)
 }
 
 message Command {
@@ -157,6 +158,10 @@ message PolicyBundle {
   uint64 version = 1;
   string content_hash = 2;
   string rules_json = 3;     // rules only, never secrets
+  bytes server_pubkey = 4;   // server Ed25519 public key (b64) — signs Decisions
+  map<string, string> host_tags = 5;  // this agent's tags (for local re-eval)
+  repeated string host_roles = 6;     // this agent's roles (for local re-eval)
+  string agent_id = 7;                 // server-assigned agent ID (for host:<id> predicates)
 }
 
 message Revoke {

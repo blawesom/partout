@@ -45,6 +45,7 @@ commands:
   run --selector S -- CMD [ARGS...]  dispatch a command, wait, show per-run output
   exec EXEC_ID             show execution detail + output
   audit [--kind K] [--actor A] [--limit N]   show audit log
+  policy <list|create|delete>                manage policy deny rules
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
 `)
 	}
@@ -101,6 +102,8 @@ commands:
 		c.cmdExec(rest)
 	case "audit":
 		c.cmdAudit(rest)
+	case "policy":
+		c.cmdPolicy(rest)
 	case "ca":
 		c.cmdCA()
 	case "help", "-h", "--help":
@@ -307,6 +310,103 @@ func (c *ctl) cmdAudit(args []string) {
 	}
 	w.Flush()
 	fmt.Printf("\n%d event(s)\n", len(items))
+}
+
+// ---- policy ----------------------------------------------------------------
+
+func (c *ctl) cmdPolicy(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl policy <list|create|delete>")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		c.policyList()
+	case "create":
+		c.policyCreate(rest)
+	case "delete":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl policy delete POLICY_ID")
+			os.Exit(2)
+		}
+		c.policyDelete(rest[0])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown policy command %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) policyList() {
+	var page map[string]any
+	if err := c.do("GET", "/api/v1/policies", nil, &page); err != nil {
+		fatal(err)
+	}
+	items, _ := page["items"].([]any)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tEFFECT\tPRIORITY\tMATCH\t")
+	for _, it := range items {
+		e, _ := it.(map[string]any)
+		match, _ := e["match"].(map[string]any)
+		var matchStr string
+		if regex, ok := match["command_regex"].(string); ok && regex != "" {
+			matchStr = "cmd=~" + regex
+		}
+		if hosts, ok := match["hosts"].(string); ok && hosts != "" {
+			matchStr += " host=" + hosts
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t\n",
+			strval(e["id"]), strval(e["name"]), strval(e["effect"]), int(num(e["priority"])), matchStr)
+	}
+	w.Flush()
+	fmt.Printf("\n%d rule(s)\n", len(items))
+}
+
+func (c *ctl) policyCreate(args []string) {
+	fs := flag.NewFlagSet("policy create", flag.ExitOnError)
+	name := fs.String("name", "", "rule name (required)")
+	effect := fs.String("effect", "deny", "deny | require_approval | allow")
+	hosts := fs.String("hosts", "", "host selector (e.g. role:db, tag:env=lab)")
+	actions := fs.String("actions", "", "comma-separated action classes (exec,file)")
+	actorRoles := fs.String("actor-roles", "", "comma-separated RBAC roles (admin,operator,viewer)")
+	commandRegex := fs.String("command-regex", "", "regex against 'cmd args...'")
+	priority := fs.Int("priority", 100, "lower = higher precedence")
+	fs.Parse(args)
+
+	if *name == "" {
+		fatal(fmt.Errorf("--name is required"))
+	}
+
+	req := map[string]any{"name": *name, "effect": *effect, "priority": *priority}
+	match := map[string]any{}
+	if *hosts != "" {
+		match["hosts"] = *hosts
+	}
+	if *actions != "" {
+		match["actions"] = strings.Split(*actions, ",")
+	}
+	if *actorRoles != "" {
+		match["actor_roles"] = strings.Split(*actorRoles, ",")
+	}
+	if *commandRegex != "" {
+		match["command_regex"] = *commandRegex
+	}
+	if len(match) > 0 {
+		req["match"] = match
+	}
+	var res map[string]string
+	if err := c.do("POST", "/api/v1/policies", req, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("policy %s created\n", res["id"])
+}
+
+func (c *ctl) policyDelete(id string) {
+	var res map[string]string
+	if err := c.do("DELETE", "/api/v1/policies/"+id, nil, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("policy %s deleted\n", res["deleted"])
 }
 
 // ---- shared display -----------------------------------------------------------

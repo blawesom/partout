@@ -378,17 +378,22 @@ POST /api/v1/executions {selector, cmd, …}
 
 ### 5.2 Policy engine
 
+**Implemented in v0.2** (M1): rules in `policies` (SQLite, versioned bundle), REST CRUD at
+`/api/v1/policies`, `partout ctl policy list|create|delete`, dispatch gating in
+`internal/control` (per-host evaluation, fail-closed on `deny`/`require_approval`),
+signed decisions on `Command` envelopes, bundle push on connect + on change, agent
+re-check in `internal/agent/guardrail` (architecture §5.3).
+
 Rule (one declarative object, stored in `policies`):
 
 ```json
 {
-  "id": "pol_…", "name": "prod-db-elevation",
+  "id": "pol_…", "name": "no-secret",
   "match": {
-    "hosts":  "role=db",                          // selector expression
-    "actions": ["exec", "file", "pkg.apply"],     // action classes
-    "actor_roles": ["operator"],                  // who is affected
-    "requires_elevation": true,                   // elevation-scoped rules
-    "command_regex": "^systemctl\\s+(restart|stop)\\s"
+    "hosts":        "role=db",                     // selector expression ("all" = any host)
+    "actions":      ["exec"],                      // action classes (v1: exec only)
+    "actor_roles":  ["operator"],                  // requester RBAC role; empty = any
+    "command_regex": "secret"                      // regex against "cmd args..."; empty = any
   },
   "effect": "deny | require_approval | allow",
   "priority": 10
@@ -396,27 +401,34 @@ Rule (one declarative object, stored in `policies`):
 ```
 
 - **Evaluation**: all matching rules considered; precedence `deny > require_approval > allow`.
-- **Default-deny for writes (proposed)**: a write action with no matching rule is denied (reads
-  always allowed). Admins opt in via explicit `allow` rules. This keeps the safe posture as the
-  default, matching PRD §7's invariants.
-- **Structured refusal**: every deny/approval-required response carries the matched rule id(s),
-  the offending field, and what would satisfy it — the same decision-table pattern the MCP
-  write tools use (PRD §10.3).
+- **v1 default: default-allow** (deny-list model): an action with no matching rule is
+  allowed. The v0.1 proposal of default-deny writes is deferred: it needs the action-class
+  taxonomy (file writes, pkg.apply, …) that lands with M2 (files) and M3 (packages).
+  `require_approval` is accepted as an effect but evaluated as `deny` until the approvals
+  engine lands (M4).
+- **Structured refusal**: every deny carries the matched rule id(s) + reason in the API
+  response, the run record (`state=denied`), and the audit log (`policy.deny`).
 
 ### 5.3 Server decision + agent re-check
 
+**Implemented in v0.2** (M1), with the noted exceptions below.
+
 - On dispatch, the server signs a compact `Decision{run_id, bundle_version, effect,
-  matched_rules}` with the server's Ed25519 key (public key distributed at enrollment).
-- The server also pushes a versioned, content-hashed **policy bundle** to each agent
-  (on change, on connect, on demand).
+  matched_rules, actor_role}` with the server's Ed25519 key (`server_identity.key` under the
+  server data dir; public key distributed in every policy bundle — `server_pubkey`).
+- The server pushes a versioned, content-hashed **policy bundle** to each agent **on connect
+  and on every policy change** (create/delete broadcasts to all connected sessions).
 - **Agent re-check (defense in depth, PRD R/C8)**: before executing any envelope, the agent
   verifies (a) decision signature, (b) `bundle_version` equals its cached bundle, and (c)
-  re-evaluates the rule set over the local action. Any mismatch → **deny**, emit
-  `denied_agent`, alert the server, request bundle refresh.
-- **Staleness**: agent-side scheduled jobs run against the last received bundle; if the bundle
-  is older than the staleness window (default 48 h **(proposed)**), jobs fail closed.
-- The policy bundle contains no secrets (rules only); secrets travel as encrypted
-  `SecretMaterialize` envelopes and are never written to the spool in cleartext (PRD §5.7).
+  re-evaluates the rule set over the local action (the bundle carries the agent's own
+  `host_tags`/`host_roles`/`agent_id`; the decision carries `actor_role`). Any mismatch →
+  **deny**, emit `ACK_DENIED_AGENT` with the reason.
+- The guardrail **fails closed** until the first bundle is received; an *empty* rule set is a
+  valid default-allow state. The bundle + server public key persist under `<data-dir>/agent/`
+  so the guardrail is effective from agent start (survives restarts).
+- **v1 exceptions**: the agent does not alert the server / request a bundle refresh on a local
+  deny (the reason is logged and visible in the run output); bundle staleness (48 h) applies
+  to scheduled jobs, which land with M4.
 
 ### 5.4 Approvals
 
@@ -855,7 +867,7 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A3 | Output chunk size | 64 KiB |
 | A4 | Stream backoff | 1 s → 60 s cap, jittered |
 | A5 | Dispatch TTL (offline agents) | 15 min |
-| A6 | Policy default | Default-deny writes; default-allow reads |
+| A6 | Policy default | **v1 (M1)**: default-allow (deny-list) for exec. Default-deny writes deferred to M2/M3 with the action-class taxonomy; `require_approval` acts as deny until M4. |
 | A7 | Approval TTL | 1 h |
 | A8 | Policy bundle staleness (agent jobs) | 48 h |
 | A9 | Reboot continuation marker validity | 10 min |

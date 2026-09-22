@@ -32,9 +32,10 @@ type Emitter interface {
 // Handler implements pb.AgentStreamServer.
 type Handler struct {
 	pb.UnimplementedAgentStreamServer
-	st  *store.Store
-	sse Emitter
-	log *log.Logger
+	st           *store.Store
+	sse          Emitter
+	log          *log.Logger
+	serverPubB64 string // server Ed25519 public key (b64) for policy bundles
 
 	mu       sync.Mutex
 	sessions map[string]*Session // agent_id -> active session
@@ -51,6 +52,52 @@ func NewHandler(st *store.Store, sse Emitter, lg *log.Logger) *Handler {
 		lg = log.Default()
 	}
 	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session)}
+}
+
+// SetServerPubKey installs the server's Ed25519 public key (b64) which is
+// included in every policy bundle so agents can verify decision signatures.
+func (h *Handler) SetServerPubKey(b64 string) { h.serverPubB64 = b64 }
+
+// pushPolicyBundle sends the current policy bundle to a newly connected
+// agent.  The bundle carries the rules, bundle version, content hash, the
+// server's signing public key, and this agent's tags/roles/ID so the
+// agent-side guardrail can re-evaluate rules locally (architecture §5.3).
+func (h *Handler) pushPolicyBundle(sess *Session) {
+	version, hash, rulesJSON, err := h.st.BuildPolicyBundle()
+	if err != nil {
+		h.log.Printf("stream: build policy bundle: %v", err)
+		return
+	}
+	tags, _ := h.st.Tags(sess.AgentID)
+	roles, _ := h.st.Roles(sess.AgentID)
+	bundle := &pb.PolicyBundle{
+		Version:      version,
+		ContentHash:  hash,
+		RulesJson:    rulesJSON,
+		ServerPubkey: []byte(h.serverPubB64),
+		HostTags:     tags,
+		HostRoles:    roles,
+		AgentId:      sess.AgentID,
+	}
+	sess.send(&pb.Envelope{
+		Kind:    pb.EnvelopeKind_POLICY_BUNDLE,
+		Payload: &pb.Envelope_PolicyBundle{PolicyBundle: bundle},
+	})
+}
+
+// BroadcastPolicyBundle pushes the current policy bundle to every active
+// session.  Called after a policy rule is created or deleted so connected
+// agents pick up the change without reconnecting.
+func (h *Handler) BroadcastPolicyBundle() {
+	h.mu.Lock()
+	sessions := make([]*Session, 0, len(h.sessions))
+	for _, s := range h.sessions {
+		sessions = append(sessions, s)
+	}
+	h.mu.Unlock()
+	for _, s := range sessions {
+		h.pushPolicyBundle(s)
+	}
 }
 
 // Session is one authenticated agent stream.
@@ -143,6 +190,10 @@ func (h *Handler) Stream(stream pb.AgentStream_StreamServer) error {
 	}()
 
 	h.log.Printf("stream: agent %s (%s) authenticated", agent.ID, ap.AgentUuid)
+
+	// 4b. Push the current policy bundle so the agent's guardrail is effective
+	// immediately (fail-closed until first bundle).
+	h.pushPolicyBundle(sess)
 
 	// 5. Envelope loop.
 	for {

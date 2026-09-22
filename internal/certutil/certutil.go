@@ -12,11 +12,13 @@ package certutil
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -281,4 +283,70 @@ func parseCSRPEM(data []byte) (*x509.CertificateRequest, error) {
 		return nil, errors.New("certutil: no PEM block found in CSR")
 	}
 	return x509.ParseCertificateRequest(block.Bytes)
+}
+
+// ServerIdentity is the server's Ed25519 keypair used to sign policy
+// Decisions (architecture §5.3).  The public key is distributed to agents
+// via the policy bundle; the private key never leaves the server.
+type ServerIdentity struct {
+	Pub  ed25519.PublicKey
+	Priv ed25519.PrivateKey
+	dir  string
+}
+
+// LoadOrCreateServerIdentity loads <dir>/server_identity.key (0600) or
+// generates a fresh Ed25519 key and persists it if absent.
+func LoadOrCreateServerIdentity(dir string) (*ServerIdentity, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("certutil: mkdir %s: %w", dir, err)
+	}
+	keyPath := filepath.Join(dir, "server_identity.key")
+
+	if data, err := os.ReadFile(keyPath); err == nil {
+		priv, err := parseEd25519KeyPEM(data)
+		if err != nil {
+			return nil, fmt.Errorf("certutil: parse server identity: %w", err)
+		}
+		return &ServerIdentity{Pub: priv.Public().(ed25519.PublicKey), Priv: priv, dir: dir}, nil
+	}
+
+	priv, err := generateEd25519()
+	if err != nil {
+		return nil, fmt.Errorf("certutil: generate server identity: %w", err)
+	}
+	if err := os.WriteFile(keyPath, pemEd25519Key(priv), 0o600); err != nil {
+		return nil, fmt.Errorf("certutil: write server identity: %w", err)
+	}
+	return &ServerIdentity{Pub: priv.Public().(ed25519.PublicKey), Priv: priv, dir: dir}, nil
+}
+
+// PubB64 returns the base64-encoded public key (for the policy bundle).
+func (s *ServerIdentity) PubB64() string {
+	return base64.StdEncoding.EncodeToString(s.Pub)
+}
+
+func generateEd25519() (ed25519.PrivateKey, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	return priv, err
+}
+
+func pemEd25519Key(key ed25519.PrivateKey) []byte {
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
+
+func parseEd25519KeyPEM(data []byte) (ed25519.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("certutil: no PEM block found")
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	ed, ok := key.(ed25519.PrivateKey)
+	if !ok {
+		return nil, errors.New("certutil: key is not Ed25519")
+	}
+	return ed, nil
 }

@@ -154,6 +154,16 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	apiH := api.New(st, h, sseB, lg)
 	apiH.SetAuth(cfg.AdminToken, cfg.OperatorToken, cfg.ViewerToken)
 
+	// Load or create the server's Ed25519 identity (signs policy decisions
+	// and is published in policy bundles so agents can verify them).
+	identDir := filepath.Join(filepath.Dir(cfg.DBPath), "identity")
+	ident, err := certutil.LoadOrCreateServerIdentity(identDir)
+	if err != nil {
+		return fmt.Errorf("server identity: %w", err)
+	}
+	apiH.Control().SetIdentity(ident)
+	h.SetServerPubKey(ident.PubB64())
+
 	// gRPC server (served via HTTP/2 demux below).
 	gs := grpc.NewServer()
 	h.Register(gs)

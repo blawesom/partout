@@ -15,9 +15,11 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	agentexec "github.com/blawesom/partout/internal/agent/exec"
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/hsauth"
 	"github.com/blawesom/partout/internal/identity"
+	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
@@ -220,4 +222,156 @@ func TestEndToEndDispatch(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("agent loop did not stop")
 	}
+}
+
+// TestDispatchPolicyDeny exercises the server-side policy deny gate:
+//  1. Creates a deny rule (command_regex "secret" → deny).
+//  2. Dispatches a matching command → agent never sees it, run = denied.
+//  3. Dispatches a non-matching command → agent sees it, run = delivered.
+func TestDispatchPolicyDeny(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	// Seed agent.
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	pubB64 := base64.StdEncoding.EncodeToString(id.Ed25519Pub)
+	xpubB64 := base64.StdEncoding.EncodeToString(id.X25519Pub)
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_pd", UUID: id.UUID, ED25519Pub: pubB64, X25519Pub: xpubB64,
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	if err := st.SetRole("ag_pd", "web"); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+
+	// Create a deny policy.
+	if err := st.CreatePolicy("pol_no_secret", "no-secret", policy.Match{
+		CommandRegex: "secret",
+	}, policy.EffectDeny, 1); err != nil {
+		t.Fatalf("CreatePolicy: %v", err)
+	}
+
+	// Server identity (signs decisions).
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("server identity: %v", err)
+	}
+
+	// Handler + control.
+	sseB := sse.New()
+	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	h.SetServerPubKey(ident.PubB64())
+	ctl := control.New(st, h, sseB, log.New(io.Discard, "ctl: ", 0))
+	ctl.SetIdentity(ident)
+
+	// bufconn server.
+	lis := bufconn.Listen(1024 * 1024)
+	gs := grpc.NewServer()
+	h.Register(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	// Agent connect + handshake.
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	agentClient := pb.NewAgentStreamClient(conn)
+	streamClient, err := agentClient.Stream(ctx)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	// Handshake.
+	env, err := streamClient.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	ch := env.GetChallenge()
+	if ch == nil {
+		t.Fatalf("expected CHALLENGE, got %s", env.Kind)
+	}
+	sig := id.Sign(hsauth.BuildMsg(ch.Nonce, id.UUID, time.Now().Unix()))
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_AUTH_PROOF,
+		Payload: &pb.Envelope_AuthProof{AuthProof: &pb.AuthProof{
+			AgentUuid: id.UUID, Ts: time.Now().Unix(), Sig: sig,
+		}},
+	}); err != nil {
+		t.Fatalf("Send proof: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// Wait for session.
+	deadlineSession := time.Now().Add(3 * time.Second)
+	for h.AgentSession("ag_pd") == nil {
+		if time.Now().After(deadlineSession) {
+			t.Fatal("session not registered")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 1. Dispatch matching the deny rule → should be denied.
+	res, err := ctl.Dispatch(ctx, control.DispatchRequest{
+		Selector: "role:web", Cmd: "cat", Args: []string{"secret.txt"},
+		TimeoutS: 10, CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if len(res.Runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(res.Runs))
+	}
+	if res.Runs[0].State != "denied" {
+		t.Fatalf("run state = %s, want denied (errors: %v)", res.Runs[0].State, res.Errors)
+	}
+
+	// Verify execution aggregate is terminal (failed).
+	exec, err := st.GetExecution(res.ExecutionID)
+	if err != nil {
+		t.Fatalf("GetExecution: %v", err)
+	}
+	if exec.State != "failed" {
+		t.Fatalf("execution state = %s, want failed", exec.State)
+	}
+
+	// Audit has policy.deny event.
+	events, err := st.ListAudit("policy.deny", 10)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected policy.deny audit event")
+	}
+
+	// 2. Dispatch non-matching command → should be delivered.
+	res2, err := ctl.Dispatch(ctx, control.DispatchRequest{
+		Selector: "role:web", Cmd: "ls", Args: []string{"/tmp"},
+		TimeoutS: 10, CreatedBy: "admin",
+	})
+	if err != nil {
+		t.Fatalf("Dispatch non-matching: %v", err)
+	}
+	if len(res2.Runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(res2.Runs))
+	}
+	if !res2.Runs[0].Delivered {
+		t.Fatalf("non-matching run not delivered: %v", res2.Errors)
+	}
+
+	streamClient.CloseSend()
 }

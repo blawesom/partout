@@ -935,7 +935,8 @@ type Decision struct {
 	BundleVersion uint64                 `protobuf:"varint,2,opt,name=bundle_version,json=bundleVersion,proto3" json:"bundle_version,omitempty"`
 	Effect        string                 `protobuf:"bytes,3,opt,name=effect,proto3" json:"effect,omitempty"` // "allow" | "deny" | "require_approval"
 	MatchedRules  []string               `protobuf:"bytes,4,rep,name=matched_rules,json=matchedRules,proto3" json:"matched_rules,omitempty"`
-	Sig           []byte                 `protobuf:"bytes,5,opt,name=sig,proto3" json:"sig,omitempty"` // server Ed25519 signature (agent verifies)
+	Sig           []byte                 `protobuf:"bytes,5,opt,name=sig,proto3" json:"sig,omitempty"`                              // server Ed25519 signature (agent verifies)
+	ActorRole     string                 `protobuf:"bytes,6,opt,name=actor_role,json=actorRole,proto3" json:"actor_role,omitempty"` // requester RBAC role (for agent re-eval)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1003,6 +1004,13 @@ func (x *Decision) GetSig() []byte {
 		return x.Sig
 	}
 	return nil
+}
+
+func (x *Decision) GetActorRole() string {
+	if x != nil {
+		return x.ActorRole
+	}
+	return ""
 }
 
 type Command struct {
@@ -1125,7 +1133,11 @@ type PolicyBundle struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       uint64                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
 	ContentHash   string                 `protobuf:"bytes,2,opt,name=content_hash,json=contentHash,proto3" json:"content_hash,omitempty"`
-	RulesJson     string                 `protobuf:"bytes,3,opt,name=rules_json,json=rulesJson,proto3" json:"rules_json,omitempty"` // rules only, never secrets
+	RulesJson     string                 `protobuf:"bytes,3,opt,name=rules_json,json=rulesJson,proto3" json:"rules_json,omitempty"`                                                                        // rules only, never secrets
+	ServerPubkey  []byte                 `protobuf:"bytes,4,opt,name=server_pubkey,json=serverPubkey,proto3" json:"server_pubkey,omitempty"`                                                               // server Ed25519 public key (b64) — signs Decisions
+	HostTags      map[string]string      `protobuf:"bytes,5,rep,name=host_tags,json=hostTags,proto3" json:"host_tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // this agent's tags (for local re-eval)
+	HostRoles     []string               `protobuf:"bytes,6,rep,name=host_roles,json=hostRoles,proto3" json:"host_roles,omitempty"`                                                                        // this agent's roles (for local re-eval)
+	AgentId       string                 `protobuf:"bytes,7,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`                                                                              // server-assigned agent ID (for host:<id> predicates)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1177,6 +1189,34 @@ func (x *PolicyBundle) GetContentHash() string {
 func (x *PolicyBundle) GetRulesJson() string {
 	if x != nil {
 		return x.RulesJson
+	}
+	return ""
+}
+
+func (x *PolicyBundle) GetServerPubkey() []byte {
+	if x != nil {
+		return x.ServerPubkey
+	}
+	return nil
+}
+
+func (x *PolicyBundle) GetHostTags() map[string]string {
+	if x != nil {
+		return x.HostTags
+	}
+	return nil
+}
+
+func (x *PolicyBundle) GetHostRoles() []string {
+	if x != nil {
+		return x.HostRoles
+	}
+	return nil
+}
+
+func (x *PolicyBundle) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
 	}
 	return ""
 }
@@ -1450,13 +1490,15 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1f\n" +
 	"\vduration_ms\x18\x04 \x01(\x03R\n" +
-	"durationMs\"\x97\x01\n" +
+	"durationMs\"\xb6\x01\n" +
 	"\bDecision\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12%\n" +
 	"\x0ebundle_version\x18\x02 \x01(\x04R\rbundleVersion\x12\x16\n" +
 	"\x06effect\x18\x03 \x01(\tR\x06effect\x12#\n" +
 	"\rmatched_rules\x18\x04 \x03(\tR\fmatchedRules\x12\x10\n" +
-	"\x03sig\x18\x05 \x01(\fR\x03sig\"\xe4\x02\n" +
+	"\x03sig\x18\x05 \x01(\fR\x03sig\x12\x1d\n" +
+	"\n" +
+	"actor_role\x18\x06 \x01(\tR\tactorRole\"\xe4\x02\n" +
 	"\aCommand\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x10\n" +
@@ -1471,12 +1513,20 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	" \x01(\v2\x14.partout.v1.DecisionR\bdecision\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"j\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcb\x02\n" +
 	"\fPolicyBundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12!\n" +
 	"\fcontent_hash\x18\x02 \x01(\tR\vcontentHash\x12\x1d\n" +
 	"\n" +
-	"rules_json\x18\x03 \x01(\tR\trulesJson\" \n" +
+	"rules_json\x18\x03 \x01(\tR\trulesJson\x12#\n" +
+	"\rserver_pubkey\x18\x04 \x01(\fR\fserverPubkey\x12C\n" +
+	"\thost_tags\x18\x05 \x03(\v2&.partout.v1.PolicyBundle.HostTagsEntryR\bhostTags\x12\x1d\n" +
+	"\n" +
+	"host_roles\x18\x06 \x03(\tR\thostRoles\x12\x19\n" +
+	"\bagent_id\x18\a \x01(\tR\aagentId\x1a;\n" +
+	"\rHostTagsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\" \n" +
 	"\x06Revoke\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x1f\n" +
 	"\x06Cancel\x12\x15\n" +
@@ -1532,7 +1582,7 @@ func file_proto_partout_partout_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_partout_partout_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_proto_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_proto_partout_partout_proto_goTypes = []any{
 	(EnvelopeKind)(0),     // 0: partout.v1.EnvelopeKind
 	(AckStatus)(0),        // 1: partout.v1.AckStatus
@@ -1555,6 +1605,7 @@ var file_proto_partout_partout_proto_goTypes = []any{
 	nil,                   // 18: partout.v1.FactsBatch.FactsEntry
 	nil,                   // 19: partout.v1.Event.AttrsEntry
 	nil,                   // 20: partout.v1.Command.EnvEntry
+	nil,                   // 21: partout.v1.PolicyBundle.HostTagsEntry
 }
 var file_proto_partout_partout_proto_depIdxs = []int32{
 	0,  // 0: partout.v1.Envelope.kind:type_name -> partout.v1.EnvelopeKind
@@ -1577,13 +1628,14 @@ var file_proto_partout_partout_proto_depIdxs = []int32{
 	2,  // 17: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
 	20, // 18: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
 	11, // 19: partout.v1.Command.decision:type_name -> partout.v1.Decision
-	3,  // 20: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
-	3,  // 21: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
-	21, // [21:22] is the sub-list for method output_type
-	20, // [20:21] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	21, // 20: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
+	3,  // 21: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
+	3,  // 22: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
+	22, // [22:23] is the sub-list for method output_type
+	21, // [21:22] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_proto_partout_partout_proto_init() }
@@ -1611,7 +1663,7 @@ func file_proto_partout_partout_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_partout_partout_proto_rawDesc), len(file_proto_partout_partout_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -13,10 +13,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/hsauth"
 	"github.com/blawesom/partout/internal/identity"
+	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/stream"
+	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -219,5 +222,124 @@ func TestHandshakeBadSignature(t *testing.T) {
 	}
 	if a.State == "connected" {
 		t.Fatal("agent marked connected despite bad signature")
+	}
+}
+
+// TestPolicyBundlePushedOnConnect verifies that the server pushes the current
+// policy bundle to an agent immediately after authentication (architecture §5.2).
+func TestPolicyBundlePushedOnConnect(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	pubB64 := base64.StdEncoding.EncodeToString(id.Ed25519Pub)
+	xpubB64 := base64.StdEncoding.EncodeToString(id.X25519Pub)
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_bundle", UUID: id.UUID, ED25519Pub: pubB64, X25519Pub: xpubB64,
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	// Server identity + handler.
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("server identity: %v", err)
+	}
+	sseB := sse.New()
+	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	h.SetServerPubKey(ident.PubB64())
+
+	// Create a policy so the bundle is non-empty.
+	if err := st.CreatePolicy("pol_t", "test-rule", policy.Match{
+		CommandRegex: "forbidden",
+	}, policy.EffectDeny, 1); err != nil {
+		t.Fatalf("CreatePolicy: %v", err)
+	}
+
+	lis := bufconn.Listen(1024 * 1024)
+	gs := grpc.NewServer()
+	h.Register(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	agentClient := pb.NewAgentStreamClient(conn)
+	streamClient, err := agentClient.Stream(ctx)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	// Handshake.
+	env, err := streamClient.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	ch := env.GetChallenge()
+	if ch == nil {
+		t.Fatalf("expected CHALLENGE, got %s", env.Kind)
+	}
+	sig := id.Sign(hsauth.BuildMsg(ch.Nonce, id.UUID, time.Now().Unix()))
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_AUTH_PROOF,
+		Payload: &pb.Envelope_AuthProof{AuthProof: &pb.AuthProof{
+			AgentUuid: id.UUID, Ts: time.Now().Unix(), Sig: sig,
+		}},
+	}); err != nil {
+		t.Fatalf("Send proof: %v", err)
+	}
+
+	// The server should push the policy bundle right after auth.
+	var benv *pb.Envelope
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		benv, err = streamClient.Recv()
+		if err != nil {
+			t.Fatalf("Recv bundle: %v", err)
+		}
+		if benv.GetPolicyBundle() != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no policy bundle received within 3s")
+		}
+	}
+	// Verify the bundle contents.
+	ver, hash, rulesJSON, err := st.BuildPolicyBundle()
+	if err != nil {
+		t.Fatalf("BuildPolicyBundle: %v", err)
+	}
+	bundle := benv.GetPolicyBundle()
+	if bundle.Version != ver {
+		t.Fatalf("bundle version = %d, want %d", bundle.Version, ver)
+	}
+	if bundle.ContentHash != hash {
+		t.Fatalf("bundle hash = %q, want %q", bundle.ContentHash, hash)
+	}
+	if bundle.RulesJson != rulesJSON {
+		t.Fatalf("bundle rules mismatch")
+	}
+	if bundle.AgentId != "ag_bundle" {
+		t.Fatalf("bundle agent_id = %q, want ag_bundle", bundle.AgentId)
+	}
+	if len(bundle.ServerPubkey) == 0 {
+		t.Fatal("bundle should carry the server public key")
 	}
 }

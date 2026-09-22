@@ -54,6 +54,9 @@ func (h *Handler) handleCreateExecution(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", "selector is required", nil)
 		return
 	}
+	// Inject the requester's RBAC role so the policy engine can gate on it
+	// (actor_roles in the rule match). The client-provided value is ignored.
+	req.ActorRole = h.roleFor(r)
 	res, err := h.ctrl.Dispatch(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)

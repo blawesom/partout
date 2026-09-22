@@ -9,7 +9,14 @@ Sections marked *proposed* describe planned work beyond v0.1.
 (REST v1 + SSE + gRPC demuxed by content-type/protocol), SQLite storage, command
 execution + cancellation + audit, RBAC bearer tokens, TLS/mTLS bootstrap
 (`PARTOUT_TLS=on`), `partout ctl` CLI, systemd units (`deploy/systemd/`).
-**Not yet in v0.1:** Web UI, host provisioning over fleet SSH, elevation, files &
+
+**What v0.2 adds (M1):** the policy deny-list engine — rule CRUD at
+`/api/v1/policies` (`partout ctl policy list|create|delete`), per-host evaluation at
+dispatch (deny / `require_approval`→deny / allow), signed `Decision` on every command,
+agent-side re-check (`internal/agent/guardrail`), and audit rows (`policy.create`,
+`policy.delete`, `policy.deny`). No new flags or env vars; the server generates a
+`server_identity.key` under `<db-dir>/identity/` on first run.
+**Not yet in v0.1/v0.2:** Web UI, host provisioning over fleet SSH, elevation, files &
 sessions, jobs/scheduling, Postgres backend, offline spool, secret store, MCP.
 
 ---

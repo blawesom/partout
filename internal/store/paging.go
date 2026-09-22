@@ -149,6 +149,7 @@ func (s *Store) CancelNonTerminalRuns(executionID string) (int64, error) {
 var terminalStates = map[string]bool{
 	"succeeded": true, "failed": true, "timed_out": true,
 	"cancelled": true, "interrupted": true, "not_delivered": true,
+	"denied": true,
 }
 
 // IsTerminalRun reports whether a run state is final.

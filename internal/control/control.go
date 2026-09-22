@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/id"
+	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
@@ -20,10 +23,11 @@ import (
 
 // Control dispatches work to hosts.
 type Control struct {
-	st  *store.Store
-	h   *stream.Handler
-	sse *sse.Broker
-	log *log.Logger
+	st    *store.Store
+	h     *stream.Handler
+	sse   *sse.Broker
+	log   *log.Logger
+	ident *certutil.ServerIdentity // signs policy Decisions; nil = unsigned (tests)
 }
 
 // New builds a Control. It also wires the stream handler's result hook so
@@ -37,6 +41,15 @@ func New(st *store.Store, h *stream.Handler, sse *sse.Broker, lg *log.Logger) *C
 	return c
 }
 
+// SetIdentity installs the server's Ed25519 signing key. Decisions attached
+// to Command envelopes are signed with it so agents can verify them
+// (architecture §5.3). Must be called before dispatching.
+func (c *Control) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
+
+// BroadcastPolicyBundle pushes the current policy bundle to every connected
+// agent.  Called by the policy API after a rule is created or deleted.
+func (c *Control) BroadcastPolicyBundle() { c.h.BroadcastPolicyBundle() }
+
 // DispatchRequest is a command to run across a selector.
 type DispatchRequest struct {
 	Selector  string            `json:"selector"`
@@ -45,6 +58,8 @@ type DispatchRequest struct {
 	Env       map[string]string `json:"env,omitempty"`
 	TimeoutS  int32             `json:"timeout_s,omitempty"`
 	CreatedBy string            `json:"created_by,omitempty"`
+	// ActorRole is the RBAC role of the requester (set by the API layer).
+	ActorRole string `json:"actor_role,omitempty"`
 }
 
 // DispatchResult reports what was dispatched.
@@ -59,6 +74,7 @@ type RunRef struct {
 	RunID     string `json:"run_id"`
 	AgentID   string `json:"agent_id"`
 	Delivered bool   `json:"delivered"`
+	State     string `json:"state"` // queued|delivered|not_delivered|denied
 }
 
 // Dispatch resolves the selector, creates an execution + a run per host, and
@@ -94,9 +110,32 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 		return nil, fmt.Errorf("control: create execution: %w", err)
 	}
 
-	// 3. Create a run per host and dispatch.
+	// 3. Load policy rules + bundle version once for this dispatch.
+	rules, err := c.st.GetPolicyRules()
+	if err != nil {
+		return nil, fmt.Errorf("control: load policies: %w", err)
+	}
+	bundleVersion, err := c.st.PolicyBundleVersion()
+	if err != nil {
+		return nil, fmt.Errorf("control: bundle version: %w", err)
+	}
+
+	// 4. Create a run per host, policy-gated, and dispatch.
 	res := &DispatchResult{ExecutionID: execID}
+	allTerminal := true
 	for _, host := range hosts {
+		// Policy evaluate (per host, per action) — arch §5.1 step 3.
+		action := policy.Action{
+			HostID:      host.ID,
+			HostTags:    host.Tags,
+			HostRoles:   host.Roles,
+			ActorRole:   req.ActorRole,
+			Cmd:         req.Cmd,
+			Args:        req.Args,
+			CommandLine: commandLine(req.Cmd, req.Args),
+		}
+		decision := policy.Evaluate(rules, action)
+
 		runID := id.New("run")
 		run := store.ExecutionRun{
 			ID:          runID,
@@ -109,6 +148,29 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			continue
 		}
 
+		// Deny / require_approval → fail closed (no envelope is sent).
+		// require_approval is denied in v1: the approvals engine is M4.
+		if decision.Effect != policy.EffectAllow {
+			kind := "policy.deny"
+			if decision.Effect == policy.EffectRequireApproval {
+				kind = "policy.require_approval"
+			}
+			if err := c.st.UpdateRunState(runID, "denied", -1, 0); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err))
+				continue
+			}
+			c.audit(kind, req.CreatedBy, map[string]string{
+				"execution_id": execID,
+				"run_id":       runID,
+				"agent_id":     host.ID,
+				"cmd":          req.Cmd,
+				"rules":        strings.Join(decision.MatchedRules, ","),
+			})
+			res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "denied"})
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: denied (%s)", host.ID, decision.Reason))
+			continue
+		}
+
 		cmd := &pb.Command{
 			RunId:       runID,
 			ExecutionId: execID,
@@ -116,16 +178,26 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			Args:        req.Args,
 			Env:         req.Env,
 			TimeoutS:    req.TimeoutS,
+			Decision:    c.signDecision(runID, bundleVersion, decision, req.ActorRole),
 		}
 		// Dispatch down the stream.
 		if err := c.h.SendCommand(host.ID, cmd); err != nil {
 			c.st.UpdateRunState(runID, "not_delivered", -1, 0)
-			res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, Delivered: false})
+			res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "not_delivered"})
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: not delivered: %v", host.ID, err))
 			continue
 		}
 		c.st.UpdateRunState(runID, "delivered", -1, 0)
-		res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, Delivered: true})
+		res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, Delivered: true, State: "delivered"})
+		allTerminal = false
+	}
+
+	// If every run is already terminal (e.g. all denied pre-dispatch),
+	// finalize the execution aggregate now instead of waiting for a hook.
+	if allTerminal {
+		if err := c.FinalizeExecution(execID); err != nil {
+			c.log.Printf("control: finalize %s: %v", execID, err)
+		}
 	}
 
 	// 4. Audit.
@@ -234,7 +306,7 @@ func (c *Control) FinalizeExecution(execID string) error {
 		switch r.State {
 		case "succeeded":
 			succeeded++
-		case "failed", "timed_out", "interrupted", "not_delivered", "cancelled":
+		case "failed", "timed_out", "interrupted", "not_delivered", "cancelled", "denied":
 			failed++
 		default:
 			other++
@@ -278,4 +350,30 @@ func (c *Control) audit(kind, actor string, payload map[string]string) {
 		Actor:   actor,
 		Payload: string(b),
 	})
+}
+
+// commandLine joins cmd + args into the "cmd args..." string used for
+// command_regex policy matching.
+func commandLine(cmd string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, cmd)
+	parts = append(parts, args...)
+	return strings.Join(parts, " ")
+}
+
+// signDecision builds the signed Decision attached to a Command envelope.
+// When the server has no identity (e.g. in tests), the decision is unsigned
+// and the effect is still enforced server-side.
+func (c *Control) signDecision(runID string, bundleVersion uint64, d policy.Decision, actorRole string) *pb.Decision {
+	dm := &pb.Decision{
+		RunId:         runID,
+		BundleVersion: bundleVersion,
+		Effect:        d.Effect,
+		MatchedRules:  d.MatchedRules,
+		ActorRole:     actorRole,
+	}
+	if c.ident != nil {
+		dm.Sig = policy.SignDecision(c.ident.Priv, runID, bundleVersion, d.Effect, d.MatchedRules, actorRole)
+	}
+	return dm
 }

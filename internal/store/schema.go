@@ -99,7 +99,22 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit_events(kind);
+
+CREATE TABLE IF NOT EXISTS policies (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  match_json   TEXT NOT NULL,
+  effect       TEXT NOT NULL,
+  priority     INTEGER NOT NULL DEFAULT 0,
+  created_unix INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_policies_effect ON policies(effect);
+
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
