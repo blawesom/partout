@@ -3,18 +3,22 @@
 //
 //	partout --mode=server            # control plane: gRPC + REST + SSE on one listener
 //	partout --mode=agent             # host agent: outbound gRPC to the server
-//	partout --mode=embedded          # server + (M1) local agent; M0: server only
+//	partout --mode=embedded          # server + co-located local agent (one process)
 //
 // The server multiplexes gRPC (HTTP/2, application/grpc) and REST/SSE
 // (HTTP/1.1 + h2c) on a single TCP listener (PRD §4, architecture §2).
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -22,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -123,10 +128,10 @@ func main() {
 			}
 		}
 	case "embedded":
-		// M0: embedded runs the server only; the co-located local agent is M1.
-		lg.Printf("embedded mode: running server (local agent is M1)")
-		if err := runServer(ctx, cfg, lg); err != nil {
-			lg.Fatal(err)
+		if err := runEmbedded(ctx, cfg, lg); err != nil {
+			if err != context.Canceled {
+				lg.Fatal(err)
+			}
 		}
 	default:
 		lg.Fatalf("unknown mode %q (want server|agent|embedded)", cfg.Mode)
@@ -349,7 +354,178 @@ func serverCertNames(tlsNames string) []string {
 	return []string{"localhost", "127.0.0.1", host}
 }
 
-// ---- flag/env helpers ---------------------------------------------------------
+// ---- embedded ---------------------------------------------------------------
+
+// runEmbedded runs the server and a local agent in the same process.
+// The agent is enrolled with the co-located server and connects over
+// loopback.  On process shutdown (SIGTERM / SIGINT), both sides shut down
+// gracefully.
+func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
+	// The embedded agent talks to the co-located server over loopback.
+	agentCfg := *cfg
+	agentCfg.ServerURL = fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	if cfg.TLS {
+		// The server bootstraps its own CA; point the agent at it so mTLS
+		// enrollment + gRPC stream will work.
+		agentCfg.TLSCAFile = filepath.Join(filepath.Dir(cfg.DBPath), "tls", "ca.crt")
+	}
+
+	// Determine whether this is a first boot (identity.json doesn't yet exist).
+	// Only then do we need an enrollment token.
+	dataDir := agentCfg.DataDir
+	if dataDir == "" {
+		home, _ := os.UserHomeDir()
+		dataDir = filepath.Join(home, ".partout", "agent")
+		agentCfg.DataDir = dataDir
+	}
+	_, statErr := os.Stat(filepath.Join(dataDir, "identity.json"))
+	fresh := os.IsNotExist(statErr)
+
+	var wg sync.WaitGroup
+	serverErr := make(chan error, 1)
+	agentErr := make(chan error, 1)
+
+	// ---- start the server (serves until ctx.Done, then graceful shutdown) ----
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		serverErr <- runServer(ctx, cfg, lg)
+	}()
+
+	// ---- wait for readiness ------------------------------------------------
+	base := "http://127.0.0.1"
+	if cfg.TLS {
+		base = "https://127.0.0.1"
+	}
+	if err := waitForReady(ctx, base, cfg.Port, agentCfg.TLSCAFile, lg); err != nil {
+		return fmt.Errorf("embedded: server not ready: %w", err)
+	}
+
+	// ---- create enrollment token (only for first boot) ----------------------
+	if fresh {
+		tok, err := createEnrollmentToken(ctx, base, cfg.Port, cfg.AdminToken, agentCfg.TLSCAFile)
+		if err != nil {
+			return fmt.Errorf("embedded: create enrollment token: %w", err)
+		}
+		agentCfg.Token = tok
+		lg.Printf("embedded: local agent enrolled (token created)")
+	} else {
+		lg.Printf("embedded: local agent already enrolled; skipping enrollment")
+	}
+
+	// ---- run the agent (blocking until ctx or revoke) ----------------------
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		agentErr <- runAgent(ctx, &agentCfg, lg)
+	}()
+
+	// ---- wait for shutdown --------------------------------------------------
+	<-ctx.Done()
+	wg.Wait()
+
+	// Return the first non-nil, non-canceled error.
+	if e := <-serverErr; e != nil && !errors.Is(e, context.Canceled) {
+		return e
+	}
+	if e := <-agentErr; e != nil && !errors.Is(e, context.Canceled) {
+		return e
+	}
+	return ctx.Err()
+}
+
+// waitForReady polls /healthz until it returns 200 or the context is done.
+// When TLS is on it uses caFile as the root CA for verification.
+func waitForReady(ctx context.Context, base string, port int, caFile string, lg *log.Logger) error {
+	url := fmt.Sprintf("%s:%d/healthz", base, port)
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for server at %s", url)
+		}
+		client := &http.Client{Timeout: 2 * time.Second}
+		if caFile != "" {
+			if c, err := tlsHTTPClient(caFile); err == nil {
+				client.Transport = c.Transport
+			}
+		}
+		resp, err := client.Get(url)
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				lg.Printf("embedded: server ready at %s", url)
+				return nil
+			}
+		}
+		if lg != nil {
+			lg.Printf("embedded: waiting for server (%s) ...", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// createEnrollmentToken calls the admin enrollment-token endpoint and returns
+// the plaintext token.  In single-user mode (no admin token) no bearer is sent.
+func createEnrollmentToken(ctx context.Context, base string, port int, adminToken, caFile string) (string, error) {
+	url := fmt.Sprintf("%s:%d/api/v1/agents/enrollment-tokens", base, port)
+	client := &http.Client{Timeout: 5 * time.Second}
+	if caFile != "" {
+		if c, err := tlsHTTPClient(caFile); err == nil {
+			client = c
+		}
+	}
+	body, err := json.Marshal(map[string]int{"ttl_s": 300})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if adminToken != "" {
+		req.Header.Set("Authorization", "Bearer "+adminToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, b)
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.Token, nil
+}
+
+// tlsHTTPClient returns an http.Client that trusts caFile as the root CA.
+func tlsHTTPClient(caFile string) (*http.Client, error) {
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA %s: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("no valid certificate in %s", caFile)
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}, nil
+}
+
+// ---- flag/env helpers --------------------------------------------------------
 
 // envOr returns the environment variable value for key, or fallback if unset
 // (or empty). Used only by `partout ctl`.

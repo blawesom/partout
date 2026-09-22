@@ -59,7 +59,7 @@ off and the docs become the implementation contract.
 - ✅ `internal/api` — REST v1: 16 API routes (15 JSON + SSE), RBAC (viewer/operator/admin), structured errors, cursor pagination, `/healthz` + `/readyz`
 - ✅ `internal/control` — dispatch orchestration, cancel, finalize, audit
 - ✅ `internal/id` — opaque TEXT keys (`prefix_` + 12 hex)
-- ✅ 81 tests, race detector clean
+- ✅ 110 tests, race detector clean
 
 ### M1 — First write path (in progress)
 
@@ -76,12 +76,12 @@ Done:
 - ✅ Agent restart resilience: identity persisted, no re-enrollment needed
 - ✅ **TLS/mTLS bootstrap** (see below): local root CA on first run, CA-signed agent leaves via CSR at enrollment, mTLS on the gRPC stream, REST over HTTPS
 - ✅ **Policy deny-list engine**: rule CRUD (REST `/api/v1/policies` + `partout ctl policy`), per-host dispatch gating (`deny` / `require_approval→deny` / allow), signed `Decision` on every command envelope, agent-side re-check (`internal/agent/guardrail`) — verifies signature, bundle version, re-evaluates rules over local action (any mismatch → deny). Empty rule set = default-allow (deny-list model). Requires no new flags/env vars.
+- ✅ **Embedded mode**: `--mode=embedded` runs the server + a co-located local agent in one process. The agent enrolls over loopback with a locally created one-time token (first boot only), reconnects with its persisted identity on restart, and works over plaintext or TLS (mTLS).
 
 Remaining:
 - [ ] Host provisioning via fleet SSH (architecture §3.5, §5.8)
 - [ ] Postgres backend (second store implementation)
 - [ ] Offline spool (16 MB mem / 128 MB disk / 24h TTL, replay on reconnect)
-- [ ] Embedded mode: wire local agent to co-located server
 - [ ] TLS cert rotation via the stream (v1.x) + optional revocation list
 
 ### Not started
