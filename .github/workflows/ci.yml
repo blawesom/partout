@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Modules
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Format check
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race)
+        # -count=2: the exec pipe-drain regression (output loss when c.Wait()
+        # precedes pump drain) only surfaces under load; a second pass raises
+        # the chance of catching a rescheduling flake.
+        run: go test ./... -race -count=2
+
+  stress:
+    name: Stress (exec output race)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The exec package streams command output through pump goroutines; it
+      # once had a silent output-loss race. Hammer it to keep it honest.
+      - name: Stress exec package
+        run: go test -race -count=20 -run 'TestRun' ./internal/agent/exec/
