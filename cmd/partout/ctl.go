@@ -48,7 +48,7 @@ commands:
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
 `)
 	}
-	fs.Parse(args)
+	fs.Parse(reorderGlobalFlags(args))
 
 	if *server == "" {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
@@ -78,8 +78,13 @@ commands:
 		}
 	}
 
+	base := *server
+	if !strings.Contains(base, "://") {
+		base = scheme + "://" + base
+	}
+
 	c := &ctl{
-		base:   scheme + "://" + *server,
+		base:   base,
 		token:  *token,
 		client: client,
 	}
@@ -442,4 +447,47 @@ func strs(v any) []string {
 		out[i] = strval(it)
 	}
 	return out
+}
+
+var ctlGlobalFlags = map[string]bool{"--server": true, "--token": true, "--ca-file": true}
+
+// reorderGlobalFlags moves the ctl global flags that appear after the
+// subcommand to the front, because the Go flag package stops parsing at the
+// first positional argument — without this, `ctl hosts --server X` would not
+// see --server. Subcommand-specific flags (e.g. --selector for `run`) are
+// left where they are.
+func reorderGlobalFlags(args []string) []string {
+	pre, post := []string{}, []string{}
+	subcmd := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "--") && !subcmd {
+			pre = append(pre, a)
+			if !strings.Contains(a, "=") && i+1 < len(args) { // space form
+				i++
+				pre = append(pre, args[i])
+			}
+			continue
+		}
+		if !strings.HasPrefix(a, "-") {
+			subcmd = true
+		}
+		name, isGlobal := a, false
+		if strings.HasPrefix(a, "--") {
+			if eq := strings.IndexByte(a, '='); eq >= 0 {
+				name = a[:eq]
+			}
+			isGlobal = ctlGlobalFlags[name]
+		}
+		if isGlobal {
+			pre = append(pre, a)
+			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				pre = append(pre, args[i]) // space-form value
+			}
+			continue
+		}
+		post = append(post, a)
+	}
+	return append(pre, post...)
 }

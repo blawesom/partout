@@ -45,38 +45,79 @@ func main() {
 		return
 	}
 
-	var (
-		mode       = flag.String("mode", envOr("PARTOUT_MODE", "server"), "server|agent|embedded")
-		port       = flag.Int("port", envIntOr("PARTOUT_PORT", 8443), "server: single listener port")
-		db         = flag.String("db", envOr("PARTOUT_DB_PATH", "./partout.db"), "server: SQLite path")
-		dataDir    = flag.String("data-dir", envOr("PARTOUT_DATA_DIR", ""), "agent: identity/policy dir (default ~/.partout/agent)")
-		server     = flag.String("server", envOr("PARTOUT_SERVER", ""), "agent: server host:port")
-		token      = flag.String("token", envOr("PARTOUT_TOKEN", ""), "agent: one-time enrollment token")
-		factsEvery = flag.Int("facts-interval", envIntOr("PARTOUT_FACTS_INTERVAL", 3600), "agent: facts refresh seconds")
-		adminTok   = flag.String("admin-token", envOr("PARTOUT_TOKEN_ADMIN", ""), "server: RBAC admin bearer token")
-		opTok      = flag.String("operator-token", envOr("PARTOUT_TOKEN_OPERATOR", ""), "server: RBAC operator bearer token")
-		viewerTok  = flag.String("viewer-token", envOr("PARTOUT_TOKEN_VIEWER", ""), "server: RBAC viewer bearer token")
-		tlsOn      = flag.String("tls", envOr("PARTOUT_TLS", "off"), "server: TLS mode on|off (generates a local root CA on first run)")
-		tlsNames   = flag.String("tls-names", envOr("PARTOUT_TLS_SERVER_NAMES", ""), "server: comma-separated SAN names for the server leaf cert (default localhost,127.0.0.1,hostname)")
-		caFile     = flag.String("ca-file", envOr("PARTOUT_TLS_CA", ""), "agent: path to the server root CA (PEM); enables TLS enrollment + mTLS stream")
-	)
-	flag.Parse()
+	// Config: env vars + defaults (config.Load), CLI flags override
+	// (fs.Changed), validated again after overrides.
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "partout:", err)
+		os.Exit(2)
+	}
 
-	lg := log.New(os.Stderr, fmt.Sprintf("partout[%s]: ", *mode), log.LstdFlags)
+	fs := flag.NewFlagSet("partout", flag.ContinueOnError)
+	mode := fs.String("mode", cfg.Mode, "server|agent|embedded")
+	port := fs.Int("port", cfg.Port, "server: single listener port")
+	db := fs.String("db", cfg.DBPath, "server: SQLite path")
+	dataDir := fs.String("data-dir", cfg.DataDir, "agent: identity/policy dir (default ~/.partout/agent)")
+	server := fs.String("server", cfg.ServerURL, "agent: server host:port")
+	token := fs.String("token", cfg.Token, "agent: one-time enrollment token")
+	factsEvery := fs.Int("facts-interval", cfg.FactsInterval, "agent: facts refresh seconds")
+	adminTok := fs.String("admin-token", cfg.AdminToken, "server: RBAC admin bearer token")
+	opTok := fs.String("operator-token", cfg.OperatorToken, "server: RBAC operator bearer token")
+	viewerTok := fs.String("viewer-token", cfg.ViewerToken, "server: RBAC viewer bearer token")
+	tlsOn := fs.String("tls", tlsDefault(cfg.TLS), "server: TLS mode on|off (generates a local root CA on first run)")
+	tlsNames := fs.String("tls-names", cfg.TLSNames, "server: comma-separated SAN names for the server leaf cert (default localhost,127.0.0.1,hostname)")
+	caFile := fs.String("ca-file", cfg.TLSCAFile, "agent: path to the server root CA (PEM); enables TLS enrollment + mTLS stream")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "partout:", err)
+		os.Exit(2)
+	}
+
+	// Apply effective values (flag > env > default: each flag was seeded with
+	// the loaded config, so after Parse the pointers hold the effective value).
+	cfg.Mode = strings.ToLower(*mode)
+	cfg.Port = *port
+	cfg.DBPath = *db
+	cfg.DataDir = *dataDir
+	cfg.ServerURL = *server
+	cfg.Token = *token
+	cfg.FactsInterval = *factsEvery
+	cfg.AdminToken = *adminTok
+	cfg.OperatorToken = *opTok
+	cfg.ViewerToken = *viewerTok
+	cfg.TLSNames = *tlsNames
+	cfg.TLSCAFile = *caFile
+	switch strings.ToLower(*tlsOn) {
+	case "on", "true":
+		cfg.TLS = true
+	case "off", "false", "":
+		cfg.TLS = false
+	default:
+		fmt.Fprintf(os.Stderr, "partout: invalid --tls %q (want on|off)\n", *tlsOn)
+		os.Exit(2)
+	}
+
+	// Re-validate (e.g. --mode=agent without --server).
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintln(os.Stderr, "partout:", err)
+		os.Exit(2)
+	}
+
+	// Set reserved fields that are not exposed as flags.
+	cfg.Elevate = "none"
+	cfg.Root = "/"
+
+	lg := log.New(os.Stderr, fmt.Sprintf("partout[%s]: ", cfg.Mode), log.LstdFlags)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	switch strings.ToLower(*mode) {
-	case "server", "":
-		if err := runServer(ctx, *port, *db, *tlsOn, *tlsNames, *adminTok, *opTok, *viewerTok, lg); err != nil {
+	switch cfg.Mode {
+	case "server":
+		if err := runServer(ctx, cfg, lg); err != nil {
 			lg.Fatal(err)
 		}
 	case "agent":
-		if *server == "" {
-			lg.Fatal("agent mode requires --server=host:port (or PARTOUT_SERVER)")
-		}
-		if err := runAgent(ctx, *server, *token, *dataDir, *caFile, *factsEvery, lg); err != nil {
+		if err := runAgent(ctx, cfg, lg); err != nil {
 			if err != context.Canceled {
 				lg.Fatal(err)
 			}
@@ -84,18 +125,18 @@ func main() {
 	case "embedded":
 		// M0: embedded runs the server only; the co-located local agent is M1.
 		lg.Printf("embedded mode: running server (local agent is M1)")
-		if err := runServer(ctx, *port, *db, *tlsOn, *tlsNames, *adminTok, *opTok, *viewerTok, lg); err != nil {
+		if err := runServer(ctx, cfg, lg); err != nil {
 			lg.Fatal(err)
 		}
 	default:
-		lg.Fatalf("unknown mode %q (want server|agent|embedded)", *mode)
+		lg.Fatalf("unknown mode %q (want server|agent|embedded)", cfg.Mode)
 	}
 }
 
 // ---- server -----------------------------------------------------------------
 
-func runServer(ctx context.Context, port int, dbPath, tlsMode, tlsNames string, adminTok, opTok, viewerTok string, lg *log.Logger) error {
-	st, err := store.New("sqlite:" + dbPath)
+func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
+	st, err := store.New("sqlite:" + cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -111,7 +152,7 @@ func runServer(ctx context.Context, port int, dbPath, tlsMode, tlsNames string, 
 	sseB := sse.New()
 	h := stream.NewHandler(st, sseB, lg)
 	apiH := api.New(st, h, sseB, lg)
-	apiH.SetAuth(adminTok, opTok, viewerTok)
+	apiH.SetAuth(cfg.AdminToken, cfg.OperatorToken, cfg.ViewerToken)
 
 	// gRPC server (served via HTTP/2 demux below).
 	gs := grpc.NewServer()
@@ -122,7 +163,7 @@ func runServer(ctx context.Context, port int, dbPath, tlsMode, tlsNames string, 
 	var protocols http.Protocols
 	protocols.SetHTTP1(true) // REST + SSE
 
-	serveTLS := strings.EqualFold(tlsMode, "on") || strings.EqualFold(tlsMode, "true")
+	serveTLS := cfg.TLS
 
 	httpSrv := &http.Server{
 		Protocols: &protocols,
@@ -144,12 +185,12 @@ func runServer(ctx context.Context, port int, dbPath, tlsMode, tlsNames string, 
 
 	if serveTLS {
 		// Bootstrap a local root CA (first run) + the server's own leaf cert.
-		certDir := filepath.Join(filepath.Dir(dbPath), "tls")
+		certDir := filepath.Join(filepath.Dir(cfg.DBPath), "tls")
 		ca, err := certutil.LoadOrCreateCA(certDir)
 		if err != nil {
 			return fmt.Errorf("load/create CA: %w", err)
 		}
-		names := serverCertNames(tlsNames)
+		names := serverCertNames(cfg.TLSNames)
 		serverCert, err := certutil.LoadOrCreateServerCert(certDir, ca, names)
 		if err != nil {
 			return fmt.Errorf("load/create server cert: %w", err)
@@ -171,14 +212,14 @@ func runServer(ctx context.Context, port int, dbPath, tlsMode, tlsNames string, 
 		lg.Printf("TLS enabled (CA in %s, SANs %v)", certDir, names)
 	}
 
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {
-		return fmt.Errorf("listen :%d: %w", port, err)
+		return fmt.Errorf("listen :%d: %w", cfg.Port, err)
 	}
 	if serveTLS {
-		lg.Printf("gRPC + REST + SSE (TLS) on :%d, db %s", port, dbPath)
+		lg.Printf("gRPC + REST + SSE (TLS) on :%d, db %s", cfg.Port, cfg.DBPath)
 	} else {
-		lg.Printf("gRPC + REST + SSE on :%d, db %s", port, dbPath)
+		lg.Printf("gRPC + REST + SSE on :%d, db %s", cfg.Port, cfg.DBPath)
 	}
 
 	go func() {
@@ -205,66 +246,58 @@ func runServer(ctx context.Context, port int, dbPath, tlsMode, tlsNames string, 
 
 // ---- agent ------------------------------------------------------------------
 
-func runAgent(ctx context.Context, server, token, dataDir, caFile string, factsInterval int, lg *log.Logger) error {
-	if dataDir == "" {
+func runAgent(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
+	if cfg.DataDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("agent: no home dir: %w", err)
 		}
-		dataDir = home + "/.partout/agent"
+		cfg.DataDir = filepath.Join(home, ".partout", "agent")
 	}
 
-	identityPath := dataDir + "/identity.json"
+	identityPath := filepath.Join(cfg.DataDir, "identity.json")
 	_, statErr := os.Stat(identityPath)
 	fresh := os.IsNotExist(statErr)
 
-	id, err := identity.LoadOrGenerate(dataDir)
+	id, err := identity.LoadOrGenerate(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("agent: identity: %w", err)
 	}
 
 	// One-time enrollment: fresh identity + token provided.
-	if token != "" && fresh {
-		lg.Printf("agent: enrolling with token %s…", token[:10]+"…")
-		factMap := agentfacts.Collector(id, factsInterval)
-		res, err := agent.Enroll(ctx, server, token, id, factMap, agent.EnrollOptions{CAFile: caFile})
+	if cfg.Token != "" && fresh {
+		lg.Printf("agent: enrolling with token %s…", cfg.Token[:10]+"…")
+		factMap := agentfacts.Collector(id, cfg.FactsInterval)
+		res, err := agent.Enroll(ctx, cfg.ServerURL, cfg.Token, id, factMap, agent.EnrollOptions{CAFile: cfg.TLSCAFile})
 		if err != nil {
 			return fmt.Errorf("agent: enroll: %w", err)
 		}
 		lg.Printf("agent: enrolled as %s (uuid %s)", res.AgentID, res.UUID)
 		if res.TLS != nil {
-			if err := persistTLSMaterial(dataDir, res, lg); err != nil {
+			if err := persistTLSMaterial(cfg, res, lg); err != nil {
 				return fmt.Errorf("agent: persist TLS: %w", err)
 			}
 		}
-	} else if token == "" && fresh {
+	} else if cfg.Token == "" && fresh {
 		lg.Printf("agent: warning: fresh identity and no token; server must already know this agent")
 	}
 
-	agentCfg := &config.Config{
-		Mode:          "agent",
-		ServerURL:     server,
-		DataDir:       dataDir,
-		FactsInterval: factsInterval,
-		Elevate:       "none",
-		Root:          "/",
-	}
 	// Pick up mTLS material from disk if present (survives restarts).
-	tlsDir := filepath.Join(dataDir, "tls")
-	if stat, err := os.Stat(filepath.Join(tlsDir, "ca.crt")); err == nil && stat != nil {
-		agentCfg.TLSCAFile = filepath.Join(tlsDir, "ca.crt")
-		agentCfg.TLSCertFile = filepath.Join(tlsDir, "agent.crt")
-		agentCfg.TLSKeyFile = filepath.Join(tlsDir, "key.pem")
+	tlsDir := filepath.Join(cfg.DataDir, "tls")
+	if _, err := os.Stat(filepath.Join(tlsDir, "ca.crt")); err == nil {
+		cfg.TLSCAFile = filepath.Join(tlsDir, "ca.crt")
+		cfg.TLSCertFile = filepath.Join(tlsDir, "agent.crt")
+		cfg.TLSKeyFile = filepath.Join(tlsDir, "key.pem")
 	}
-	ag := agent.New(id, agentCfg, lg)
+	ag := agent.New(id, cfg, lg)
 	return ag.Run(ctx)
 }
 
 // persistTLSMaterial writes the agent's TLS material (CA, leaf, private key)
 // under <dataDir>/tls/ with 0600 permissions on the key. The private key
 // never leaves the host.
-func persistTLSMaterial(dataDir string, res *agent.EnrollResult, lg *log.Logger) error {
-	dir := filepath.Join(dataDir, "tls")
+func persistTLSMaterial(cfg *config.Config, res *agent.EnrollResult, lg *log.Logger) error {
+	dir := filepath.Join(cfg.DataDir, "tls")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -308,6 +341,8 @@ func serverCertNames(tlsNames string) []string {
 
 // ---- flag/env helpers ---------------------------------------------------------
 
+// envOr returns the environment variable value for key, or fallback if unset
+// (or empty). Used only by `partout ctl`.
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -315,12 +350,10 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-func envIntOr(key string, fallback int) int {
-	if v := os.Getenv(key); v != "" {
-		var n int
-		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
-			return n
-		}
+// tlsDefault renders the TLS bool as the --tls flag default.
+func tlsDefault(on bool) string {
+	if on {
+		return "on"
 	}
-	return fallback
+	return "off"
 }

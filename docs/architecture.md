@@ -850,7 +850,7 @@ Everything else in this document follows PRD-locked decisions. These are new:
 
 | # | Item | Proposal |
 |---|---|---|
-| A1 | Listener | Single port `:8443` serving UI/REST/SSE/MCP + gRPC (h2); optional split gRPC port |
+| A1 | Listener | **Implemented in v0.1**: single port `:8443` serving REST/SSE + gRPC (h2); UI deferred, MCP proposed. Optional split gRPC port still proposed. |
 | A2 | Transport keys | Add X25519 transport keypair alongside Ed25519 identity (agent spool encryption) |
 | A3 | Output chunk size | 64 KiB |
 | A4 | Stream backoff | 1 s → 60 s cap, jittered |

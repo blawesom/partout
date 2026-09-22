@@ -1,203 +1,133 @@
-// Package config parses environment variables and CLI flags to produce a
-// validated configuration for the server, agent, or embedded mode.
-// All configuration is via env vars (PRD R15); flags override env.
+// Package config holds the validated runtime configuration for the Partout
+// binary.
 //
-// Defaults are the proposed defaults from the architecture document §15.
+// Single source of truth: cmd/partout calls Load() (env vars + defaults) and
+// CLI flags override the loaded values, so precedence is flag > env > default.
+//
+// Scope: only the settings the v0.1 binary actually enforces. The wider
+// surface (retention, spool, MCP, H2C, secret key, SSH provisioning dir, log
+// level, split gRPC listener, elevation) is planned — see
+// docs/deployment.md §4 "Planned, not wired yet" — and intentionally not
+// parsed here: an env var that is documented but never read is a false
+// promise. Add a variable here only when its feature lands.
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-// Config holds the complete Partout configuration.
+// Config is the validated runtime configuration for one process.
 type Config struct {
-	Mode string // "server", "agent", "embedded"
+	// Mode: server | agent | embedded.
+	Mode string
 
-	// ---- server only (populated when Mode == "server") ----
-	Addr                               string // ":8443"
-	TLSCert, TLSKey                    string
-	H2C                                bool
-	DataDir                            string
-	DB                                 string
-	SecretKeyFile, SecretKey           string
-	DisableExternalData                bool
-	RetentionOutput, RetentionSessions int
-	RetentionRuns, RetentionFacts      int
-	MaxOutputMB, MaxTransferMB         int
-	MaxConcurrentRunsPerHost           int
-	DispatchTTL, PolicyStaleness       int
-	MCPEnabled                         bool
-
-	// RBAC bearer tokens (PRD R10; local users, no OIDC in v1). When none are
-	// set the server runs in single-user local mode (all requests allowed).
+	// ---- Server ----
+	// Port is the single listener port (REST v1 + SSE + gRPC, demuxed by
+	// protocol/content-type).
+	Port int
+	// DBPath is the SQLite database path (server data set).
+	DBPath string
+	// DataDir: agent — identity, TLS material, policy dir (used).
+	// server — reserved (output blobs, extern cache; M1+).
+	DataDir string
+	// TLS enables server-native TLS with local root-CA bootstrap
+	// (PARTOUT_TLS=on / --tls=on).
+	TLS bool
+	// TLSNames: comma-separated SANs for the server leaf cert.
+	// Empty → default localhost,127.0.0.1,hostname.
+	TLSNames string
+	// RBAC bearer tokens; when none are set the server runs in single-user
+	// local mode (no auth).
 	AdminToken, OperatorToken, ViewerToken string
-	SPOOL
 
-	// ---- agent only (populated when Mode == "agent") ----
-	ServerURL     string
-	Token         string
-	Elevate       string
-	Root          string
-	FactsInterval int
-	SSHPDir       string
+	// ---- Agent ----
+	ServerURL     string // server host:port (gRPC + REST, single port)
+	Token         string // one-time enrollment token (first boot)
+	FactsInterval int    // facts refresh, seconds
+	// TLSCAFile: path to the server root CA (PEM); enables HTTPS
+	// enrollment + mTLS stream.
+	TLSCAFile string
+	// TLSCertFile/TLSKeyFile: the agent's CA-signed leaf + private key.
+	// Persisted after a TLS enrollment, reloaded on later starts.
+	TLSCertFile, TLSKeyFile string
 
-	// mTLS material (agent mode). All empty = plaintext h2c. The agent
-	// persists these under <DataDir>/tls/ after a TLS enrollment.
-	TLSCAFile, TLSCertFile, TLSKeyFile string
-
-	// ---- common ----
-	LogLevel string
+	// ---- Reserved (elevation, M1+) ----
+	// Elevate/Root are part of the agent's runtime contract but elevation
+	// is not implemented yet; main.go hardcodes "none"/"/" until it lands.
+	// Not parsed from the environment on purpose.
+	Elevate, Root string
 }
 
-// SPOOL holds spool capacity limits.
-type SPOOL struct {
-	Mem  int // 16 MB
-	Disk int // 128 MB
-	Age  int // 86400 (24h)
-}
-
-// Load reads env vars, applies defaults, and validates. Returns an error
-// if the config is invalid.
+// Load reads configuration from the environment and returns the validated
+// result. PARTOUT_MODE unset defaults to "server" (the --mode default).
 func Load() (*Config, error) {
-	c := &Config{
-		// Defaults (proposed — architecture §15).
-		Mode:     strings.ToLower(os.Getenv("PARTOUT_MODE")),
-		LogLevel: getEnv("PARTOUT_LOG_LEVEL", "info"),
-		DataDir:  getEnv("PARTOUT_DATA_DIR", "/var/lib/partout/server"),
-		DB:       getEnv("PARTOUT_DB", "sqlite:partout.db"),
-		Addr:     getEnv("PARTOUT_ADDR", ":8443"),
-		SSHPDir:  getEnv("PARTOUT_SSH_DIR", getDefaultSSHDir()),
-		SPOOL: SPOOL{
-			Mem:  getEnvInt("PARTOUT_SPOOL_MEM_MB", 16),
-			Disk: getEnvInt("PARTOUT_SPOOL_DISK_MB", 128),
-			Age:  getEnvInt("PARTOUT_SPOOL_AGE_S", 86400),
-		},
-		// Server defaults.
-		RetentionOutput:          getEnvInt("PARTOUT_RETENTION_OUTPUT_DAYS", 30),
-		RetentionSessions:        getEnvInt("PARTOUT_RETENTION_SESSIONS_DAYS", 30),
-		RetentionRuns:            getEnvInt("PARTOUT_RETENTION_RUNS_DAYS", 90),
-		RetentionFacts:           getEnvInt("PARTOUT_RETENTION_FACTS_DAYS", 90),
-		MaxOutputMB:              getEnvInt("PARTOUT_MAX_OUTPUT_MB", 16),
-		MaxTransferMB:            getEnvInt("PARTOUT_MAX_TRANSFER_MB", 256),
-		MaxConcurrentRunsPerHost: getEnvInt("PARTOUT_MAX_CONCURRENT_RUNS_PER_HOST", 4),
-		DispatchTTL:              getEnvInt("PARTOUT_DISPATCH_TTL_S", 900),
-		PolicyStaleness:          getEnvInt("PARTOUT_POLICY_STALE_S", 172800),
-		MCPEnabled:               getEnvBool("PARTOUT_MCP_ENABLED", true),
-		DisableExternalData:      getEnvBool("PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH", false),
-		AdminToken:               os.Getenv("PARTOUT_TOKEN_ADMIN"),
-		OperatorToken:            os.Getenv("PARTOUT_TOKEN_OPERATOR"),
-		ViewerToken:              os.Getenv("PARTOUT_TOKEN_VIEWER"),
-		// Agent defaults.
-		Elevate:       getEnv("PARTOUT_ELEVATE", "none"),
-		Root:          getEnv("PARTOUT_ROOT", "/"),
-		FactsInterval: getEnvInt("PARTOUT_FACTS_INTERVAL", 3600),
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PARTOUT_MODE")))
+	if mode == "" {
+		mode = "server"
 	}
-
-	// Secrets.
-	c.SecretKeyFile = os.Getenv("PARTOUT_SECRET_KEY_FILE")
-	c.SecretKey = os.Getenv("PARTOUT_SECRET_KEY")
-
-	// TLS.
-	c.TLSCert = os.Getenv("PARTOUT_TLS_CERT")
-	c.TLSKey = os.Getenv("PARTOUT_TLS_KEY")
-	c.H2C = getEnvBool("PARTOUT_H2C", false)
-
-	// Agent-only envs.
-	c.ServerURL = os.Getenv("PARTOUT_SERVER")
-	c.Token = os.Getenv("PARTOUT_TOKEN")
-
+	c := &Config{
+		Mode:          mode,
+		Port:          envInt("PARTOUT_PORT", 8443),
+		DBPath:        envStr("PARTOUT_DB_PATH", "./partout.db"),
+		DataDir:       os.Getenv("PARTOUT_DATA_DIR"),
+		TLS:           envBool("PARTOUT_TLS"),
+		TLSNames:      os.Getenv("PARTOUT_TLS_SERVER_NAMES"),
+		AdminToken:    os.Getenv("PARTOUT_TOKEN_ADMIN"),
+		OperatorToken: os.Getenv("PARTOUT_TOKEN_OPERATOR"),
+		ViewerToken:   os.Getenv("PARTOUT_TOKEN_VIEWER"),
+		ServerURL:     os.Getenv("PARTOUT_SERVER"),
+		Token:         os.Getenv("PARTOUT_TOKEN"),
+		FactsInterval: envInt("PARTOUT_FACTS_INTERVAL", 3600),
+		TLSCAFile:     os.Getenv("PARTOUT_TLS_CA"),
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
-// Validate checks invariants and returns an error if the config is invalid.
+// Validate checks mode-specific requirements.
 func (c *Config) Validate() error {
 	switch c.Mode {
-	case "server":
-		return c.validateServer()
+	case "server", "embedded":
+		// nothing mode-specific
 	case "agent":
-		return c.validateAgent()
-	case "embedded":
-		return c.validateEmbedded()
-	case "":
-		return nil // un-set; set before use (main() dispatches)
+		if c.ServerURL == "" {
+			return errors.New("agent mode requires PARTOUT_SERVER (or --server) to be set")
+		}
 	default:
-		return fmt.Errorf("config: invalid mode %q (want server|agent|embedded)", c.Mode)
-	}
-}
-
-func (c *Config) validateServer() error {
-	if c.SPOOL.Mem <= 0 || c.SPOOL.Disk <= 0 || c.SPOOL.Age <= 0 {
-		return fmt.Errorf("config: SPOOL values must be positive")
+		return fmt.Errorf("invalid mode %q (want server|agent|embedded)", c.Mode)
 	}
 	return nil
 }
 
-func (c *Config) validateAgent() error {
-	if c.ServerURL == "" {
-		return fmt.Errorf("config: PARTOUT_SERVER required for agent mode")
-	}
-	if c.SPOOL.Mem <= 0 || c.SPOOL.Disk <= 0 || c.SPOOL.Age <= 0 {
-		return fmt.Errorf("config: SPOOL values must be positive")
-	}
-	switch c.Elevate {
-	case "none", "sudoers", "sudo":
-		// ok
-	default:
-		return fmt.Errorf("config: PARTOUT_ELEVATE must be none|sudoers|sudo")
-	}
-	return nil
-}
-
-func (c *Config) validateEmbedded() error {
-	// Embedded = server + agent on one box; both sets of constraints apply.
-	if err := c.validateServer(); err != nil {
-		return err
-	}
-	// ServerURL is allowed to be empty for embedded.
-	return nil
-}
-
-// DefaultSSHDir returns the OS-specific default SSH directory for the
-// current user. For the server service user, this is typically $HOME/.ssh.
-func getDefaultSSHDir() string {
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return ".ssh"
-	}
-	return filepath.Join(h, ".ssh")
-}
-
-// Helper functions.
-func getEnv(key, fallback string) string {
+func envStr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
-	return fallback
+	return def
 }
 
-func getEnvInt(key string, fallback int) int {
-	s := os.Getenv(key)
-	if s == "" {
-		return fallback
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
-	v, err := strconv.Atoi(s)
-	if err != nil {
-		return fallback
-	}
-	return v
+	return def
 }
 
-func getEnvBool(key string, fallback bool) bool {
-	s := os.Getenv(key)
-	if s == "" {
-		return fallback
+// envBool accepts on/true/1/yes as true; everything else (including unset
+// and off/false/0/no) is false.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "on", "true", "1", "yes":
+		return true
+	default:
+		return false
 	}
-	return s == "true" || s == "1"
 }

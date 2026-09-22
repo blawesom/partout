@@ -1,10 +1,24 @@
 # Partout — Operations
 
-**Status:** Draft v0.1
+**Status:** Draft v0.1 — day-2 runbook for the *planned* control plane. Reflects the
+**v0.1.0 binary** where stated; steps for features that ship later are marked
+*(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
 
 Day-2 guide for the Partout control plane: first-time setup, daily operations, backups, upgrades,
 incident response, capacity, compliance, and a go-live checklist.
+
+> **v0.1 reality check** (binary tag `v0.1.0`):
+> - Auth is **bearer tokens** (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) or single-user local mode —
+>   there is no `--create-admin` and no secret key store in v0.1.
+> - Server state = the **SQLite file** (`PARTOUT_DB_PATH`, default `./partout.db`) plus
+>   `<db dir>/tls/` when `PARTOUT_TLS=on`. No output blobs, extern cache, spool, or Postgres yet.
+> - Agent state = `<data dir>/identity.json` + `<data dir>/tls/` (mTLS leaf/key).
+> - No Web UI in v0.1: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
+> - Not wired in v0.1 (planned, see deployment §4.4): `PARTOUT_SSH_DIR`, `PARTOUT_SECRET_KEY*`,
+>   `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation hardcoded `none`), `PARTOUT_SPOOL_*`,
+>   `PARTOUT_RETENTION_*`, `PARTOUT_MAX_*`, `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH`,
+>   `PARTOUT_MCP_ENABLED`, `PARTOUT_LOG_LEVEL`.
 
 ---
 
@@ -14,15 +28,16 @@ Where everything lives (for backup/restore/troubleshooting):
 
 | Component | Path / Resource | Notes |
 |---|---|---|
-| Server DB | `PARTOUT_DATA_DIR/db.partout` | SQLite WAL; or the Postgres data directory |
-| Server output blobs | `PARTOUT_DATA_DIR/output/` | large command output, session recordings; retention-bounded |
-| Server extern cache | `PARTOUT_DATA_DIR/extern/` | EOL dates, vulnerability data |
-| Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`) | **critical** — losing it = lost secret store (PRD §5.7) |
+| Server DB | `PARTOUT_DB_PATH` (default `./partout.db`; `db.partout` when using `PARTOUT_DATA_DIR`) | SQLite WAL *(Postgres proposed)*; `<db dir>/tls/` holds the CA + server leaf when `PARTOUT_TLS=on` |
+| Server output blobs | `PARTOUT_DATA_DIR/output/` | large command output, session recordings; retention-bounded *(P)* |
+| Server extern cache | `PARTOUT_DATA_DIR/extern/` | EOL dates, vulnerability data *(P)* |
+| Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`) | **critical** — losing it = lost secret store (PRD §5.7) *(P)* |
 | Server config | `/etc/partout/server.env` (systemd) | env vars (PRD R15) |
-| Server SSH dir | `PARTOUT_SSH_DIR` (default: service user's `$HOME/.ssh`) | fleet keys + `known_hosts` used for provisioning (R17) — **critical asset**: server compromise ⇒ fleet-key exposure |
+| Server SSH dir | `PARTOUT_SSH_DIR` (default: service user's `$HOME/.ssh`) | fleet keys + `known_hosts` used for provisioning (R17) — **critical asset**: server compromise ⇒ fleet-key exposure *(P)* |
 | Server UI/API | `http(s)://:8443` | main listener |
 | Agent identity | `/var/lib/partout/agent/identity.json` (0600) | **critical** — losing = re-enroll with new keypair |
-| Agent spool | `/var/lib/partout/agent/spool.db` | in-flight results, job state |
+| Agent TLS | `/var/lib/partout/agent/tls/` (0700) | CA, CA-signed leaf (0644), private key (0600) — mTLS material *(v0.1, when `PARTOUT_TLS_CA` set)* |
+| Agent spool | `/var/lib/partout/agent/spool.db` | in-flight results, job state *(P)* |
 | Agent config | `/etc/partout/agent.env` | env vars |
 | Audit log | DB `audit_events` + optional exported sink | append-only, indefinitely retained (PRD §9) |
 | Agents | `systemctl status partout-agent` | logs in `journalctl -u partout-agent` |
@@ -35,29 +50,27 @@ Step-by-step bring-up, also referenced in deployment §6:
 
 1. **Install the server** (§3.1 of deployment). Create the `partout` system user. Start the
    systemd unit. `journalctl -u partout-server` should show a clean startup: DB ready,
-   listener on the configured port, secret key loaded (or a clear message that secrets are
-   disabled).
-2. **Create the admin**: `partout --mode=server --create-admin=alice` — interactive password
-   prompt (proposed CLI, not PRD-locked). The first principal created this way gets role
-   `admin`; there are no other principals at this point, so no authz gate applies.
-3. **Verify the health endpoint**: `curl -sf https://localhost:8443/healthz` should return 200.
-   The UI is available at `https://localhost:8443/`.
-4. **Create a baseline policy** (UI, API, or via a playbook):
+   listener on the configured port. *(v0.1: no secret key; if `PARTOUT_TLS=on` the local CA
+   bootstrap runs here.)*
+2. **Set RBAC bearer tokens** (v0.1): put `PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`,
+   `PARTOUT_TOKEN_VIEWER` in `/etc/partout/server.env` and restart. *(Proposed, not in v0.1:
+   `--create-admin=<name>` interactive password bootstrap.)*
+3. **Verify the health endpoint**: `curl -sf http://localhost:8443/healthz` should return 200.
+   *(The Web UI is proposed — not in v0.1; use `partout ctl` or REST/SSE.)*
+4. **Create a baseline policy** *(proposed — policy engine is M1+, not in v0.1)*:
    - Rule 1: `deny` on `requires_elevation=true` and `action=exec` for actors without
      `admin` (safety floor).
    - Rule 2: `require_approval` on `action=apply_updates` (patch governance).
    - Rule 3: explicit `allow` rules for the commands you'll run routinely (e.g. `systemctl
      restart *` on `role=web`).
    Start restrictive; loosen later. The audit log captures everything (PRD §5.8).
-5. **Add your first host (provisioning, PRD R17)**:
-   - In the UI: `Provision → Add host` → address or `~/.ssh/config` alias, install mode
-     (systemd), labels → confirm the host-key fingerprint if the host is new to
-     `known_hosts` → the server copies the binary, installs the unit, starts the agent, and
-     waits for enrollment. Every step is live in the UI and recorded in the audit log
-     (`provision` taxonomy kind).
-   - In the UI: host should appear in `<10 s` with facts (PRD §5.1 acceptance).
-   - Manual path (Docker host, air-gapped, non-systemd): the wizard's manual handoff gives
-     the binary + a one-line install command with a one-time token.
+5. **Add your first host** *(provisioning via fleet SSH is M1+, not in v0.1)*:
+   - **v0.1 manual path**: mint a one-time token (`partout ctl enroll-token`), install the
+     binary + agent unit on the host (§3.2 of deployment) with that token.
+   - **Proposed**: `Provision → Add host` in the UI → address or `~/.ssh/config` alias, install
+     mode (systemd), labels → the server copies the binary, installs the unit, starts the agent,
+     and waits for enrollment; every step recorded in the audit log (`provision` kind).
+   - Host should appear with facts in `<10 s` (PRD §5.1 acceptance).
 6. **Run a test command**: `whoami` or `hostname` against the new host. Verify the audit log
    has a row with your principal.
 7. **Enable alerts** for `host.state=disconnected` and `approval.request` — a control plane
@@ -88,6 +101,8 @@ Step-by-step bring-up, also referenced in deployment §6:
 - v1: local users only (PRD Decision 6). Roles: `viewer` (read-only), `operator` (exec,
   files, jobs, tasks, secret read-use, request approval), `admin` (all + principals + policy
   + approvals act).
+- **v0.1**: auth is **bearer tokens** (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`), not a user DB.
+  No principals/identities yet — audit rows carry `actor` (token role) + agent id.
 - OIDC is post-v1 (PRD Decision 6). Until then, manage the local user DB; remove
   departed operators promptly — every action is attributable.
 - Periodic access review: export the audit log filtered by `principal` and check for
@@ -397,18 +412,21 @@ never connects.
 
 ## 10. Go-live checklist
 
+v0.1 items first; items marked *(P)* are proposed and track later milestones.
+
 - [ ] Server installed, systemd unit active, `GET /healthz` returns 200
-- [ ] TLS enabled if exposing beyond localhost (`PARTOUT_TLS=on`); CA copied to hosts; `ca.crt` in the agent env
-- [ ] Admin principal created; other principals created as needed
-- [ ] Secret key file set and **backed up** (encrypted offsite)
-- [ ] Baseline policy: deny on elevation, require-approval on patch, allow-list for routine
-- [ ] ≥1 agent enrolled; facts visible <10 s; test command executed and audited
-- [ ] Alert channels configured: host state (disconnected), approval request
-- [ ] Backup runbook tested: DB restored from backup; audit log intact
+- [ ] RBAC bearer tokens set (admin/operator/viewer) and verified (`/api/v1/hosts` → 401 without, 200 with)
+- [ ] TLS enabled if exposing beyond localhost (`PARTOUT_TLS=on`); CA fetched via `partout ctl ca`; `ca.crt` in the agent env
+- [ ] ≥1 agent enrolled; facts visible <10 s; test command executed and audited (`partout ctl run`)
+- [ ] Backup runbook tested: DB + `<db dir>/tls/` restored from backup; audit log intact
 - [ ] Upgrades tested on a non-prod host: new binary → restart → reconnect → command works
-- [ ] Capacity baseline: disk usage recorded; retention set; spool limits appropriate
-- [ ] Access review process documented (who gets operator/admin, quarterly review)
-- [ ] Air-gap mode tested (if applicable): `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH=true`
+- [ ] *(P)* Admin principal / password bootstrap (v0.1 uses bearer tokens only)
+- [ ] *(P)* Secret key file set and **backed up** (encrypted offsite) — secret store feature
+- [ ] *(P)* Baseline policy: deny on elevation, require-approval on patch, allow-list for routine
+- [ ] *(P)* Alert channels configured: host state (disconnected), approval request
+- [ ] *(P)* Capacity baseline: disk usage recorded; retention set; spool limits appropriate
+- [ ] *(P)* Access review process documented (who gets operator/admin, quarterly review)
+- [ ] *(P)* Air-gap mode tested (if applicable): `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH=true`
 - [ ] Operator training: UI tour for hosts, execute, sessions, jobs, tasks, updates, secrets,
   policy, audit, observe pages
 - [ ] Runbooks accessible: this document published to the team's knowledge base
