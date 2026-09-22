@@ -9,6 +9,7 @@ import (
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
+	"github.com/blawesom/partout/internal/server/provision"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -18,6 +19,7 @@ import (
 type Handler struct {
 	st     *store.Store
 	ctrl   *control.Control
+	prov   *provision.Provisioner
 	sse    *sse.Broker
 	log    *log.Logger
 	router http.Handler
@@ -60,6 +62,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// Enrollment (PRD R2).
 	handler.RegisterEnrollment(mux)
 
+	// Host provisioning (PRD R17, arch §3.5) — admin-gated routes are
+	// registered lazily once a provisioner is installed (see SetProvisioner).
+	handler.RegisterProvision(mux)
+
 	// TLS CA bootstrap (public material, admin-gated for convenience).
 	mux.Handle("GET /api/v1/tls/ca", handler.requireRole(roleAdmin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if handler.ca == nil {
@@ -89,6 +95,12 @@ func (h *Handler) SetAuth(admin, operator, viewer string) {
 // server runs in plaintext mode this is not called.
 func (h *Handler) SetTLS(ca *certutil.CA) {
 	h.ca = ca
+}
+
+// SetProvisioner installs the host-provisioning engine. When nil (or never
+// called), the provisioning endpoints return 503.
+func (h *Handler) SetProvisioner(p *provision.Provisioner) {
+	h.prov = p
 }
 
 // Store returns the underlying store (for tests).

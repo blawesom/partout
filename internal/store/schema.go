@@ -114,7 +114,36 @@ CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS provision_runs (
+  id           TEXT PRIMARY KEY,
+  host         TEXT NOT NULL,
+  mode         TEXT NOT NULL DEFAULT 'fresh',
+  state        TEXT NOT NULL DEFAULT 'queued',
+  key_type     TEXT,
+  fingerprint  TEXT,
+  key_line     TEXT,
+  token_hash   TEXT,
+  agent_id     TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  step         TEXT,
+  error        TEXT,
+  created      INTEGER NOT NULL,
+  updated      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_provision_state ON provision_runs(state);
+
+CREATE TABLE IF NOT EXISTS provision_steps (
+  run_id         TEXT NOT NULL REFERENCES provision_runs(id) ON DELETE CASCADE,
+  seq            INTEGER NOT NULL,
+  name           TEXT NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'pending',
+  stdout_excerpt TEXT,
+  stderr_excerpt TEXT,
+  started        INTEGER,
+  finished       INTEGER,
+  PRIMARY KEY (run_id, seq)
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3

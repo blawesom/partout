@@ -46,6 +46,7 @@ commands:
   exec EXEC_ID             show execution detail + output
   audit [--kind K] [--actor A] [--limit N]   show audit log
   policy <list|create|delete>                manage policy deny rules
+  provision <new|list|get|key|cancel>        host provisioning (admin)
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
 `)
 	}
@@ -104,6 +105,8 @@ commands:
 		c.cmdAudit(rest)
 	case "policy":
 		c.cmdPolicy(rest)
+	case "provision":
+		c.cmdProvision(rest)
 	case "ca":
 		c.cmdCA()
 	case "help", "-h", "--help":
@@ -407,6 +410,139 @@ func (c *ctl) policyDelete(id string) {
 		fatal(err)
 	}
 	fmt.Printf("policy %s deleted\n", res["deleted"])
+}
+
+// ---- provision -----------------------------------------------------------
+
+func (c *ctl) cmdProvision(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl provision <new|list|get|key|cancel>")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "new":
+		c.provisionNew(rest)
+	case "list":
+		c.provisionList()
+	case "get":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl provision get RUN_ID")
+			os.Exit(2)
+		}
+		c.provisionGet(rest[0])
+	case "key":
+		// provision key RUN_ID confirm|deny
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl provision key RUN_ID confirm|deny")
+			os.Exit(2)
+		}
+		c.provisionKey(rest[0], rest[1])
+	case "cancel":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl provision cancel RUN_ID")
+			os.Exit(2)
+		}
+		c.provisionCancel(rest[0])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown provision command %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) provisionNew(args []string) {
+	fs := flag.NewFlagSet("provision new", flag.ExitOnError)
+	host := fs.String("host", "", "target host (ssh user@host)")
+	mode := fs.String("mode", "fresh", "fresh | join")
+	fs.Parse(args)
+	if *host == "" {
+		fatal(fmt.Errorf("--host is required"))
+	}
+	var res struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+		Host  string `json:"host"`
+	}
+	if err := c.do("POST", "/api/v1/provision-runs", map[string]string{"host": *host, "mode": *mode}, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("run %s started for %s (state: %s)\n", res.ID, res.Host, res.State)
+	fmt.Println("watch with:  partout ctl provision get", res.ID)
+	fmt.Println("confirm a new host key with:  partout ctl provision key", res.ID, "confirm")
+}
+
+func (c *ctl) provisionList() {
+	var res struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := c.do("GET", "/api/v1/provision-runs?limit=200", nil, &res); err != nil {
+		fatal(err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tHOST\tMODE\tSTATE\tSTEP\tAGENT\tERROR\t")
+	for _, e := range res.Items {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n",
+			strval(e["id"]), strval(e["host"]), strval(e["mode"]), strval(e["state"]),
+			strval(e["step"]), strval(e["agent_id"]), strval(e["error"]))
+	}
+	w.Flush()
+	fmt.Printf("\n%d run(s)\n", len(res.Items))
+}
+
+func (c *ctl) provisionGet(runID string) {
+	var res struct {
+		Run   map[string]any   `json:"run"`
+		Steps []map[string]any `json:"steps"`
+	}
+	if err := c.do("GET", "/api/v1/provision-runs/"+runID, nil, &res); err != nil {
+		fatal(err)
+	}
+	r := res.Run
+	fmt.Printf("run %s  [%s]\n", strval(r["id"]), strval(r["state"]))
+	fmt.Printf("  host:      %s\n", strval(r["host"]))
+	fmt.Printf("  mode:      %s\n", strval(r["mode"]))
+	if fp := strval(r["fingerprint"]); fp != "" {
+		fmt.Printf("  key:       %s\n", fp)
+	}
+	if agent := strval(r["agent_id"]); agent != "" {
+		fmt.Printf("  agent:     %s\n", agent)
+	}
+	if step := strval(r["step"]); step != "" {
+		fmt.Printf("  step:      %s\n", step)
+	}
+	if e := strval(r["error"]); e != "" {
+		fmt.Printf("  error:     %s\n", e)
+	}
+	if len(res.Steps) > 0 {
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "\n  #\tSTEP\tSTATE\t")
+		for _, s := range res.Steps {
+			fmt.Fprintf(w, "  %d\t%s\t%s\t\n",
+				int(num(s["seq"])), strval(s["name"]), strval(s["state"]))
+			if out := strval(s["stdout_excerpt"]); out != "" {
+				for _, line := range strings.Split(out, "\n") {
+					fmt.Fprintf(w, "  \t\t  %s\t\n", line)
+				}
+			}
+		}
+		w.Flush()
+	}
+}
+
+func (c *ctl) provisionKey(runID, action string) {
+	var res map[string]string
+	if err := c.do("POST", "/api/v1/provision-runs/"+runID+"/key", map[string]string{"action": action}, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("run %s key %s\n", runID, res["action"])
+}
+
+func (c *ctl) provisionCancel(runID string) {
+	var res map[string]string
+	if err := c.do("POST", "/api/v1/provision-runs/"+runID+"/cancel", nil, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("run %s cancelled\n", runID)
 }
 
 // ---- shared display -----------------------------------------------------------

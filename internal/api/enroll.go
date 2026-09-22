@@ -153,6 +153,15 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Link this enrollment to a provisioning run (if the token was created
+	// by the provisioner). The run's agent_id is set so step 5
+	// (wait-enroll) can detect completion.
+	if runID, err := h.st.ProvisionRunForToken(hashHex); err == nil && runID != "" {
+		if err := h.st.LinkProvisionRunAgent(runID, agentID); err == nil {
+			h.log.Printf("enroll: linked agent %s to provision run %s", agentID, runID)
+		}
+	}
+
 	// Store initial facts.
 	if len(req.Facts) > 0 {
 		if err := h.st.UpsertFacts(store.Facts{

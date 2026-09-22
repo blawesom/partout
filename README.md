@@ -34,7 +34,7 @@ off and the docs become the implementation contract.
 | Milestone | Status | Notes |
 |---|---|---|
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
-| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list engine**. Missing: host provisioning, Postgres, offline spool |
+| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)**. Missing: Postgres, offline spool |
 | **M2 — Files & sessions** | ⬜ Not started | — |
 | **M3 — Automation** | ⬜ Not started | — |
 | **M4 — Governance** | ⬜ Not started | — |
@@ -59,7 +59,7 @@ off and the docs become the implementation contract.
 - ✅ `internal/api` — REST v1: 16 API routes (15 JSON + SSE), RBAC (viewer/operator/admin), structured errors, cursor pagination, `/healthz` + `/readyz`
 - ✅ `internal/control` — dispatch orchestration, cancel, finalize, audit
 - ✅ `internal/id` — opaque TEXT keys (`prefix_` + 12 hex)
-- ✅ 110 tests, race detector clean
+- ✅ 117 tests, race detector clean
 
 ### M1 — First write path (in progress)
 
@@ -76,10 +76,10 @@ Done:
 - ✅ Agent restart resilience: identity persisted, no re-enrollment needed
 - ✅ **TLS/mTLS bootstrap** (see below): local root CA on first run, CA-signed agent leaves via CSR at enrollment, mTLS on the gRPC stream, REST over HTTPS
 - ✅ **Policy deny-list engine**: rule CRUD (REST `/api/v1/policies` + `partout ctl policy`), per-host dispatch gating (`deny` / `require_approval→deny` / allow), signed `Decision` on every command envelope, agent-side re-check (`internal/agent/guardrail`) — verifies signature, bundle version, re-evaluates rules over local action (any mismatch → deny). Empty rule set = default-allow (deny-list model). Requires no new flags/env vars.
+- ✅ **Host provisioning via fleet SSH** (architecture §3.5, §5.8): `partout ctl provision new --host user@host` drives a server-side 5-step state machine — `connect` (ssh-keyscan fingerprint + no-silent-TOFU gate: a new host key pauses the run at `key_confirm` until an admin confirms it) → `preflight` (OS/arch/init/sudo/disk) → `transfer` (scp the server binary) → `install` (base64-piped sudo bash: place binary, create `partout` user, write `agent.env` + systemd unit) → `wait-enroll` (agent self-enrolls with a one-time token). Uses only system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen` with hardened flags (`BatchMode`, `ConnectTimeout`, `StrictHostKeyChecking=yes`); no credentials are created, copied, or persisted (the operator's existing `~/.ssh` is the bootstrap channel). Non-systemd hosts hand off cleanly (terminal `handoff`, not an error). REST: `POST/GET /api/v1/provision-runs[/{id}]`, `POST .../key` (confirm|deny), `POST .../cancel`; SSE emits `provision.*` events. Tested with fake ssh binaries (unit + REST integration); real-host E2E deferred. Policy action-class gating for provisioning lands with M4 (admin-only for now).
 - ✅ **Embedded mode**: `--mode=embedded` runs the server + a co-located local agent in one process. The agent enrolls over loopback with a locally created one-time token (first boot only), reconnects with its persisted identity on restart, and works over plaintext or TLS (mTLS).
 
 Remaining:
-- [ ] Host provisioning via fleet SSH (architecture §3.5, §5.8)
 - [ ] Postgres backend (second store implementation)
 - [ ] Offline spool (16 MB mem / 128 MB disk / 24h TTL, replay on reconnect)
 - [ ] TLS cert rotation via the stream (v1.x) + optional revocation list
@@ -99,9 +99,10 @@ Remaining:
 3. ~~Scaffold the Go module + `deploy/` artifacts per architecture §1.~~ ✅ Done
 4. ~~Build milestone M0 (spine).~~ ✅ Done
 5. ~~**Finish M1**: policy deny-list~~ ✅ Done (v0.2.0)
-6. **Finish M1**: host provisioning (fleet SSH), Postgres backend, offline spool
-7. **M2**: files & sessions
-8. **Web UI** (deferred V1 phase)
+6. ~~**Finish M1**: host provisioning (fleet SSH)~~ ✅ Done (see M1 Done list)
+7. **Finish M1**: Postgres backend, offline spool
+8. **M2**: files & sessions
+9. **Web UI** (deferred V1 phase)
 
 ## TLS / transport security (implemented)
 

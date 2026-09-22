@@ -38,8 +38,10 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
+	"github.com/blawesom/partout/internal/server/provision"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
+	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -168,6 +170,29 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	apiH.Control().SetIdentity(ident)
 	h.SetServerPubKey(ident.PubB64())
+
+	// Host provisioning (arch §3.5). SSH is the bootstrap channel only;
+	// Partout never creates/copies/persists operator credentials. The ssh dir
+	// defaults to $HOME/.ssh (PARTOUT_SSH_DIR overrides). The server host is
+	// the address new agents connect to (PARTOUT_SERVER_HOST defaults to the
+	// local hostname).
+	sshDir := os.Getenv("PARTOUT_SSH_DIR")
+	if sshDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			sshDir = filepath.Join(home, ".ssh")
+		}
+	}
+	serverHost := os.Getenv("PARTOUT_SERVER_HOST")
+	if serverHost == "" {
+		if host, err := os.Hostname(); err == nil && host != "" {
+			serverHost = host
+		} else {
+			serverHost = "localhost"
+		}
+	}
+	binPath, _ := os.Executable()
+	prov := provision.New(st, sshutil.Default(sshDir), serverHost+":"+fmt.Sprint(cfg.Port), binPath, sseB, lg)
+	apiH.SetProvisioner(prov)
 
 	// gRPC server (served via HTTP/2 demux below).
 	gs := grpc.NewServer()
