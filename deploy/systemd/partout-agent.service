@@ -1,0 +1,22 @@
+[Unit]
+Description=Partout agent (outbound-only host agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partout
+# Server address + (first-run only) enrollment token come from agent.env.
+EnvironmentFile=-/etc/partout/agent.env
+ExecStart=/usr/local/bin/partout --mode=agent --data-dir=/var/lib/partout/agent
+Restart=always
+RestartSec=3
+# Hardening: the agent only opens outbound connections.
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/partout
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

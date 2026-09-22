@@ -1,0 +1,25 @@
+[Unit]
+Description=Partout server (control plane: gRPC + REST + SSE on one port)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partout
+Group=partout
+EnvironmentFile=/etc/partout/server.env
+ExecStart=/usr/local/bin/partout --mode=server \
+    --port=8443 \
+    --db=/var/lib/partout/partout.db
+Restart=on-failure
+RestartSec=2
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/partout
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

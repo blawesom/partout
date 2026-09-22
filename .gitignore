@@ -1,0 +1,26 @@
+# Compiled binary (build with `go build ./cmd/partout`)
+/partout
+/partout.exe
+
+# Test / dev artifacts
+*.db
+*.db-wal
+*.db-shm
+*.test
+*.out
+coverage.*
+
+# TLS material generated at runtime (server + agent data dirs)
+**/tls/ca.crt
+**/tls/ca.key
+**/tls/server.crt
+**/tls/server.key
+**/tls/agent.crt
+**/tls/key.pem
+identity.json
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

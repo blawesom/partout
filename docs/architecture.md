@@ -1,0 +1,871 @@
+# Partout — Architecture
+
+**Status:** Draft v0.1 (implementation-level design)
+**Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
+
+This document is the implementation-level design. The PRD is the source of truth for *what* and
+*why*; this document defines *how*: module layout, the stream protocol, state machines, the
+policy engine's shape, storage details, and failure semantics. Items the PRD does not lock down
+are marked **(proposed)** and need sign-off.
+
+---
+
+## 1. Repository & binary layout
+
+Single Go module, single binary, three modes (`--mode=server|agent|embedded`), Vue 3 frontend
+embedded via `embed.FS` (PRD R1). Module path: `github.com/<org>/partout` (final org pending the
+repo rename from `hiersoir`).
+
+```
+partout/
+├── cmd/partout/            # main: mode dispatch, flag/env config, first-run bootstrap
+├── internal/
+│   ├── server/
+│   │   ├── api/            # REST v1 handlers (mux), authz middleware, RBAC
+│   │   ├── sse/            # SSE broker: subscribe, fan-out, per-client buffers
+│   │   ├── mcp/            # MCP server (stdio + Streamable HTTP, OAuth2 PKCE)
+│   │   ├── control/        # dispatcher, selector resolution, approvals
+│   │   ├── provision/      # host bootstrap: preflight, install, update runs (PRD R17)
+│   │   ├── policy/         # rule model, evaluator, decision signing, bundle builder
+│   │   ├── secrets/        # store (HKDF), bindings, materialization envelopes
+│   │   ├── audit/          # append-only writer, taxonomy, export
+│   │   ├── jobs/           # job store, selector → per-host schedule resolution
+│   │   ├── tasks/          # task/playbook store, versioning
+│   │   ├── pkgmgmt/        # update orchestration, vuln correlation, EOL gating
+│   │   ├── extern/         # external data service (EOL, CVE feeds), cache, refresh
+│   │   ├── observe/        # facts ingestion, containers, endpoints, certs, alerts
+│   │   └── web/            # embed.FS of the built UI
+│   ├── agent/
+│   │   ├── stream/         # gRPC client, reconnect/backoff, handshake, flow control
+│   │   ├── identity/       # Ed25519 + X25519 keypairs, identity.json (0600)
+│   │   ├── guardrail/      # cached policy bundle, re-check, staleness
+│   │   ├── exec/           # command/session/script runner, pty, output chunking
+│   │   ├── fs/             # transfers, stat, edit (CAS), path safety
+│   │   ├── jobsched/       # agent-side cron, overlap/failure policies, spool of runs
+│   │   ├── taskrun/        # step runner, when-evaluator, reboot continuation
+│   │   ├── pkg/            # apt/dnf/apk backends, journals
+│   │   └── facts/          # collectors (os-release, init, pkg hash, units, ifaces…)
+│   ├── spool/              # shared spool: mem → disk → drop-oldest (both directions)
+│   ├── store/              # dialect abstraction: sqlite | postgres; migrations
+│   ├── proto/              # .proto + generated code for the stream service
+│   ├── selector/           # selector grammar, resolution (shared server/agent tests)
+│   ├── sshutil/            # system ssh/scp/ssh-keygen wrapper (provisioning only; §3.5)
+│   ├── cryptoutil/         # ed25519 sign/verify, x25519, hkdf, aead helpers
+│   └── config/             # env parsing (R15), defaults, validation
+├── web/                    # Vue 3 + TS + Pinia + Tailwind + uPlot + xterm.js source
+├── docs/                   # this directory
+├── deploy/                 # systemd units, docker, compose, cloud-init, helm chart
+└── test/
+    ├── e2e/                # compose rig: server + 2 container agents
+    └── fixtures/
+```
+
+Rules:
+
+- `internal/` only — no importable packages; the binary is the product.
+- `store` is the only layer that touches SQL; everything else uses repository interfaces.
+- `selector` and `policy` IR are shared so server evaluation and agent re-check use one
+  implementation of the rule semantics (defense in depth without two divergent engines).
+
+---
+
+## 2. Component overview
+
+```
+                        ┌────────────────────────────────────────────────────┐
+                        │                    PARTOUT SERVER                  │
+                        │                                                    │
+  Browser ──── SSE ───► │  api ──► control ──► policy ──► approvals          │
+  MCP client ─ HTTP ──► │               │            │          │            │
+  CLI/curl ─── REST ──► │               ▼            ▼          ▼            │
+                        │          selector     decisions   audit ◄─(all)   │
+                        │               │            │          │            │
+                        │               ▼            ▼          ▼            │
+                        │  ┌── dispatch queue (per-agent, ordered) ──┐       │
+                        │  │  jobs · tasks · secrets · pkgmgmt ·     │       │
+                        │  │  extern (EOL/CVE) · observe (facts)     │       │
+                        │  └───────────────────┬─────────────────────┘       │
+                        │                      │                             │
+                        │                store (SQLite | Postgres)           │
+                        └──────────────────────┬─────────────────────────────┘
+                                               │ gRPC bidi stream (TLS or h2c)
+                          ┌────────────────────┼────────────────────┐
+                          ▼                    ▼                    ▼
+                     agent (host A)       agent (host B)       agent (host C)
+                     exec·fs·jobsched·    …                   …
+                     taskrun·pkg·facts·
+                     guardrail·spool
+```
+
+The **control plane** (control/policy/approvals/secrets/audit) sits in front of the transport:
+nothing reaches a dispatch queue without a policy decision and an audit row. The **observe
+layer** (observe/extern) is a sibling plane that feeds facts and external data into both
+monitoring (alerts, UI) and control decisions (EOL gating, CVE ranking, `when` guards).
+**Provisioning** (`provision`, PRD R17) enters through the same API → RBAC → policy → audit
+path and is the only authorized consumer of `sshutil` — a bootstrap channel, never a command
+or observation path (§3.5).
+
+---
+
+## 3. Transport & stream protocol
+
+### 3.1 Connection lifecycle
+
+1. **Enroll** (one-time, PRD R2): `POST /api/v1/agents/enrollment-tokens` → token
+   `par_enr_…` shown once; stored as `sha256` + first-14 mask. Agent runs
+   `partout --mode=agent --server=<url> --token=<tok>` → generates keypairs
+   (Ed25519 identity + X25519 transport **(proposed** — needed to encrypt per-agent material
+   like secret envelopes at rest in the spool)) → `RegisterAgent(pubkeys, uuid, facts)` →
+   enrolled; token consumed.
+2. **Handshake** (per stream, PRD R3): server sends `Challenge{nonce, server_ts}`; agent
+   replies `AuthProof{agent_uuid, ts, sig}` where `sig = ed25519_sign(nonce ‖ uuid ‖ ts_be64)`.
+   Server verifies against the enrolled public key, rejects skew > ±300s, and marks the stream
+   authenticated. Every subsequent envelope is bound to that `agent_id`.
+3. **Stream**: authenticated bidirectional stream of `Envelope` messages.
+4. **Reconnect**: exponential backoff with jitter, 1s base, 60s cap **(proposed)**; each
+   attempt re-hands-hakes from scratch. On success the agent first drains its local spool
+   (events/results) and then receives any pending down-queue (undelivered command envelopes
+   whose TTL has not expired), in original dispatch order.
+5. **Revoke**: server closes the stream and purges cascade rows (PRD R7). A revoked agent's
+   keypair fails handshake on any subsequent attempt; re-enrollment issues a fresh keypair.
+
+### 3.2 Envelope model (illustrative proto)
+
+```proto
+service AgentStream {
+  rpc Stream(stream Envelope) returns (stream Envelope);
+}
+
+message Envelope {
+  string id            = 1;  // unique per envelope
+  AgentMsgKind kind    = 2;  // see below
+  uint64  seq          = 3;  // per-direction monotonic, for ordering/loss detection
+  string  corr_id      = 4;  // run_id / request id correlation
+  int64   ttl_unix     = 5;  // expiry for queued down envelopes
+  bytes   payload      = 6;  // typed payload (oneof in full proto)
+  Ack     ack          = 7;  // optional: ack of a previously received envelope
+}
+```
+
+**Up (agent → server):**
+
+| Kind | Carries |
+|---|---|
+| `Heartbeat` | liveness, agent version, spool usage, uptime |
+| `FactsBatch` | full or delta fact set (hourly + on change) |
+| `EventsBatch` | observe events (metrics, containers, endpoints, certs, alerts) |
+| `CommandOutput` | `run_id`, chunk seq, stdout/stderr bytes (≤ 64 KiB **(proposed)**) |
+| `CommandResult` | `run_id`, exit code / timeout / cancel / interrupted, duration, final state |
+| `SessionData` / `SessionResult` | PTY output chunks / close |
+| `FileOpResult`, `PkgOpResult`, `JobRunReport`, `TaskRunReport` | per-domain results + journals |
+| `Ack` | delivered + guardrail re-check outcome for a down envelope |
+
+**Down (server → agent):**
+
+| Kind | Carries |
+|---|---|
+| `CommandEnvelope` | full exec spec (cmd/args/cwd/env/user/timeout/elevation profile/stdin) + `Decision` (below) + `secret_refs` |
+| `SessionOpen` / `SessionInput` / `SessionResize` / `SessionClose` | PTY control |
+| `FileOp` | upload chunk / download request / edit CAS / stat / perm change |
+| `SchedulePush` | resolved per-host schedules for a job (cron+tz, overlap/failure policy, task ref) |
+| `TaskRunRequest` | `task_version_id`, steps, vars, `secret_refs` |
+| `PkgOpRequest` | list-updates / dry-run / apply + correlation hints |
+| `PolicyBundlePush` | version, content hash, full ruleset |
+| `SecretMaterialize` | `secret_ref`, version, ciphertext (X25519-encrypted to the agent; never plaintext) |
+| `Revoke` | (server closes stream; explicit for logging) |
+
+### 3.3 Ordering, acks, dedup
+
+- Each direction is a single ordered stream per agent; `seq` detects gaps. No reordering.
+- **Down**: server marks a command envelope `delivered` on `Ack`; unacked envelopes stay in the
+  per-agent queue with a TTL (default 15 min **(proposed)**; expiry → run state
+  `not_delivered`, audited).
+- **Up**: results are persisted idempotently keyed by `run_id` (PRD §6.2: at-least-once,
+  dedupe on the audit side). Output chunks are appended by `(run_id, chunk_seq)`; replays are
+  no-ops.
+- **Flow control / rate limiting** (PRD R6): per-agent token bucket on both event upload and
+  command dispatch; server-side backpressure: if the server cannot persist output faster than
+  it arrives, the agent's up-window for that run shrinks (agent holds chunks in spool, bounded).
+
+### 3.4 Failure semantics
+
+| Scenario | Behavior |
+|---|---|
+| Disconnect mid-command | run → `interrupted`; ad-hoc commands are **not** auto-replayed unless flagged `retryable`; task steps re-run convergently (idempotent by construction) |
+| Dispatch to offline agent | envelope queued with TTL; on reconnect agent pulls pending queue |
+| Server down, agent up | agent-side jobs keep running (agent clock); results spool (16 MB / 128 MB / 24 h); replay on reconnect |
+| Agent restart | spool reloaded from disk; pending `resume-after-reboot` continuation started first; stream re-hands-shake |
+| Result lost to spool overflow | run expires to `result_lost` after TTL; audited distinctly (never silently `succeeded`) |
+| Policy bundle mismatch | agent-side deny (see §5.3); alert + bundle refresh request |
+| Clock skew > 300 s | handshake rejected; remediation is NTP (see ops doc) |
+
+### 3.5 Host provisioning (PRD R17, C10; Decision 11)
+
+The server bootstraps the agent on a new host over the **operator's existing fleet SSH** —
+the server process can already `ssh` to its hosts. SSH is a *bootstrap channel only*: it never
+carries commands, files, or observation data (PRD §7 invariant 1), and Partout never creates,
+copies, or persists operator credentials.
+
+**Modules:** `internal/sshutil/` — a thin wrapper around the **system** `ssh`/`scp`/
+`ssh-keygen` binaries (deliberately not a Go SSH client library: the operator's
+`~/.ssh/config`, known_hosts, ssh-agent, and ProxyJump all keep working as-is) — and
+`internal/server/provision/` — run state machine, preflight, install plan, step executor,
+SSE step log.
+
+**SSH child-process contract (proposed, A16):**
+- Runs as the server's service user; the child's `HOME` is set to the parent of
+  `PARTOUT_SSH_DIR` (default: the service user's `$HOME`), so `config`, `known_hosts`, and
+  identity files resolve from `PARTOUT_SSH_DIR` (deployment §4.1).
+- Hardened flags: `BatchMode=yes` (no interactive prompts), `ConnectTimeout=10s`,
+  `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` — except the initial *fingerprint
+  capture* connect, which uses `StrictHostKeyChecking=no UserKnownHostsFile=/dev/null`
+  and trusts nothing.
+- The wizard's "host" field is an address **or a `~/.ssh/config` alias**; the alias used is
+  recorded in `provision_runs`.
+
+**Fingerprint gate (no silent TOFU).** If the target is not in `known_hosts`, the run pauses
+in `key_confirm`: the UI shows key type + fingerprint; operator confirms → public key hashed
+and appended to `known_hosts` (`ssh-keygen -H`) → run continues; operator denies → run
+cancelled, nothing changed on the host.
+
+**Run state machine** (see §4):
+
+```
+queued → connecting → key_confirm → preflight → transferring → installing
+       → starting → enrolling → connected
+any step → failed | cancelled | handoff
+```
+
+**Steps** (each audited under taxonomy kind `provision`, streamed as `provision.step` SSE
+events with a bounded output excerpt):
+
+1. **connect** — fingerprint gate above.
+2. **preflight** (read-only, remote): `/etc/os-release`, arch, init system (`systemctl`
+   present?), `whoami` + `sudo -n true` (install needs root or NOPASSWD sudo), free disk,
+   host→server outbound reachability (`GET <server>/healthz`), and existing partout install
+   (binary + `identity.json` → *update* or *fresh* path, below). Failure → `failed` with
+   concrete remediation text.
+3. **transfer** — `scp` of the same-version server binary (sha256 known) to
+   `/tmp/partout-<sha256[:12]>` on the host.
+4. **install** — one `ssh 'sudo -n bash -s'` script: verify sha256; `install -m 0755` →
+   `/usr/local/bin/partout`; create `partout` user/group; `mkdir -p /var/lib/partout/agent`
+   (0750 `partout:partout`); write `/etc/partout/agent.env` (0640) with `PARTOUT_SERVER`, a
+   fresh short-TTL one-time `PARTOUT_TOKEN`, and labels from the wizard; write the systemd
+   unit (deployment §3.2); `systemctl daemon-reload`; `systemctl enable --now partout-agent`.
+   The script **never touches** an existing `identity.json`/`spool.db` unless the run is
+   `fresh` (explicit "wipe agent state" in the wizard — re-provisioning after revocation,
+   ops runbook 6.2).
+5. **wait-enroll** — server waits (≤ 60 s) for `RegisterAgent` with the run's token →
+   `agent_id` linked to the run → `connected` once the stream authenticates.
+6. **handoff** (terminal, non-error): hosts the v1 server cannot install — unreachable,
+   non-systemd init (v1: systemd + bare binary only), Docker-host sidecar (manual), or
+   air-gapped. The UI prints the exact manual recipe: binary download + one-line install
+   command with the one-time token (PRD §5.1).
+
+**Update path:** re-provisioning an installed, connected host replaces the binary (when the
+version differs) and restarts the unit; identity and spool are untouched; audited with
+`mode=update`. (Post-v1 option: agent self-update over a gRPC `AgentUpdate` envelope would
+remove the SSH dependency for upgrades entirely — noted in PRD Decision 11.)
+
+**Security properties (regression-tested, §14):** `provision` is `admin`-only (RBAC) and
+policy-evaluable (action class `provision`; default-deny applies like any write). No run
+reads, copies, or logs private key material — step logs capture command lines with
+identity-file *names*, never contents. A failed run leaves no usable state: the token is
+one-time + short-TTL, a partial install is overwritten idempotently by a re-run, and `fresh`
+is the only destructive path and requires an explicit confirmation.
+
+### 3.6 TLS / mTLS bootstrap (implemented)
+
+Transport security is opt-in (`--tls on` / `PARTOUT_TLS=on`); plaintext `h2c` is the default
+for local dev. When enabled, the control-plane port serves **only TLS** (a plaintext client
+is rejected), and the port still multiplexes gRPC + REST — the demux is
+`content-type: application/grpc`-driven, so it is unaffected by TLS (both may be h2).
+
+**Trust model — local root CA, one trust anchor:**
+
+- The server generates a **local root CA** (10y, ECDSA P-256) + its own **leaf** (2y) on
+  first run, under `<db dir>/tls/` (`ca.key` 0600). SANs from `--tls-names`
+  (default `localhost,127.0.0.1,<hostname>`).
+- The **operator** distributes the CA (public) to managed hosts (e.g. `scp`, or
+  `partout ctl ca` over HTTPS with the admin token → `GET /api/v1/tls/ca`).
+- At **enrollment**, the agent generates a **local ECDSA P-256 keypair**, ships a **CSR** in
+  the enroll request (over HTTPS), and receives the **CA + a signed leaf**
+  (CN = agent id, EKU clientAuth, 2y). The private key never leaves the host; it is persisted
+  under `<agent data dir>/tls/` (key 0600) and reused on restarts.
+- The **gRPC agent stream** then connects over **mTLS**: server verifies client certs
+  (`VerifyClientCertIfGiven`) and **requires** a valid client cert for gRPC requests (403
+  otherwise), while REST/SSE remain open to bearer-auth clients.
+
+**Why mTLS is not the primary auth:** the **Ed25519 handshake (§3.1 step 2) still gates every
+stream** on top of TLS. So revocation is instant (purge the agent row → handshake fails) and
+no certificate revocation list is needed for v1. The client cert protects the transport
+channel (confidentiality + tamper-evidence against a misconfigured/compromised CA-less
+listener), not agent identity.
+
+**Certificate lifecycle (v1 vs v1.x):**
+
+- v1: CA + leaves have fixed 10y/2y validity; leaf rotation is out of scope. An expired
+  leaf → the agent re-enrolls (fresh CSR, same CA).
+- v1.x: stream-delivered rotation (`TLS_CSR`/`TLS_CERT` envelopes) and a revocation list.
+
+Implementation: `internal/certutil` (CA/leaf/CSR), `cmd/partout` (server bootstrap + agent
+TLS flow), `internal/agent/{enroll,stream}`, `internal/api/{enroll,api}` (CSR/CA endpoints).
+
+---
+
+## 4. State machines
+
+**Execution** (1) → **execution_runs** (N per host):
+
+```
+execution:    pending → dispatching → running → succeeded | failed | partial
+run:          queued → delivered → running → succeeded | failed | timed_out
+                                        │  └→ cancelled | interrupted
+              queued → not_delivered (TTL expired)
+              delivered → denied_agent (guardrail re-check failed; server notified)
+```
+
+- `partial` = mixed per-host outcomes; `failed` = all runs failed or policy-denied pre-dispatch.
+- `timed_out` / `cancelled` are distinct terminal states, recorded with the timeout/cancel event
+  (PRD §5.2).
+
+**Task run** — ordered steps, each:
+
+```
+step:  pending → running → ok | changed | failed | skipped
+run:   running → succeeded | failed | interrupted
+```
+
+- Any `failed` stops the run (no auto-rollback; before/after state is recorded where the step
+  kind supports it — packages, services, files).
+- `skipped` only via a false `when` (PRD Decision 4).
+
+**Job run** = execution with `job_id` lineage (PRD §5.4).
+
+**Approval**: `requested → approved | denied | expired` (TTL **(proposed**: 1 h default)); an
+approval binds to the exact payload hash — a changed payload needs a new request
+(PRD §5.8: scoped, not blanket).
+
+**Provision run** (PRD R17; steps in §3.5):
+
+```
+run:  queued → connecting → key_confirm → preflight → transferring → installing
+      → starting → enrolling → connected
+      → failed | cancelled | handoff        (from any step; handoff is non-error)
+```
+
+- `key_confirm` blocks on operator fingerprint confirmation (no timer in v1 **proposed**).
+- `connected` additionally requires `RegisterAgent` + authenticated stream for the run's
+  token; if enrollment doesn't complete within the wait window the run is `failed`
+  (enrollment step), with the agent left installed — re-running picks up from *preflight*.
+
+---
+
+## 5. Control plane
+
+### 5.1 Dispatch pipeline
+
+```
+POST /api/v1/executions {selector, cmd, …}
+ 1. authn (principal) + RBAC role check (viewer denied)
+ 2. resolve selector → concrete host set (deterministic; empty → 400, never silent)
+ 3. policy evaluate (per host, per action) → allow | deny | require_approval
+ 4. if require_approval: create approval_request; dispatch waits (or queues with TTL)
+ 5. audit write: execution + N runs (state=queued)
+ 6. enqueue CommandEnvelope per host (ordered per agent queue)
+ 7. agent ack → runs → delivered → … → results → SSE broadcast → alerts if policy says
+```
+
+### 5.2 Policy engine
+
+Rule (one declarative object, stored in `policies`):
+
+```json
+{
+  "id": "pol_…", "name": "prod-db-elevation",
+  "match": {
+    "hosts":  "role=db",                          // selector expression
+    "actions": ["exec", "file", "pkg.apply"],     // action classes
+    "actor_roles": ["operator"],                  // who is affected
+    "requires_elevation": true,                   // elevation-scoped rules
+    "command_regex": "^systemctl\\s+(restart|stop)\\s"
+  },
+  "effect": "deny | require_approval | allow",
+  "priority": 10
+}
+```
+
+- **Evaluation**: all matching rules considered; precedence `deny > require_approval > allow`.
+- **Default-deny for writes (proposed)**: a write action with no matching rule is denied (reads
+  always allowed). Admins opt in via explicit `allow` rules. This keeps the safe posture as the
+  default, matching PRD §7's invariants.
+- **Structured refusal**: every deny/approval-required response carries the matched rule id(s),
+  the offending field, and what would satisfy it — the same decision-table pattern the MCP
+  write tools use (PRD §10.3).
+
+### 5.3 Server decision + agent re-check
+
+- On dispatch, the server signs a compact `Decision{run_id, bundle_version, effect,
+  matched_rules}` with the server's Ed25519 key (public key distributed at enrollment).
+- The server also pushes a versioned, content-hashed **policy bundle** to each agent
+  (on change, on connect, on demand).
+- **Agent re-check (defense in depth, PRD R/C8)**: before executing any envelope, the agent
+  verifies (a) decision signature, (b) `bundle_version` equals its cached bundle, and (c)
+  re-evaluates the rule set over the local action. Any mismatch → **deny**, emit
+  `denied_agent`, alert the server, request bundle refresh.
+- **Staleness**: agent-side scheduled jobs run against the last received bundle; if the bundle
+  is older than the staleness window (default 48 h **(proposed)**), jobs fail closed.
+- The policy bundle contains no secrets (rules only); secrets travel as encrypted
+  `SecretMaterialize` envelopes and are never written to the spool in cleartext (PRD §5.7).
+
+### 5.4 Approvals
+
+- `approval_requests` carry the exact payload (selector snapshot, command, elevation) and its
+  hash; approvers (role `admin`, or `operator` where policy assigns) act via UI/API/MCP.
+- Approval records are linked into the execution's audit row (approver principal + timestamp).
+- Expiry: un-acted requests expire (default 1 h **(proposed)**) and the run ends `approval_expired`.
+
+### 5.5 Secrets
+
+- Store: `secrets` + `secret_versions` (append-only until rotation), `secret_bindings`
+  (secret → selector → materialization mode: env / temp file / template value).
+- Keys: master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`; per-secret
+  keys = HKDF(master, secret_id) (PRD §5.7). No key → feature disabled at startup with a clear
+  error.
+- Distribution: `SecretMaterialize{ciphertext_to_agent, version}` over the authenticated
+  (TLS) stream; ciphertext additionally X25519-encrypted to the agent's transport key so the
+  on-disk spool never holds cleartext. Agent decrypts in memory, materializes only for the
+  lifetime of the declaring task/command, and wipes on completion.
+- **Offline**: default fail-closed ("secret unavailable", recorded). Per-secret `offline_ttl`
+  (default 0) allows a bounded encrypted cache agent-side.
+- Rotation: new version → prior binding invalidated; audit records which version each run used.
+
+### 5.6 Audit
+
+- `audit_events`: append-only; no update/delete endpoints (PRD §5.8). One writer goroutine,
+  batched inserts; taxonomy: `enroll`, `revoke`, `exec`, `file`, `session`, `job`, `task`,
+  `pkg`, `secret`, `policy`, `approval`, `principal`, `system`.
+- Privileged commands recorded **in full, no redaction** (PRD Decision 8).
+- Output replay within 30-day window; metadata (exit, duration, redacted command, output
+  digest) retained with the run indefinitely (PRD §5.8 acceptance).
+- Export: `GET /api/v1/audit?format=json|csv` with filters; intended to be piped by cron to a
+  sink the server can't modify (syslog/remote DB/WORM). Cryptographic hash-chain: deferred
+  post-v1 (PRD Decision 5).
+
+### 5.7 Targeting / selectors
+
+Grammar **(proposed)** — a selector is a comma-separated conjunction of predicates:
+
+```
+all
+host:<id>                      # explicit host (repeatable)
+tag:env=prod | tag:env         # key=value or key-only
+role:web
+group:webservers               # a saved group (named selector)
+```
+
+- `a,b,c` = intersection (AND). No OR in v1 — compose with groups instead (keeps the language
+  tiny, matching the task-language philosophy).
+- Resolution: deterministic (result sorted by host id), recorded with every job/execution as a
+  snapshot. Empty result = error (PRD §5.1).
+- Jobs resolve selectors **server-side at save/update time** into per-host schedules
+  (`SchedulePush`); agents never see selectors (PRD §5.4).
+
+---
+
+## 6. Agent internals
+
+### 6.1 Modules
+
+- **facts** — collectors for os-release/osImage, init system, package manager, arch,
+  cpu/mem/disk, installed-package *hash* (change detection), systemd units, users/groups
+  (names), interfaces. Refresh hourly + on detected change (PRD §5.1). Feeds `when` guards.
+- **exec** — non-pty and pty execution; env sanitized (`$HOME`, `$PATH` from a clean base;
+  only explicitly declared env passed); cwd defaults to agent home. All fs/exec paths are
+  interpreted relative to the **agent root** (`PARTOUT_ROOT`, default `/`; `--root=` flag),
+  which makes the identical binary work on bare metal and in a container mounting the host
+  at `/host` (deployment §3.4). Output chunked ≤ 64 KiB
+  **(proposed)**, streamed, never buffered whole. Cancellation ladder: SIGTERM → 5 s grace →
+  SIGKILL **(proposed)**; timeout default 30 s, configurable, hard cap.
+- **elevation** (PRD Decision 3) — the agent executes `sudo -n -u <target> -- <cmd>` only when
+  the command matches a named **elevation profile** (pattern-scoped, declared in the command
+  spec and constrained by policy). Precedence: per-command > host-level `--elevate`; `sudoers`
+  wins over `sudo` at any level. Host-level `--elevate=none` (default **(proposed**) / `sudoers`
+  / `sudo`) sets the floor; per-command can only tighten.
+- **fs** — atomic writes (temp + rename), stat, CAS edit (compare-and-swap on checksum),
+  size caps, no symlink traversal across the transfer boundary (PRD §5.3).
+- **jobsched** — in-process cron on the agent's clock; stores resolved schedules + run state +
+  overlap locks in `spool.db`; overlap policy (allow/skip/replace) and failure retry-with-
+  backoff executed here; results spool offline.
+- **taskrun** — ordered step runner; each step checks-then-changes and reports
+  `ok|changed|failed|skipped`; `when` evaluated agent-side against live facts;
+  **reboot continuation**: before reboot the agent persists
+  `resume-after-reboot.json {task_run_id, step_index, ts}` in its state dir; on boot, if a
+  marker exists and is within its validity window (10 min **(proposed)**), the run resumes and
+  reports `rebooting → resumed`.
+- **when grammar** (constrained, agent-side, never free-form — PRD Decision 4):
+  comparisons over facts (`fact.os == 'debian'`, `host.distro in ['debian','ubuntu']`),
+  state predicates (`!file.exists('/x')`, `pkg.installed('nginx')`,
+  `service.running('ssh')`), combined with `and`/`or`. Parsed to a tiny AST; anything else is
+  rejected at task validation time.
+- **pkg** — apt/dnf/apk backends selected from OS identity (R13); `list-updates` ranks by
+  correlated CVE severity (server-computed hints in the request); `apply-updates` always
+  dry-runs first and writes a per-host before/after journal (PRD §5.6).
+- **guardrail** — cached policy bundle (content-hashed), re-check per §5.3, staleness watcher.
+- **spool** — shared implementation: 16 MB mem → 128 MB disk → drop-oldest, 24 h max age
+  (PRD §9); spools event upload, command-result upload, and delivery acks; encrypted payloads
+  (secret materialization) stay encrypted at rest.
+
+### 6.2 Agent state on disk
+
+```
+/var/lib/partout/agent/
+├── identity.json          # keypairs + uuid, mode 0600 (PRD R3)
+├── spool.db               # SQLite: spool queues, job state, task resume marker
+├── policy-bundle.json     # last received bundle (rules only, no secrets)
+└── secret-cache/          # optional, only for secrets with offline_ttl>0; encrypted
+```
+
+---
+
+## 7. Observe layer (elided)
+
+Facts ingestion, containers, endpoints, heartbeats, certificates, resources, and the alert
+engine are defined by PRD §6, R10/R13 and are not re-derived here. The only
+architectural coupling to the control plane:
+
+- **facts feed `when` guards** — the agent's fact cache is the single source for task guards.
+- **EOL state feeds patch gating** — `extern` publishes per-host `supported | ending_soon | ended`
+  from the EOL cache; `pkg` and policy rules may require approval on `ended` hosts (PRD §5.6).
+- **alerts fan out on the same SSE broker** as command output and audit events.
+
+---
+
+## 8. External data service (PRD §6.3)
+
+```
+startup ──► refresh ◄── daily timer
+             │                ▲
+             ▼                └── POST /api/v1/extern/refresh (manual)
+        fetchers (parallel, per-source timeout 30 s):
+          • endoflife.date          → eol_cache
+          • distro security trackers→ vuln_cache (distro CVE/USN/errata entries)
+          • OSV.dev / GHSA          → vuln_cache (cross-distro, deduped by CVE id)
+             │
+             ▼
+   all-or-nothing: every fetch must succeed AND parse → atomic cache replace
+   any failure    → previous cache untouched, one log line, retry next cadence
+```
+
+- Cache is in-DB (SQL tables `eol_cache`, `vuln_cache`) so it survives restarts and is
+  inspectable; a **minimal embedded EOL fallback** (major distros only) ships in the binary for
+  first boot / air-gapped use.
+- `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` (PRD) disables all fetching for air-gapped sites.
+- **Privacy invariant (PRD §6.3/§7):** only installed-package identifiers (name+version, distro,
+  arch) leave the server, as query parameters. No host identity, host lists, or operator data.
+- Correlation output: per-host `updates` ranked by severity (distro-adjusted score where the
+  tracker provides one, else CVSSv3 base); drives the Updates UI and `apply-updates` priority.
+
+---
+
+## 9. Storage
+
+### 9.1 Dialect & migration discipline (PRD R9)
+
+- Two engines: SQLite (default, WAL, single writer) and PostgreSQL (optional for the server
+data set). One dialect abstraction (`internal/store`); no engine-specific queries outside it.
+- **One migration version**: a single monotonic version applied identically to both dialects;
+  forward-only; run automatically at boot. Migration tests run against **both** engines in CI
+  (parity matrix).
+- All entities carry `agent_id` (`NULL` = local/embedded); `ON DELETE CASCADE` on
+  agent removal (PRD R7/R8). TEXT keys (opaque ids, `ag_…`, `exec_…`, `run_…`), epoch-second
+  BIGINTs, `ON CONFLICT … DO UPDATE` upserts.
+
+### 9.2 Tables (illustrative; full schema in migration v1)
+
+| Table | Notes |
+|---|---|
+| `agents` (hosts) | `agent_id`, uuid, public keys (ed25519 + x25519), version, state, last_seen, first/last facts hash |
+| `host_facts` | latest + history (JSON), 90-day history retention, latest always kept |
+| `host_tags`, `host_roles`, `groups` | targeting (group = named selector) |
+| `enrollment_tokens` | sha256 + mask, one-time, TTL |
+| `executions` → `execution_runs` | 1:N; run carries state machine (§4), `retryable` flag |
+| `output_chunks` | `(run_id, chunk_seq)` unique; stream-to-disk above 1 MiB/run **(proposed)**; 30-day retention |
+| `sessions`, `session_records` | PTY byte streams; 30-day retention; optional capture |
+| `files_actions` | upload/download/edit/stat/perm audit rows |
+| `jobs`, `job_runs` | resolved per-host schedule stored with job; run lineage |
+| `tasks`, `task_versions`, `playbooks`, `task_runs`, `task_run_steps` | versioned; step state per §4 |
+| `package_actions` | list/apply/dry-run + per-host before/after journal |
+| `eol_cache`, `vuln_cache` | external data (§8) |
+| `secrets`, `secret_versions`, `secret_bindings` | values encrypted at rest (HKDF-derived keys) |
+| `audit_events` | append-only, all taxonomy kinds; no update/delete paths |
+| `policies`, `approval_requests`, `approvals` | control plane |
+| `principals` | local users (v1), roles `viewer|operator|admin`, hash+pepper of password |
+| `provision_runs` | per-run state, host alias, mode (`install|update|fresh`), per-step rows (kind, ts, bounded output excerpt), linked `agent_id` once enrolled; retention 90 d (audit keeps `provision` events) |
+
+### 9.3 Retention sweeper
+
+A single server-side sweeper (hourly) enforces PRD §9: output chunks 30 d, session records
+30 d, job/task run history 90 d, facts history 90 d, spool age 24 h (agent-side). Audit and
+secret versions are **not** swept (operator-configurable floor for audit; secrets until
+rotated). Sweeper actions are themselves audited.
+
+---
+
+## 10. API, events, MCP
+
+### 10.1 REST v1
+
+Conventions (PRD R10): JSON, `/api/v1`, cursor pagination, structured
+error bodies `{code, message, details}`.
+
+#### Endpoint surface
+
+| Method | Path | RBAC | Description |
+|--------|------|------|-------------|
+| POST   | `/api/v1/executions` | operator | Dispatch a command across a selector |
+| GET    | `/api/v1/executions` | viewer | List executions (cursor paginated) |
+| GET    | `/api/v1/executions/:id` | viewer | Get execution detail with runs |
+| POST   | `/api/v1/executions/:id/cancel` | operator | Cancel a running execution |
+| GET    | `/api/v1/executions/:id/output` | viewer | Get command output (stdout/stderr) |
+| GET    | `/api/v1/hosts` | viewer | List connected hosts |
+| GET    | `/api/v1/hosts/:id` | viewer | Get host detail (state, tags, roles) |
+| GET    | `/api/v1/hosts/:id/facts` | viewer | Get latest fact set |
+| PUT    | `/api/v1/hosts/:id/facts` | operator | Update facts (agent-side) |
+| GET    | `/api/v1/groups` | viewer | List named selectors |
+| POST   | `/api/v1/groups` | operator | Create a named selector |
+| POST   | `/api/v1/agents/enrollment-tokens` | operator | Create one-time enrollment token |
+| POST   | `/api/v1/agents/enroll` | — | Agent enrollment (token auth; accepts `csr` in TLS mode) |
+| POST   | `/api/v1/agents/enroll` (TLS) | — | enroll returns `tls.{ca_cert,leaf_cert}` when the server has a CA |
+| GET    | `/api/v1/tls/ca` | admin | Fetch the server root CA (PEM, `{"cert": ...}`) |
+| GET    | `/api/v1/audit` | viewer | Audit event log |
+| GET    | `/healthz` | — | Liveness |
+| GET    | `/readyz` | — | Readiness (DB ping) |
+| GET    | `/api/v1/events` | — | SSE event stream |
+
+#### Request / response shapes
+
+**POST /api/v1/executions**
+```json
+{
+  "selector": "role:prod",
+  "cmd": "echo", "args": ["hi"],
+  "env": {"KEY": "val"},
+  "timeout_s": 120,
+  "created_by": "admin"
+}
+```
+Response: `{"execution_id": "exec_...", "runs": [{"run_id": "run_...", "agent_id": "ag_...", "delivered": true}], "errors": []}`
+
+**POST /api/v1/agents/enroll** (TLS mode)
+```json
+{
+  "token": "par_enr_...",
+  "uuid": "...",
+  "ed25519_pub": "...",
+  "x25519_pub": "...",
+  "agent_version": "...",
+  "csr": "-----BEGIN CERTIFICATE REQUEST-----..."
+}
+```
+Response: `{"agent_id": "ag_...", "uuid": "...", "tls": {"ca_cert": "...", "leaf_cert": "..."}}`
+(`csr` is required in TLS mode — 400 without it; `tls` is omitted in plaintext mode.)
+
+**GET /api/v1/hosts?limit=50&cursor=ag_abc** → `{"items": [...], "next_cursor": "ag_def"}`
+
+**POST /api/v1/executions/:id/cancel** → `{"execution_id": "...", "cancelled": ["run_..."], "already_done": [...]}`
+
+**GET /api/v1/executions/:id/output?stream=stdout|stderr** → `[{"run_id": "...", "agent_id": "...", "stdout": "...", "stderr": "..."}]`
+
+**GET /api/v1/audit?kind=exec.dispatch&actor=admin&since=1700000000** → `{"items": [...], "next_cursor": "1700000100"}`
+
+#### Error body
+```json
+{"code": "bad_request", "message": "selector is required", "details": null}
+```
+Stable codes: `bad_request`, `not_found`, `conflict`, `unauthorized`, `forbidden`, `internal_error`, `already_terminal`.
+
+#### RBAC
+
+Bearer tokens from env (`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`, `PARTOUT_TOKEN_VIEWER`).
+No tokens → single-user local mode (all requests allowed, single log warning).
+
+### 10.2 SSE
+
+One broker, fan-out per browser (PRD R10). Event types: `output.chunk`, `execution.state`,
+`session.data`, `job.run`, `task.run`, `host.state`, `approval.request`, `provision.step`,
+`audit.event`, `alert.*`, `extern.refresh`. Each client gets a buffered channel; slow consumers
+are dropped and re-subscribe (SSE retry) — never block the broker.
+
+### 10.3 MCP (PRD §10.3)
+
+- Transports: stdio (local assistants) + Streamable HTTP (remote, OAuth2 PKCE).
+- Read tools from the observe layer + new: `list_hosts`, `get_host_facts`,
+  `list_groups`, `list_updates`, `list_jobs`, `list_tasks`, `get_audit`, `list_sessions`,
+  `get_session`.
+- Write tools (each = full control-plane pipeline: authn → RBAC → selector → policy → approval
+  → audit → dispatch): `run_command`, `upload_file`, `download_file`, `run_job`,
+  `run_playbook`, `apply_updates`, `create_secret`, `request_approval`.
+- No PTY tool (PRD). Refusals use the structured decision-table shape (rule id + what would
+  satisfy it).
+
+---
+
+## 11. Frontend
+
+Stack (PRD R12): Vue 3 + TS + Pinia + Tailwind, uPlot for metrics, xterm.js for PTY,
+PWA. Page map = PRD §11. Implementation notes:
+
+- One SSE subscription per page (or one app-wide, filtered) — no polling anywhere.
+- **Execute** page: selector input with live resolution preview (resolves on type, shows the
+  concrete host set before dispatch); per-host live output panes; cancel/timeout controls.
+- **Sessions**: xterm.js over SSE output + `POST /sessions/{id}/input` (PRD §5.2); replay from
+  stored recordings.
+- **Tasks & Playbooks**: step editor emits the JSON task model directly (no YAML in the UI);
+  `when` editor is a form over the constrained grammar.
+- **Audit**: filterable table, full-fidelity expansion for privileged commands (Decision 8).
+- Embedded as `embed.FS`; no separate build server; served on the main listener.
+
+---
+
+## 12. Security walkthroughs
+
+### 12.1 Enrollment
+
+```
+operator: POST /agents/enrollment-tokens {ttl} → par_enr_… (shown once; sha256+mask at rest)
+          [TLS] ship ca.crt to the host (scp / ctl ca)
+agent:    generates ed25519 + x25519, uuid
+          [TLS] generates local ECDSA P-256 key + CSR
+          RegisterAgent{token, pubkeys, uuid, initial_facts, csr}
+server:   verifies token (one-time, unexpired) → insert agent row
+          [TLS] signs the CSR with the root CA → returns {ca_cert, leaf_cert}
+          → return agent_id
+agent:    writes identity.json (0600); [TLS] persists ca.crt/agent.crt/key.pem (0600)
+          → open stream → mTLS + handshake (§3.1, §3.6) → connected
+```
+
+### 12.2 Privileged command (end-to-end)
+
+```
+UI:     command with elevation profile "pkgadmin" (pattern-scoped)
+server: RBAC ok → selector ok → policy: match "prod-db-elevation"?
+        → require_approval → approval_request created → operator approves (exact payload)
+        → audit rows (execution + runs, queued)
+        → CommandEnvelope + signed Decision{bundle_v17, allow, rules:[…]}
+agent:  verify Decision signature (server pubkey) → bundle_version == cached (17) ✓
+        re-evaluate rules locally over (host tags, action, elevation, command) ✓
+        command matches elevation profile "pkgadmin" pattern ✓ (host --elevate=sudoers)
+        exec: sudo -n -u root -- apt-get install …  (full command recorded, no redaction)
+        stream output chunks → CommandResult{exit 0}
+server: persist, SSE broadcast, audit rows finalized (approver + executor principals)
+```
+
+Any single check failing → structured deny; nothing executes.
+
+### 12.3 Secret usage in a task step
+
+```
+task step declares secret_ref "db_password" v3, mode=env
+server: resolve binding (selector includes host) → SecretMaterialize{v3, ct(agent_pub)}
+agent:  X25519-decrypt in memory → inject env for the step's process only
+        → spool contains only ciphertext → wipe after step → audit records v3 used
+offline (server unreachable): default → step fails closed "secret unavailable"
+        (offline_ttl>0: bounded encrypted cache may satisfy, still versioned + audited)
+```
+
+### 12.4 Host provisioning (end-to-end)
+
+```
+operator (UI):  Add host "web01" (alias from ~/.ssh/config), systemd, label env=prod
+server:         RBAC: admin ✓ → policy: action=provision, target=web01 → allow
+                (or require_approval) → audit provision.requested
+step 1 connect: ssh -o BatchMode=yes -o StrictHostKeyChecking=no
+                   -o UserKnownHostsFile=/dev/null web01 true
+                → host key not in known_hosts → run → key_confirm (SSE)
+operator (UI):  fingerprint shown → confirm
+server:         fingerprint hashed → appended to known_hosts
+step 2 preflight: ssh web01: os-release, arch, systemctl?, whoami + sudo -n true,
+                free disk, curl -sI <server>/healthz, existing partout? → plan
+step 3 transfer: scp /usr/local/bin/partout web01:/tmp/partout-<sha12>
+step 4 install:  ssh web01 'sudo -n bash -s': verify sha256 → install -m0755
+                /usr/local/bin/partout → useradd partout → agent dir (0750) →
+                agent.env (0640: PARTOUT_SERVER + PARTOUT_TOKEN + labels) → unit →
+                daemon-reload → systemctl enable --now partout-agent
+step 5 enroll:   agent (on host) generates keypair → RegisterAgent{par_enr_…}
+                → stream handshake → connected; run → connected;
+                audit: provision.completed + per-step rows (principal, alias, key file
+                name, host, duration)
+any failure:    run → failed with step + bounded stderr excerpt; token (one-time,
+                short-TTL) expires unused; partial install idempotent under re-run
+```
+
+Any single check failing (RBAC, policy, fingerprint deny, sudo probe, sha256, enrollment
+window) stops the run; nothing executes past the failed step.
+
+---
+
+## 13. Performance & capacity (targets)
+
+| Dimension | Target **(proposed)** |
+|---|---|
+| Agents per server | 500 streams on a 2 vCPU / 4 GB box (streams are idle-cheap; heartbeat + facts are small) |
+| SSE clients per server | 100 concurrent browsers, fan-out via buffered channels |
+| Output throughput | 10 MB/s sustained per execution across hosts; chunks to disk above 1 MiB/run |
+| DB | SQLite WAL fine to ~10k hosts of audit+runs before Postgres is advisable |
+| Facts load | hourly refresh of 500 hosts ≈ negligible (batched upserts) |
+| Dispatch fan-out | 500-host execution enqueued in <1 s (per-agent ordered queues) |
+
+Scaling path beyond one server (multi-region, sharding) is a non-goal (PRD §13: no self-HA);
+the operator's cluster manager owns availability, and the design keeps the server stateless
+*except* the data dir + secret key (ops doc §4 covers backups/restore).
+
+---
+
+## 14. Testing strategy
+
+- **Unit**: selector grammar; policy evaluator (exhaustive precedence table); `when` AST parser
+  + evaluator; spool mem/disk/drop-oldest transitions; HKDF/AEAD helpers; cron resolution.
+- **Integration**: in-process server + **fake agent** over a real gRPC transport (test
+  listener) — handshake, reconnect, spool replay, ack/timeout, policy mismatch deny;
+  **dialect parity**: full migration + repository suite run against SQLite **and** Postgres.
+- **Security properties** (regression-tested): no write endpoint reachable without a
+  principal; denied action never produces a `CommandEnvelope`; secret value absent from every
+  read API response and from spool bytes (byte-level assertion); privileged audit row always
+  full-fidelity; provisioning run unreachable by non-admins, unknown host key blocks until
+  confirmation, and no SSH private-key material appears in any log/DB byte (byte-level
+  assertion).
+- **E2E** (`test/e2e`, docker compose): server + 2 container agents on real distros;
+  scenarios: enroll → facts <10 s → exec fan-out → cancel/timeout → task with `when` skip →
+  job survives server restart → apply-updates dry-run journal → revoke cascade. Runs on CI for
+  amd64; arm64 smoke.
+- **Load**: scripted 500 fake agents (heartbeat + facts + periodic exec) against the compose
+  server; asserts §13 targets.
+
+---
+
+## 15. Proposed defaults needing sign-off
+
+Everything else in this document follows PRD-locked decisions. These are new:
+
+| # | Item | Proposal |
+|---|---|---|
+| A1 | Listener | Single port `:8443` serving UI/REST/SSE/MCP + gRPC (h2); optional split gRPC port |
+| A2 | Transport keys | Add X25519 transport keypair alongside Ed25519 identity (agent spool encryption) |
+| A3 | Output chunk size | 64 KiB |
+| A4 | Stream backoff | 1 s → 60 s cap, jittered |
+| A5 | Dispatch TTL (offline agents) | 15 min |
+| A6 | Policy default | Default-deny writes; default-allow reads |
+| A7 | Approval TTL | 1 h |
+| A8 | Policy bundle staleness (agent jobs) | 48 h |
+| A9 | Reboot continuation marker validity | 10 min |
+| A10 | Agent default `--elevate` | `none` |
+| A11 | Cancel ladder | SIGTERM → 5 s → SIGKILL |
+| A12 | Selector grammar | AND-only predicates (`all`, `host:`, `tag:`, `role:`, `group:`) |
+| A13 | Health endpoints | `/healthz`, `/readyz` |
+| A14 | Retention sweeper | hourly; audited |
+| A15 | Capacity targets | §13 table |
+| A16 | Provisioning SSH | system `ssh`/`scp`; `BatchMode=yes`, `ConnectTimeout=10s`, `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` after fingerprint gate; `PARTOUT_SSH_DIR` (default `$HOME/.ssh`) | §3.5 |
+| A17 | Preflight checks | os-release, arch, systemd, `sudo -n true`, disk, host→server `/healthz`, existing install; remediation text on failure | §3.5 |
+| A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; `identity.json`/`spool.db` untouched unless `fresh` | §3.5 |
+| A19 | Manual handoff triggers | unreachable, non-systemd init, Docker-host, air-gapped; prints binary + one-line install with one-time token | §3.5 |

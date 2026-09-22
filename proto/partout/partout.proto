@@ -1,0 +1,185 @@
+// Partout stream protocol (v1).
+//
+// The AgentStream is a single bidirectional gRPC stream per agent. Events flow
+// agent -> server, command/control envelopes flow server -> agent, on one
+// authenticated connection (PRD R4, architecture §3).
+//
+// Envelope framing: each message carries an opaque id, a direction-scoped
+// monotonic seq, a correlation id (run_id / request id), an optional TTL, and
+// exactly one typed payload (oneof). ACKs reference previously received
+// envelopes by id.
+syntax = "proto3";
+
+package partout.v1;
+
+option go_package = "github.com/blawesom/partout/internal/proto";
+
+// AgentStream is the sole data channel between one agent and the server.
+service AgentStream {
+  // Stream is a bidirectional message stream. The agent initiates the
+  // connection, performs the Ed25519 challenge-response handshake (enforced
+  // before the first envelope is accepted), then exchanges Envelopes.
+  rpc Stream(stream Envelope) returns (stream Envelope);
+}
+
+// EnvelopeKind tags the oneof payload and its direction.
+enum EnvelopeKind {
+  ENVELOPE_KIND_UNSPECIFIED = 0;
+
+  // Up (agent -> server)
+  HEARTBEAT = 1;
+  FACTS_BATCH = 2;
+  EVENTS_BATCH = 3;
+  COMMAND_OUTPUT = 4;
+  COMMAND_RESULT = 5;
+  ACK = 6;
+
+  // Down (server -> agent)
+  COMMAND = 10;
+  POLICY_BUNDLE = 11;
+  REVOKE = 12;
+  CANCEL = 13;
+
+  // Handshake (per stream)
+  CHALLENGE = 40;   // down: server issues
+  AUTH_PROOF = 41;  // up: agent replies
+}
+
+// Envelope is the single message type on the stream.
+message Envelope {
+  string id = 1;             // unique per envelope
+  EnvelopeKind kind = 2;
+  uint64 seq = 3;            // per-direction monotonic (ordering / loss)
+  string corr_id = 4;        // run_id / request correlation
+  int64 ttl_unix = 5;        // expiry for queued down envelopes
+  oneof payload {
+    // Up
+    Heartbeat heartbeat = 20;
+    FactsBatch facts = 21;
+    EventsBatch events = 22;
+    CommandOutput output = 23;
+    CommandResult result = 24;
+    Ack ack = 25;
+    // Down
+    Command command = 30;
+    PolicyBundle policy_bundle = 31;
+    Revoke revoke = 32;
+    Cancel cancel = 33;
+    // Handshake
+    Challenge challenge = 50;
+    AuthProof auth_proof = 51;
+  }
+}
+
+// Ack is sent by the receiver of an envelope to confirm delivery (and, for
+// down envelopes, the guardrail re-check outcome).
+message Ack {
+  string envelope_id = 1;    // id of the envelope being acknowledged
+  AckStatus status = 2;
+  string detail = 3;
+}
+
+enum AckStatus {
+  ACK_STATUS_UNSPECIFIED = 0;
+  ACK_OK = 1;
+  ACK_DENIED_AGENT = 2;      // guardrail re-check failed (down envelope)
+}
+
+// ---- Up: agent -> server --------------------------------------------------
+
+message Heartbeat {
+  string agent_version = 1;
+  int64 uptime_s = 2;
+  int64 spool_mem_bytes = 3;
+  int64 spool_disk_bytes = 4;
+}
+
+message FactsBatch {
+  string host_id = 1;
+  bool full = 2;             // full snapshot vs. delta
+  map<string, string> facts = 3;
+}
+
+message EventsBatch {
+  repeated Event events = 1;
+}
+
+message Event {
+  string kind = 1;           // e.g. "container.state", "endpoint.down"
+  int64 ts = 2;              // epoch seconds
+  map<string, string> attrs = 3;
+}
+
+message CommandOutput {
+  string run_id = 1;
+  uint64 chunk_seq = 2;
+  OutputStream stream = 3;
+  bytes data = 4;
+}
+
+enum OutputStream {
+  OUTPUT_STREAM_UNSPECIFIED = 0;
+  OUTPUT_STDOUT = 1;
+  OUTPUT_STDERR = 2;
+}
+
+message CommandResult {
+  string run_id = 1;
+  int32 exit_code = 2;
+  string state = 3;          // succeeded|failed|timed_out|cancelled|interrupted
+  int64 duration_ms = 4;
+}
+
+// ---- Down: server -> agent ------------------------------------------------
+
+message Decision {
+  string run_id = 1;
+  uint64 bundle_version = 2;
+  string effect = 3;         // "allow" | "deny" | "require_approval"
+  repeated string matched_rules = 4;
+  bytes sig = 5;             // server Ed25519 signature (agent verifies)
+}
+
+message Command {
+  string run_id = 1;
+  string execution_id = 2;
+  string cmd = 3;
+  repeated string args = 4;
+  string cwd = 5;
+  string user = 6;
+  int32 timeout_s = 7;
+  map<string, string> env = 8;
+  bool retryable = 9;
+  Decision decision = 10;
+}
+
+message PolicyBundle {
+  uint64 version = 1;
+  string content_hash = 2;
+  string rules_json = 3;     // rules only, never secrets
+}
+
+message Revoke {
+  string reason = 1;
+}
+
+// Cancel asks the agent to stop an in-flight run (kills the process and
+// reports state=cancelled).
+message Cancel {
+  string run_id = 1;
+}
+
+// ---- Handshake ------------------------------------------------------------
+
+// Challenge is issued by the server at stream open (architecture §3.1).
+message Challenge {
+  bytes nonce = 1;    // 32 random bytes
+  int64 server_ts = 2; // server epoch seconds
+}
+
+// AuthProof is the agent's reply. sig = ed25519_sign(nonce || uuid || ts_be64).
+message AuthProof {
+  string agent_uuid = 1;
+  int64 ts = 2;            // agent epoch seconds (skew check ±300s)
+  bytes sig = 3;
+}
