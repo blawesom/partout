@@ -308,6 +308,17 @@ func TestProvisionREST(t *testing.T) {
 	if err := post("/api/v1/provision-runs/"+created.ID+"/key", map[string]string{"action": "confirm"}, nil); err != nil {
 		t.Fatalf("confirm key: %v", err)
 	}
+
+	// A duplicate confirm must be a clean API error, not an abrupt EOF
+	// (regression guard for the "close of closed channel" panic).
+	if err := post("/api/v1/provision-runs/"+created.ID+"/key", map[string]string{"action": "confirm"}, nil); err == nil {
+		t.Error("duplicate confirm returned success, want a conflict error")
+	}
+	var hz struct{}
+	if err := get("/healthz", &hz); err != nil {
+		t.Fatalf("server unhealthy after duplicate confirm: %v", err)
+	}
+
 	run := waitFor("handoff")
 	if run.Error == "" {
 		t.Error("handoff run should carry a remediation note")

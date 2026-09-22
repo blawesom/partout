@@ -6,9 +6,22 @@
 // never creates, copies, or persists operator credentials — it only drives
 // the system binaries the operator has already configured.
 //
-// The child's HOME is set to the parent of Config.SSHDir so that ssh
-// resolves config, known_hosts, and identity files from Config.SSHDir
-// (conventionally $HOME/.ssh).
+// # SSH dir redirection
+//
+// Config.SSHDir is authoritative. It is *not* applied via $HOME: OpenSSH
+// resolves ~/.ssh from the passwd database (getpwuid), so overriding HOME is
+// silently ignored for config/known_hosts/identity lookups. The wrapper
+// therefore passes the paths explicitly to every command:
+//
+//	-F <SSHDir>/config                        (replaces the per-user config)
+//	-o UserKnownHostsFile=<SSHDir>/known_hosts
+//	-o IdentityFile=<SSHDir>/id_{ed25519,ecdsa,rsa}   (when present)
+//
+// Consequence: with a non-default SSHDir the operator's own ~/.ssh/config is
+// NOT read (ssh's -F replaces it) — the isolated dir's config is the
+// contract. With the default SSHDir ($HOME/.ssh) the two are the same file
+// and behaviour is unchanged. ssh-agent keys are still offered unless the
+// caller disables agent auth in config.
 package sshutil
 
 import (
@@ -66,12 +79,20 @@ func (c Config) keygenBin() string {
 	return c.Keygen
 }
 
-// home returns the HOME value for the child: the parent of SSHDir.
+// home returns the HOME value for the child: the parent of SSHDir. This is
+// only a best-effort hint (see dirArgs): OpenSSH resolves ~/.ssh from the
+// passwd database, not from $HOME, so HOME alone is NOT sufficient to point
+// ssh at SSHDir.
 func (c Config) home() string { return filepath.Dir(c.SSHDir) }
 
 // childEnv returns the environment for a child process with HOME set (and
-// any pre-existing HOME replaced) to the parent of SSHDir, so ssh resolves
-// config, known_hosts, and identity files from SSHDir.
+// any pre-existing HOME replaced) to the parent of SSHDir.
+//
+// NOTE: $HOME alone does not redirect OpenSSH's ~/.ssh lookups — ssh uses
+// getpwuid() for the user's home. It stays here only because some helpers
+// (and non-OpenSSH binaries) honour it, and because ProxyCommand scripts may
+// rely on it. The authoritative redirection is dirArgs(), which passes the
+// paths explicitly.
 func (c Config) childEnv() []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -83,19 +104,62 @@ func (c Config) childEnv() []string {
 	return append(env, "HOME="+c.home())
 }
 
+// knownHostsPath returns the path to the known_hosts file inside SSHDir.
+func (c Config) knownHostsPath() string { return filepath.Join(c.SSHDir, "known_hosts") }
+
+// configPath returns the path to the ssh config file inside SSHDir.
+func (c Config) configPath() string { return filepath.Join(c.SSHDir, "config") }
+
+// dirArgs returns the OpenSSH options that pin ssh/scp to SSHDir explicitly:
+// the config file, the user known_hosts file, and the identity files.
+//
+// OpenSSH resolves ~/.ssh from the passwd database rather than $HOME, so
+// passing these explicitly is the only reliable way to honour PARTOUT_SSH_DIR.
+//
+// ssh refuses to start when -F points at a missing file, so an empty config
+// is created on demand. If SSHDir is empty, no redirection is applied (the
+// current user's default ~/.ssh is used).
+func (c Config) dirArgs() []string {
+	if c.SSHDir == "" {
+		return nil
+	}
+	// Ensure the config file exists (ssh exits 255 on a missing -F target).
+	cfg := c.configPath()
+	if _, err := os.Stat(cfg); err != nil {
+		if err := os.MkdirAll(c.SSHDir, 0o700); err != nil {
+			return nil // fall back to defaults rather than break the command
+		}
+		_ = os.WriteFile(cfg, nil, 0o600)
+	}
+	args := []string{
+		"-F", cfg,
+		"-o", "UserKnownHostsFile=" + c.knownHostsPath(),
+	}
+	// Conventional key names, in the order OpenSSH itself tries them.
+	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+		p := filepath.Join(c.SSHDir, name)
+		if _, err := os.Stat(p); err == nil {
+			args = append(args, "-o", "IdentityFile="+p)
+		}
+	}
+	return args
+}
+
 // hardened returns the A16 hardened options: non-interactive, bounded
-// connect, liveness keepalive, and known_hosts enforced (no silent TOFU).
+// connect, liveness keepalive, known_hosts enforced (no silent TOFU), plus
+// the explicit SSHDir redirection (dirArgs).
 func (c Config) hardened() []string {
 	t := c.ConnectTimeout
 	if t <= 0 {
 		t = 10
 	}
-	return []string{
+	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", t),
 		"-o", "ServerAliveInterval=15",
 		"-o", "StrictHostKeyChecking=yes",
 	}
+	return append(args, c.dirArgs()...)
 }
 
 // run is the shared exec helper: sets HOME to SSHDir's parent, captures
@@ -157,9 +221,15 @@ func (c Config) HostKey(ctx context.Context, host string) (keyType, fingerprint,
 }
 
 // HasHost reports whether host is already trusted in known_hosts
-// (fingerprint gate, architecture §3.5).
+// (fingerprint gate, architecture §3.5). It checks SSHDir's known_hosts
+// explicitly: `ssh-keygen -F` otherwise consults the passwd-db home, which
+// would silently ignore PARTOUT_SSH_DIR.
 func (c Config) HasHost(ctx context.Context, host string) (bool, error) {
-	_, _, exit, err := c.run(ctx, c.keygenBin(), "-F", host)
+	args := []string{"-F", host}
+	if c.SSHDir != "" {
+		args = append(args, "-f", c.knownHostsPath())
+	}
+	_, _, exit, err := c.run(ctx, c.keygenBin(), args...)
 	if err != nil {
 		return false, err
 	}
@@ -175,7 +245,7 @@ func (c Config) AddKey(ctx context.Context, keyLine string) error {
 	if err := os.MkdirAll(c.SSHDir, 0o700); err != nil {
 		return fmt.Errorf("sshutil: mkdir ssh dir: %w", err)
 	}
-	kh := filepath.Join(c.SSHDir, "known_hosts")
+	kh := c.knownHostsPath()
 	f, err := os.OpenFile(kh, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("sshutil: open known_hosts: %w", err)

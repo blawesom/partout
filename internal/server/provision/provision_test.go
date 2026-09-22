@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +33,7 @@ case "$*" in
     echo "user=root"
     echo "sudo=yes"
     echo "disk=100000000"
+    echo "reach=yes-plain"
     exit 0
     ;;
 esac
@@ -227,6 +230,7 @@ echo "init=none"
 echo "user=root"
 echo "sudo=yes"
 echo "disk=100000000"
+echo "reach=yes-plain"
 exit 0
 `
 	scp := `#!/bin/sh
@@ -237,10 +241,175 @@ echo "$3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFleetKeyForTest0123456789abcde
 exit 0
 `
 	keygen := `#!/bin/sh
+# Honour an explicit -f <file> (sshutil passes it for known_hosts lookups);
+# fall back to $HOME/.ssh/known_hosts like real ssh-keygen.
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
 case "$1" in
-  -F) if grep -qF "$2" "$HOME/.ssh/known_hosts" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
   -H) exit 0 ;;
   -l) cat >/dev/null; echo "256 SHA256:FakeFleetFingerprint comment (ED25519)"; exit 0 ;;
+esac
+exit 0
+`
+	for name, body := range map[string]string{
+		"ssh": ssh, "scp": scp, "ssh-keyscan": keyscan, "ssh-keygen": keygen,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	return bin
+}
+
+// TestConfirmKeyIsIdempotent is the regression guard for the duplicate-confirm
+// panic: a second POST /key (double-click, retry, two admins) must return an
+// error, never panic with "close of closed channel".
+func TestConfirmKeyIsIdempotent(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+	run, err := prov.Start("web-dc", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForState(t, st, run.ID, "key_confirm")
+
+	if err := prov.ConfirmKey(run.ID); err != nil {
+		t.Fatalf("first confirm: %v", err)
+	}
+	// Must not panic; must be rejected because the run left key_confirm.
+	if err := prov.ConfirmKey(run.ID); err == nil {
+		t.Error("second confirm returned nil, want an error")
+	}
+
+	// The run must still make progress (double-confirm must not wedge it).
+	waitForState(t, st, run.ID, "enrolling")
+}
+
+// TestRacingConfirmsDoNotPanic exercises simultaneous confirms.
+func TestRacingConfirmsDoNotPanic(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+	run, err := prov.Start("web-race", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForState(t, st, run.ID, "key_confirm")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = prov.ConfirmKey(run.ID) // errors are fine; a panic is not
+		}()
+	}
+	wg.Wait()
+	waitForState(t, st, run.ID, "enrolling")
+}
+
+// TestConfirmAfterRestartFailsRun is the regression guard for the zombie-run
+// bug: if the server restarted while a run was paused (no in-memory state
+// machine), ConfirmKey must fail the run with a clear message instead of
+// returning success and leaving it in key_confirm forever.
+func TestConfirmAfterRestartFailsRun(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+	run, err := prov.Start("web-restart", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitForState(t, st, run.ID, "key_confirm")
+
+	// Simulate a restart: drop the in-memory active-run registry.
+	prov.mu.Lock()
+	delete(prov.runs, run.ID)
+	prov.mu.Unlock()
+
+	err = prov.ConfirmKey(run.ID)
+	if err == nil {
+		t.Fatal("ConfirmKey after restart returned nil, want error")
+	}
+	cur, _ := st.ProvisionRun(run.ID)
+	if cur.State != "failed" {
+		t.Fatalf("state after failed confirm = %q, want failed", cur.State)
+	}
+	if cur.Error == "" {
+		t.Error("failed run should carry a remediation message")
+	}
+}
+
+// TestProvisionUnreachableServerFailsPreflight verifies the host->server
+// reachability probe: when the target cannot reach the control-plane port,
+// the run fails at preflight (with remediation) instead of installing the
+// agent and burning the 60s enroll window.
+func TestProvisionUnreachableServerFailsPreflight(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+
+	bin := writeFakeFleetNoReach(t)
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	os.MkdirAll(sshDir, 0o700)
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+	// Pre-trust so we go straight to preflight.
+	if err := prov.ssh.AddKey(context.Background(), "web-nr ssh-ed25519 AAAApretrusted"); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	run, err := prov.Start("web-nr", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "failed")
+	if !strings.Contains(run.Error, "reach") && !strings.Contains(run.Error, "firewall") {
+		t.Errorf("failure message should mention reachability, got %q", run.Error)
+	}
+}
+
+// writeFakeFleetNoReach is a fleet whose preflight reports reach=no.
+func writeFakeFleetNoReach(t *testing.T) string {
+	t.Helper()
+	bin := t.TempDir()
+	ssh := `#!/bin/sh
+case "$*" in
+  *"base64 -d"*) echo "INSTALL_OK"; exit 0 ;;
+  *)
+    echo "os=Ubuntu 24.04"
+    echo "arch=x86_64"
+    echo "init=systemd"
+    echo "user=root"
+    echo "sudo=yes"
+    echo "disk=100000000"
+    echo "reach=no"
+    exit 0
+    ;;
+esac
+`
+	scp := "#!/bin/sh\nexit 0\n"
+	keyscan := `#!/bin/sh
+echo "$3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyNoReach"
+exit 0
+`
+	keygen := `#!/bin/sh
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
+case "$1" in
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -H) exit 0 ;;
+  -l) cat >/dev/null; echo "256 SHA256:FakeFingerprint comment (ED25519)"; exit 0 ;;
 esac
 exit 0
 `

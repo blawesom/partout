@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -53,3 +54,35 @@ jobs:
       # once had a silent output-loss race. Hammer it to keep it honest.
       - name: Stress exec package
         run: go test -race -count=20 -run 'TestRun' ./internal/agent/exec/
+
+  # Opt-in real-sshd tests. These exist because the fake-binary unit tests
+  # implement ssh's *intended* semantics and therefore cannot catch the fact
+  # that OpenSSH resolves ~/.ssh from the passwd database, not $HOME — which
+  # made PARTOUT_SSH_DIR silently non-functional. Runs on demand, not on every
+  # push, since it depends on a live sshd.
+  live-ssh:
+    name: Live sshd (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Start sshd and authorise a test key
+        run: |
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -t || true
+          sudo systemctl start ssh 2>/dev/null || sudo /usr/sbin/sshd
+          ssh-keygen -q -t ed25519 -N '' -f ~/.ssh/id_ed25519_ci
+          cat ~/.ssh/id_ed25519_ci.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+      - name: Live SSH tests
+        env:
+          PARTOUT_LIVE_SSH: "1"
+          PARTOUT_LIVE_SSH_HOST: "127.0.0.1"
+        run: go test -tags live -run TestLive -v ./internal/sshutil/

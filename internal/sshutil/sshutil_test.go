@@ -33,9 +33,19 @@ exit 0
 `
 	keygen := `#!/bin/sh
 echo "keygen $*" >> "$FAKE_LOG"
+# Parse an optional explicit -f <file> (sshutil passes it for known_hosts
+# lookups and hashing). Real ssh-keygen defaults to ~/.ssh/known_hosts when
+# -f is absent; the fake mirrors that so an accidental omission is caught.
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
 case "$1" in
   -F)
-    if grep -qF "$2" "$HOME/.ssh/known_hosts" 2>/dev/null; then exit 0; else exit 1; fi
+    if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi
     ;;
   -H)
     exit 0
@@ -167,5 +177,78 @@ func TestCopy(t *testing.T) {
 	cfg := newTestCfg(t, writeFakeBinaries(t))
 	if _, err := cfg.Copy(context.Background(), "/tmp/a", "web01", "/tmp/b"); err != nil {
 		t.Fatalf("Copy: %v", err)
+	}
+}
+
+// TestArgsPinSSHDir is the regression guard for the PARTOUT_SSH_DIR bug: with a
+// non-default SSHDir, OpenSSH resolves ~/.ssh from the passwd database rather
+// than $HOME, so ssh/scp MUST be given -F and UserKnownHostsFile explicitly,
+// and ssh-keygen -F must be given -f. Without these, a confirmed host key is
+// written to a file ssh never reads and every strict connect fails.
+func TestArgsPinSSHDir(t *testing.T) {
+	bin := writeFakeBinaries(t)
+	cfg := newTestCfg(t, bin)
+	ctx := context.Background()
+
+	if _, _, _, err := cfg.Run(ctx, "web01", "echo hi"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := cfg.Copy(ctx, "/tmp/a", "web01", "/tmp/b"); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if _, err := cfg.HasHost(ctx, "web01"); err != nil {
+		t.Fatalf("HasHost: %v", err)
+	}
+
+	cfgPath := filepath.Join(cfg.SSHDir, "config")
+	khPath := filepath.Join(cfg.SSHDir, "known_hosts")
+
+	calls, err := os.ReadFile(filepath.Join(bin, "calls.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := string(calls)
+
+	// ssh and scp must both pin the config + known_hosts.
+	for _, want := range []string{
+		"-F " + cfgPath,
+		"UserKnownHostsFile=" + khPath,
+	} {
+		if n := strings.Count(logs, want); n < 2 { // once for ssh, once for scp
+			t.Errorf("expected %q at least twice (ssh+scp), got %d; log:\n%s", want, n, logs)
+		}
+	}
+	// ssh-keygen -F must consult the explicit known_hosts file.
+	if !strings.Contains(logs, "keygen -F web01 -f "+khPath) {
+		t.Errorf("HasHost did not pass -f %s; log:\n%s", khPath, logs)
+	}
+}
+
+// TestDirArgsCreatesConfig guards the -F contract: ssh exits 255 when -F
+// points at a missing file, so dirArgs must materialise an empty config.
+func TestDirArgsCreatesConfig(t *testing.T) {
+	sshDir := filepath.Join(t.TempDir(), "isolated", ".ssh")
+	cfg := Default(sshDir)
+	args := cfg.dirArgs()
+	cfgPath := filepath.Join(sshDir, "config")
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Fatalf("dirArgs did not create %s: %v", cfgPath, err)
+	}
+	found := false
+	for i, a := range args {
+		if a == "-F" && i+1 < len(args) && args[i+1] == cfgPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dirArgs missing -F %s: %v", cfgPath, args)
+	}
+}
+
+// TestDirArgsEmptySSHDirPassthrough documents that an empty SSHDir applies no
+// redirection (the operator's default ~/.ssh is used).
+func TestDirArgsEmptySSHDirPassthrough(t *testing.T) {
+	if args := (Config{}).dirArgs(); args != nil {
+		t.Errorf("dirArgs(empty SSHDir) = %v, want nil", args)
 	}
 }

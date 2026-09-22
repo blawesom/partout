@@ -46,6 +46,11 @@ type activeRun struct {
 	id      string
 	confirm chan struct{} // closed when ConfirmKey is called
 	cancel  context.CancelFunc
+
+	// confirmOnce guarantees the confirm channel is closed at most once, so a
+	// duplicate POST /key (double-click, retry) cannot panic with
+	// "close of closed channel".
+	confirmOnce sync.Once
 }
 
 // Provisioner orchestrates host provisioning runs.
@@ -98,15 +103,20 @@ func (p *Provisioner) Start(host, mode string) (*store.ProvisionRun, error) {
 		Updated: time.Now().Unix(),
 	}
 
+	// Create the run first so a failure here cannot leave an orphaned
+	// enrollment token behind. The token is generated and attached next.
+	if err := p.store.CreateProvisionRun(*run); err != nil {
+		return nil, fmt.Errorf("provision: create run: %w", err)
+	}
+
 	// One-time short-TTL enrollment token for the new agent.
 	token, err := p.store.NewEnrollmentToken(p.tokenTTL)
 	if err != nil {
 		return nil, fmt.Errorf("provision: create token: %w", err)
 	}
 	run.TokenHash = sha256Hex(token)
-
-	if err := p.store.CreateProvisionRun(*run); err != nil {
-		return nil, fmt.Errorf("provision: create run: %w", err)
+	if err := p.store.SetProvisionRunToken(runID, run.TokenHash); err != nil {
+		return nil, fmt.Errorf("provision: link token: %w", err)
 	}
 	for i := 1; i <= len(stepNames); i++ {
 		if err := p.store.CreateProvisionStep(runID, i, stepNames[i-1]); err != nil {
@@ -142,18 +152,40 @@ func (p *Provisioner) ConfirmKey(runID string) error {
 	if run.KeyLine == "" {
 		return fmt.Errorf("provision: run %s has no captured key", runID)
 	}
-	// Append the public key to known_hosts and hash it. No private material
-	// is ever read, copied, or logged.
-	if err := p.ssh.AddKey(context.Background(), run.KeyLine); err != nil {
-		return fmt.Errorf("provision: add to known_hosts: %w", err)
-	}
-	p.audit("provision.key.confirmed", fmt.Sprintf(`{"run_id":%q,"fingerprint":%q}`, runID, run.Fingerprint))
+
 	p.mu.Lock()
 	ar := p.runs[runID]
 	p.mu.Unlock()
-	if ar != nil {
-		close(ar.confirm)
+	if ar == nil {
+		// The run is paused but this process has no live state machine for it:
+		// the server restarted after capturing the key. Resume is not possible
+		// (the goroutine is gone and the one-time token is still valid only
+		// until its TTL), so fail the run explicitly instead of reporting a
+		// success that resumes nothing and leaves a permanent key_confirm
+		// zombie.
+		const msg = "server restarted while awaiting key confirmation; re-run provisioning"
+		p.emitStep(run, 1, stepNames[0], "failed")
+		p.setTerminal(run, "failed", msg)
+		return fmt.Errorf("provision: run %s lost its state machine (server restart); re-run provisioning", runID)
 	}
+
+	// Transition out of key_confirm BEFORE closing the channel so a concurrent
+	// or duplicate confirm sees a non-key_confirm state and is rejected.
+	if err := p.store.SetProvisionRunState(runID, "confirming", "connect", ""); err != nil {
+		return fmt.Errorf("provision: mark confirming: %w", err)
+	}
+
+	// Append the public key to known_hosts and hash it. No private material
+	// is ever read, copied, or logged.
+	if err := p.ssh.AddKey(context.Background(), run.KeyLine); err != nil {
+		// Roll back so the operator can retry without a stuck run.
+		_ = p.store.SetProvisionRunState(runID, "key_confirm", "connect", "")
+		return fmt.Errorf("provision: add to known_hosts: %w", err)
+	}
+	p.audit("provision.key.confirmed", fmt.Sprintf(`{"run_id":%q,"fingerprint":%q}`, runID, run.Fingerprint))
+
+	// Close at most once: safe under duplicate/racing confirms.
+	ar.confirmOnce.Do(func() { close(ar.confirm) })
 	return nil
 }
 
@@ -170,6 +202,7 @@ func (p *Provisioner) DenyKey(runID string) error {
 	if err := p.store.SetProvisionRunState(runID, "cancelled", "connect", "key confirmation denied"); err != nil {
 		return err
 	}
+	p.emitStep(run, 1, stepNames[0], "cancelled")
 	p.mu.Lock()
 	ar := p.runs[runID]
 	p.mu.Unlock()
@@ -220,6 +253,9 @@ func (p *Provisioner) run(ctx context.Context, ar *activeRun, run *store.Provisi
 		case <-ar.confirm:
 			p.finishStep(run, 1) // step complete now that the key is trusted
 		case <-ctx.Done():
+			// Only cancel if we are still waiting for a decision. If the
+			// operator already confirmed (state=confirming) we must not
+			// overwrite that with "cancelled".
 			if r, err := p.store.ProvisionRun(run.ID); err == nil && r.State == "key_confirm" {
 				p.setTerminal(r, "cancelled", "key confirmation cancelled")
 			}
@@ -285,14 +321,32 @@ func (p *Provisioner) stepPreflight(ctx context.Context, run *store.ProvisionRun
 	p.setState(run, "preflight", "preflight", "")
 	p.beginStep(run, 2)
 
-	script := `set +e
+	// The reachability probe is the cheap way to catch the most common
+	// real-world failure (a firewall/NAT between the host and the server)
+	// before installing anything and burning the wait-enroll window.
+	// curl/wget are best-effort: if neither exists we do not fail the run.
+	script := fmt.Sprintf(`set +e
 echo "os=$(cat /etc/os-release 2>/dev/null | grep -m1 PRETTY_NAME | cut -d= -f2 | tr -d '"')"
 echo "arch=$(uname -m)"
 if command -v systemctl >/dev/null 2>&1; then echo "init=systemd"; else echo "init=none"; fi
 echo "user=$(whoami)"
 if sudo -n true 2>/dev/null; then echo "sudo=yes"; else echo "sudo=no"; fi
 echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
-`
+# Host -> server reachability on the control-plane port.
+SRV=%s
+if command -v curl >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 "https://$SRV/healthz" >/dev/null 2>&1; then echo "reach=yes-tls"
+  elif curl -fsS --max-time 5 "http://$SRV/healthz" >/dev/null 2>&1; then echo "reach=yes-plain"
+  else echo "reach=no"; fi
+elif command -v wget >/dev/null 2>&1; then
+  if wget -q -T 5 -O /dev/null "https://$SRV/healthz" 2>/dev/null; then echo "reach=yes-tls"
+  elif wget -q -T 5 -O /dev/null "http://$SRV/healthz" 2>/dev/null; then echo "reach=yes-plain"
+  else echo "reach=no"; fi
+else
+  echo "reach=unknown"
+fi
+`, shellQuote(p.serverHost))
+
 	out, stderr, exit, err := p.ssh.Run(ctx, run.Host, script)
 	if err != nil {
 		return p.failStep(run, 2, fmt.Sprintf("ssh failed: %v", err))
@@ -311,6 +365,13 @@ echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
 	}
 	if facts["sudo"] != "yes" {
 		return p.failStep(run, 2, "install needs root or NOPASSWD sudo; grant the ssh user passwordless sudo")
+	}
+	// reach=unknown means neither curl nor wget is present: warn but continue,
+	// since the agent itself (Go) does not need them.
+	if facts["reach"] == "no" {
+		return p.failStep(run, 2, fmt.Sprintf(
+			"host cannot reach the server at %s on the control-plane port; open the firewall/NAT path before provisioning",
+			p.serverHost))
 	}
 
 	p.finishStep(run, 2)
@@ -409,7 +470,7 @@ echo INSTALL_OK
 // stepWaitEnroll polls until the agent from this run has connected. Terminal:
 // connected (success) or failed (timeout).
 func (p *Provisioner) stepWaitEnroll(ctx context.Context, run *store.ProvisionRun) {
-	p.setState(run, "enrolling", "enroll", "")
+	p.setState(run, "enrolling", stepNames[4], "")
 	p.beginStep(run, 5)
 
 	deadline := time.Now().Add(60 * time.Second)

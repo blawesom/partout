@@ -43,6 +43,11 @@ func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = "fresh"
 	}
+	if req.Mode != "fresh" && req.Mode != "join" && req.Mode != "install" && req.Mode != "update" {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"mode must be fresh, join, install, or update", nil)
+		return
+	}
 	run, err := h.prov.Start(req.Host, req.Mode)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error",
@@ -115,6 +120,10 @@ func (h *Handler) handleConfirmKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := r.PathValue("id")
+	if _, err := h.st.ProvisionRun(runID); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "provision run not found", nil)
+		return
+	}
 	var req confirmKeyRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body", nil)
@@ -123,13 +132,14 @@ func (h *Handler) handleConfirmKey(w http.ResponseWriter, r *http.Request) {
 	switch req.Action {
 	case "confirm":
 		if err := h.prov.ConfirmKey(runID); err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+			// A duplicate/racing confirm is a conflict, not a bad request.
+			writeError(w, http.StatusConflict, "not_pending", err.Error(), nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"action": "confirmed"})
 	case "deny":
 		if err := h.prov.DenyKey(runID); err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+			writeError(w, http.StatusConflict, "not_pending", err.Error(), nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"action": "denied"})
@@ -147,8 +157,19 @@ func (h *Handler) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := r.PathValue("id")
+	run, err := h.st.ProvisionRun(runID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "provision run not found", nil)
+		return
+	}
 	if err := h.prov.Cancel(runID); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+		return
+	}
+	// Cancel is a no-op on an already-terminal run: report the real outcome
+	// instead of claiming a fresh cancellation.
+	if next, err := h.st.ProvisionRun(runID); err == nil && next.State == run.State {
+		writeJSON(w, http.StatusOK, map[string]string{"action": "noop", "state": run.State})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"action": "cancelled"})

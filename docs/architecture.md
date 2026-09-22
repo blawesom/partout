@@ -212,31 +212,41 @@ copies, or persists operator credentials.
 `internal/server/provision/` — run state machine, preflight, install plan, step executor,
 SSE step log.
 
-**SSH child-process contract (proposed, A16):**
-- Runs as the server's service user; the child's `HOME` is set to the parent of
-  `PARTOUT_SSH_DIR` (default: the service user's `$HOME`), so `config`, `known_hosts`, and
-  identity files resolve from `PARTOUT_SSH_DIR` (deployment §4.1).
+**SSH child-process contract (A16, implemented):**
+- Runs as the server's service user. `PARTOUT_SSH_DIR` (default: the service user's
+  `$HOME/.ssh`) is **authoritative**, and is passed to every child *explicitly*:
+  `-F <dir>/config`, `-o UserKnownHostsFile=<dir>/known_hosts`, and
+  `-o IdentityFile=<dir>/id_*` for any conventional key present. It is **not** applied via
+  `$HOME`: OpenSSH resolves `~/.ssh` from the passwd database (`getpwuid`), so a `HOME`
+  override is silently ignored — a bug this contract exists to prevent.
+- Because `ssh -F` *replaces* the per-user config, a non-default `PARTOUT_SSH_DIR` means the
+  operator's own `~/.ssh/config` is not read (the isolated dir's `config` is the contract).
+  With the default dir the two are the same file, so behaviour is unchanged.
 - Hardened flags: `BatchMode=yes` (no interactive prompts), `ConnectTimeout=10s`,
-  `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` — except the initial *fingerprint
-  capture* connect, which uses `StrictHostKeyChecking=no UserKnownHostsFile=/dev/null`
-  and trusts nothing.
+  `ServerAliveInterval=15`, `StrictHostKeyChecking=yes`. Fingerprint capture uses
+  `ssh-keyscan` (which trusts nothing) rather than an unverified connect.
 - The operator provides a host address **or a `~/.ssh/config` alias**; the alias used is
   recorded in `provision_runs`.
 
 **Fingerprint gate (no silent TOFU).** If the target is not in `known_hosts`, the run pauses
-in `key_confirm`: the UI shows key type + fingerprint; operator confirms → public key hashed
-and appended to `known_hosts` (`ssh-keygen -H`) → run continues; operator denies → run
-cancelled, nothing changed on the host.
+in `key_confirm`: `partout ctl provision get <id>` shows key type + fingerprint; operator
+confirms → public key hashed and appended to `<PARTOUT_SSH_DIR>/known_hosts`
+(`ssh-keygen -H`) → run continues; operator denies → run cancelled, nothing changed on the
+host. Confirm is **idempotent-safe**: a duplicate or racing confirm is rejected with a
+conflict, never a panic. The gate is in-memory, so if the server restarts while a run is
+paused, confirming it **fails the run** with a "re-run provisioning" remediation rather
+than leaving a permanent `key_confirm` zombie.
 
 **Run state machine** (see §4):
 
 ```
-queued → connecting → key_confirm → preflight → transferring → installing
+queued → connecting → key_confirm → confirming → preflight → transferring → installing
        → enrolling → connected
 any step → failed | cancelled | handoff
 ```
 
-(`installing` includes starting the unit — the install script runs
+(`confirming` is the brief transition after the operator approves the key, before preflight;
+`installing` includes starting the unit — the install script runs
 `systemctl enable --now partout-agent`, so there is no separate `starting` state.)
 
 **Steps** (each audited under taxonomy kind `provision`, streamed as `provision.step` SSE
@@ -245,7 +255,9 @@ events with a bounded output excerpt):
 1. **connect** — fingerprint gate above.
 2. **preflight** (read-only, remote): `/etc/os-release`, arch, init system (`systemctl`
    present?), `whoami` + `sudo -n true` (install needs root or NOPASSWD sudo), free disk,
-   host→server outbound reachability (`GET <server>/healthz`), and existing partout install
+   host→server outbound reachability (`curl`/`wget` against `<server>/healthz`, caught here
+   so a firewall fails fast instead of burning the 60 s enroll window; skipped if neither
+   tool exists), and existing partout install
    (binary + `identity.json` → *update* or *fresh* path, below). Failure → `failed` with
    concrete remediation text.
 3. **transfer** — `scp` of the same-version server binary (sha256 known) to
@@ -893,7 +905,7 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A13 | Health endpoints | `/healthz`, `/readyz` |
 | A14 | Retention sweeper | hourly; audited |
 | A15 | Capacity targets | §13 table |
-| A16 | Provisioning SSH | system `ssh`/`scp`; `BatchMode=yes`, `ConnectTimeout=10s`, `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` after fingerprint gate; `PARTOUT_SSH_DIR` (default `$HOME/.ssh`) | §3.5 |
+| A16 | Provisioning SSH | system `ssh`/`scp`; `BatchMode=yes`, `ConnectTimeout=10s`, `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` after fingerprint gate; `PARTOUT_SSH_DIR` (default `$HOME/.ssh`) passed explicitly via `-F`/`UserKnownHostsFile`/`IdentityFile` (a `HOME` override is ignored by OpenSSH) | §3.5 |
 | A17 | Preflight checks | os-release, arch, systemd, `sudo -n true`, disk, host→server `/healthz`, existing install; remediation text on failure | §3.5 |
 | A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; `identity.json`/`spool.db` untouched unless `fresh` | §3.5 |
 | A19 | Manual handoff triggers | unreachable, non-systemd init, Docker-host, air-gapped; prints binary + one-line install with one-time token | §3.5 |
