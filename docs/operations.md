@@ -12,8 +12,12 @@ incident response, capacity, compliance, and a go-live checklist.
 > - Auth is **bearer tokens** (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) or single-user local mode —
 >   there is no `--create-admin` and no secret key store in v0.1.
 > - Server state = the **SQLite file** (`PARTOUT_DB_PATH`, default `./partout.db`) plus
->   `<db dir>/tls/` when `PARTOUT_TLS=on`. No output blobs, extern cache, spool, or Postgres yet.
-> - Agent state = `<data dir>/identity.json` + `<data dir>/tls/` (mTLS leaf/key).
+>   `<db dir>/tls/` when `PARTOUT_TLS=on` and `<db dir>/identity/` (server Ed25519 signing key,
+>   v0.2). No output blobs, extern cache, spool, or Postgres yet.
+> - Agent state = `<data dir>/identity.json` + `<data dir>/tls/` (mTLS leaf/key) +
+>   `<data dir>/agent/` (cached policy bundle + server pubkey, v0.2).
+> - **v0.2.0 adds the policy deny-list engine** (rule CRUD, dispatch gating, signed decisions,
+>   agent re-check). Steps below marked *(v0.2)* are live on tag `v0.2.0`.
 > - No Web UI in v0.1: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
 > - Not wired in v0.1 (planned, see deployment §4.4): `PARTOUT_SSH_DIR`, `PARTOUT_SECRET_KEY*`,
 >   `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation hardcoded `none`), `PARTOUT_SPOOL_*`,
@@ -57,13 +61,18 @@ Step-by-step bring-up, also referenced in deployment §6:
    `--create-admin=<name>` interactive password bootstrap.)*
 3. **Verify the health endpoint**: `curl -sf http://localhost:8443/healthz` should return 200.
    *(The Web UI is proposed — not in v0.1; use `partout ctl` or REST/SSE.)*
-4. **Create a baseline policy** *(proposed — policy engine is M1+, not in v0.1)*:
-   - Rule 1: `deny` on `requires_elevation=true` and `action=exec` for actors without
-     `admin` (safety floor).
-   - Rule 2: `require_approval` on `action=apply_updates` (patch governance).
-   - Rule 3: explicit `allow` rules for the commands you'll run routinely (e.g. `systemctl
-     restart *` on `role=web`).
-   Start restrictive; loosen later. The audit log captures everything (PRD §5.8).
+4. **Create a baseline policy** *(v0.2 — implemented on tag `v0.2.0`; the engine is a
+   default-allow deny-list, and `require_approval` acts as a hard deny until the M4 approvals
+   engine)*:
+   - Rule 1: `deny` on the commands you never want run (e.g. `rm -rf`, `mkfs`, `shutdown`).
+   - Rule 2: `deny` host-scoped, e.g. `--hosts 'tag:env=prod' --command-regex 'restart'`.
+   - Rule 3: `deny` actor-scoped, e.g. `--actor-roles operator --command-regex '…'`.
+   ```bash
+   partout ctl --server … --token $ADMIN policy create \
+     --name no-destructive --effect deny --command-regex 'rm\s+-rf|mkfs|shutdown'
+   ```
+   Start restrictive; loosen later. The audit log captures everything
+   (`policy.create`/`policy.delete`/`policy.deny`, PRD §5.8).
 5. **Add your first host** *(provisioning via fleet SSH is M1+, not in v0.1)*:
    - **v0.1 manual path**: mint a one-time token (`partout ctl enroll-token`), install the
      binary + agent unit on the host (§3.2 of deployment) with that token.
@@ -110,14 +119,17 @@ Step-by-step bring-up, also referenced in deployment §6:
 
 ### 3.3 Policy & approvals
 
-- Rules are declarative; the server evaluates them **before dispatch**, and the agent
-  re-checks agent-side (architecture §5.3, defense in depth).
-- **Approvals**: scoped to the exact payload hash — a modified command needs a new request.
-  UI/API/MCP show the pending queue. Expiry is 1 h by default (architecture A7).
-- **Editing a rule**: publish a new version; the server pushes a fresh bundle to agents.
-  Agent-side jobs continue on the last bundle until the refresh reaches them (architecture §5.3).
-- **Testing policy**: the UI includes a "dry-run" for selectors and commands (what hosts
-  would be affected, what rule fires) before dispatch.
+- Rules are declarative; the server evaluates them **before dispatch** *(v0.2)*, and the agent
+  re-checks agent-side *(v0.2 — signature + bundle version + local re-eval; any mismatch →
+  deny, `ACK_DENIED_AGENT`)* (architecture §5.3, defense in depth).
+- **Approvals** *(M4 — not yet)*: will be scoped to the exact payload hash — a modified command
+  needs a new request. Until then `require_approval` rules deny.
+- **Editing a rule** *(v0.2)*: create/delete a rule; the server pushes a fresh bundle to all
+  connected agents immediately (no reconnect needed). Bundles are versioned + content-hashed,
+  and the agent's cached bundle persists under `<data dir>/agent/`.
+- **Testing policy**: the UI dry-run is *(proposed — Web UI deferred)*; verify with
+  `partout ctl policy list` and a test dispatch (a denied run records `state=denied` with the
+  matched rule id(s) and reason).
 
 ### 3.4 Secrets management
 

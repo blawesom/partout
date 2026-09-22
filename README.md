@@ -34,7 +34,7 @@ off and the docs become the implementation contract.
 | Milestone | Status | Notes |
 |---|---|---|
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
-| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap**. Missing: policy deny-list, host provisioning |
+| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list engine**. Missing: host provisioning, Postgres, offline spool |
 | **M2 — Files & sessions** | ⬜ Not started | — |
 | **M3 — Automation** | ⬜ Not started | — |
 | **M4 — Governance** | ⬜ Not started | — |
@@ -68,16 +68,16 @@ Done:
 - ✅ Command cancellation (server → agent CANCEL envelope, live process kill)
 - ✅ Full audit log (append-only, filterable, REST-exportable)
 - ✅ RBAC bearer tokens (`PARTOUT_TOKEN_ADMIN`/`OPERATOR`/`VIEWER`), single-user local mode
-- ✅ Run lifecycle: `queued → delivered → running → terminal` (succeeded/failed/timed_out/cancelled/interrupted)
+- ✅ Run lifecycle: `queued → delivered → running → terminal` (succeeded/failed/timed_out/cancelled/interrupted/denied)
 - ✅ Execution aggregate: `succeeded/failed/partial/cancelled`
-- ✅ Operator CLI: `partout ctl` (enroll-token, hosts, run, exec, audit, ca; `--ca-file` for HTTPS)
+- ✅ Operator CLI: `partout ctl` (enroll-token, hosts, run, exec, audit, **policy**, ca; `--ca-file` for HTTPS)
 - ✅ Deploy artifacts: `deploy/systemd/` (server + agent units, env templates, install README)
 - ✅ Server restart resilience: agents marked `disconnected` at startup, flip back on reconnect
 - ✅ Agent restart resilience: identity persisted, no re-enrollment needed
 - ✅ **TLS/mTLS bootstrap** (see below): local root CA on first run, CA-signed agent leaves via CSR at enrollment, mTLS on the gRPC stream, REST over HTTPS
+- ✅ **Policy deny-list engine**: rule CRUD (REST `/api/v1/policies` + `partout ctl policy`), per-host dispatch gating (`deny` / `require_approval→deny` / allow), signed `Decision` on every command envelope, agent-side re-check (`internal/agent/guardrail`) — verifies signature, bundle version, re-evaluates rules over local action (any mismatch → deny). Empty rule set = default-allow (deny-list model). Requires no new flags/env vars.
 
 Remaining:
-- [ ] Policy deny-list (agent-side guardrail recheck before execution)
 - [ ] Host provisioning via fleet SSH (architecture §3.5, §5.8)
 - [ ] Postgres backend (second store implementation)
 - [ ] Offline spool (16 MB mem / 128 MB disk / 24h TTL, replay on reconnect)
@@ -98,9 +98,10 @@ Remaining:
 2. ~~Resolve the repo rename `hiersoir` → `partout` (PRD Decision 10).~~ ✅ Done
 3. ~~Scaffold the Go module + `deploy/` artifacts per architecture §1.~~ ✅ Done
 4. ~~Build milestone M0 (spine).~~ ✅ Done
-5. **Finish M1**: policy deny-list, host provisioning (fleet SSH), Postgres backend, offline spool
-6. **M2**: files & sessions
-7. **Web UI** (deferred V1 phase)
+5. ~~**Finish M1**: policy deny-list~~ ✅ Done (v0.2.0)
+6. **Finish M1**: host provisioning (fleet SSH), Postgres backend, offline spool
+7. **M2**: files & sessions
+8. **Web UI** (deferred V1 phase)
 
 ## TLS / transport security (implemented)
 
@@ -156,3 +157,51 @@ See `deploy/systemd/` for the systemd units and env templates.
 - Long-lived CA management / renewal reminders.
 - Optional `PARTOUT_TLS_INSECURE` (skip-verify) escape hatch for dev — intentionally **not**
   shipped; use a local CA instead.
+
+## Policy deny-list (implemented, v0.2.0)
+
+Declarative deny rules gate every dispatch. v1 is a **deny-list**: the default is *allow*
+(a rule set with no match is allowed); a matching `deny` (or `require_approval`, which acts
+as deny until the M4 approvals engine) blocks the command **server-side, before any envelope
+reaches the agent**.
+
+```bash
+# Block any command containing 'secret' on all hosts
+partout ctl --server localhost:8443 --token $ADMIN \
+  policy create --name no-secret --effect deny --command-regex 'secret'
+
+# Scope to hosts by tag/role and by requester role
+partout ctl --server localhost:8443 --token $ADMIN \
+  policy create --name no-prod-restart --effect deny \
+    --hosts 'tag:env=prod' --actor-roles operator --command-regex 'systemctl (restart|stop)'
+
+partout ctl policy list
+partout ctl policy delete pol_<id>
+```
+
+**Match fields** (all optional; empty = match any):
+`hosts` (selector: `all`, `host:`, `tag:`, `role:`, `group:`), `actions` (`exec` in v1),
+`actor_roles` (requester RBAC role), `command_regex` (against `"cmd args…"`).
+
+**How it's enforced (architecture §5.2–5.3):**
+
+1. **Dispatch gate** — `internal/control` evaluates the rule set per host per action.
+   Deny → run recorded `denied`, audit `policy.deny`, no envelope sent. An execution whose
+   runs are *all* denied finalizes `failed` immediately.
+2. **Signed decision** — every `Command` envelope carries a `Decision` signed with the
+   server's Ed25519 key (`server_identity.key`, auto-generated under `<db dir>/identity/`;
+   public key distributed in every policy bundle).
+3. **Agent re-check** — `internal/agent/guardrail` verifies the decision signature, that the
+   `bundle_version` matches its cached bundle, and re-evaluates the rules over the local
+   action (the bundle carries the agent's own tags/roles/id; the decision carries the actor
+   role). Any mismatch → **deny** with `ACK_DENIED_AGENT` + reason. Fails closed until the
+   first bundle; persists across agent restarts.
+4. **Bundle delivery** — the server pushes a versioned, content-hashed bundle to each agent
+   **on connect and on every policy change** (create/delete broadcasts to all connected).
+
+**Audit:** `policy.create`, `policy.delete`, `policy.deny` (with matched rule id(s)).
+**RBAC:** list = viewer; create/delete = admin.
+**Deviations from the proposed design** (tracked in architecture §15): default-allow in v1
+(default-deny writes deferred to M2/M3 with the action-class taxonomy); `require_approval`
+evaluates as deny until M4; `requires_elevation` match field not wired (elevation is
+`none` in v1).
