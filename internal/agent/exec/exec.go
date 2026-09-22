@@ -84,8 +84,16 @@ func Run(ctx context.Context, cmdName string, args []string, cwd string, env map
 	go pump(stdout, "stdout")
 	go pump(stderr, "stderr")
 
+	// Drain the pipes to completion BEFORE c.Wait(). The exec package docs are
+	// explicit: StdoutPipe/StderrPipe say "Cmd.Wait will close the pipe after
+	// seeing the command exit" and "it is incorrect to call Wait before all
+	// reads from the pipe have completed." Calling Wait() first closes the
+	// read-ends; a pump goroutine that hasn't yet read the data still buffered
+	// in the OS pipe loses it (silent output loss). The pumps run concurrently
+	// so the child never blocks on a full pipe, and EOF on a pipe only happens
+	// once the child has exited, so this cannot deadlock.
+	wg.Wait()
 	waitErr := c.Wait()
-	wg.Wait() // wait for pumps to drain
 
 	dur := time.Since(start).Milliseconds()
 	res := &Result{DurationMS: dur}
