@@ -134,15 +134,62 @@ func (s *Store) CreateExecutionRun(r ExecutionRun) error {
 	return err
 }
 
-// UpdateRunState updates a run's state, exit code, and duration.
-// UpdateRunState sets a run's terminal state, exit code, and duration.
+// UpdateRunState sets a run's state, exit code, and duration.
 func (s *Store) UpdateRunState(id, state string, exitCode int32, durationMS int64) error {
+	// Guarded (architecture §3.3): a run in a terminal state other than
+	// "interrupted" is not overwritten by a (possibly stale) update; "interrupted"
+	// runs may be re-finalized by a replayed result after a disconnect. A
+	// duplicate update with the same state is a no-op.
 	_, err := s.db.Exec(`
 		UPDATE execution_runs
 		SET state=?, exit_code=?, duration_ms=?, updated=?
-		WHERE id=?
-	`, state, exitCode, durationMS, now(), id)
+		WHERE id=? AND (state IN ('queued','delivered','running','interrupted') OR state=?)
+	`, state, exitCode, durationMS, now(), id, state)
 	return err
+}
+
+// InterruptAgentRuns marks the agent's in-flight runs (delivered/running)
+// as interrupted (architecture §3.4: disconnect mid-command). Returns the
+// distinct execution ids of affected runs, for aggregate recomputation.
+func (s *Store) InterruptAgentRuns(agentID string) ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT id, execution_id FROM execution_runs
+		WHERE agent_id=? AND state IN ('delivered','running')
+	`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	type ref struct{ runID, execID string }
+	var refs []ref
+	seen := make(map[string]bool)
+	var execs []string
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.runID, &r.execID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		refs = append(refs, r)
+		if !seen[r.execID] {
+			seen[r.execID] = true
+			execs = append(execs, r.execID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	if _, err := s.db.Exec(`
+		UPDATE execution_runs SET state='interrupted', updated=?
+		WHERE agent_id=? AND state IN ('delivered','running')
+	`, now(), agentID); err != nil {
+		return nil, err
+	}
+	return execs, nil
 }
 
 // ExecutionIDForRun returns the execution id a run belongs to.
@@ -181,11 +228,14 @@ func (s *Store) ListRunsForExecution(executionID string) ([]*ExecutionRun, error
 
 // ---- Output chunks --------------------------------------------------------
 
-// AppendOutput appends an output chunk to a run.
+// AppendOutput appends an output chunk to a run. Idempotent: replayed chunks
+// (same run_id, chunk_seq) are no-ops (architecture §3.3: at-least-once up
+// delivery, deduped by (run_id, chunk_seq)).
 func (s *Store) AppendOutput(c OutputChunk) error {
 	_, err := s.db.Exec(`
 		INSERT INTO output_chunks(run_id, chunk_seq, stream, data, ts)
 		VALUES(?,?,?,?,?)
+		ON CONFLICT(run_id, chunk_seq) DO NOTHING
 	`, c.RunID, c.ChunkSeq, c.Stream, c.Data, now())
 	return err
 }

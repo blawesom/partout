@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blawesom/partout/internal/agent/exec"
@@ -20,6 +21,7 @@ import (
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
+	"github.com/blawesom/partout/internal/spool"
 
 	pb "github.com/blawesom/partout/internal/proto"
 )
@@ -45,6 +47,20 @@ type Agent struct {
 	factset   map[string]string
 	policyDir string
 	guard     *guardrail.Guard
+	spool     *spool.Spool
+
+	// rootCtx is the top-level agent context (from Run). In-flight runs are
+	// derived from it — not from a per-stream session context — so a stream
+	// drop does not kill the running process; its output spools instead and
+	// replays on reconnect (architecture §3.4).
+	rootCtx context.Context
+
+	// sendMu serializes all up-sends (direct + spool drain) on the stream.
+	sendMu sync.Mutex
+
+	// spooledMu guards spooled: runs whose output is currently in the spool.
+	spooledMu sync.Mutex
+	spooled   map[string]bool
 
 	// activeMu guards activeRunners.  Each entry is a context.CancelFunc for
 	// a run in progress.  The server CANCEL envelope uses this map to kill
@@ -64,6 +80,13 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	if err := g.Load(); err != nil {
 		lg.Printf("agent: load guardrail: %v", err)
 	}
+	// Open the offline spool (architecture §3.4). A failure degrades to no
+	// spooling (output during a disconnect is lost), but does not stop the
+	// agent.
+	sp, err := spool.Open(spool.Config{Dir: filepath.Join(cfg.DataDir, "agent", "spool")})
+	if err != nil {
+		lg.Printf("agent: open spool: %v", err)
+	}
 	return &Agent{
 		id:            id,
 		cfg:           cfg,
@@ -73,6 +96,8 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		factset:       facts.Collector(id, cfg.FactsInterval),
 		policyDir:     policyDir,
 		guard:         g,
+		spool:         sp,
+		spooled:       make(map[string]bool),
 		activeRunners: make(map[string]context.CancelFunc),
 	}
 }
@@ -86,6 +111,10 @@ func (a *Agent) GuardLoaded() bool {
 // Run blocks until ctx is canceled or the agent is revoked. It manages the
 // connect → stream → reconnect loop with exponential backoff + jitter.
 func (a *Agent) Run(ctx context.Context) error {
+	a.rootCtx = ctx
+	if a.spool != nil {
+		defer a.spool.Close()
+	}
 	backoff := backoffBase
 	for {
 		err := a.connectAndStream(ctx)
@@ -124,6 +153,22 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	if err := a.sendFacts(sessCtx, true); err != nil {
 		return fmt.Errorf("agent: send facts: %w", err)
 	}
+	// Drain spooled output from any previous disconnection before processing
+	// new down traffic (architecture §3.1.4).  On the first connection (no
+	// spool) this is a fast no-op.
+	if a.spool != nil {
+		sent, _, err := a.spool.Drain(sessCtx, func(ctx context.Context, env *pb.Envelope) error {
+			a.sendMu.Lock()
+			defer a.sendMu.Unlock()
+			return a.streamC.Send(ctx, env)
+		})
+		if sent > 0 {
+			a.log.Printf("agent: drained %d spooled records", sent)
+		}
+		if err != nil {
+			return fmt.Errorf("agent: drain spool: %w", err)
+		}
+	}
 
 	hbTimer := time.NewTicker(heartbeatInterval)
 	defer hbTimer.Stop()
@@ -152,6 +197,11 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 			hb := &pb.Heartbeat{
 				AgentVersion: facts.Version,
 				UptimeS:      int64(time.Since(a.start).Seconds()),
+			}
+			if a.spool != nil {
+				m, d := a.spool.Usage()
+				hb.SpoolMemBytes = m
+				hb.SpoolDiskBytes = d
 			}
 			if err := a.streamC.Send(sessCtx, &pb.Envelope{
 				Kind:    pb.EnvelopeKind_HEARTBEAT,
@@ -222,8 +272,11 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 				Status:     pb.AckStatus_ACK_OK,
 			}},
 		})
-		// Register a cancel handle for this run.
-		runCtx, runCancel := context.WithCancel(ctx)
+		// Register a cancel handle for this run.  The run context derives from
+		// the agent root context (not the session): a stream drop must not
+		// kill the process — its output spools and replays on reconnect
+		// (architecture §3.4). CANCEL still works via activeRunners.
+		runCtx, runCancel := context.WithCancel(a.rootCtx)
 		a.activeMu.Lock()
 		a.activeRunners[cmd.RunId] = runCancel
 		a.activeMu.Unlock()
@@ -261,23 +314,51 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 }
 
 // execCommand runs a command, streaming output chunks, then the result.
+// While the stream is down, output is routed to the offline spool and
+// replayed on reconnect (architecture §3.4).  Once a run's output first
+// enters the spool, all subsequent records for that run also go to the
+// spool, so it holds a contiguous suffix that drains together when the
+// result is appended (spool drain requires a result record).
 func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
-	seq := uint64(0)
+	var seq atomic.Uint64
+	deliver := func(env *pb.Envelope) {
+		a.spooledMu.Lock()
+		spooling := a.spooled[cmd.RunId]
+		a.spooledMu.Unlock()
+		if !spooling {
+			a.sendMu.Lock()
+			err := a.streamC.Send(ctx, env)
+			a.sendMu.Unlock()
+			if err == nil {
+				return
+			}
+			// Stream down: enter spool mode for this run. All future
+			// records for the same run also go to the spool so the
+			// spool holds a contiguous tail that drains together.
+			a.spooledMu.Lock()
+			a.spooled[cmd.RunId] = true
+			a.spooledMu.Unlock()
+			a.log.Printf("agent: stream down; spooling output for run %s", cmd.RunId)
+		}
+		if a.spool == nil {
+			a.log.Printf("agent: spool append %s: no spool", cmd.RunId)
+			return
+		}
+		if err := a.spool.Append(cmd.RunId, env); err != nil {
+			a.log.Printf("agent: spool append %s: %v", cmd.RunId, err)
+		}
+	}
 	onChunk := func(c exec.Chunk) {
 		s := pb.OutputStream_OUTPUT_STDOUT
 		if c.Stream == "stderr" {
 			s = pb.OutputStream_OUTPUT_STDERR
 		}
-		env := &pb.Envelope{
+		deliver(&pb.Envelope{
 			Kind: pb.EnvelopeKind_COMMAND_OUTPUT,
 			Payload: &pb.Envelope_Output{Output: &pb.CommandOutput{
-				RunId: cmd.RunId, ChunkSeq: seq, Stream: s, Data: c.Data,
+				RunId: cmd.RunId, ChunkSeq: seq.Add(1) - 1, Stream: s, Data: c.Data,
 			}},
-		}
-		seq++
-		if err := a.streamC.Send(ctx, env); err != nil {
-			a.log.Printf("agent: send output %s: %v", cmd.RunId, err)
-		}
+		})
 	}
 
 	res, err := exec.Run(ctx, cmd.Cmd, cmd.Args, cmd.Cwd, cmd.Env, cmd.TimeoutS, onChunk)
@@ -290,17 +371,47 @@ func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
 	delete(a.activeRunners, cmd.RunId)
 	a.activeMu.Unlock()
 
-	result := &pb.Envelope{
+	deliver(&pb.Envelope{
 		Kind: pb.EnvelopeKind_COMMAND_RESULT,
 		Payload: &pb.Envelope_Result{Result: &pb.CommandResult{
 			RunId: cmd.RunId, ExitCode: res.ExitCode, State: res.State, DurationMs: res.DurationMS,
 		}},
-	}
-	if err := a.streamC.Send(ctx, result); err != nil {
-		a.log.Printf("agent: send result %s: %v", cmd.RunId, err)
-		return
+	})
+
+	// If this run spooled while disconnected, try a drain now (the stream
+	// may be back). A failed drain keeps the spool for the next reconnect.
+	if a.spool != nil {
+		go a.drainSpool(context.Background())
 	}
 	a.log.Printf("agent: run %s finished: %s (exit=%d, %dms)", cmd.RunId, res.State, res.ExitCode, res.DurationMS)
+}
+
+// drainSpool sends spooled runs to the server (architecture §3.1.4: on
+// reconnect the agent first drains its local spool, then receives pending
+// down traffic). A run is removed from the spool only after a fully
+// successful drain; a failed send keeps it for the next attempt.
+func (a *Agent) drainSpool(ctx context.Context) error {
+	if a.spool == nil || len(a.spool.Runs()) == 0 {
+		return nil
+	}
+	sent, drained, err := a.spool.Drain(ctx, a.sendUpEnvelope)
+	for _, rid := range drained {
+		a.spooledMu.Lock()
+		delete(a.spooled, rid)
+		a.spooledMu.Unlock()
+	}
+	if sent > 0 || len(drained) > 0 {
+		a.log.Printf("agent: drained %d spooled envelopes (%d runs)", sent, len(drained))
+	}
+	return err
+}
+
+// sendUpEnvelope is the spool Drain send callback: serialized on sendMu, sent
+// over the live stream.
+func (a *Agent) sendUpEnvelope(ctx context.Context, env *pb.Envelope) error {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return a.streamC.Send(ctx, env)
 }
 
 // savePolicy writes the policy bundle to the agent data dir (M0: store + hash).

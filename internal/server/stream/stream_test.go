@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/blawesom/partout/internal/certutil"
+	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/hsauth"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/policy"
@@ -341,5 +342,134 @@ func TestPolicyBundlePushedOnConnect(t *testing.T) {
 	}
 	if len(bundle.ServerPubkey) == 0 {
 		t.Fatal("bundle should carry the server public key")
+	}
+}
+
+// TestDisconnectInterruptsRuns verifies that when a stream session ends,
+// the DisconnectHook marks in-flight runs (delivered/running) as interrupted
+// and the control plane finalizes the affected execution (architecture §3.4).
+func TestDisconnectInterruptsRuns(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	// Create identity + enroll.
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	pubB64 := base64.StdEncoding.EncodeToString(id.Ed25519Pub)
+	xpubB64 := base64.StdEncoding.EncodeToString(id.X25519Pub)
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_x", UUID: id.UUID, ED25519Pub: pubB64, X25519Pub: xpubB64,
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	// Create an execution + run.
+	if err := st.CreateExecution(store.Execution{
+		ID: "exec_x", Selector: "role:web", Cmd: "echo", CreatedBy: "admin", State: "running",
+	}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	if err := st.CreateExecutionRun(store.ExecutionRun{
+		ID: "run_x", ExecutionID: "exec_x", AgentID: "ag_x", State: "delivered",
+	}); err != nil {
+		t.Fatalf("CreateExecutionRun: %v", err)
+	}
+
+	// Handler + control wires the DisconnectHook.
+	sseB := sse.New()
+	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	_ = control.New(st, h, sseB, log.New(io.Discard, "ctl: ", 0))
+
+	lis := bufconn.Listen(1024 * 1024)
+	gs := grpc.NewServer()
+	h.Register(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	// Connect the agent stream.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	agentClient := pb.NewAgentStreamClient(conn)
+	streamClient, err := agentClient.Stream(ctx)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	// Handshake.
+	env, err := streamClient.Recv()
+	if err != nil {
+		t.Fatalf("Recv challenge: %v", err)
+	}
+	ch := env.GetChallenge()
+	if ch == nil {
+		t.Fatalf("expected CHALLENGE, got %s", env.Kind)
+	}
+	sig := id.Sign(hsauth.BuildMsg(ch.Nonce, id.UUID, time.Now().Unix()))
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_AUTH_PROOF,
+		Payload: &pb.Envelope_AuthProof{AuthProof: &pb.AuthProof{
+			AgentUuid: id.UUID, Ts: time.Now().Unix(), Sig: sig,
+		}},
+	}); err != nil {
+		t.Fatalf("Send proof: %v", err)
+	}
+
+	// Wait for the server to process the handshake (agent marked connected).
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		a, err := st.Agent("ag_x")
+		if err == nil && a.State == "connected" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent not connected")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Close the stream — this triggers the DisconnectHook.
+	if err := streamClient.CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
+	}
+	// Drain to let the server side finish.
+	for {
+		if _, err := streamClient.Recv(); err != nil {
+			break
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify the run was marked interrupted.
+	runs, err := st.ListRunsForExecution("exec_x")
+	if err != nil {
+		t.Fatalf("ListRunsForExecution: %v", err)
+	}
+	if len(runs) != 1 || runs[0].State != "interrupted" {
+		t.Fatalf("run_x state = %q, want interrupted", runs[0].State)
+	}
+
+	// Verify the execution was finalized (interrupted counts as failure).
+	exec, err := st.GetExecution("exec_x")
+	if err != nil {
+		t.Fatalf("GetExecution: %v", err)
+	}
+	if exec.State != "failed" {
+		t.Fatalf("execution state = %q, want failed", exec.State)
 	}
 }

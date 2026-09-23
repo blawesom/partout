@@ -44,6 +44,11 @@ type Handler struct {
 	// execution id of the finished run. Control uses it to recompute the
 	// execution's aggregate state.
 	ResultHook func(executionID string)
+
+	// DisconnectHook, if set, is called when a session ends with the agent id.
+	// Control uses it to mark in-flight runs interrupted and recompute the
+	// affected execution aggregates (architecture §3.4).
+	DisconnectHook func(agentID string)
 }
 
 // NewHandler builds a stream handler.
@@ -186,6 +191,9 @@ func (h *Handler) Stream(stream pb.AgentStream_StreamServer) error {
 		}
 		if h.sse != nil {
 			h.sse.Emit("host.state", map[string]string{"agent_id": agent.ID, "state": "disconnected"})
+		}
+		if h.DisconnectHook != nil {
+			h.DisconnectHook(agent.ID)
 		}
 	}()
 

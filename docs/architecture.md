@@ -191,11 +191,11 @@ message Envelope {
 
 | Scenario | Behavior |
 |---|---|
-| Disconnect mid-command | run → `interrupted`; ad-hoc commands are **not** auto-replayed unless flagged `retryable`; task steps re-run convergently (idempotent by construction) |
-| Dispatch to offline agent | envelope queued with TTL; on reconnect agent pulls pending queue |
-| Server down, agent up | agent-side jobs keep running (agent clock); results spool (16 MB / 128 MB / 24 h); replay on reconnect |
-| Agent restart | spool reloaded from disk; pending `resume-after-reboot` continuation started first; stream re-hands-shake |
-| Result lost to spool overflow | run expires to `result_lost` after TTL; audited distinctly (never silently `succeeded`) |
+| Disconnect mid-command | ✅ run → `interrupted` (server marks it when the session ends); the in-flight process **keeps running** on the host, its output spools, and the run re-finalizes when the replayed result lands. Ad-hoc commands are **not** auto-replayed unless flagged `retryable`; task steps re-run convergently (idempotent by construction) |
+| Dispatch to offline agent | envelope queued with TTL; on reconnect agent pulls pending queue — **follow-up** (M0/M1 dispatch to an offline host returns `not_delivered`) |
+| Server down, agent up | ✅ in-flight runs keep running (agent clock); command output + result spool (16 MB mem / 128 MB disk / 24 h TTL, drop-oldest); replayed on reconnect |
+| Agent restart | ✅ spool reloaded from disk (orphaned runs replay partial output); pending `resume-after-reboot` continuation starts first (M3); stream re-hands-shake |
+| Run lost to spool TTL/overflow | run is dropped wholesale (its `.sp` log deleted); the server-side run stays `interrupted` — never silently `succeeded` |
 | Policy bundle mismatch | agent-side deny (see §5.3); alert + bundle refresh request |
 | Clock skew > 300 s | handshake rejected; remediation is NTP (see ops doc) |
 
@@ -557,15 +557,20 @@ group:webservers               # a saved group (named selector)
   dry-runs first and writes a per-host before/after journal (PRD §5.6).
 - **guardrail** — cached policy bundle (content-hashed), re-check per §5.3, staleness watcher.
 - **spool** — shared implementation: 16 MB mem → 128 MB disk → drop-oldest, 24 h max age
-  (PRD §9); spools event upload, command-result upload, and delivery acks; encrypted payloads
-  (secret materialization) stay encrypted at rest.
+  (PRD §9); per-run append-only log (length-prefixed proto envelope, fsync'd); a run is
+  drained only once its CommandResult is present, oldest-first. M1 spools command output +
+  result upload; event upload and delivery acks follow in later milestones. Encrypted
+  payloads (secret materialization) stay encrypted at rest.
 
 ### 6.2 Agent state on disk
 
 ```
 /var/lib/partout/agent/
 ├── identity.json          # keypairs + uuid, mode 0600 (PRD R3)
-├── spool.db               # SQLite: spool queues, job state, task resume marker
+├── spool/                 # offline spool: one append-only log per run (<run_id>.sp, 0600)
+│                          #   record = [4-byte BE length][proto Envelope], fsync'd.
+│                          #   M1: COMMAND_OUTPUT chunks + COMMAND_RESULT. Survives
+│                          #   agent restart (orphaned runs replay partial output).
 ├── policy-bundle.json     # last received bundle (rules only, no secrets)
 └── secret-cache/          # optional, only for secrets with offline_ttl>0; encrypted
 ```

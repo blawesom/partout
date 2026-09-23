@@ -34,7 +34,7 @@ off and the docs become the implementation contract.
 | Milestone | Status | Notes |
 |---|---|---|
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
-| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)**. Missing: Postgres, offline spool |
+| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. Missing: Postgres backend (deferred to a later phase) |
 | **M2 — Files & sessions** | ⬜ Not started | — |
 | **M3 — Automation** | ⬜ Not started | — |
 | **M4 — Governance** | ⬜ Not started | — |
@@ -77,12 +77,13 @@ Done:
 - ✅ **TLS/mTLS bootstrap** (see below): local root CA on first run, CA-signed agent leaves via CSR at enrollment, mTLS on the gRPC stream, REST over HTTPS
 - ✅ **Policy deny-list engine**: rule CRUD (REST `/api/v1/policies` + `partout ctl policy`), per-host dispatch gating (`deny` / `require_approval→deny` / allow), signed `Decision` on every command envelope, agent-side re-check (`internal/agent/guardrail`) — verifies signature, bundle version, re-evaluates rules over local action (any mismatch → deny). Empty rule set = default-allow (deny-list model). Requires no new flags/env vars.
 - ✅ **Host provisioning via fleet SSH** (architecture §3.5, §5.8): `partout ctl provision new --host user@host` drives a server-side 5-step state machine — `connect` (ssh-keyscan fingerprint + no-silent-TOFU gate: a new host key pauses the run at `key_confirm` until an admin confirms it) → `preflight` (OS/arch/init/sudo/disk) → `transfer` (scp the server binary) → `install` (base64-piped sudo bash: place binary, create `partout` user, write `agent.env` + systemd unit) → `wait-enroll` (agent self-enrolls with a one-time token). Uses only system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen` with hardened flags (`BatchMode`, `ConnectTimeout`, `StrictHostKeyChecking=yes`); no credentials are created, copied, or persisted (the operator's existing `~/.ssh` is the bootstrap channel). Non-systemd hosts hand off cleanly (terminal `handoff`, not an error). REST: `POST/GET /api/v1/provision-runs[/{id}]`, `POST .../key` (confirm|deny), `POST .../cancel`; SSE emits `provision.*` events. Tested with fake ssh binaries (unit + REST integration) **and** an opt-in live suite against real OpenSSH (`PARTOUT_LIVE_SSH=1 go test -tags live ./internal/sshutil/`) — the fakes encode ssh's intended semantics, so the live suite is what catches real-world divergence. Real-host (multi-machine) E2E through a fleet is still deferred. Policy action-class gating for provisioning lands with M4 (admin-only for now).
+- ✅ **Offline spool** (architecture §3.1.4, §3.4): when the stream to the server drops, in-flight commands **keep running** on the host; their output and result are buffered locally in a bounded per-run spool (16 MB mem → 128 MB disk → 24 h TTL → drop-oldest) and **replayed on reconnect** before new down traffic. The server marks in-flight runs `interrupted` on disconnect, then re-finalizes them when the replayed result arrives. Output chunks are appended idempotently keyed by `(run_id, chunk_seq)` and run-state updates are guarded, so replay is at-least-once and duplicate-safe. Spooled records are fsync'd per-run files under `<data dir>/spool/` and survive an agent restart (orphaned runs replay their partial output; the server shows the run as `interrupted`). Heartbeats report `spool_mem_bytes` / `spool_disk_bytes`.
 - ✅ **Embedded mode**: `--mode=embedded` runs the server + a co-located local agent in one process. The agent enrolls over loopback with a locally created one-time token (first boot only), reconnects with its persisted identity on restart, and works over plaintext or TLS (mTLS).
 
 Remaining:
-- [ ] Postgres backend (second store implementation)
-- [ ] Offline spool (16 MB mem / 128 MB disk / 24h TTL, replay on reconnect)
+- [ ] Postgres backend (second store implementation) — deferred to a later phase (after M2)
 - [ ] TLS cert rotation via the stream (v1.x) + optional revocation list
+- [ ] Dispatch to offline agents (server-side down-queue with TTL) — follow-up
 
 ### Not started
 
@@ -100,9 +101,10 @@ Remaining:
 4. ~~Build milestone M0 (spine).~~ ✅ Done
 5. ~~**Finish M1**: policy deny-list~~ ✅ Done (v0.2.0)
 6. ~~**Finish M1**: host provisioning (fleet SSH)~~ ✅ Done (see M1 Done list)
-7. **Finish M1**: Postgres backend, offline spool
+7. ~~**Finish M1**: offline spool~~ ✅ Done (see M1 Done list)
 8. **M2**: files & sessions
-9. **Web UI** (deferred V1 phase)
+9. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
+10. **Web UI** (deferred V1 phase)
 
 ## TLS / transport security (implemented)
 

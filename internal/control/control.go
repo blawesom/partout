@@ -38,6 +38,7 @@ func New(st *store.Store, h *stream.Handler, sse *sse.Broker, lg *log.Logger) *C
 	}
 	c := &Control{st: st, h: h, sse: sse, log: lg}
 	h.ResultHook = c.onRunFinished
+	h.DisconnectHook = c.onAgentDisconnect
 	return c
 }
 
@@ -338,6 +339,32 @@ func (c *Control) FinalizeExecution(execID string) error {
 func (c *Control) onRunFinished(execID string) {
 	if err := c.FinalizeExecution(execID); err != nil {
 		c.log.Printf("control: finalize %s: %v", execID, err)
+	}
+}
+
+// onAgentDisconnect implements stream.Handler.DisconnectHook (architecture
+// §3.4: "Disconnect mid-command → run → interrupted"). When an agent stream
+// ends, its in-flight runs (delivered/running) are marked interrupted and the
+// affected executions recompute their aggregate state. If the agent
+// reconnects and replays a spooled result, the run re-finalizes via
+// ResultHook and the execution aggregate converges to the true outcome.
+func (c *Control) onAgentDisconnect(agentID string) {
+	execs, err := c.st.InterruptAgentRuns(agentID)
+	if err != nil {
+		c.log.Printf("control: interrupt runs %s: %v", agentID, err)
+		return
+	}
+	if len(execs) == 0 {
+		return
+	}
+	c.audit("exec.interrupted", "", map[string]string{
+		"agent_id":   agentID,
+		"executions": strings.Join(execs, ","),
+	})
+	for _, e := range execs {
+		if err := c.FinalizeExecution(e); err != nil {
+			c.log.Printf("control: finalize %s: %v", e, err)
+		}
 	}
 }
 

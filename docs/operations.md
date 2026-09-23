@@ -211,12 +211,17 @@ versa. Rolling upgrades are safe in either order (server first is the standard p
 
 ### 4.4 Spool management
 
-- **Monitoring**: agent heartbeat includes spool usage (mem/disk/age); alert when >80 % of
-  disk limit (architecture §3.4).
-- **Spool full**: oldest entries are dropped (drop-oldest, PRD §9). If a command result is
-  lost, the run status shows `result_lost` in the audit (never silently `succeeded`).
-- **Mitigate persistent overflow**: increase `PARTOUT_SPOOL_DISK_MB` (default 128 MB) or
-  investigate why the agent can't flush (network path to server, server load).
+- **Location**: `<agent data dir>/spool/` — one append-only log per spooled run
+  (`<run_id>.sp`, mode 0600), plus in-memory hot tier.
+- **Limits** (architecture §3.4 defaults, not currently env-tunable): 16 MB mem →
+  128 MB disk → 24 h per-run TTL, drop-oldest.
+- **Monitoring**: agent heartbeat includes spool usage (`spool_mem_bytes`,
+  `spool_disk_bytes`); alert when disk usage grows toward the 128 MB cap.
+- **Spool full / TTL expired**: the oldest spooled run is dropped wholesale; the
+  server-side run stays `interrupted` with whatever output was already delivered
+  (never silently `succeeded`).
+- **Mitigate persistent overflow**: investigate why the agent can't flush (network
+  path to server, server load) or keep outages short (< 24 h).
 
 ### 4.5 Retention & disk
 
@@ -281,20 +286,21 @@ Partout observes **hosts**; you also need to observe the control plane:
 ### 6.3 Server down — agent behavior
 
 What happens (by design — PRD §6.2, architecture §3.4):
-- Agent-side jobs continue running on the agent's clock.
-- Results spool locally (16 MB / 128 MB / 24 h).
+- In-flight commands **keep running** on the host (the stream drop does not kill them).
+- Their output + result spool locally (16 MB mem / 128 MB disk / 24 h TTL).
 - No new commands can be dispatched (server is the dispatch origin).
-- On reconnect, the agent flushes its spool; previously dispatched commands that timed out
-  are no longer delivered (TTL expired); already-delivered but un-acked runs keep their
-  `running` state until a timeout fires server-side.
+- The server marks in-flight runs `interrupted` when the session ends.
+- On reconnect, the agent drains its spool first; the replayed results re-finalize the
+  `interrupted` runs to their true terminal state (at-least-once, deduped server-side).
 
 **Post-restore recovery**:
 1. Start the server; verify `GET /healthz` → 200.
-2. Agents reconnect automatically (backoff).
-3. Check the agent reconnect logs and the host list in the UI: all agents should show
-   `connected` within a few minutes.
-4. Review the job/task runs that were in-flight during the outage: some may be
-   `interrupted` and need re-run (tasks converge; ad-hoc commands may need a retry).
+2. Agents reconnect automatically (backoff) and drain their spools.
+3. Check the agent reconnect logs and the host list: all agents should show
+   `connected` within a few minutes; runs that were in-flight flip from `interrupted`
+   to their final state as replays land.
+4. Runs still `interrupted` after recovery (e.g. spool TTL/overflow dropped them) need a
+   manual re-dispatch.
 
 ### 6.4 Policy misconfiguration (lockout)
 
@@ -327,18 +333,18 @@ wrong predicate).
 
 ### 6.6 Spool full (agent-side)
 
-Symptom: agent drops entries; `result_lost` in the audit; jobs may fail closed if results
-are dropped before the server can see them.
+Symptom: spooled runs dropped wholesale (oldest first); their server-side runs stay
+`interrupted` instead of reaching a final state.
 
 ```
-1. On the host: check spool usage (agent heartbeat reports it; check disk:
-   ls -la /var/lib/partout/agent/spool.db /var/lib/partout/agent/*.db)
+1. On the host: check spool usage (agent heartbeat reports spool_mem_bytes /
+   spool_disk_bytes; check disk: ls -la /var/lib/partout/agent/spool/*.sp)
 2. Investigate: is the agent stuck in a loop producing output? Is the network path to
-   the server down? Increase the spool size (PARTOUT_SPOOL_DISK_MB).
-3. If the agent is producing more than it can flush: fix the command/task causing
-   large output; consider streaming output (it already streams — the issue is usually
-   the network or a large one-off dump).
-4. Monitor: set up an alert on spool usage >80%.
+   the server down? How long is the outage (24 h TTL per run)?
+3. If the agent is producing more than it can flush: fix the command causing large
+   output (streaming already chunks at 64 KiB — the issue is usually the network or a
+   huge one-off dump).
+4. Monitor: set up an alert on spool disk usage growing toward 128 MB.
 ```
 
 ### 6.7 Clock skew > 300 s (handshake rejection)
