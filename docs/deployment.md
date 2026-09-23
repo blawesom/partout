@@ -19,9 +19,12 @@ agent-side re-check (`internal/agent/guardrail`), and audit rows (`policy.create
 **What v0.3 adds (M1):** host provisioning over fleet SSH (PRD R17) —
 `partout ctl provision new --host user@host` drives a server-side 5-step run
 (connect + no-silent-TOFU `key_confirm` gate → preflight → transfer → install →
-wait-enroll). The server spawns the system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen`
-(`PARTOUT_SSH_DIR` overrides the SSH dir, default the service user's `$HOME/.ssh`;
-`PARTOUT_SERVER_HOST` sets the address written into the new agent's `agent.env`).
+wait-enroll). The server spawns the system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen`.
+`PARTOUT_SSH_DIR` (default the service user's `$HOME/.ssh`) selects the SSH dir and is
+passed to the binaries **explicitly** (`-F`, `UserKnownHostsFile`, `IdentityFile`); a
+non-default dir replaces the per-user `ssh_config`. `PARTOUT_SERVER_HOST` sets the address
+written into the new agent's `agent.env`. Preflight also probes host→server reachability
+(`/healthz`) so a firewall fails fast.
 New env vars: `PARTOUT_SSH_DIR`, `PARTOUT_SERVER_HOST`.
 **Not yet in v0.3:** Web UI, elevation, files & sessions, jobs/scheduling, Postgres
 backend, offline spool, secret store, MCP.
@@ -251,7 +254,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_TOKEN_OPERATOR` / `--operator-token` | *(empty)* | operator bearer token |
 | `PARTOUT_TOKEN_VIEWER` / `--viewer-token` | *(empty)* | viewer bearer token |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for output blobs / extern cache (M1+) — not used by the server in v0.1 |
-| `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout |
+| `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules |
 | `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning (the listen address `:8443` is not usable by remote agents) |
 
 RBAC: when no token is set the server runs in **single-user local mode** (no auth);
@@ -284,8 +287,13 @@ admin), `ca`. Global flags may be given before or after the subcommand.
 [--mode fresh|join]` starts a run; `get RUN_ID` shows state + per-step output; when a
 host key is new to `known_hosts` the run pauses at `key_confirm` until `key RUN_ID
 confirm|deny`; `cancel RUN_ID` aborts. States: `queued → connecting → key_confirm →
-preflight → transfer → install → enrolling → connected` (terminals `failed`/`handoff`/
-`cancelled`; `handoff` = non-systemd host, manual install).
+confirming → preflight → transferring → installing → enrolling → connected` (terminals
+`failed`/`handoff`/`cancelled`; `handoff` = non-systemd host, manual install).
+
+A duplicate/racing `confirm` returns **409** (`not_pending`), an unknown run **404**, and
+`cancel` on a finished run reports `noop` with the current state. The `key_confirm` gate
+lives in memory only: if the server restarts while a run is paused, a later `confirm`
+**fails the run** ("re-run provisioning") rather than silently doing nothing.
 
 ### 4.4 Planned — documented, **not wired** in v0.3
 

@@ -376,12 +376,17 @@ approval binds to the exact payload hash — a changed payload needs a new reque
 **Provision run** (PRD R17; steps in §3.5):
 
 ```
-run:  queued → connecting → key_confirm → preflight → transferring → installing
-      → starting → enrolling → connected
+run:  queued → connecting → key_confirm → confirming → preflight → transferring
+      → installing → enrolling → connected
       → failed | cancelled | handoff        (from any step; handoff is non-error)
 ```
 
 - `key_confirm` blocks on operator fingerprint confirmation (no timer in v1 **proposed**).
+  `confirming` is the brief transition between approval and preflight; a duplicate/racing
+  confirm is rejected with a conflict (never a panic).
+- Confirm state is **in-memory**: if the server restarts while a run is paused at
+  `key_confirm`, a subsequent confirm **fails the run** with a "re-run provisioning"
+  remediation (the paused state machine is gone).
 - `connected` additionally requires `RegisterAgent` + authenticated stream for the run's
   token; if enrollment doesn't complete within the wait window the run is `failed`
   (enrollment step), with the agent left installed — re-running picks up from *preflight*.
@@ -640,7 +645,7 @@ data set). One dialect abstraction (`internal/store`); no engine-specific querie
 | `audit_events` | append-only, all taxonomy kinds; no update/delete paths |
 | `policies`, `approval_requests`, `approvals` | control plane |
 | `principals` | local users (v1), roles `viewer|operator|admin`, hash+pepper of password |
-| `provision_runs` | per-run state, host alias, mode (`install|update|fresh`), per-step rows (kind, ts, bounded output excerpt), linked `agent_id` once enrolled; retention 90 d (audit keeps `provision` events) |
+| `provision_runs` | per-run state, host alias, mode (`fresh` or `join`, default `fresh`), per-step rows (kind, ts, bounded output excerpt), linked `agent_id` once enrolled; `key_line`/`token_hash` stored but never serialized; retention 90 d (audit keeps `provision` events) |
 
 ### 9.3 Retention sweeper
 
@@ -819,14 +824,15 @@ offline (server unreachable): default → step fails closed "secret unavailable"
 operator (CLI):  `partout ctl provision new --host web01`
 server:          RBAC: admin ✓ → policy: action=provision, target=web01 → allow
                  (or require_approval) → audit provision.requested
-step 1 connect:  ssh -o BatchMode=yes -o StrictHostKeyChecking=no
-                  -o UserKnownHostsFile=/dev/null web01 true
-                 → host key not in known_hosts → run → key_confirm (SSE)
+step 1 connect:  ssh-keyscan -t ed25519,ecdsa,rsa web01   (trusts nothing)
+                 → host key not in <PARTOUT_SSH_DIR>/known_hosts → run → key_confirm (SSE)
 operator (CLI):  `provision get <id>` shows fingerprint → confirm via
-                 `provision key <id> confirm`
-server:          fingerprint hashed → appended to known_hosts
+                 `provision key <id> confirm`   (duplicate confirm → 409)
+server:          fingerprint hashed → appended to <PARTOUT_SSH_DIR>/known_hosts
+                 → run → confirming
 step 2 preflight: ssh web01: os-release, arch, systemctl?, whoami + sudo -n true,
-                  free disk, curl -sI <server>/healthz, existing partout? → plan
+                  free disk, curl/wget <server>/healthz (host→server egress), existing
+                  partout? → plan; reach=no → fail with firewall remediation
 step 3 transfer: scp /usr/local/bin/partout web01:/tmp/partout-<sha12>
 step 4 install:  ssh web01 'sudo -n bash -s': verify sha256 → install -m0755
                   /usr/local/bin/partout → useradd partout → agent dir (0750) →
@@ -869,12 +875,19 @@ the operator's cluster manager owns availability, and the design keeps the serve
 - **Integration**: in-process server + **fake agent** over a real gRPC transport (test
   listener) — handshake, reconnect, spool replay, ack/timeout, policy mismatch deny;
   **dialect parity**: full migration + repository suite run against SQLite **and** Postgres.
+- **Live SSH** (`//go:build live`, `PARTOUT_LIVE_SSH=1`): `internal/sshutil` runs against a
+  **real sshd** (opt-in; manual CI job). This exists because fake ssh binaries implement
+  ssh's *intended* semantics and therefore cannot catch real-world divergence — notably
+  that OpenSSH resolves `~/.ssh` from the passwd database, not `$HOME`, which once made
+  `PARTOUT_SSH_DIR` silently non-functional.
+- **Provisioning** (implemented): fake-fleet unit tests (fingerprint gate, non-systemd
+  handoff, unreachable-server preflight, duplicate/racing confirm, restart-while-paused) +
+  a REST integration test through the live server. *Still to add:* byte-level assertion that
+  no SSH private-key material appears in logs/DB, and a multi-machine E2E fleet.
 - **Security properties** (regression-tested): no write endpoint reachable without a
-  principal; denied action never produces a `CommandEnvelope`; secret value absent from every
-  read API response and from spool bytes (byte-level assertion); privileged audit row always
-  full-fidelity; provisioning run unreachable by non-admins, unknown host key blocks until
-  confirmation, and no SSH private-key material appears in any log/DB byte (byte-level
-  assertion).
+  principal; denied action never produces a `CommandEnvelope`; privileged audit row always
+  full-fidelity; provisioning run unreachable by non-admins (RBAC admin-only), and an
+  unknown host key blocks the run until confirmation.
 - **E2E** (`test/e2e`, docker compose): server + 2 container agents on real distros;
   scenarios: enroll → facts <10 s → exec fan-out → cancel/timeout → task with `when` skip →
   job survives server restart → apply-updates dry-run journal → revoke cascade. Runs on CI for

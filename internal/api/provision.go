@@ -43,9 +43,9 @@ func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = "fresh"
 	}
-	if req.Mode != "fresh" && req.Mode != "join" && req.Mode != "install" && req.Mode != "update" {
+	if req.Mode != "fresh" && req.Mode != "join" {
 		writeError(w, http.StatusBadRequest, "bad_request",
-			"mode must be fresh, join, install, or update", nil)
+			"mode must be fresh or join", nil)
 		return
 	}
 	run, err := h.prov.Start(req.Host, req.Mode)

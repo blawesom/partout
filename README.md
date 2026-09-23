@@ -206,3 +206,48 @@ partout ctl policy delete pol_<id>
 (default-deny writes deferred to M2/M3 with the action-class taxonomy); `require_approval`
 evaluates as deny until M4; `requires_elevation` match field not wired (elevation is
 `none` in v1).
+
+## Host provisioning (implemented, v0.3)
+
+Boot a new agent over the operator's **existing fleet SSH** — no credentials are created,
+copied, or persisted; the operator's key material is the bootstrap channel (PRD R17,
+Decision 11). Driven by a server-side 5-step run:
+
+```bash
+partout ctl --server srv:8443 --token $ADMIN provision new --host deploy@web01
+partout ctl provision get prv_ab12cd34ef56      # watch state + per-step output
+partout ctl provision key prv_ab12cd34ef56 confirm   # if the host key is new
+partout ctl provision cancel prv_ab12cd34ef56
+```
+
+| Step | What happens |
+|---|---|
+| `connect` | `ssh-keyscan` captures the host key; **new keys pause the run** at `key_confirm` until an admin confirms the fingerprint (no silent TOFU) |
+| `preflight` | read-only: OS/arch/init/`sudo -n`/disk + **host→server reachability** (`/healthz`), so a firewall fails fast |
+| `transfer` | `scp` the server binary to `/tmp/partout-<sha12>` |
+| `install` | one `sudo -n bash -s` script: verify sha256, install the binary, create the `partout` user, write `/etc/partout/agent.env` + the systemd unit, `systemctl enable --now` |
+| `wait-enroll` | the agent self-enrolls with a short-TTL one-time token and flips to `connected` |
+
+States: `queued → connecting → key_confirm → confirming → preflight → transferring →
+installing → enrolling → connected`; terminals `failed` / `cancelled` / `handoff`
+(`handoff` = non-systemd host, with the manual recipe — not an error).
+
+**What the server runs:** only the system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen`, with
+`BatchMode=yes`, `ConnectTimeout=10s`, `ServerAliveInterval=15`, `StrictHostKeyChecking=yes`.
+`PARTOUT_SSH_DIR` (default `$HOME/.ssh`) is passed **explicitly** (`-F`, `UserKnownHostsFile`,
+`IdentityFile`) because OpenSSH resolves `~/.ssh` from the passwd database and ignores
+`$HOME`; a non-default dir replaces the per-user `ssh_config`.
+
+**REST:** `POST/GET /api/v1/provision-runs[/{id}]`, `POST .../key` (confirm|deny),
+`POST .../cancel`; SSE emits `provision.*`. **RBAC:** admin (viewer may read).
+`confirm` is idempotent-safe (duplicate/racing → **409**); unknown run → **404**.
+
+**Tested:** fake-fleet unit tests (fingerprint gate, non-systemd handoff, unreachable-server
+preflight, duplicate/racing confirm, restart-while-paused) + a REST integration test, plus an
+**opt-in live suite against real OpenSSH** (`PARTOUT_LIVE_SSH=1 go test -tags live
+./internal/sshutil/`) — the fakes encode ssh's *intended* semantics, so the live suite is what
+catches real-world divergence.
+
+**Deferred:** destructive `--mode fresh` wipe and the version-diff update check (the install
+is an idempotent in-place update for now); policy action-class gating (admin-only until M4);
+multi-machine fleet E2E.

@@ -46,6 +46,7 @@ Where everything lives (for backup/restore/troubleshooting):
 | Agent TLS | `/var/lib/partout/agent/tls/` (0700) | CA, CA-signed leaf (0644), private key (0600) — mTLS material *(v0.1, when `PARTOUT_TLS_CA` set)* |
 | Agent spool | `/var/lib/partout/agent/spool.db` | in-flight results, job state *(P)* |
 | Agent config | `/etc/partout/agent.env` | env vars |
+| Provision runs | DB `provision_runs` + `provision_steps` (v0.3) | per-run state + per-step excerpts; `key_line`/`token_hash` are never serialized over the API; captured in the DB backup |
 | Audit log | DB `audit_events` + optional exported sink | append-only, indefinitely retained (PRD §9) |
 | Agents | `systemctl status partout-agent` | logs in `journalctl -u partout-agent` |
 
@@ -99,8 +100,10 @@ Step-by-step bring-up, also referenced in deployment §6:
 - **Enroll / provision**: preferred (v0.3) — `partout ctl provision new --host user@host`
   (PRD R17): the server installs and starts the agent over the operator's existing fleet
   SSH; confirm the host-key fingerprint for hosts new to `known_hosts` (the run pauses at
-  `key_confirm` until an admin confirms). Re-provisioning an installed host updates the
-  binary (identity untouched); `--mode fresh` wipes agent state after revocation. Manual
+  `key_confirm` until an admin confirms). Re-provisioning an installed host replaces the
+  binary and unit and **keeps** the existing `identity.json` (idempotent in-place update).
+  To force a brand-new identity, remove `/var/lib/partout/agent/identity.json` on the host
+  first (the destructive `--mode fresh` wipe is not wired yet — architecture §3.5). Manual
   alternative: mint a short-TTL token → run enrollment on the host.
   Tags/roles assigned. Agent writes `identity.json` (0600); server marks `connected`.
 - **Tag / role / group**: done in the UI, API, or via an MCP tool. Groups are saved
@@ -264,11 +267,12 @@ Partout observes **hosts**; you also need to observe the control plane:
 
 ```
 1. DELETE /api/v1/agents/{old_id} → cascade-purges rows.
-2. On the (same or new) host: re-provision via `partout ctl provision new --host user@host
-   --mode fresh` (wipes the stale `identity.json`/spool so a new identity is generated —
-   architecture §3.5), or by hand:
-   install the binary, run `partout --mode=agent --server=... --token=par_enr_new`
-   (fresh token).
+2. On the (same or new) host: remove the stale agent state, then re-provision:
+   ssh <host> 'sudo rm -f /var/lib/partout/agent/identity.json'
+   partout ctl provision new --host user@host        # fresh identity is generated
+   (the destructive `--mode fresh` wipe is not wired yet, so remove identity.json
+   explicitly — architecture §3.5). Or by hand: install the binary and run
+   `partout --mode=agent --server=... --token=par_enr_new` (fresh token).
 3. Agent generates a new keypair; writes identity.json (0600); connects.
 4. Tag/role/group the host per your topology.
 5. Verify: facts visible; a test command succeeds; audit shows new enrollment event.
@@ -361,8 +365,10 @@ never connects.
 | Agent never connects | Wrong `PARTOUT_SERVER` URL / TLS / network block | Verify URL, check `curl -v`, verify firewall egress to port |
 | Agent TLS handshake fails | Missing/wrong `PARTOUT_TLS_CA`, or server leaf SAN doesn't match the address | Confirm `ca.crt` path on the host; add the address to `PARTOUT_TLS_SERVER_NAMES` and re-run the server; check agent log for cert errors |
 | Operator CLI can't reach server over HTTPS | `--ca-file` missing / wrong, or server plaintext | Use `--ca-file <ca.crt>`; or the server isn't running `--tls on` (switch to `http://`) |
-| Provision run failed at `preflight` | no sudo (`sudo -n` fails), non-systemd init, no host→server egress, disk full | follow the step's remediation text; fix on the host, re-run (idempotent) |
-| Provision run stuck at `key_confirm` | host key new to `known_hosts` | review the fingerprint in the UI, confirm (appends to `known_hosts`) |
+| Provision run failed at `preflight` | no sudo (`sudo -n` fails), non-systemd init, no host→server egress, disk full | follow the step's remediation text; fix on the host, re-run (idempotent). A `reach=no` failure means the host cannot open `<server>/healthz` — fix the firewall/NAT path |
+| Provision run stuck at `key_confirm` | host key new to `known_hosts` | review the fingerprint (`partout ctl provision get <id>`), then `partout ctl provision key <id> confirm` (appends to `known_hosts`) or `deny` |
+| `provision key ... confirm` returns 409 `not_pending` | the run already left `key_confirm` (duplicate submit, or another admin confirmed/denied) | re-`get` the run; nothing to do — confirm is idempotent-safe |
+| `provision key ... confirm` says "lost its state machine (server restart)" | the server restarted while the run was paused; the paused goroutine is gone | re-run `partout ctl provision new --host <host>` (the old run is marked `failed`) |
 | Provision `enrolling` timed out | agent installed but never enrolled (stale token, firewall to server) | `journalctl -u partout-agent` on the host; re-run the provision (install is idempotent) |
 | "handshake failed: clock skew" | Host clock drifted >300 s | Sync NTP, restart agent (runbook 6.7) |
 | "token expired" / "token consumed" | Token already used or TTL expired | Re-mint a fresh token (UI/API) |
