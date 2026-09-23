@@ -225,10 +225,13 @@ func (s *Spool) Append(runID string, env *pb.Envelope) error {
 }
 
 // Drain sends complete spooled runs (those with a CommandResult) to send,
-// oldest first. A run is removed only after all its records are sent
-// without error; on the first failed send the drain stops and the run (and
-// younger ones) are kept for the next attempt. Returns the number of
-// envelopes sent and the ids of fully drained runs.
+// oldest first. After a run's snapshot is sent without error, exactly the
+// records that were sent are removed — records appended to the run while the
+// send was in flight are kept for the next attempt (a run is normally
+// finished by the time it drains, but the spool does not rely on that). On
+// the first failed send the drain stops and the run (and younger ones) are
+// kept for the next attempt. Returns the number of envelopes sent and the
+// ids of fully drained runs.
 func (s *Spool) Drain(ctx context.Context, send func(ctx context.Context, env *pb.Envelope) error) (int, []string, error) {
 	sent := 0
 	var drained []string
@@ -254,23 +257,36 @@ func (s *Spool) Drain(ctx context.Context, send func(ctx context.Context, env *p
 			id = oid
 			break
 		}
-		s.mu.Unlock()
 		if id == "" {
+			s.mu.Unlock()
 			return sent, drained, nil
 		}
-		if len(recs) == 0 { // empty run with a result — cannot exist; drop
-			s.dropRun(id)
+		if len(recs) == 0 {
+			// Empty run with a result — cannot exist; drop it and move on.
+			s.dropLocked(id)
+			s.mu.Unlock()
 			drained = append(drained, id)
 			continue
 		}
+		s.mu.Unlock()
+
 		for _, rec := range recs {
 			if err := send(ctx, rec.env); err != nil {
 				return sent, drained, err
 			}
 			sent++
 		}
-		s.dropRun(id)
-		drained = append(drained, id)
+
+		// Remove exactly the records just sent. Anything appended while the
+		// drain was in flight stays queued; a run with nothing left is fully
+		// drained. Re-acquiring the lock (rather than using dropRun) keeps
+		// this atomic with respect to concurrent Append.
+		s.mu.Lock()
+		gone := s.dropPrefixLocked(id, len(recs))
+		s.mu.Unlock()
+		if gone {
+			drained = append(drained, id)
+		}
 	}
 }
 
@@ -378,8 +394,9 @@ func (s *Spool) openFileLocked(r *run) (*os.File, error) {
 	return f, nil
 }
 
-// snapshotLocked returns an ordered copy of a run's records (RAM tier:
-// copies of the in-memory records; disk tier: records read from the file).
+// snapshotLocked returns an ordered copy of a run's records (RAM tier: a
+// shallow copy of the record pointers, which are immutable once appended;
+// disk tier: records read from the file).
 func (s *Spool) snapshotLocked(r *run) ([]*record, error) {
 	if r.recs != nil {
 		out := make([]*record, len(r.recs))
@@ -389,12 +406,117 @@ func (s *Spool) snapshotLocked(r *run) ([]*record, error) {
 	return readSpoolFile(filepath.Join(s.cfg.Dir, r.id+".sp"))
 }
 
-// dropRun releases a run from the spool (file + memory). Lock-free entry:
-// takes the lock itself; safe to call concurrently.
-func (s *Spool) dropRun(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.dropLocked(id)
+// dropPrefixLocked removes the first n records of a run (those just sent by
+// Drain) and reports whether the run is now empty and was removed entirely.
+// Records appended after the drained snapshot are preserved. Callers hold s.mu.
+func (s *Spool) dropPrefixLocked(id string, n int) (gone bool) {
+	r, ok := s.runs[id]
+	if !ok {
+		return true
+	}
+	if r.recs != nil { // RAM tier
+		if n > len(r.recs) {
+			n = len(r.recs)
+		}
+		for _, rec := range r.recs[:n] {
+			r.memBytes -= rec.size
+			s.mem -= rec.size
+		}
+		rest := append([]*record(nil), r.recs[n:]...)
+		r.recs = rest
+		if len(rest) == 0 {
+			s.dropLocked(id)
+			return true
+		}
+		// The result may have been among the drained records; recompute so a
+		// later drain does not consider this run complete prematurely.
+		if n > 0 && r.hasResult {
+			r.hasResult = hasResultRecord(rest)
+		}
+		return false
+	}
+
+	// Disk tier: rewrite the file with the records after the drained prefix.
+	recs, err := readSpoolFile(filepath.Join(s.cfg.Dir, id+".sp"))
+	if err != nil {
+		// Unreadable: drop the run rather than wedge the spool.
+		s.dropLocked(id)
+		return true
+	}
+	removed := int64(0)
+	if n > len(recs) {
+		n = len(recs)
+	}
+	for _, rec := range recs[:n] {
+		removed += rec.size
+	}
+	rest := recs[n:]
+	if len(rest) == 0 {
+		s.dropLocked(id)
+		return true
+	}
+	if err := s.rewriteFileLocked(r, rest); err != nil {
+		s.dropLocked(id)
+		return true
+	}
+	r.diskBytes -= removed
+	s.disk -= removed
+	if n > 0 && r.hasResult {
+		r.hasResult = hasResultRecord(rest)
+	}
+	return false
+}
+
+// rewriteFileLocked atomically replaces a disk run's log with the given
+// records (temp file + rename), re-syncing the open append handle.
+func (s *Spool) rewriteFileLocked(r *run, recs []*record) error {
+	path := filepath.Join(s.cfg.Dir, r.id+".sp")
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	for _, rec := range recs {
+		enc, err := encode(rec.env)
+		if err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		if _, err := w.Write(enc); err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if r.file != nil {
+		_ = r.file.Close()
+		r.file = nil
+	}
+	return os.Rename(tmp, path)
+}
+
+// hasResultRecord reports whether the last record is a CommandResult.
+func hasResultRecord(recs []*record) bool {
+	if len(recs) == 0 {
+		return false
+	}
+	return recs[len(recs)-1].env.Kind == pb.EnvelopeKind_COMMAND_RESULT
 }
 
 // dropLocked removes a run and its file. No-op if the run is gone.

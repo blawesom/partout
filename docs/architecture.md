@@ -199,6 +199,14 @@ message Envelope {
 | Policy bundle mismatch | agent-side deny (see §5.3); alert + bundle refresh request |
 | Clock skew > 300 s | handshake rejected; remediation is NTP (see ops doc) |
 
+> **Known M1 limitation (fix in M3).** `interrupted` currently counts as a failure when
+> the execution aggregate is computed, so a disconnect momentarily reports the execution
+> as `failed` before the replayed result re-finalizes it to its true state. That is
+> tolerable for human-driven ad-hoc commands, but a job/task failure policy acting on the
+> transient state would wrongly retry or remediate. M3 must either keep the execution
+> `running` while any run is `interrupted` (with a bound to resolve stranded runs), or
+> model `interrupted` as its own execution state.
+
 ### 3.5 Host provisioning (PRD R17, C10; Decision 11)
 
 The server bootstraps the agent on a new host over the **operator's existing fleet SSH** —
@@ -267,10 +275,10 @@ events with a bounded output excerpt):
    (0750 `partout:partout`); write `/etc/partout/agent.env` (0640) with `PARTOUT_SERVER`, a
    fresh short-TTL one-time `PARTOUT_TOKEN`, and labels from the run; write the systemd
    unit (deployment §3.2); `systemctl daemon-reload`; `systemctl enable --now partout-agent`.
-   The script **never touches** an existing `identity.json`/`spool.db` (the install is
-   idempotent; a re-run overwrites the binary and unit, keeps agent state). The `fresh`
-   destructive path — explicit wipe of `identity.json`/spool.db for post-revocation
-   re-provisioning — is the next provisioning increment.
+   The script **never touches** existing agent state (`identity.json`, `tls/`, `spool/`;
+   the install is idempotent; a re-run overwrites the binary and unit, keeps agent state).
+   The `fresh` destructive path — explicit wipe of `identity.json` and `tls/` for
+   post-revocation re-provisioning — is the next provisioning increment.
 5. **wait-enroll** — server waits (≤ 60 s) for `RegisterAgent` with the run's token →
    `agent_id` linked to the run → `connected` once the stream authenticates.
 6. **handoff** (terminal, non-error): hosts the v1 server cannot install — unreachable,
@@ -287,8 +295,8 @@ remove the SSH dependency for upgrades entirely — noted in PRD Decision 11.)
 > on the run and in the audit trail, but the state machine does not yet branch on it — the
 > install script is idempotent (overwrites binary + unit, keeps `identity.json`), so a
 > re-run over an installed host acts as an in-place update. The `fresh` destructive path
-> (explicit wipe of `identity.json`/spool.db, per step 4 above) and the version-diff update
-> check are the next provisioning increments.
+> (explicit wipe of `identity.json` and `tls/`, per step 4 above) and the version-diff
+> update check are the next provisioning increments.
 
 **Security properties (regression-tested, §14):** `provision` is `admin`-only (RBAC). No run
 reads, copies, or logs private key material — step logs capture command lines with
@@ -539,8 +547,8 @@ group:webservers               # a saved group (named selector)
 - **fs** — atomic writes (temp + rename), stat, CAS edit (compare-and-swap on checksum),
   size caps, no symlink traversal across the transfer boundary (PRD §5.3).
 - **jobsched** — in-process cron on the agent's clock; stores resolved schedules + run state +
-  overlap locks in `spool.db`; overlap policy (allow/skip/replace) and failure retry-with-
-  backoff executed here; results spool offline.
+  overlap locks in agent-local state; overlap policy (allow/skip/replace) and failure
+  retry-with-backoff executed here; results spool offline.
 - **taskrun** — ordered step runner; each step checks-then-changes and reports
   `ok|changed|failed|skipped`; `when` evaluated agent-side against live facts;
   **reboot continuation**: before reboot the agent persists
@@ -558,9 +566,11 @@ group:webservers               # a saved group (named selector)
 - **guardrail** — cached policy bundle (content-hashed), re-check per §5.3, staleness watcher.
 - **spool** — shared implementation: 16 MB mem → 128 MB disk → drop-oldest, 24 h max age
   (PRD §9); per-run append-only log (length-prefixed proto envelope, fsync'd); a run is
-  drained only once its CommandResult is present, oldest-first. M1 spools command output +
-  result upload; event upload and delivery acks follow in later milestones. Encrypted
-  payloads (secret materialization) stay encrypted at rest.
+  drained only once its CommandResult is present, oldest-first, and only the records
+  actually sent are removed (records appended while a drain is in flight stay queued).
+  Opening the spool is fatal on failure — the agent never runs without offline buffering.
+  M1 spools command output + result upload; event upload and delivery acks follow in later
+  milestones. Encrypted payloads (secret materialization) stay encrypted at rest.
 
 ### 6.2 Agent state on disk
 
@@ -925,5 +935,5 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A15 | Capacity targets | §13 table |
 | A16 | Provisioning SSH | system `ssh`/`scp`; `BatchMode=yes`, `ConnectTimeout=10s`, `ServerAliveInterval=15`, `StrictHostKeyChecking=yes` after fingerprint gate; `PARTOUT_SSH_DIR` (default `$HOME/.ssh`) passed explicitly via `-F`/`UserKnownHostsFile`/`IdentityFile` (a `HOME` override is ignored by OpenSSH) | §3.5 |
 | A17 | Preflight checks | os-release, arch, systemd, `sudo -n true`, disk, host→server `/healthz`, existing install; remediation text on failure | §3.5 |
-| A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; `identity.json`/`spool.db` untouched unless `fresh` | §3.5 |
+| A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; agent state (`identity.json`, `tls/`, `spool/`) untouched unless `fresh` | §3.5 |
 | A19 | Manual handoff triggers | unreachable, non-systemd init, Docker-host, air-gapped; prints binary + one-line install with one-time token | §3.5 |

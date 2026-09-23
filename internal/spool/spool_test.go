@@ -2,6 +2,7 @@ package spool
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -383,3 +384,129 @@ func TestConcurrentAppend(t *testing.T) {
 		t.Fatalf("sent = %d, want 201", sent)
 	}
 }
+
+// TestDrainPreservesRecordsAppendedDuringSend verifies that a record appended
+// to a run while its snapshot is being sent is NOT dropped with the drained
+// prefix — the run stays queued until everything it holds has been sent.
+func TestDrainPreservesRecordsAppendedDuringSend(t *testing.T) {
+	s := makeTestSpool(t, Config{MemCap: 1 << 20, DiskCap: 1 << 20})
+	defer s.Close()
+
+	s.Append("run_x", makeOutput("run_x", 0, []byte("a")))
+	s.Append("run_x", makeResult("run_x", 0, "succeeded"))
+
+	// Append a trailing chunk from inside the send callback: it lands after
+	// the drain's snapshot was taken.
+	appended := false
+	sent, drained, err := s.Drain(context.Background(), func(ctx context.Context, env *pb.Envelope) error {
+		if !appended {
+			appended = true
+			s.Append("run_x", makeOutput("run_x", 1, []byte("late")))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(drained) != 0 {
+		t.Fatalf("run reported fully drained with a late record pending: %v", drained)
+	}
+	if sent != 2 {
+		t.Fatalf("sent = %d, want 2", sent)
+	}
+	if runs := s.Runs(); len(runs) != 1 || runs[0] != "run_x" {
+		t.Fatalf("Runs() = %v, want [run_x]", runs)
+	}
+
+	// The late record must still be spooled. Note it is a bare output chunk,
+	// so the run is no longer "complete"; re-append a result and drain again.
+	s.Append("run_x", makeResult("run_x", 0, "succeeded"))
+	sent, drained, err = s.Drain(context.Background(), func(ctx context.Context, env *pb.Envelope) error { return nil })
+	if err != nil {
+		t.Fatalf("second Drain: %v", err)
+	}
+	if sent != 2 || len(drained) != 1 {
+		t.Fatalf("second drain: sent=%d drained=%v, want 2/[run_x]", sent, drained)
+	}
+}
+
+// TestDrainPreservesLateRecordsOnDisk exercises the same guarantee for the
+// disk tier, where the drained prefix is removed by rewriting the log.
+func TestDrainPreservesLateRecordsOnDisk(t *testing.T) {
+	s := makeTestSpool(t, Config{MemCap: 1, DiskCap: 1 << 20}) // force spill
+	defer s.Close()
+
+	s.Append("run_d", makeOutput("run_d", 0, []byte("a")))
+	s.Append("run_d", makeResult("run_d", 0, "succeeded"))
+
+	appended := false
+	sent, _, err := s.Drain(context.Background(), func(ctx context.Context, env *pb.Envelope) error {
+		if !appended {
+			appended = true
+			s.Append("run_d", makeOutput("run_d", 1, []byte("late")))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if sent != 2 {
+		t.Fatalf("sent = %d, want 2", sent)
+	}
+	// The late chunk must survive the log rewrite.
+	if runs := s.Runs(); len(runs) != 1 || runs[0] != "run_d" {
+		t.Fatalf("Runs() = %v, want [run_d]", runs)
+	}
+}
+
+// TestPartialSendKeepsRunAndUsage documents the retry contract: when a send
+// fails mid-run, the drain stops and NOTHING is removed from the run, so the
+// already-sent prefix is re-sent on the next attempt (at-least-once; the
+// server dedupes by (run_id, chunk_seq)). Usage must therefore be unchanged.
+func TestPartialSendKeepsRunAndUsage(t *testing.T) {
+	s := makeTestSpool(t, Config{MemCap: 1, DiskCap: 1 << 20}) // force spill
+	defer s.Close()
+
+	s.Append("run_u", makeOutput("run_u", 0, []byte("aaaa")))
+	s.Append("run_u", makeOutput("run_u", 1, []byte("bbbb")))
+	s.Append("run_u", makeResult("run_u", 0, "succeeded"))
+
+	_, diskBefore := s.Usage()
+
+	calls := 0
+	_, drained, err := s.Drain(context.Background(), func(ctx context.Context, env *pb.Envelope) error {
+		calls++
+		if calls == 3 {
+			return errStop
+		}
+		return nil
+	})
+	if err != errStop {
+		t.Fatalf("Drain err = %v, want errStop", err)
+	}
+	if len(drained) != 0 {
+		t.Fatalf("drained = %v, want none (send failed mid-run)", drained)
+	}
+
+	memAfter, diskAfter := s.Usage()
+	if diskAfter != diskBefore {
+		t.Fatalf("disk usage changed on a failed drain: before=%d after=%d", diskBefore, diskAfter)
+	}
+	if memAfter != 0 {
+		t.Fatalf("mem usage = %d, want 0", memAfter)
+	}
+
+	// The whole run is retried and then fully drained.
+	sent, drained, err := s.Drain(context.Background(), func(ctx context.Context, env *pb.Envelope) error { return nil })
+	if err != nil {
+		t.Fatalf("second Drain: %v", err)
+	}
+	if sent != 3 || len(drained) != 1 {
+		t.Fatalf("second drain: sent=%d drained=%v, want 3/[run_u]", sent, drained)
+	}
+	if m, d := s.Usage(); m != 0 || d != 0 {
+		t.Fatalf("usage after full drain = (%d,%d), want (0,0)", m, d)
+	}
+}
+
+var errStop = errors.New("stop")

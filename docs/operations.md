@@ -44,7 +44,7 @@ Where everything lives (for backup/restore/troubleshooting):
 | Server UI/API | `http(s)://:8443` | main listener |
 | Agent identity | `/var/lib/partout/agent/identity.json` (0600) | **critical** — losing = re-enroll with new keypair |
 | Agent TLS | `/var/lib/partout/agent/tls/` (0700) | CA, CA-signed leaf (0644), private key (0600) — mTLS material *(v0.1, when `PARTOUT_TLS_CA` set)* |
-| Agent spool | `/var/lib/partout/agent/spool.db` | in-flight results, job state *(P)* |
+| Agent spool | `/var/lib/partout/agent/spool/` | in-flight output chunks + results buffered during a server outage (`<run_id>.sp`, 0600); replayed on reconnect |
 | Agent config | `/etc/partout/agent.env` | env vars |
 | Provision runs | DB `provision_runs` + `provision_steps` (v0.3) | per-run state + per-step excerpts; `key_line`/`token_hash` are never serialized over the API; captured in the DB backup |
 | Audit log | DB `audit_events` + optional exported sink | append-only, indefinitely retained (PRD §9) |
@@ -212,7 +212,11 @@ versa. Rolling upgrades are safe in either order (server first is the standard p
 ### 4.4 Spool management
 
 - **Location**: `<agent data dir>/spool/` — one append-only log per spooled run
-  (`<run_id>.sp`, mode 0600), plus in-memory hot tier.
+  (`<run_id>.sp`, mode 0600), plus in-memory hot tier. With the shipped units that is
+  `/var/lib/partout/agent/spool/` (`PARTOUT_DATA_DIR` is already the per-agent root).
+- **Startup**: if the spool directory cannot be created the agent exits with
+  `offline spool unavailable` — it never starts in a mode where a disconnect would
+  silently discard results.
 - **Limits** (architecture §3.4 defaults, not currently env-tunable): 16 MB mem →
   128 MB disk → 24 h per-run TTL, drop-oldest.
 - **Monitoring**: agent heartbeat includes spool usage (`spool_mem_bytes`,

@@ -62,6 +62,12 @@ type Agent struct {
 	spooledMu sync.Mutex
 	spooled   map[string]bool
 
+	// spoolErr is set if the offline spool could not be opened at startup.
+	// Run fails fast on it: silently running without a spool would drop every
+	// result produced during a disconnect — the exact failure the spool exists
+	// to prevent (architecture §3.4).
+	spoolErr error
+
 	// activeMu guards activeRunners.  Each entry is a context.CancelFunc for
 	// a run in progress.  The server CANCEL envelope uses this map to kill
 	// an in-flight process.
@@ -80,12 +86,14 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	if err := g.Load(); err != nil {
 		lg.Printf("agent: load guardrail: %v", err)
 	}
-	// Open the offline spool (architecture §3.4). A failure degrades to no
-	// spooling (output during a disconnect is lost), but does not stop the
-	// agent.
-	sp, err := spool.Open(spool.Config{Dir: filepath.Join(cfg.DataDir, "agent", "spool")})
-	if err != nil {
-		lg.Printf("agent: open spool: %v", err)
+	// Open the offline spool (architecture §3.4). The spool dir lives directly
+	// under the agent data dir (which is already the per-agent root, e.g.
+	// /var/lib/partout/agent). A failure is not swallowed: it is surfaced from
+	// Run so a broker data dir fails loudly at startup instead of silently
+	// losing output during disconnects.
+	sp, spoolErr := spool.Open(spool.Config{Dir: filepath.Join(cfg.DataDir, "spool")})
+	if spoolErr != nil {
+		lg.Printf("agent: open spool: %v", spoolErr)
 	}
 	return &Agent{
 		id:            id,
@@ -97,6 +105,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		policyDir:     policyDir,
 		guard:         g,
 		spool:         sp,
+		spoolErr:      spoolErr,
 		spooled:       make(map[string]bool),
 		activeRunners: make(map[string]context.CancelFunc),
 	}
@@ -112,6 +121,11 @@ func (a *Agent) GuardLoaded() bool {
 // connect → stream → reconnect loop with exponential backoff + jitter.
 func (a *Agent) Run(ctx context.Context) error {
 	a.rootCtx = ctx
+	// Fail fast: without a spool, in-flight runs cannot be replayed after a
+	// disconnect, so results would be silently lost (architecture §3.4).
+	if a.spoolErr != nil {
+		return fmt.Errorf("agent: offline spool unavailable: %w", a.spoolErr)
+	}
 	if a.spool != nil {
 		defer a.spool.Close()
 	}
@@ -154,20 +168,12 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 		return fmt.Errorf("agent: send facts: %w", err)
 	}
 	// Drain spooled output from any previous disconnection before processing
-	// new down traffic (architecture §3.1.4).  On the first connection (no
-	// spool) this is a fast no-op.
-	if a.spool != nil {
-		sent, _, err := a.spool.Drain(sessCtx, func(ctx context.Context, env *pb.Envelope) error {
-			a.sendMu.Lock()
-			defer a.sendMu.Unlock()
-			return a.streamC.Send(ctx, env)
-		})
-		if sent > 0 {
-			a.log.Printf("agent: drained %d spooled records", sent)
-		}
-		if err != nil {
-			return fmt.Errorf("agent: drain spool: %w", err)
-		}
+	// new down traffic (architecture §3.1.4). On the first connection this is
+	// a fast no-op. A drain failure keeps the spool for the next attempt and
+	// does not tear down the freshly established stream: the send error will
+	// surface on the envelope loop itself if the connection is really down.
+	if err := a.drainSpool(sessCtx); err != nil {
+		a.log.Printf("agent: drain spool: %v (kept for retry)", err)
 	}
 
 	hbTimer := time.NewTicker(heartbeatInterval)
@@ -322,6 +328,19 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
 	var seq atomic.Uint64
 	deliver := func(env *pb.Envelope) {
+		// No spool: nothing to fall back to. Log once per run rather than per
+		// envelope, and do not mark the run as spooled (Run already failed
+		// fast on a missing spool; this is defensive).
+		if a.spool == nil {
+			a.spooledMu.Lock()
+			warned := a.spooled[cmd.RunId]
+			a.spooled[cmd.RunId] = true
+			a.spooledMu.Unlock()
+			if !warned {
+				a.log.Printf("agent: no spool; dropping output for run %s", cmd.RunId)
+			}
+			return
+		}
 		a.spooledMu.Lock()
 		spooling := a.spooled[cmd.RunId]
 		a.spooledMu.Unlock()
@@ -339,10 +358,6 @@ func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
 			a.spooled[cmd.RunId] = true
 			a.spooledMu.Unlock()
 			a.log.Printf("agent: stream down; spooling output for run %s", cmd.RunId)
-		}
-		if a.spool == nil {
-			a.log.Printf("agent: spool append %s: no spool", cmd.RunId)
-			return
 		}
 		if err := a.spool.Append(cmd.RunId, env); err != nil {
 			a.log.Printf("agent: spool append %s: %v", cmd.RunId, err)

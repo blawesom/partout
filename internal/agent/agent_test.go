@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -324,22 +325,15 @@ func TestOfflineSpoolReplay(t *testing.T) {
 		out.Write(c.Data)
 	}
 	text := out.String()
-	if !strings.Contains(text, "line-1") {
-		t.Errorf("output missing line-1: %q", text)
+	// The complete output must be present in order: a gap in the middle is
+	// exactly the failure mode this feature exists to prevent, so assert the
+	// exact expected text rather than a subset/count.
+	want := ""
+	for i := 1; i <= 5; i++ {
+		want += fmt.Sprintf("line-%d\n", i)
 	}
-	// line-5 is produced ~2s after dispatch — after the server stopped — so
-	// its presence proves the process kept running through the outage.
-	if !strings.Contains(text, "line-5") {
-		t.Errorf("output missing line-5 (process should have survived the outage): %q", text)
-	}
-	lines := 0
-	for _, l := range strings.Split(text, "\n") {
-		if strings.HasPrefix(l, "line-") {
-			lines++
-		}
-	}
-	if lines < 4 {
-		t.Errorf("output has %d lines, want >= 4: %q", lines, text)
+	if text != want {
+		t.Errorf("output = %q, want %q (every line must survive the outage in order)", text, want)
 	}
 
 	// The execution aggregate must converge to succeeded after the replay.
@@ -356,4 +350,54 @@ func TestOfflineSpoolReplay(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("spool dir not empty after drain: %v", entries)
 	}
+}
+
+// TestAgentSpoolLayoutAndFailFast locks in two startup guarantees:
+//   - the spool lives directly under the agent data dir (which is already the
+//     per-agent root, e.g. /var/lib/partout/agent → <dir>/spool, not
+//     <dir>/agent/spool);
+//   - an unusable spool dir fails Run loudly instead of silently dropping
+//     every result produced during a disconnect.
+func TestAgentSpoolLayoutAndFailFast(t *testing.T) {
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+
+	t.Run("layout", func(t *testing.T) {
+		dataDir := t.TempDir()
+		ag := agent.New(id, &config.Config{
+			Mode: "agent", DataDir: dataDir, FactsInterval: 3600,
+		}, log.New(io.Discard, "agent: ", 0))
+		// Run only to open the spool, then stop immediately (no server).
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = ag.Run(ctx)
+
+		if _, err := os.Stat(filepath.Join(dataDir, "spool")); err != nil {
+			t.Errorf("expected spool at <datadir>/spool: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dataDir, "agent", "spool")); err == nil {
+			t.Errorf("unexpected nested spool at <datadir>/agent/spool")
+		}
+	})
+
+	t.Run("fail-fast on unwritable dir", func(t *testing.T) {
+		// A regular file where the data dir should be makes MkdirAll fail.
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ag := agent.New(id, &config.Config{
+			Mode: "agent", DataDir: file, FactsInterval: 3600,
+		}, log.New(io.Discard, "agent: ", 0))
+
+		err := ag.Run(context.Background())
+		if err == nil {
+			t.Fatal("Run succeeded without a usable spool; want a loud failure")
+		}
+		if !strings.Contains(err.Error(), "spool") {
+			t.Errorf("error %q does not mention the spool", err)
+		}
+	})
 }
