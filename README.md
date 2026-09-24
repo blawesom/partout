@@ -102,7 +102,7 @@ Remaining:
 5. ~~**Finish M1**: policy deny-list~~ ✅ Done (v0.2.0)
 6. ~~**Finish M1**: host provisioning (fleet SSH)~~ ✅ Done (see M1 Done list)
 7. ~~**Finish M1**: offline spool~~ ✅ Done (see M1 Done list)
-8. ⬜ **Review PRD R5** (marked `REVIEW` in `PRD.md`): confirm the spool requirement text — the original design said "SQLite `spool.db`", but the implementation uses per-run `.sp` logs (`<data dir>/spool/<run_id>.sp`). Decide if the PRD needs updating.
+8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
 9. **M2**: files & sessions
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
 11. **Web UI** (deferred V1 phase)
