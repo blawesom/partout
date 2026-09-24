@@ -169,10 +169,23 @@ func TestEmbeddedBootstrapAdmin(t *testing.T) {
 		t.Fatalf("generated password too short: %d chars", len(pw))
 	}
 
-	// The principal exists and verifies against the file's password.
-	st, err := store.New("sqlite:" + filepath.Join(tmp, "em.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
+	// The principal exists and verifies against the file's password. Retry
+	// the open: right after the embedded server shuts down the WAL lock may
+	// not be released yet (transient SQLITE_BUSY under CI load). (Note:
+	// parseDSN appends the WAL/FK pragma suffix, so the server's DB file is
+	// literally named "em.db&_pragma=..."; passing the plain path here makes
+	// parseDSN derive exactly that name.)
+	var st *store.Store
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, err = store.New("sqlite:" + filepath.Join(tmp, "em.db"))
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("open store: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	defer st.Close()
 	p, err := st.Principal("admin")
