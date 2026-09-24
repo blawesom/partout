@@ -43,6 +43,7 @@ type Config struct {
 	// RBAC bearer tokens; when none are set the server runs in single-user
 	// local mode (no auth).
 	AdminToken, OperatorToken, ViewerToken string
+	AdminPassword                          string // first-run admin bootstrap (PARTOUT_ADMIN_PASSWORD)
 
 	// ---- Agent ----
 	ServerURL     string // server host:port (gRPC + REST, single port)
@@ -79,6 +80,7 @@ func Load() (*Config, error) {
 		AdminToken:    os.Getenv("PARTOUT_TOKEN_ADMIN"),
 		OperatorToken: os.Getenv("PARTOUT_TOKEN_OPERATOR"),
 		ViewerToken:   os.Getenv("PARTOUT_TOKEN_VIEWER"),
+		AdminPassword: os.Getenv("PARTOUT_ADMIN_PASSWORD"),
 		ServerURL:     os.Getenv("PARTOUT_SERVER"),
 		Token:         os.Getenv("PARTOUT_TOKEN"),
 		FactsInterval: envInt("PARTOUT_FACTS_INTERVAL", 3600),

@@ -64,7 +64,7 @@ func (h *Handler) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "create policy", err)
 		return
 	}
-	actor := h.roleFor(r)
+	actor, _ := h.actorFor(r)
 	h.audit("policy.create", actor, map[string]string{
 		"policy_id": ruleID,
 		"name":      req.Name,
@@ -87,7 +87,8 @@ func (h *Handler) handleDeletePolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "policy not found", nil)
 		return
 	}
-	h.audit("policy.delete", h.roleFor(r), map[string]string{
+	deleteActor, _ := h.actorFor(r)
+	h.audit("policy.delete", deleteActor, map[string]string{
 		"policy_id": ruleID,
 	})
 	// Push the updated bundle to all connected agents.
@@ -95,19 +96,10 @@ func (h *Handler) handleDeletePolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": ruleID})
 }
 
-// roleFor returns the actor label from the request's bearer token.
-// Falls back to "local" when no tokens are configured.
+// roleFor returns the RBAC role string from the request's credentials
+// (session token or static token); "admin" in single-user local mode, "none"
+// when unauthenticated/invalid.
 func (h *Handler) roleFor(r *http.Request) string {
-	if !h.tokensConfigured() {
-		return "local"
-	}
-	tok := bearerToken(r)
-	if tok == "" {
-		return "unknown"
-	}
-	role := h.auth.roleFor(tok)
-	if role == roleNone {
-		return "token"
-	}
-	return role.String()
+	_, roleStr := h.actorFor(r)
+	return roleStr
 }

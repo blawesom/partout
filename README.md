@@ -37,7 +37,7 @@ off and the docs become the implementation contract.
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
 | **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) scheduled job steps run **without a policy decision or agent guardrail** (manual `task.run` is gated; scheduled is not — security fix required); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
-| **M4 — Governance** | ⬜ Not started | — |
+| **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap); remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
 
 ### M0 — Spine (complete)
@@ -155,7 +155,7 @@ Done so far:
 15. **Reboot continuation** (PRD §5.5 acceptance criterion) — the `reboot` step kind is a
     stub (returns "reboot requested"); no `resume-after-reboot` marker exists. Implement or
     explicitly defer in the PRD.
-16. **M4 — Governance**: approvals engine (`require_approval` currently fails closed with
+16. **M4 — Governance** (local user auth ✅ done — see below): approvals engine (`require_approval` currently fails closed with
     "not yet available — M4"), full policy surface, MCP server (R11) + write tools.
 17. **Observe layer (§6)** + MCP read tools.
 18. Postgres backend; then **M5 — Distribution & polish** (installers, cloud-init, Helm).
@@ -262,6 +262,33 @@ partout ctl policy delete pol_<id>
 (default-deny writes deferred to M2/M3 with the action-class taxonomy); `require_approval`
 evaluates as deny until M4; `requires_elevation` match field not wired (elevation is
 `none` in v1).
+
+## Local user auth (implemented, M4)
+
+Local username/password identity (PRD Decision 6) — no OIDC (post-v1). Replaces the
+"paste a static env token" model for the web UI while **keeping static env tokens working**
+(side-by-side; useful for the CLI and scripts).
+
+- **First-run bootstrap**: with no users, the server creates an `admin` user. The password
+  comes from `PARTOUT_ADMIN_PASSWORD` (or `--admin-password`); otherwise a random password is
+  generated, written to `<db dir>/admin_password.txt` (0600), and the operator is logged a
+  pointer to rotate it after first login.
+- **Passwords**: argon2id (OWASP params) + a fresh 16-byte pepper per password; stored as a
+  PHC string in the `principals` table. Verification is constant-time.
+- **Sessions**: `POST /api/v1/auth/login` returns a random 256-bit bearer token valid for
+  12 h (in-memory; a server restart logs everyone out). `GET /auth/me`,
+  `POST /auth/logout`, `POST /auth/password` (change own, re-issues a token).
+- **User management** (admin): `GET/POST /api/v1/users`, `PATCH/DELETE /api/v1/users/{name}`
+  (change role / disable / reset password / delete).
+- **Guards**: last-active-admin cannot be deleted/disabled/demoted; no self-delete or
+  self-modify; password change / reset / disable / role change invalidate that user's
+  sessions. Login failures and user ops are audited (`auth.*`, `user.*`); login returns a
+  generic 401 (no user enumeration).
+- **RBAC**: session tokens and static env tokens both authorize. Once any user exists the
+  single-user local-mode exemption is lifted — unauthenticated requests get 401 (public
+  routes like `/healthz` and `/api/v1/auth/login` stay open).
+- **CLI**: `partout ctl auth login --username U --password P` stores the session token at
+  `~/.config/partout/token`; `ctl` auto-uses it when no `--token`/`PARTOUT_CTL_TOKEN` is set.
 
 ## Host provisioning (implemented, v0.3)
 

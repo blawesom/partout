@@ -85,7 +85,8 @@ func (h *Handler) secretCreate(w http.ResponseWriter, r *http.Request) {
 	if body.Name == "" || body.Value == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "name and value required", nil)
 	}
-	sec, err := h.secretsMgr.CreateSecret(body.Name, body.Value, body.Selector, body.OfflineTTL, h.roleFor(r))
+	principal, _ := h.actorFor(r)
+	sec, err := h.secretsMgr.CreateSecret(body.Name, body.Value, body.Selector, body.OfflineTTL, principal)
 	if err != nil {
 		h.secretErr(w, err)
 		return
@@ -113,7 +114,8 @@ func (h *Handler) secretRotate(w http.ResponseWriter, r *http.Request) {
 	if body.Value == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "value required", nil)
 	}
-	v, err := h.secretsMgr.RotateSecret(r.PathValue("name"), body.Value, h.roleFor(r))
+	principal, _ := h.actorFor(r)
+	v, err := h.secretsMgr.RotateSecret(r.PathValue("name"), body.Value, principal)
 	if err != nil {
 		h.secretErr(w, err)
 		return
@@ -127,7 +129,8 @@ func (h *Handler) secretRevoke(w http.ResponseWriter, r *http.Request) {
 			"secrets feature disabled: no master key configured", nil)
 		return
 	}
-	if err := h.secretsMgr.RevokeSecret(r.PathValue("name"), h.roleFor(r)); err != nil {
+	principal, _ := h.actorFor(r)
+	if err := h.secretsMgr.RevokeSecret(r.PathValue("name"), principal); err != nil {
 		h.secretErr(w, err)
 		return
 	}
@@ -141,7 +144,8 @@ func (h *Handler) secretDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	if err := h.secretsMgr.DeleteSecret(name, h.roleFor(r)); err != nil {
+	principal, _ := h.actorFor(r)
+	if err := h.secretsMgr.DeleteSecret(name, principal); err != nil {
 		h.secretErr(w, err)
 		return
 	}

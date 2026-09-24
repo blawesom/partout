@@ -9,8 +9,9 @@ Day-2 guide for the Partout control plane: first-time setup, daily operations, b
 incident response, capacity, compliance, and a go-live checklist.
 
 > **v0.1 reality check** (binary tag `v0.1.0`):
-> - Auth is **bearer tokens** (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) or single-user local mode —
->   there is no `--create-admin` and no secret key store in v0.1.
+> - Auth is **local users** (login → session token; first-run admin bootstrap, M4) **plus**
+>   static bearer tokens (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) for CLI/scripts; with no
+>   users and no tokens, single-user local mode.
 > - Server state = the **SQLite file** (`PARTOUT_DB_PATH`, default `./partout.db`) plus
 >   `<db dir>/tls/` when `PARTOUT_TLS=on` and `<db dir>/identity/` (server Ed25519 signing key,
 >   v0.2). No output blobs, extern cache, spool, or Postgres yet.
@@ -35,7 +36,7 @@ Where everything lives (for backup/restore/troubleshooting):
 
 | Component | Path / Resource | Notes |
 |---|---|---|
-| Server DB | `PARTOUT_DB_PATH` (default `./partout.db`; `db.partout` when using `PARTOUT_DATA_DIR`) | SQLite WAL *(Postgres proposed)*; `<db dir>/tls/` holds the CA + server leaf when `PARTOUT_TLS=on` |
+| Server DB | `PARTOUT_DB_PATH` (default `./partout.db`; `db.partout` when using `PARTOUT_DATA_DIR`) | SQLite WAL *(Postgres proposed)*; `<db dir>/tls/` holds the CA + server leaf when `PARTOUT_TLS=on`; `<db dir>/admin_password.txt` (0600) holds the first-run admin password until rotated |
 | Server output blobs | `PARTOUT_DATA_DIR/output/` | large command output, session recordings; retention-bounded *(P)* |
 | Server extern cache | `PARTOUT_DATA_DIR/extern/` | EOL dates, vulnerability data *(P)* |
 | Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`) | **critical** — losing it = lost secret store (PRD §5.7) *(P)* |
@@ -60,9 +61,18 @@ Step-by-step bring-up, also referenced in deployment §6:
    systemd unit. `journalctl -u partout-server` should show a clean startup: DB ready,
    listener on the configured port. *(v0.1: no secret key; if `PARTOUT_TLS=on` the local CA
    bootstrap runs here.)*
-2. **Set RBAC bearer tokens** (v0.1): put `PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`,
-   `PARTOUT_TOKEN_VIEWER` in `/etc/partout/server.env` and restart. *(Proposed, not in v0.1:
-   `--create-admin=<name>` interactive password bootstrap.)*
+2. **Set up auth**: on first run the server bootstraps an `admin` local user
+   (M4 local-user auth, PRD Decision 6). Either pre-seed it with `PARTOUT_ADMIN_PASSWORD`
+   in `/env/partout/server.env`, or read the generated password from
+   `<db dir>/admin_password.txt` (0600), then **log in, change the password, and delete the
+   file**. Static env tokens (`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`,
+   `PARTOUT_TOKEN_VIEWER`) still work side-by-side for the CLI/scripts.
+   ```bash
+   # CLI login (stores the session token in ~/.config/partout/token):
+   partout ctl --server … auth login --username admin --password …
+   # or keep using a static token:
+   partout ctl --server … --token $ADMIN …
+   ```
 3. **Verify the health endpoint**: `curl -sf http://localhost:8443/healthz` should return 200.
    *(The Web UI is proposed — not in v0.1; use `partout ctl` or REST/SSE.)*
 4. **Create a baseline policy** *(v0.2 — implemented on tag `v0.2.0`; the engine is a

@@ -784,6 +784,14 @@ error bodies `{code, message, details}`.
 | POST   | `/api/v1/agents/enroll` | — | Agent enrollment (token auth; accepts `csr` in TLS mode) |
 | POST   | `/api/v1/agents/enroll` (TLS) | — | enroll returns `tls.{ca_cert,leaf_cert}` when the server has a CA |
 | GET    | `/api/v1/tls/ca` | admin | Fetch the server root CA (PEM, `{"cert": ...}`) |
+| POST   | `/api/v1/auth/login` | — | Local-user login → session bearer token (PRD Decision 6) |
+| GET    | `/api/v1/auth/me` | any | Current session identity (username, role, expiry) |
+| POST   | `/api/v1/auth/logout` | any | Invalidate this session token |
+| POST   | `/api/v1/auth/password` | any | Change own password (re-issues a token) |
+| GET    | `/api/v1/users` | admin | List local users (no password material) |
+| POST   | `/api/v1/users` | admin | Create a user (username, password, role) |
+| PATCH  | `/api/v1/users/:name` | admin | Change role / disable / reset password |
+| DELETE | `/api/v1/users/:name` | admin | Delete a user (last-admin + self-delete guarded) |
 | GET    | `/api/v1/files/stat` | viewer | File metadata (`stat` + sha256) |
 | GET    | `/api/v1/files/list` | viewer | Directory listing |
 | GET    | `/api/v1/files/download` | viewer | Chunked file download (resumable) |
@@ -888,8 +896,14 @@ Stable codes: `bad_request`, `not_found`, `conflict`, `unauthorized`, `forbidden
 
 #### RBAC
 
-Bearer tokens from env (`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`, `PARTOUT_TOKEN_VIEWER`).
-No tokens → single-user local mode (all requests allowed, single log warning).
+Two credential kinds, checked in order: (1) a **local-user session token** from
+`POST /api/v1/auth/login` (PRD Decision 6; argon2id + pepper in the `principals` table,
+12 h in-memory session), (2) **static env tokens**
+(`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`, `PARTOUT_TOKEN_VIEWER`). Once any user
+exists the single-user local mode is lifted and unauthenticated requests get 401; with no
+users and no tokens the server still runs in single-user local mode (all requests allowed,
+single log warning). First run bootstraps an `admin` user (`PARTOUT_ADMIN_PASSWORD` or a
+generated password in `<db dir>/admin_password.txt`).
 
 ### 10.2 SSE
 

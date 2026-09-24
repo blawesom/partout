@@ -34,10 +34,9 @@ func (h *Handler) RegisterTasks(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/playbooks", h.requireRole(roleOperator)(http.HandlerFunc(h.playbookCreate)))
 }
 
-// taskActor derives the requester identity.
+// taskActor derives the requester identity (username + role).
 func (h *Handler) taskActor(r *http.Request) (string, string) {
-	role := h.roleFor(r)
-	return role, role
+	return h.actorFor(r)
 }
 
 func (h *Handler) taskList(w http.ResponseWriter, r *http.Request) {

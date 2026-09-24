@@ -371,7 +371,14 @@ CREATE TABLE IF NOT EXISTS job_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_runs_agent ON job_runs(agent_id);
+CREATE TABLE IF NOT EXISTS principals (
+  username      TEXT PRIMARY KEY,
+  password_hash TEXT NOT NULL,  -- PHC argon2id string (per-user pepper inside)
+  role          TEXT NOT NULL CHECK (role IN ('viewer','operator','admin')),
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  created_unix  INTEGER NOT NULL
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 9
+const currentSchemaVersion = 10

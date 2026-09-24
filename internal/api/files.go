@@ -36,7 +36,8 @@ func (h *Handler) RegisterFiles(mux *http.ServeMux) {
 
 // fileActor derives the requester identity (RBAC role = principal).
 func (h *Handler) fileActor(r *http.Request) files.Actor {
-	return files.Actor{Principal: h.roleFor(r), Role: h.roleFor(r)}
+	principal, role := h.actorFor(r)
+	return files.Actor{Principal: principal, Role: role}
 }
 
 func (h *Handler) fileStat(w http.ResponseWriter, r *http.Request) {

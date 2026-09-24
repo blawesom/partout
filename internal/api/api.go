@@ -9,6 +9,7 @@ import (
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
+	serverauth "github.com/blawesom/partout/internal/server/auth"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
@@ -24,21 +25,23 @@ import (
 
 // Handler wraps the server-side resources and serves REST endpoints.
 type Handler struct {
-	st         *store.Store
-	ctrl       *control.Control
-	prov       *provision.Provisioner
-	files      *files.Controller
-	pkgs       *packages.Controller
-	tasks      *tasks.Controller
-	jobs       *jobs.Controller
-	sess       *sessions.Manager
-	secretsMgr *serversecrets.Manager
-	extdata    *externaldata.Refresher
-	sse        *sse.Broker
-	log        *log.Logger
-	router     http.Handler
-	auth       *auth
-	ca         *certutil.CA // TLS root CA; nil when the server runs in plaintext mode
+	st          *store.Store
+	ctrl        *control.Control
+	prov        *provision.Provisioner
+	files       *files.Controller
+	pkgs        *packages.Controller
+	tasks       *tasks.Controller
+	jobs        *jobs.Controller
+	sess        *sessions.Manager
+	secretsMgr  *serversecrets.Manager
+	extdata     *externaldata.Refresher
+	sse         *sse.Broker
+	log         *log.Logger
+	router      http.Handler
+	auth        *auth
+	authC       *serverauth.Controller // local user identity (PRD Decision 6); nil until set
+	usersActive bool                   // true once the principals table is non-empty
+	ca          *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
 }
 
 // New builds the REST handler and its router.
@@ -109,6 +112,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M3: external data status/refresh (PRD §6.3).
 	handler.RegisterExternalData(mux)
 
+	// Local user identity (PRD Decision 6): login/logout/me/password +
+	// admin user management.
+	handler.RegisterAuth(mux)
+
 	handler.router = mux
 	return handler
 }
@@ -153,6 +160,17 @@ func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }
 
 // SetExternalData installs the EOL/vuln refresher (M3, PRD §6.3).
 func (h *Handler) SetExternalData(r *externaldata.Refresher) { h.extdata = r }
+
+// SetAuthController installs the local-user identity controller (PRD
+// Decision 6). Session tokens become valid bearer credentials alongside
+// the static env tokens; once a user exists, unauthenticated requests are
+// rejected (the single-user local-mode exemption is lifted).
+func (h *Handler) SetAuthController(c *serverauth.Controller) {
+	h.authC = c
+	if active, err := h.st.AnyPrincipal(); err == nil {
+		h.usersActive = active
+	}
+}
 
 // Store returns the underlying store (for tests).
 func (h *Handler) Store() *store.Store {

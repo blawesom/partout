@@ -40,6 +40,7 @@ import (
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
 	pb "github.com/blawesom/partout/internal/proto"
+	serverauth "github.com/blawesom/partout/internal/server/auth"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
@@ -169,6 +170,35 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	h := stream.NewHandler(st, sseB, lg)
 	apiH := api.New(st, h, sseB, lg)
 	apiH.SetAuth(cfg.AdminToken, cfg.OperatorToken, cfg.ViewerToken)
+
+	// Local user identity (PRD Decision 6). First run (no principals):
+	// create the admin user. Password comes from PARTOUT_ADMIN_PASSWORD / --admin-password;
+	// otherwise a random password is generated, persisted to <db dir>/admin_password.txt
+	// (0600), and the operator is told to rotate it after first login.
+	authC := serverauth.New(st, lg)
+	if exists, _ := st.AnyPrincipal(); !exists {
+		pw := cfg.AdminPassword
+		var pwFile string
+		if pw == "" {
+			pw, err = serverauth.GeneratePassword()
+			if err != nil {
+				return fmt.Errorf("generate admin password: %w", err)
+			}
+			pwFile = filepath.Join(filepath.Dir(cfg.DBPath), "admin_password.txt")
+			if err := os.WriteFile(pwFile, []byte(pw+"\n"), 0o600); err != nil {
+				return fmt.Errorf("write admin password file: %w", err)
+			}
+		}
+		if err := authC.BootstrapAdmin("admin", pw); err != nil {
+			return fmt.Errorf("bootstrap admin: %w", err)
+		}
+		if pwFile != "" {
+			lg.Printf("FIRST RUN: admin user 'admin' created; initial password in %s (0600) — log in and change it, then delete the file", pwFile)
+		} else {
+			lg.Printf("FIRST RUN: admin user 'admin' created from PARTOUT_ADMIN_PASSWORD")
+		}
+	}
+	apiH.SetAuthController(authC)
 
 	// Load or create the server's Ed25519 identity (signs policy decisions
 	// and is published in policy bundles so agents can verify them).

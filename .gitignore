@@ -6,6 +6,7 @@
 *.db
 *.db-wal
 *.db-shm
+admin_password.txt
 *.test
 *.out
 coverage.*

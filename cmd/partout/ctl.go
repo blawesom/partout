@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -59,9 +60,20 @@ commands:
   sessions close <id>                       end a PTY session
   sessions list --agent A                   recent sessions
   sessions replay <id>                      replay recorded PTY chunks
+  auth login --username U [--password P]    log in; stores the session token
 `)
 	}
 	fs.Parse(reorderGlobalFlags(args))
+
+	// Token resolution: --token flag > PARTOUT_CTL_TOKEN env > saved session
+	// token from `ctl auth login` (~/.config/partout/token).
+	if *token == "" {
+		if tf, err := ctlTokenFile(); err == nil {
+			if b, err := os.ReadFile(tf); err == nil {
+				*token = strings.TrimSpace(string(b))
+			}
+		}
+	}
 
 	if *server == "" {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
@@ -136,6 +148,8 @@ commands:
 		c.cmdJobs(rest)
 	case "external-data":
 		c.cmdExternalData(rest)
+	case "auth":
+		c.cmdAuth(rest)
 	case "help", "-h", "--help":
 		fs.Usage()
 	default:
@@ -153,6 +167,51 @@ func (c *ctl) cmdCA() {
 		fatal(err)
 	}
 	fmt.Print(res.Cert)
+}
+
+// ctlTokenFile is where `ctl auth login` persists the session token
+// (~/.config/partout/token, 0600).
+func ctlTokenFile() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "partout", "token"), nil
+}
+
+// cmdAuth handles `ctl auth login` (PRD Decision 6).
+func (c *ctl) cmdAuth(args []string) {
+	if len(args) < 1 || args[0] != "login" {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl auth login --username U [--password P]")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("partout ctl auth login", flag.ExitOnError)
+	username := fs.String("username", "", "username (required)")
+	password := fs.String("password", envOr("PARTOUT_PASSWORD", ""), "password (or set PARTOUT_PASSWORD)")
+	fs.Parse(args[1:])
+	if *username == "" || *password == "" {
+		fmt.Fprintln(os.Stderr, "auth login: --username and --password (or PARTOUT_PASSWORD) are required")
+		os.Exit(2)
+	}
+	var res struct {
+		Token  string `json:"token"`
+		Role   string `json:"role"`
+		Expire int64  `json:"expires_unix"`
+	}
+	if err := c.do("POST", "/api/v1/auth/login",
+		map[string]string{"username": *username, "password": *password}, &res); err != nil {
+		fatal(err)
+	}
+	if tf, err := ctlTokenFile(); err == nil {
+		if err := os.MkdirAll(filepath.Dir(tf), 0o700); err == nil {
+			if err := os.WriteFile(tf, []byte(res.Token+"\n"), 0o600); err == nil {
+				fmt.Fprintf(os.Stderr, "logged in as %s (role %s); token saved to %s\n", *username, res.Role, tf)
+				return
+			}
+		}
+	}
+	// Could not persist; print the token for manual use.
+	fmt.Println(res.Token)
 }
 
 // ---- HTTP helpers -----------------------------------------------------------

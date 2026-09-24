@@ -12,10 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blawesom/partout/internal/config"
+	serverauth "github.com/blawesom/partout/internal/server/auth"
+	"github.com/blawesom/partout/internal/store"
 )
 
 // freePort returns a port that is free right now and confirmed bindable on
@@ -135,6 +138,52 @@ func TestEmbeddedFirstBoot(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(tmp, "agent", "identity.json")); err != nil {
 		t.Fatalf("agent identity not persisted: %v", err)
+	}
+}
+
+// TestEmbeddedBootstrapAdmin verifies first-run admin bootstrap: a generated
+// password is persisted to <db dir>/admin_password.txt (0600) and the admin
+// principal verifies against it.
+func TestEmbeddedBootstrapAdmin(t *testing.T) {
+	port := freePort(t)
+	tmp := t.TempDir()
+
+	if hostID := runEmbeddedOnce(t, port, tmp); hostID == "" {
+		t.Fatal("no host id returned")
+	}
+
+	pwPath := filepath.Join(tmp, "admin_password.txt")
+	info, err := os.Stat(pwPath)
+	if err != nil {
+		t.Fatalf("admin password file missing: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("admin password file mode = %o, want 600", perm)
+	}
+	pwBytes, err := os.ReadFile(pwPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pw := strings.TrimSpace(string(pwBytes))
+	if len(pw) < 8 {
+		t.Fatalf("generated password too short: %d chars", len(pw))
+	}
+
+	// The principal exists and verifies against the file's password.
+	st, err := store.New("sqlite:" + filepath.Join(tmp, "em.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	p, err := st.Principal("admin")
+	if err != nil || p == nil {
+		t.Fatalf("admin principal: %v %v", err, p)
+	}
+	if p.Role != "admin" {
+		t.Fatalf("admin role = %q", p.Role)
+	}
+	if !serverauth.VerifyPassword(p.PasswordHash, pw) {
+		t.Fatal("admin password file does not verify against stored hash")
 	}
 }
 

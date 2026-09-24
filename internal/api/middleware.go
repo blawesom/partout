@@ -1,8 +1,10 @@
 // RBAC middleware (PRD R10, arch §10.1). Roles: viewer < operator < admin.
 //
-// v1 uses bearer tokens from env (local users, no OIDC yet). If no tokens are
-// configured the server runs in single-user local mode (all requests allowed)
-// — the embedded/self-hosted single-operator case.
+// Credentials, in order: (1) a local-user session token (PRD Decision 6,
+// from POST /api/v1/auth/login), (2) static env bearer tokens. If no
+// users exist AND no tokens are configured the server runs in single-user
+// local mode (all requests allowed) — the embedded/self-hosted
+// single-operator case before any user is created.
 package api
 
 import (
@@ -35,6 +37,19 @@ func (r role) String() string {
 
 func (r role) atLeast(min role) bool { return r >= min }
 
+func roleFromString(s string) role {
+	switch s {
+	case "admin":
+		return roleAdmin
+	case "operator":
+		return roleOperator
+	case "viewer":
+		return roleViewer
+	default:
+		return roleNone
+	}
+}
+
 // auth holds the RBAC bearer tokens for the three roles.
 type auth struct {
 	admin    string
@@ -63,7 +78,13 @@ func (a *auth) roleFor(tok string) role {
 }
 
 // roleFromToken maps a bearer token to its role (roleNone if unknown).
+// Local-user session tokens are checked first, then static env tokens.
 func (h *Handler) roleFromToken(tok string) role {
+	if h.authC != nil {
+		if _, roleStr, ok := h.authC.RoleFor(tok); ok {
+			return roleFromString(roleStr)
+		}
+	}
 	if h.auth == nil {
 		return roleNone
 	}
@@ -75,14 +96,43 @@ func (h *Handler) tokensConfigured() bool {
 	return h.auth != nil && h.auth.configured()
 }
 
+// authRequired reports whether the API enforces authentication (any local
+// user exists, or static tokens are configured).
+func (h *Handler) authRequired() bool {
+	return h.tokensConfigured() || h.usersActive
+}
+
+// actorFor derives the (principal, role) audit label from the request:
+// session token → (username, role); static token → (role, role); local
+// mode → ("local", "admin"); unauthenticated → ("unknown", "none").
+func (h *Handler) actorFor(r *http.Request) (string, string) {
+	tok := bearerToken(r)
+	if tok != "" && h.authC != nil {
+		if u, roleStr, ok := h.authC.RoleFor(tok); ok {
+			return u, roleStr
+		}
+	}
+	if !h.authRequired() {
+		return "local", "admin"
+	}
+	if tok == "" {
+		return "unknown", "none"
+	}
+	role := h.roleFromToken(tok)
+	if role == roleNone {
+		return "unknown", "none"
+	}
+	return role.String(), role.String()
+}
+
 // requireRole wraps a handler with a minimum-role check.
 func (h *Handler) requireRole(min role) func(http.Handler) http.Handler {
 	var warnedOnce atomic.Bool
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !h.tokensConfigured() {
+			if !h.authRequired() {
 				if warnedOnce.CompareAndSwap(false, true) && h.log != nil {
-					h.log.Printf("api: no RBAC tokens configured; running in single-user local mode (all requests allowed)")
+					h.log.Printf("api: no RBAC tokens or local users configured; running in single-user local mode (all requests allowed)")
 				}
 				next.ServeHTTP(w, r)
 				return
@@ -94,6 +144,11 @@ func (h *Handler) requireRole(min role) func(http.Handler) http.Handler {
 				return
 			}
 			got := h.roleFromToken(tok)
+			if got == roleNone {
+				writeError(w, http.StatusUnauthorized, "unauthorized",
+					"invalid bearer token", nil)
+				return
+			}
 			if !got.atLeast(min) {
 				writeError(w, http.StatusForbidden, "forbidden",
 					"insufficient role (need "+min.String()+", got "+got.String()+")", nil)

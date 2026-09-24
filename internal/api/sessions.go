@@ -59,10 +59,11 @@ func (h *Handler) sessionOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "agent_id and cmd required", nil)
 		return
 	}
+	principal, role := h.actorFor(r)
 	req := sessions.OpenRequest{
 		AgentID: body.AgentID, Cmd: body.Cmd, Args: body.Args,
 		Cols: body.Cols, Rows: body.Rows, Record: body.Record,
-		Actor: h.roleFor(r), Role: h.roleFor(r),
+		Actor: principal, Role: role,
 	}
 	sess, err := h.sess.Open(r.Context(), req)
 	if err != nil {

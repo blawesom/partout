@@ -25,7 +25,8 @@ func (h *Handler) RegisterPackages(mux *http.ServeMux) {
 }
 
 func (h *Handler) pkgActor(r *http.Request) packages.Actor {
-	return packages.Actor{Principal: h.roleFor(r), Role: h.roleFor(r)}
+	principal, role := h.actorFor(r)
+	return packages.Actor{Principal: principal, Role: role}
 }
 
 // pkgUpdates lists available updates for a host.
