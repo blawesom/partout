@@ -26,8 +26,8 @@ import (
 
 	"github.com/blawesom/partout/internal/cryptoutil"
 	"github.com/blawesom/partout/internal/id"
-	selectorpkg "github.com/blawesom/partout/internal/selector"
 	pb "github.com/blawesom/partout/internal/proto"
+	selectorpkg "github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/store"
 )

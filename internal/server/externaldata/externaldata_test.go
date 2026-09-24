@@ -2,8 +2,8 @@ package externaldata
 
 import (
 	"context"
-	"log"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -108,13 +108,13 @@ func TestEOLStateFor(t *testing.T) {
 	}
 	defer st.Close()
 	now := time.Now()
-	eolSoon := now.AddDate(0, 3, 0).Format("2006-01-02") // 3 months out
+	eolSoon := now.AddDate(0, 3, 0).Format("2006-01-02")  // 3 months out
 	eolPast := now.AddDate(0, -3, 0).Format("2006-01-02") // 3 months ago
 	eolFar := now.AddDate(2, 0, 0).Format("2006-01-02")
 	rows := []store.EOLRow{
-		{Distro: "ubuntu", Cycle: "20.04", EOLDate: eolPast, FetchedAt: now.Unix()},       // ended
-		{Distro: "ubuntu", Cycle: "22.04", EOLDate: eolSoon, FetchedAt: now.Unix()},       // ending_soon
-		{Distro: "ubuntu", Cycle: "24.04", EOLDate: eolFar, FetchedAt: now.Unix()},        // supported
+		{Distro: "ubuntu", Cycle: "20.04", EOLDate: eolPast, FetchedAt: now.Unix()}, // ended
+		{Distro: "ubuntu", Cycle: "22.04", EOLDate: eolSoon, FetchedAt: now.Unix()}, // ending_soon
+		{Distro: "ubuntu", Cycle: "24.04", EOLDate: eolFar, FetchedAt: now.Unix()},  // supported
 		{Distro: "debian", Cycle: "12", EOLDate: eolFar,
 			ExtendedSupport: now.AddDate(2, 0, 0).Format("2006-01-02"), FetchedAt: now.Unix()},
 	}
@@ -152,7 +152,7 @@ func TestCorrelateOSV(t *testing.T) {
 		_, _ = io.ReadAll(r.Body) // discard request body
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"results":[{"vulns":[{"id":"DEBIAN-CVE-2026-0001"},{"id":"DEBIAN-CVE-2026-0002"}]}]}`)
-		
+
 	}))
 	t.Cleanup(srv.Close)
 

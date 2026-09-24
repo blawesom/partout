@@ -17,8 +17,8 @@ import (
 	"net/http"
 
 	"github.com/blawesom/partout/internal/id"
-	"github.com/blawesom/partout/internal/server/tasks"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -66,9 +66,9 @@ func (h *Handler) taskCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name        string             `json:"name"`
-		Description string             `json:"description"`
-		Steps       []store.TaskStep   `json:"steps"`
+		Name        string           `json:"name"`
+		Description string           `json:"description"`
+		Steps       []store.TaskStep `json:"steps"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
@@ -224,10 +224,10 @@ func (h *Handler) playbookList(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) playbookCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name       string `json:"name"`
-		TaskID     string `json:"task_id"`
-		TaskVersion int   `json:"task_version"`
-		Selector   string `json:"selector"`
+		Name        string `json:"name"`
+		TaskID      string `json:"task_id"`
+		TaskVersion int    `json:"task_version"`
+		Selector    string `json:"selector"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)

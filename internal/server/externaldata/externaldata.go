@@ -39,16 +39,16 @@ var eolDistros = []string{
 
 // distroAlias maps /etc/os-release IDs to endoflife.date project names.
 var distroAlias = map[string]string{
-	"debian":    "debian",
-	"ubuntu":    "ubuntu",
-	"rhel":      "rhel",
-	"alpine":    "alpine",
-	"rocky":     "rockylinux",
-	"alma":      "almalinux",
-	"fedora":    "fedora",
-	"centos":    "centos",
-	"ol":        "oraclelinux",
-	"opensuse":  "opensuse",
+	"debian":   "debian",
+	"ubuntu":   "ubuntu",
+	"rhel":     "rhel",
+	"alpine":   "alpine",
+	"rocky":    "rockylinux",
+	"alma":     "almalinux",
+	"fedora":   "fedora",
+	"centos":   "centos",
+	"ol":       "oraclelinux",
+	"opensuse": "opensuse",
 }
 
 // VulnTTL is how long a correlated vuln result is considered fresh.
@@ -256,7 +256,7 @@ type osvQuery struct {
 }
 
 type osvVulnEntry struct {
-	ID     string `json:"id"`
+	ID      string   `json:"id"`
 	Aliases []string `json:"aliases"`
 }
 
@@ -353,13 +353,13 @@ func (r *Refresher) fetchJSON(ctx context.Context, url string) ([]byte, error) {
 // API uses "null", a date string, or a bool for support windows depending on
 // the distro, so we parse into json.RawMessage and normalize.
 type eolCycle struct {
-	Cycle      string          `json:"cycle"`
-	Codename   string          `json:"codename"`
-	ReleaseDate string         `json:"releaseDate"`
-	EOL        json.RawMessage `json:"eol"`
-	Support    json.RawMessage `json:"support"`
-	Extended   json.RawMessage `json:"extendedSupport"`
-	Latest     string          `json:"latest"`
+	Cycle       string          `json:"cycle"`
+	Codename    string          `json:"codename"`
+	ReleaseDate string          `json:"releaseDate"`
+	EOL         json.RawMessage `json:"eol"`
+	Support     json.RawMessage `json:"support"`
+	Extended    json.RawMessage `json:"extendedSupport"`
+	Latest      string          `json:"latest"`
 }
 
 // eolDate normalizes an endoflife.date date field, which may be a date

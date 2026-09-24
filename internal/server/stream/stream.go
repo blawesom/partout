@@ -411,9 +411,9 @@ func (h *Handler) SendFileOp(agentID string, op *pb.FileOp) error {
 	h.filePending[op.OpId] = ch
 	h.fileMu.Unlock()
 	if err := sess.send(&pb.Envelope{
-		Kind:     pb.EnvelopeKind_FILE_OP,
-		CorrId:   op.OpId,
-		Payload:  &pb.Envelope_FileOp{FileOp: op},
+		Kind:    pb.EnvelopeKind_FILE_OP,
+		CorrId:  op.OpId,
+		Payload: &pb.Envelope_FileOp{FileOp: op},
 	}); err != nil {
 		h.fileMu.Lock()
 		delete(h.filePending, op.OpId)
@@ -472,9 +472,9 @@ func (h *Handler) SendPkgOp(agentID string, op *pb.PkgOp) error {
 	h.pkgPending[op.OpId] = ch
 	h.pkgMu.Unlock()
 	if err := sess.send(&pb.Envelope{
-		Kind:     pb.EnvelopeKind_PKG_OP,
-		CorrId:   op.OpId,
-		Payload:  &pb.Envelope_PkgOp{PkgOp: op},
+		Kind:    pb.EnvelopeKind_PKG_OP,
+		CorrId:  op.OpId,
+		Payload: &pb.Envelope_PkgOp{PkgOp: op},
 	}); err != nil {
 		h.pkgMu.Lock()
 		delete(h.pkgPending, op.OpId)

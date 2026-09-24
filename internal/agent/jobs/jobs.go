@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/robfig/cron/v3"
-	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/agent/task"
+	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/robfig/cron/v3"
 )
 
 // Assignment is the persisted per-host job schedule.
@@ -35,8 +35,8 @@ type Assignment struct {
 	TaskVersion      int32          `json:"task_version"`
 	Steps            []*pb.TaskStep `json:"steps"`
 	MaxRunS          int32          `json:"max_run_s"`
-	OverlapPolicy    string         `json:"overlap_policy"`    // allow | skip | replace
-	FailurePolicy    string         `json:"failure_policy"`    // no_retry | retry
+	OverlapPolicy    string         `json:"overlap_policy"` // allow | skip | replace
+	FailurePolicy    string         `json:"failure_policy"` // no_retry | retry
 	RetryBackoffS    int32          `json:"retry_backoff_s"`
 	SelectorSnapshot string         `json:"selector_snapshot"`
 	Version          int64          `json:"version"`

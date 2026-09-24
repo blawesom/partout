@@ -19,8 +19,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/blawesom/partout/internal/server/files"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/files"
 )
 
 // RegisterFiles wires the file REST routes. Routes return 503 until

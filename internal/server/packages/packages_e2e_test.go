@@ -1,12 +1,12 @@
 package packages_test
 
 import (
-	"strings"
 	"context"
 	"encoding/base64"
 	"io"
 	"log"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,16 +93,16 @@ func newBufconnTest(t *testing.T) (*store.Store, *packages.Controller, *grpc.Cli
 
 	// Fake agent: handle PKG_OP, respond with canned data.
 	fakeInstalled := map[string]string{
-		"coreutils":   "9.4-1",
-		"bash":        "5.2.21",
-		"gzip":        "1.13",
-		"python3.12":  "3.12.3",
+		"coreutils":  "9.4-1",
+		"bash":       "5.2.21",
+		"gzip":       "1.13",
+		"python3.12": "3.12.3",
 	}
 	fakeAvailable := map[string]string{
-		"coreutils":   "9.4-2ubuntu1",
-		"bash":        "5.2.21-2",
-		"gzip":        "1.13-1",
-		"python3.12":  "3.12.3-1ubuntu0.5",
+		"coreutils":  "9.4-2ubuntu1",
+		"bash":       "5.2.21-2",
+		"gzip":       "1.13-1",
+		"python3.12": "3.12.3-1ubuntu0.5",
 	}
 	done := make(chan struct{})
 	go func() {

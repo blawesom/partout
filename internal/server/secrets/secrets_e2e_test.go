@@ -128,6 +128,18 @@ func startServer(t *testing.T) *env {
 		}
 	}()
 
+	// Wait for the server to register the session. Handshake completion and
+	// session registration are asynchronous, so returning before this point
+	// lets a fast Materialize race the registration and fail with
+	// "no active session" under load.
+	deadline := time.Now().Add(5 * time.Second)
+	for h.AgentSession("ag_sec") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("agent session not registered within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	return &env{st: st, mgr: mgr, agent: id, cache: cache, cacheDir: secDir, cancel: cancel}
 }
 

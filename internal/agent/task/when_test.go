@@ -4,16 +4,16 @@ import "testing"
 
 func TestWhenEval(t *testing.T) {
 	facts := map[string]string{
-		"host.distro":           "ubuntu",
-		"host.distro_version":   "24.04",
-		"host.os":               "linux",
-		"host.arch":             "amd64",
-		"partout.agent_uuid":    "test-uuid",
+		"host.distro":         "ubuntu",
+		"host.distro_version": "24.04",
+		"host.os":             "linux",
+		"host.arch":           "amd64",
+		"partout.agent_uuid":  "test-uuid",
 	}
 	tests := []struct {
-		expr  string
-		want  bool
-		err   bool
+		expr string
+		want bool
+		err  bool
 	}{
 		// Basic comparisons.
 		{`host.distro == 'ubuntu'`, true, false},
@@ -41,7 +41,7 @@ func TestWhenEval(t *testing.T) {
 		{"", true, false},
 		// Error cases.
 		{`host.distro == "ubuntu"`, true, false}, // double-quote string is ok
-		{`bad_func('x')`, false, true},            // unknown identifier
+		{`bad_func('x')`, false, true},           // unknown identifier
 	}
 	for _, tc := range tests {
 		w := NewWhenEvaluator(facts)
@@ -64,9 +64,9 @@ func TestWhenFileExists(t *testing.T) {
 		return p == "/tmp/partout"
 	})
 	tests := []struct {
-		expr  string
-		want  bool
-		err   bool
+		expr string
+		want bool
+		err  bool
 	}{
 		{`file.exists('/tmp/partout')`, true, false},
 		{`file.exists('/nonexistent')`, false, false},

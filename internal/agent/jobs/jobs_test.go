@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/agent/task"
+	pb "github.com/blawesom/partout/internal/proto"
 )
 
 // TestSchedulerApplyAndPersist verifies that a job assignment is applied,
@@ -19,7 +19,7 @@ func TestSchedulerApplyAndPersist(t *testing.T) {
 	a := &Assignment{
 		JobID: "job_1", Name: "test job", Cron: "*/5 * * * *",
 		Timezone: "UTC", TaskID: "task_1", TaskVersion: 1,
-		Steps: []*pb.TaskStep{{Kind: "command", Name: "echo", Command: "echo"}},
+		Steps:         []*pb.TaskStep{{Kind: "command", Name: "echo", Command: "echo"}},
 		OverlapPolicy: "skip", FailurePolicy: "no_retry",
 	}
 	if err := s.Apply(a); err != nil {

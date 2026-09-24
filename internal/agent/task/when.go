@@ -77,7 +77,7 @@ const (
 	tkString tokType = iota
 	tkNumber
 	tkIdent
-	tkOp      // ==, !=
+	tkOp // ==, !=
 	tkIn
 	tkNot
 	tkAnd
@@ -121,7 +121,7 @@ func tokenize(expr string) ([]token, error) {
 			raw := expr[start:j]
 			toks = append(toks, token{typ: tkString, val: unescape(raw), text: raw})
 			i = j + 1
-		case c == '(' :
+		case c == '(':
 			toks = append(toks, token{typ: tkLParen, text: "("})
 			i++
 		case c == ')':

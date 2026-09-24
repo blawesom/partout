@@ -19,12 +19,12 @@ import (
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/agent/guardrail"
+	"github.com/blawesom/partout/internal/agent/jobs"
 	pkg "github.com/blawesom/partout/internal/agent/pkg"
 	agentsecrets "github.com/blawesom/partout/internal/agent/secrets"
-	"github.com/blawesom/partout/internal/agent/task"
-	"github.com/blawesom/partout/internal/agent/jobs"
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
+	"github.com/blawesom/partout/internal/agent/task"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/spool"
@@ -823,7 +823,6 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 	a.sendFileOpResult(res)
 }
 
-
 // ---------------------------------------------------------------------------
 // Package operations (PRD §5.6)
 // ---------------------------------------------------------------------------
@@ -983,13 +982,13 @@ func (a *Agent) execTaskRun(run *pb.TaskRun) {
 func (a *Agent) sendTaskResult(runID, state, errMsg string, steps []*pb.TaskStepResult) {
 	a.sendMu.Lock()
 	err := a.streamC.Send(context.Background(), &pb.Envelope{
-		Kind:    pb.EnvelopeKind_TASK_RUN_RESULT,
-		CorrId:  runID,
+		Kind:   pb.EnvelopeKind_TASK_RUN_RESULT,
+		CorrId: runID,
 		Payload: &pb.Envelope_TaskRunResult{TaskRunResult: &pb.TaskRunResult{
-			RunId:  runID,
-			State:  state,
-			Error:  errMsg,
-			Steps:  steps,
+			RunId: runID,
+			State: state,
+			Error: errMsg,
+			Steps: steps,
 		}},
 	})
 	a.sendMu.Unlock()
@@ -1002,18 +1001,18 @@ func (a *Agent) sendTaskResult(runID, state, errMsg string, steps []*pb.TaskStep
 func (a *Agent) sendJobResult(r *jobs.Report) {
 	a.sendMu.Lock()
 	err := a.streamC.Send(context.Background(), &pb.Envelope{
-		Kind:    pb.EnvelopeKind_JOB_RUN_RESULT,
-		CorrId:  r.RunID,
+		Kind:   pb.EnvelopeKind_JOB_RUN_RESULT,
+		CorrId: r.RunID,
 		Payload: &pb.Envelope_JobRunResult{JobRunResult: &pb.JobRunResult{
-			RunId:      r.RunID,
-			JobId:      r.JobID,
-			State:      r.State,
-			Error:      r.Error,
+			RunId:       r.RunID,
+			JobId:       r.JobID,
+			State:       r.State,
+			Error:       r.Error,
 			ScheduledAt: r.ScheduledAt,
-			StartedAt:  r.StartedAt,
-			FinishedAt: r.FinishedAt,
-			Trigger:    r.Trigger,
-			RetryOf:    r.RetryOf,
+			StartedAt:   r.StartedAt,
+			FinishedAt:  r.FinishedAt,
+			Trigger:     r.Trigger,
+			RetryOf:     r.RetryOf,
 		}},
 	})
 	a.sendMu.Unlock()
@@ -1021,7 +1020,6 @@ func (a *Agent) sendJobResult(r *jobs.Report) {
 		a.log.Printf("agent: job result %s send failed: %v", r.RunID, err)
 	}
 }
-
 
 // jaToAssignment converts a proto JobAssignment to the agent's local type.
 func jaToAssignment(ja *pb.JobAssignment) *jobs.Assignment {

@@ -9,15 +9,15 @@ import (
 
 // EOLRow is one distro release cycle's end-of-support dates (endoflife.date).
 type EOLRow struct {
-	Distro           string
-	Cycle            string
-	Codename         string
-	ReleaseDate      string
-	EOLDate          string
-	SupportDate      string
-	ExtendedSupport  string
-	Latest           string
-	FetchedAt        int64
+	Distro          string
+	Cycle           string
+	Codename        string
+	ReleaseDate     string
+	EOLDate         string
+	SupportDate     string
+	ExtendedSupport string
+	Latest          string
+	FetchedAt       int64
 }
 
 // VulnRow is one cached vulnerability affecting (package, ecosystem, version).

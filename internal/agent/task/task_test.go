@@ -127,7 +127,7 @@ func TestRunnerSkipped(t *testing.T) {
 	run := &pb.TaskRun{
 		Steps: []*pb.TaskStep{
 			{Kind: "command", Command: "true", When: "host.distro == 'debian'"}, // skipped
-			{Kind: "command", Command: "true"},                                 // runs
+			{Kind: "command", Command: "true"},                                  // runs
 		},
 	}
 	res := r.Run(context.Background(), run)

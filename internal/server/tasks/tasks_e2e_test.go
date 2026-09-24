@@ -2,8 +2,8 @@ package tasks_test
 
 import (
 	"context"
-	"encoding/json"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log"
 	"net"
@@ -16,8 +16,8 @@ import (
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/hsauth"
-	"github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/identity"
+	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/server/tasks"
@@ -114,8 +114,8 @@ func newBufconnTest(t *testing.T) (*store.Store, *tasks.Controller, func()) {
 				})
 			}
 			if err := s.Send(&pb.Envelope{
-				Kind:    pb.EnvelopeKind_TASK_RUN_RESULT,
-				CorrId:  run.RunId,
+				Kind:   pb.EnvelopeKind_TASK_RUN_RESULT,
+				CorrId: run.RunId,
 				Payload: &pb.Envelope_TaskRunResult{TaskRunResult: &pb.TaskRunResult{
 					RunId: run.RunId, State: "succeeded", Steps: steps,
 				}},

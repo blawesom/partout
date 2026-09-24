@@ -22,10 +22,10 @@ import (
 
 // Controller manages scheduled jobs.
 type Controller struct {
-	st    *store.Store
-	h     *stream.Handler
-	sse   *sse.Broker
-	log   *log.Logger
+	st  *store.Store
+	h   *stream.Handler
+	sse *sse.Broker
+	log *log.Logger
 }
 
 // New builds a Controller.
@@ -46,8 +46,8 @@ type Job struct {
 	Timezone      string `json:"timezone"` // IANA tz (default UTC)
 	Selector      string `json:"selector"`
 	MaxRunS       int    `json:"max_run_s"`
-	OverlapPolicy string `json:"overlap_policy"`   // allow | skip | replace (default skip)
-	FailurePolicy string `json:"failure_policy"`   // no_retry | retry
+	OverlapPolicy string `json:"overlap_policy"` // allow | skip | replace (default skip)
+	FailurePolicy string `json:"failure_policy"` // no_retry | retry
 	RetryBackoffS int    `json:"retry_backoff_s"`
 	Enabled       bool   `json:"enabled"`
 }
@@ -191,7 +191,9 @@ func (c *Controller) Delete(ctx context.Context, jobID string) error {
 	assignments, _ := c.st.JobAssignmentsForJob(jobID)
 	for _, a := range assignments {
 		_ = c.st.UnassignJob(jobID, a.AgentID)
-		if c.h != nil { _ = c.h.SendJobUnassign(a.AgentID, jobID) }
+		if c.h != nil {
+			_ = c.h.SendJobUnassign(a.AgentID, jobID)
+		}
 	}
 	if err := c.st.DeleteJob(jobID); err != nil {
 		return fmt.Errorf("jobs: delete: %w", err)

@@ -112,8 +112,8 @@ func startFilesServer(t *testing.T) (*store.Store, *files.Controller, *grpc.Clie
 				res = &pb.FileOpResult{OpId: op.OpId, Code: 500, Error: err.Error()}
 			}
 			if err := s.Send(&pb.Envelope{
-				Kind:   pb.EnvelopeKind_FILE_OP_RESULT,
-				CorrId: op.OpId,
+				Kind:    pb.EnvelopeKind_FILE_OP_RESULT,
+				CorrId:  op.OpId,
 				Payload: &pb.Envelope_FileOpResult{FileOpResult: res},
 			}); err != nil {
 				return

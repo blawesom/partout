@@ -315,9 +315,9 @@ func TestFilesActionsInsert(t *testing.T) {
 	db, _ := setupTestDB(t)
 	seedAgent(db, "a1")
 	fa := FileAction{
-		ID:      "fa1", AgentID: "a1", Op: "upload",
+		ID: "fa1", AgentID: "a1", Op: "upload",
 		Path: "/tmp/test", Actor: "op", State: "ok",
-		Size:  sql.NullInt64{Int64: 1234, Valid: true}, SHA256: "abc", Code: 0,
+		Size: sql.NullInt64{Int64: 1234, Valid: true}, SHA256: "abc", Code: 0,
 		Created: time.Now().Unix(),
 	}
 	if err := db.InsertFileAction(fa); err != nil {

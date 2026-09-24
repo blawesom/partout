@@ -18,8 +18,8 @@ import (
 
 // Executor carries dependencies for all step kinds.
 type Executor struct {
-	mu         sync.RWMutex
-	facts      map[string]string
+	mu    sync.RWMutex
+	facts map[string]string
 	// secrets resolves a secret ref to its plaintext value.
 	secrets    func(ref string, version int64) (string, error)
 	fileExists func(path string) bool

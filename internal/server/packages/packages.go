@@ -170,7 +170,7 @@ func (c *Controller) Apply(ctx context.Context, agentID string, actor Actor, fil
 		opName = "dry_run"
 	}
 	op := &pb.PkgOp{
-		OpId:     id.New("pko"), Kind: pb.PkgOpKind_PKG_APPLY,
+		OpId: id.New("pko"), Kind: pb.PkgOpKind_PKG_APPLY,
 		Packages: filterPkgs, DryRun: dryRun,
 	}
 
@@ -213,7 +213,7 @@ func (c *Controller) Apply(ctx context.Context, agentID string, actor Actor, fil
 		actionID, status, res.DryRunSummary,
 		beforeJSON, afterJSON, res.AppliedCount, res.Error,
 	)
-		action.Status = status
+	action.Status = status
 	action.DrySummary = res.DryRunSummary
 	action.BeforeJSON = beforeJSON
 	action.AfterJSON = afterJSON

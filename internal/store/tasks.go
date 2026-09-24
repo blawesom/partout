@@ -194,23 +194,23 @@ func DecodeTaskSteps(stepsJSON string) ([]TaskStep, error) {
 // in task_versions.steps_json. `When` is a constrained fact expression
 // (not free-form code); a false guard yields state "skipped".
 type TaskStep struct {
-	Kind     string         `json:"kind"`                // command|file|package|service|user|group|template|assert|reboot
-	Name     string         `json:"name,omitempty"`      // display name
-	When     string         `json:"when,omitempty"`      // constrained fact expression
-	Command  string         `json:"command,omitempty"`   // for kind=command
-	Args     []string       `json:"args,omitempty"`      // for kind=command
-	Env      map[string]string `json:"env,omitempty"`    // for kind=command
-	Path     string         `json:"path,omitempty"`      // for kind=file|template
-	Content  string         `json:"content,omitempty"`   // for kind=file
-	Template string         `json:"template,omitempty"`  // for kind=template
-	Vars     map[string]string `json:"vars,omitempty"`   // for kind=template
-	Mode     string         `json:"mode,omitempty"`      // for kind=file
-	Package  string         `json:"package,omitempty"`   // for kind=package
-	State    string         `json:"state,omitempty"`     // for kind=package|service|user|group (installed|absent, running|stopped)
-	Service  string         `json:"service,omitempty"`   // for kind=service
-	User     string         `json:"user,omitempty"`      // for kind=user
-	Group    string         `json:"group,omitempty"`     // for kind=group
-	Expr     string         `json:"expr,omitempty"`      // for kind=assert (fact expression)
+	Kind     string            `json:"kind"`               // command|file|package|service|user|group|template|assert|reboot
+	Name     string            `json:"name,omitempty"`     // display name
+	When     string            `json:"when,omitempty"`     // constrained fact expression
+	Command  string            `json:"command,omitempty"`  // for kind=command
+	Args     []string          `json:"args,omitempty"`     // for kind=command
+	Env      map[string]string `json:"env,omitempty"`      // for kind=command
+	Path     string            `json:"path,omitempty"`     // for kind=file|template
+	Content  string            `json:"content,omitempty"`  // for kind=file
+	Template string            `json:"template,omitempty"` // for kind=template
+	Vars     map[string]string `json:"vars,omitempty"`     // for kind=template
+	Mode     string            `json:"mode,omitempty"`     // for kind=file
+	Package  string            `json:"package,omitempty"`  // for kind=package
+	State    string            `json:"state,omitempty"`    // for kind=package|service|user|group (installed|absent, running|stopped)
+	Service  string            `json:"service,omitempty"`  // for kind=service
+	User     string            `json:"user,omitempty"`     // for kind=user
+	Group    string            `json:"group,omitempty"`    // for kind=group
+	Expr     string            `json:"expr,omitempty"`     // for kind=assert (fact expression)
 }
 
 // --- task runs ---

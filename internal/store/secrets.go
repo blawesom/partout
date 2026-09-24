@@ -23,23 +23,23 @@ type Secret struct {
 
 // SecretVersion is one ciphertext under the secret's HKDF-derived key.
 type SecretVersion struct {
-	ID        string
-	SecretID  string
-	Version   int64
+	ID         string
+	SecretID   string
+	Version    int64
 	Ciphertext []byte
-	Created   int64
-	Revoked   bool
+	Created    int64
+	Revoked    bool
 }
 
 // SecretBinding records that a run materialized a specific version on a host
 // (PRD §5.7: "audit records which version was used").
 type SecretBinding struct {
-	ID      string
+	ID       string
 	SecretID string
-	Version int64
-	AgentID string
-	Ref     string // task-run / execution id that declared the secret
-	Ts      int64
+	Version  int64
+	AgentID  string
+	Ref      string // task-run / execution id that declared the secret
+	Ts       int64
 }
 
 // CreateSecret inserts a secret and its first version (v1).

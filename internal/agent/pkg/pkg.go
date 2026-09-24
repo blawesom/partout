@@ -28,25 +28,25 @@ import (
 
 // PkgUpdate is one package's update status.
 type PkgUpdate struct {
-	Name         string
-	Installed    string
-	Available    string
-	VulnCount    int64
-	MaxSeverity  string
-	IsSecurity   bool
+	Name        string
+	Installed   string
+	Available   string
+	VulnCount   int64
+	MaxSeverity string
+	IsSecurity  bool
 }
 
 // PkgResult is the agent's full package operation result.
 type PkgResult struct {
-	Code            int32
-	Error           string
-	Updates         []PkgUpdate
-	Before          []PkgUpdate
-	After           []PkgUpdate
-	DryRunSummary   string
-	AppliedCount    int64
-	SkippedCount    int64
-	Applied         bool
+	Code          int32
+	Error         string
+	Updates       []PkgUpdate
+	Before        []PkgUpdate
+	After         []PkgUpdate
+	DryRunSummary string
+	AppliedCount  int64
+	SkippedCount  int64
+	Applied       bool
 }
 
 // Backend is the agent-side package-management interface.

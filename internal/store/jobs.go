@@ -15,9 +15,9 @@ type Job struct {
 	Name          string `json:"name"`
 	TaskID        string `json:"task_id"`
 	TaskVersion   int    `json:"task_version"`
-	Cron          string `json:"cron"`        // cron expression (5 fields) or @daily/@weekly/@monthly
-	Selector      string `json:"selector"`    // host selector
-	MaxRunSeconds int    `json:"max_run_s"`   // per-run deadline (0 = 30 min)
+	Cron          string `json:"cron"`      // cron expression (5 fields) or @daily/@weekly/@monthly
+	Selector      string `json:"selector"`  // host selector
+	MaxRunSeconds int    `json:"max_run_s"` // per-run deadline (0 = 30 min)
 	Enabled       bool   `json:"enabled"`
 	Created       int64  `json:"created"`
 	Updated       int64  `json:"updated"`
@@ -25,10 +25,10 @@ type Job struct {
 
 // JobAssignment binds a job to one agent (host).
 type JobAssignment struct {
-	JobID       string `json:"job_id"`
-	AgentID     string `json:"agent_id"`
-	AssignedAt  int64  `json:"assigned_at"`
-	LastRunAt   int64  `json:"last_run_at"`
+	JobID        string `json:"job_id"`
+	AgentID      string `json:"agent_id"`
+	AssignedAt   int64  `json:"assigned_at"`
+	LastRunAt    int64  `json:"last_run_at"`
 	LastRunState string `json:"last_run_state"`
 }
 
@@ -42,7 +42,7 @@ type JobRun struct {
 	ScheduledAt int64  `json:"scheduled_at"`
 	StartedAt   int64  `json:"started_at"`
 	FinishedAt  int64  `json:"finished_at"`
-	State       string `json:"state"` // pending, running, succeeded, failed, timeout
+	State       string `json:"state"`   // pending, running, succeeded, failed, timeout
 	Trigger     string `json:"trigger"` // cron, manual, resume
 	Error       string `json:"error"`
 }

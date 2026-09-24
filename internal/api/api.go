@@ -9,24 +9,24 @@ import (
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
-	"github.com/blawesom/partout/internal/server/files"
-	"github.com/blawesom/partout/internal/server/packages"
-	"github.com/blawesom/partout/internal/server/jobs"
-	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/externaldata"
-	serversecrets "github.com/blawesom/partout/internal/server/secrets"
+	"github.com/blawesom/partout/internal/server/files"
+	"github.com/blawesom/partout/internal/server/jobs"
+	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/provision"
+	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/server/stream"
+	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
 
 // Handler wraps the server-side resources and serves REST endpoints.
 type Handler struct {
-	st     *store.Store
-	ctrl   *control.Control
-	prov   *provision.Provisioner
+	st         *store.Store
+	ctrl       *control.Control
+	prov       *provision.Provisioner
 	files      *files.Controller
 	pkgs       *packages.Controller
 	tasks      *tasks.Controller
@@ -35,10 +35,10 @@ type Handler struct {
 	secretsMgr *serversecrets.Manager
 	extdata    *externaldata.Refresher
 	sse        *sse.Broker
-	log    *log.Logger
-	router http.Handler
-	auth   *auth
-	ca     *certutil.CA // TLS root CA; nil when the server runs in plaintext mode
+	log        *log.Logger
+	router     http.Handler
+	auth       *auth
+	ca         *certutil.CA // TLS root CA; nil when the server runs in plaintext mode
 }
 
 // New builds the REST handler and its router.

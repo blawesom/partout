@@ -206,4 +206,3 @@ func (c *Controller) audit(agentID, runID string, actor Actor, state string, app
 		})
 	}
 }
-

@@ -20,8 +20,8 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
-	"github.com/blawesom/partout/internal/server/stream"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -310,12 +310,12 @@ func (c *Controller) signDecision(opID string, d policy.Decision, actorRole stri
 		sig = policy.SignDecision(c.ident.Priv, opID, version, d.Effect, d.MatchedRules, actorRole)
 	}
 	return &pb.Decision{
-		RunId:        opID,
+		RunId:         opID,
 		BundleVersion: version,
-		Effect:       d.Effect,
-		MatchedRules: d.MatchedRules,
-		Sig:          sig,
-		ActorRole:    actorRole,
+		Effect:        d.Effect,
+		MatchedRules:  d.MatchedRules,
+		Sig:           sig,
+		ActorRole:     actorRole,
 	}
 }
 
@@ -372,13 +372,13 @@ func (c *Controller) audit(agentID, opName, path, opID string, actor Actor, stat
 	}
 	// Audit event (append-only, PRD §7: full-fidelity audit).
 	payload, _ := json.Marshal(map[string]any{
-		"op":      opName,
-		"path":    path,
-		"op_id":   opID,
-		"state":   state,
-		"size":    size,
-		"sha256":  sha,
-		"error":   errMsg,
+		"op":     opName,
+		"path":   path,
+		"op_id":  opID,
+		"state":  state,
+		"size":   size,
+		"sha256": sha,
+		"error":  errMsg,
 	})
 	_ = c.st.AppendAudit(store.AuditEvent{
 		TS: time.Now().Unix(), Kind: "file", Actor: actor.Principal,
