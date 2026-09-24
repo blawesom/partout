@@ -561,6 +561,10 @@ Rule (one declarative object, stored in `policies`):
   re-saved from the server to re-authorize.
 - REST: `GET/POST /api/v1/jobs`, `GET/PUT/DELETE /api/v1/jobs/:id`, `GET /jobs/:id/runs`,
   `POST /jobs/:id/run`, `GET /jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
+- **Selector edits reconcile assignments**: `PUT /jobs/:id` re-resolves the selector and
+  **unassigns** (store + `JOB_UNASSIGN`) every host that no longer matches, so a narrowed
+  selector stops those hosts from firing with a stale signed decision. A selector that
+  resolves to zero hosts is rejected (the write is refused, existing assignments stand).
 
 ### 5.6 Audit
 

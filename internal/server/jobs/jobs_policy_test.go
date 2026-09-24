@@ -29,13 +29,14 @@ import (
 // jobPolicyHarness builds a store + stream handler + bufconn fake agent that
 // captures JobAssignment/TaskRun down-envelopes, plus a server identity.
 type jobPolicyHarness struct {
-	st        *store.Store
-	h         *stream.Handler
-	ctrl      *jobs.Controller
-	srvIdent  *certutil.ServerIdentity
-	cleanup   func()
-	jobAssign chan *pb.JobAssignment
-	taskRuns  chan *pb.TaskRun
+	st          *store.Store
+	h           *stream.Handler
+	ctrl        *jobs.Controller
+	srvIdent    *certutil.ServerIdentity
+	cleanup     func()
+	jobAssign   chan *pb.JobAssignment
+	jobUnassign chan string
+	taskRuns    chan *pb.TaskRun
 }
 
 // ctrlPub returns the server's Ed25519 public key (verifies Decisions).
@@ -104,6 +105,7 @@ func newJobPolicyHarness(t *testing.T) *jobPolicyHarness {
 	}
 
 	jobAssign := make(chan *pb.JobAssignment, 8)
+	jobUnassign := make(chan string, 8)
 	taskRuns := make(chan *pb.TaskRun, 8)
 	go func() {
 		for {
@@ -113,6 +115,9 @@ func newJobPolicyHarness(t *testing.T) *jobPolicyHarness {
 			}
 			if ja := down.GetJobAssign(); ja != nil {
 				jobAssign <- ja
+			}
+			if ju := down.GetJobUnassign(); ju != nil {
+				jobUnassign <- ju.GetJobId()
 			}
 			if tr := down.GetTaskRun(); tr != nil {
 				taskRuns <- tr
@@ -146,8 +151,9 @@ func newJobPolicyHarness(t *testing.T) *jobPolicyHarness {
 			gs.Stop()
 			st.Close()
 		},
-		jobAssign: jobAssign,
-		taskRuns:  taskRuns,
+		jobAssign:   jobAssign,
+		jobUnassign: jobUnassign,
+		taskRuns:    taskRuns,
 	}
 }
 
@@ -375,4 +381,94 @@ func TestJobRunNowAllowedDispatchesSignedDecision(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("no TaskRun dispatched")
 	}
+}
+
+// TestJobUpdateNoMatchingSelectorRejected verifies a selector that resolves to
+// no hosts is rejected outright by the policy gate (pre-existing resolver
+// semantics), leaving existing assignments untouched.
+func TestJobUpdateNoMatchingSelectorRejected(t *testing.T) {
+	harness := newJobPolicyHarness(t)
+	defer harness.cleanup()
+	harness.seedTask(t)
+
+	job, err := harness.ctrl.Create(context.Background(), jobs.Job{
+		Name: "cron job", TaskID: "task_test",
+		Cron: "* * * * *", Selector: "all",
+	}, jobs.Actor{Principal: "admin", Role: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	select {
+	case <-harness.jobAssign:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no JobAssignment from create")
+	}
+
+	if _, err := harness.ctrl.Update(context.Background(), job.ID, jobs.Job{
+		Name: "cron job", TaskID: "task_test",
+		Cron: "* * * * *", Selector: "role:does-not-exist",
+	}, jobs.Actor{Principal: "admin", Role: "admin"}); err == nil {
+		t.Fatal("Update to a selector matching no hosts: expected an error")
+	}
+	// The rejected update must not have dropped the existing assignment.
+	if n := len(mustAssignments(t, harness, job.ID)); n != 1 {
+		t.Fatalf("assignments after rejected update = %d, want 1", n)
+	}
+}
+
+// TestJobUpdateKeepsMatchingHosts verifies reconciliation only drops hosts
+// that fell out of the selector, leaving the rest assigned.
+func TestJobUpdateKeepsMatchingHosts(t *testing.T) {
+	harness := newJobPolicyHarness(t)
+	defer harness.cleanup()
+	harness.seedTask(t)
+
+	// A second host that will be dropped, tagged so the selector can target it.
+	if err := harness.st.UpsertAgent(store.Agent{
+		ID: "ag_other", UUID: "uuid-other", ED25519Pub: "eA==", X25519Pub: "eA==",
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	if err := harness.st.SetTag("ag_other", "env", "lab"); err != nil {
+		t.Fatalf("SetTag: %v", err)
+	}
+
+	job, err := harness.ctrl.Create(context.Background(), jobs.Job{
+		Name: "cron job", TaskID: "task_test",
+		Cron: "* * * * *", Selector: "all",
+	}, jobs.Actor{Principal: "admin", Role: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if n := len(mustAssignments(t, harness, job.ID)); n != 2 {
+		t.Fatalf("assignments after create = %d, want 2", n)
+	}
+
+	// Narrow to the connected host only (the other one is not "connected"
+	// in the test but still assigned — drop it).
+	if _, err := harness.ctrl.Update(context.Background(), job.ID, jobs.Job{
+		Name: "cron job", TaskID: "task_test",
+		Cron: "*/5 * * * *", Selector: "tag:env=lab",
+	}, jobs.Actor{Principal: "admin", Role: "admin"}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	select {
+	case <-harness.jobUnassign:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no JOB_UNASSIGN pushed")
+	}
+
+	assigned := mustAssignments(t, harness, job.ID)
+	if len(assigned) != 1 || assigned[0].AgentID != "ag_other" {
+		t.Fatalf("assignments after narrowing = %+v, want only ag_other", assigned)
+	}
+}
+
+func mustAssignments(t *testing.T, harness *jobPolicyHarness, jobID string) []*store.JobAssignment {
+	t.Helper()
+	a, err := harness.st.JobAssignmentsForJob(jobID)
+	if err != nil {
+		t.Fatalf("JobAssignmentsForJob: %v", err)
+	}
+	return a
 }

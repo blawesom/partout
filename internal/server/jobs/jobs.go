@@ -125,7 +125,7 @@ func (c *Controller) Create(ctx context.Context, spec Job, actor Actor) (*store.
 		return nil, fmt.Errorf("jobs: create: %w", err)
 	}
 
-	if err := c.resolveAndPush(job, spec, steps, decisions); err != nil {
+	if _, err := c.resolveAndPush(job, spec, steps, decisions); err != nil {
 		// Leave the job row (operator can fix + re-save); report the error.
 		c.log.Printf("jobs: resolve %s: %v", jobID, err)
 		return job, fmt.Errorf("jobs: resolve selector: %w", err)
@@ -204,10 +204,14 @@ func (c *Controller) Update(ctx context.Context, jobID string, spec Job, actor A
 	if err := c.st.UpdateJob(job); err != nil {
 		return nil, fmt.Errorf("jobs: update: %w", err)
 	}
-	if err := c.resolveAndPush(job, spec, steps, decisions); err != nil {
+	current, err := c.resolveAndPush(job, spec, steps, decisions)
+	if err != nil {
 		return job, fmt.Errorf("jobs: resolve selector: %w", err)
 	}
-	c.audit("update", jobID, spec.Selector, 0)
+	// Editing a selector can drop hosts: unassign them so they stop firing
+	// (PRD §5.4 acceptance) and discard their signed decision.
+	c.reconcileAssignments(jobID, current)
+	c.audit("update", jobID, spec.Selector, len(current))
 	return job, nil
 }
 
@@ -229,17 +233,19 @@ func (c *Controller) Delete(ctx context.Context, jobID string) error {
 
 // resolveAndPush resolves the selector to concrete agents and pushes a
 // per-host schedule to each (with the pre-gated signed Decision per host).
-// Records the selector snapshot on each assignment.
-func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.TaskStep, decisions map[string]*pb.Decision) error {
+// Records the selector snapshot on each assignment and returns the set of
+// agent ids that currently belong to the job.
+func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.TaskStep, decisions map[string]*pb.Decision) (map[string]bool, error) {
 	// Resolve the selector to agent ids.
 	r := store.NewResolver(c.st)
 	agentsList, err := r.ResolveSelector(spec.Selector)
 	if err != nil {
-		return fmt.Errorf("resolve selector %q: %w", spec.Selector, err)
+		return nil, fmt.Errorf("resolve selector %q: %w", spec.Selector, err)
 	}
 	if len(agentsList) == 0 {
 		c.log.Printf("jobs: %s: selector %q matched no hosts", job.ID, spec.Selector)
 	}
+	current := make(map[string]bool, len(agentsList))
 	tz := spec.Timezone
 	if tz == "" {
 		tz = "UTC"
@@ -247,6 +253,7 @@ func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.Task
 	version := job.Updated // monotonic-ish version (bumps on edit)
 	for _, agentInfo := range agentsList {
 		agentID := agentInfo.ID
+		current[agentID] = true
 		a := &store.JobAssignment{JobID: job.ID, AgentID: agentID}
 		if err := c.st.AssignJob(a); err != nil {
 			c.log.Printf("jobs: assign %s -> %s: %v", job.ID, agentID, err)
@@ -276,7 +283,35 @@ func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.Task
 			}
 		}
 	}
-	return nil
+	return current, nil
+}
+
+// reconcileAssignments drops and unassigns hosts that no longer match the
+// job's selector (PRD §5.4: editing a selector re-resolves the fleet). It
+// must run before/with the push so a host removed from the selector stops
+// firing — and, once the agent removes the assignment, discards its signed
+// decision. Hosts that remain keep their freshly pushed assignment.
+func (c *Controller) reconcileAssignments(jobID string, current map[string]bool) {
+	assigned, err := c.st.JobAssignmentsForJob(jobID)
+	if err != nil {
+		c.log.Printf("jobs: reconcile %s: assignments: %v", jobID, err)
+		return
+	}
+	for _, a := range assigned {
+		if current[a.AgentID] {
+			continue
+		}
+		if err := c.st.UnassignJob(jobID, a.AgentID); err != nil {
+			c.log.Printf("jobs: unassign %s -> %s: %v", jobID, a.AgentID, err)
+			continue
+		}
+		if c.h != nil {
+			if err := c.h.SendJobUnassign(a.AgentID, jobID); err != nil {
+				c.log.Printf("jobs: push unassign %s -> %s: %v", jobID, a.AgentID, err)
+			}
+		}
+		c.log.Printf("jobs: %s unassigned from %s (no longer matches the selector)", jobID, a.AgentID)
+	}
 }
 
 // gatePolicy resolves the selector and evaluates the task.run action class
@@ -286,6 +321,12 @@ func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.Task
 // Evaluation happens BEFORE any job state is persisted, so a denied write
 // leaves the store untouched.
 func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*pb.Decision, error) {
+	// Fail closed without a signing identity: a job that cannot carry a
+	// verifiable Decision would be denied by the agent at fire time, so
+	// reject the write with a clear misconfiguration error instead.
+	if c.ident == nil {
+		return nil, fmt.Errorf("jobs: server signing identity not configured; cannot authorize task.run")
+	}
 	r := store.NewResolver(c.st)
 	agents, err := r.ResolveSelector(selector)
 	if err != nil {
@@ -326,8 +367,8 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*
 // (reason carries the denial reason).
 func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Action) (*pb.Decision, string, bool) {
 	if c.ident == nil {
-		// No server identity (unit tests): skip the gate.
-		return nil, "", true
+		// Callers gate on this up front; keep the failure closed.
+		return nil, "server signing identity not configured", false
 	}
 	rules, _ := c.st.GetPolicyRules()
 	decision := policy.Evaluate(rules, act)
@@ -436,6 +477,11 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 		return fmt.Errorf("jobs: decode steps: %w", err)
 	}
 	runID := id.New("jr")
+
+	// Fail closed without a signing identity (see gatePolicy).
+	if c.ident == nil {
+		return fmt.Errorf("jobs: server signing identity not configured; cannot authorize task.run")
+	}
 
 	// Policy gate: sign a fresh per-run decision for this host.
 	host, _ := c.st.Agent(agentID)

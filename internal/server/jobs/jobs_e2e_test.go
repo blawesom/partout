@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"log"
+	"strings"
 	"testing"
 
+	"github.com/blawesom/partout/internal/certutil"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/sse"
@@ -213,10 +215,16 @@ func TestControllerCreateResolvesSelector(t *testing.T) {
 	}
 
 	// Controller without a stream (SendJobAssign will fail, but the job row
-	// + assignment should still be recorded).
+	// + assignment should still be recorded). The signing identity is
+	// required: without it the policy gate fails closed.
 	sseB := sse.New()
 	lg := log.New(io.Discard, "jobs:", 0)
 	ctrl := jobs.New(st, nil, sseB, lg)
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("server identity: %v", err)
+	}
+	ctrl.SetIdentity(ident)
 
 	job, err := ctrl.Create(context.Background(), jobs.Job{
 		Name: "cron job", TaskID: "task_test",
@@ -232,6 +240,45 @@ func TestControllerCreateResolvesSelector(t *testing.T) {
 	}
 	if len(assignments) != 1 {
 		t.Fatalf("listed %d assignments, want 1", len(assignments))
+	}
+}
+
+// TestControllerWithoutIdentityFailsClosed verifies that a controller with no
+// server signing identity rejects job writes instead of silently creating a
+// job whose (missing) decision the agent would deny at fire time.
+func TestControllerWithoutIdentityFailsClosed(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.UpsertAgent(store.Agent{ID: "ag_test", UUID: "uuid", ED25519Pub: "eA==", X25519Pub: "eA=="}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTask(&store.Task{ID: "task_test", Name: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTaskVersion(&store.TaskVersion{TaskID: "task_test", Version: 1,
+		StepsJSON: `[{"kind":"command","name":"echo","command":"echo"}]`}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := jobs.New(st, nil, sse.New(), log.New(io.Discard, "jobs:", 0))
+	_, err = ctrl.Create(context.Background(), jobs.Job{
+		Name: "cron job", TaskID: "task_test",
+		Cron: "* * * * *", Selector: "all",
+	}, jobs.Actor{Principal: "admin", Role: "admin"})
+	if err == nil {
+		t.Fatal("Create without identity: expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "signing identity") {
+		t.Fatalf("Create without identity: err=%v, want a signing-identity error", err)
+	}
+	// Nothing persisted.
+	listed, _ := st.ListJobs()
+	if len(listed) != 0 {
+		t.Fatalf("listed %d jobs, want 0 (write must be rejected before persisting)", len(listed))
 	}
 }
 
