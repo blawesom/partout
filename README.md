@@ -36,7 +36,7 @@ off and the docs become the implementation contract.
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
-| **M3 — Automation** | ✅ Done | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, **scheduled jobs** ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules) |
+| **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) scheduled job steps run **without a policy decision or agent guardrail** (manual `task.run` is gated; scheduled is not — security fix required); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
 | **M4 — Governance** | ⬜ Not started | — |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
 
@@ -100,7 +100,7 @@ Done (decisions D1–D5 per PRD review):
 - ✅ **CLI**: `partout ctl files stat|list|upload|edit|perm` and `partout ctl sessions open|close|list|replay`.
 - ✅ E2E tests: files over a live bufconn stream (stat/list/download/upload/edit-CAS/conflict/perm/symlink-rejection/policy-deny/audit) and sessions (open→data→close→result, recording+replay, policy deny, disconnect interruption).
 
-### M3 — Automation (in progress)
+### M3 — Automation (features complete; known gaps documented in the status table)
 
 Done so far:
 - ✅ **Secrets** (PRD §5.7, arch §5.5): server-side encrypted store — master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`, per-secret keys = HKDF(master, secret_id), values AES-256-GCM at rest, versioned. **No master key → feature disabled with a clear message** (503 on the endpoints).
@@ -121,8 +121,9 @@ Done so far:
 ### Not started
 
 - M2 Web UI (xterm.js terminal + file browser frontend) — deferred to later V1 phase (backend complete)
-- M3 complete — all §5.x features implemented.
-- M4: approvals, full policy engine, MCP write tools
+- M3 known gaps (from the verification audit, tracked in Next steps): scheduled-job policy enforcement, job dispatch E2E, reboot continuation
+- M4: approvals engine, full policy surface, MCP server (R11) + write tools
+- §6 observe layer + MCP read tools
 - M5: installers, cloud-init, Helm, status page
 
 ## Next steps
@@ -137,8 +138,27 @@ Done so far:
 8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
-11. **M3 complete** — all automation features (PRD §5.x) done: secrets, external data refresh, packages, tasks/playbooks, scheduled jobs.
+11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; three known gaps tracked below
 12. **Web UI** (deferred V1 phase)
+
+### Next (priority order, from the M3 verification audit)
+
+13. **Enforce policy on scheduled job steps** (security, M3/§5.4+§5.5) — scheduled runs
+    currently execute task steps with **no policy decision and no agent guardrail re-check**
+    (manual `task.run` dispatch is gated; `jobs.fire` builds a `pb.TaskRun` with a nil
+    `Decision` and the task executor never consults one). Close the bypass: evaluate the
+    job's steps under `task.run` at assign time (server), carry a signed `Decision` in the
+    assignment, and re-check agent-side before each fire.
+14. **E2E test the job dispatch path** — `JOB_ASSIGN` → connected agent → cron fire →
+    `JOB_RUN_RESULT` → `job_runs` row. Current tests stop at store/selector level and use a
+    nil stream handler, so the real wire path is unverified.
+15. **Reboot continuation** (PRD §5.5 acceptance criterion) — the `reboot` step kind is a
+    stub (returns "reboot requested"); no `resume-after-reboot` marker exists. Implement or
+    explicitly defer in the PRD.
+16. **M4 — Governance**: approvals engine (`require_approval` currently fails closed with
+    "not yet available — M4"), full policy surface, MCP server (R11) + write tools.
+17. **Observe layer (§6)** + MCP read tools.
+18. Postgres backend; then **M5 — Distribution & polish** (installers, cloud-init, Helm).
 
 ## TLS / transport security (implemented)
 
