@@ -859,6 +859,22 @@ error bodies `{code, message, details}`.
 | GET    | `/readyz` | — | Readiness (DB ping) |
 | GET    | `/api/v1/events` | — | SSE event stream |
 
+#### Planned additions (not implemented)
+
+Surfaced by the web-UI reconciliation ([ui-guidelines §14](ui-guidelines.md)); each is a
+prerequisite for a UI slice and none exist today.
+
+| Method | Path | RBAC | Why |
+|--------|------|------|-----|
+| GET | `/api/v1/capabilities` | viewer | Boolean per subsystem, so the UI greys controls from data instead of hardcoded milestones. Complements the existing `503 <subsystem>_disabled` codes |
+| GET | `/api/v1/hosts?selector=<sel>` | viewer | Selector **preview** before dispatch. Today resolution only happens inside `Control.Dispatch`, so the UI cannot show the resolved host set first |
+| DELETE | `/api/v1/agents/{id}` | admin | `store.DeleteAgent` exists but has no HTTP route, so a decommissioned host can never leave the fleet; also makes the `revoked` agent state reachable |
+| GET | `/api/v1/audit?agent_id=` | viewer | Per-host audit view; client-side filtering is adequate until log volume grows |
+
+Also required for S0: **static asset serving** — there is currently no `embed.FS`, no
+`http.FileServer`, and no `web/` directory. Planned shape: Vite → `web/dist` → `go:embed` +
+SPA fallback on the main listener.
+
 #### Request / response shapes
 
 **POST /api/v1/executions**
@@ -951,6 +967,15 @@ PWA. Page map = PRD §11. Implementation notes:
   `when` editor is a form over the constrained grammar.
 - **Audit**: filterable table, full-fidelity expansion for privileged commands (Decision 8).
 - Embedded as `embed.FS`; no separate build server; served on the main listener.
+- **Capability-gated UI**: one capability probe (`GET /api/v1/capabilities`) drives which nav
+  items and controls are enabled; not-yet-built surfaces render disabled with the milestone
+  named, and role-gated controls are visually distinct from not-yet-available ones (see
+  [ui-guidelines §4](ui-guidelines.md)).
+- **Selector preview**: the Execute page resolves and displays the concrete host set before
+  dispatch, via the planned selector filter on `/api/v1/hosts`.
+
+Layout, tokens, component inventory, state vocabulary, and the S0–S5 slicing live in
+[ui-guidelines.md](ui-guidelines.md); `docs/ui-design.png` is the north-star mockup.
 
 ---
 

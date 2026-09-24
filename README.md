@@ -10,6 +10,7 @@ for AI assistants.
 | [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, control plane, storage, testing | **Draft v0.3** |
 | [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference, recipes | Draft v0.3 |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, incident runbooks, troubleshooting, compliance, go-live | Draft v0.3 |
+| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: mockup reconciliation, capability gating, IA/tokens/components, slice plan (guidelines, not implementation) | Draft v0.4 |
 
 ## Positioning
 
@@ -139,7 +140,7 @@ Done so far:
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
 11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; two known gaps tracked below
-12. **Web UI** (deferred V1 phase)
+12. **Web UI** — definition complete ([docs/ui-guidelines.md](docs/ui-guidelines.md) v0.4: mockup reconciled against real capability, capability-driven gating, S0–S5 slices). Prerequisites before S0: static asset serving (`go:embed`), `GET /api/v1/capabilities`; before S1: selector preview endpoint, host removal endpoint. See ui-guidelines §14.
 
 ### Next (priority order, from the M3 verification audit)
 
