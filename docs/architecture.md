@@ -549,12 +549,16 @@ Rule (one declarative object, stored in `policies`):
 - Runs produce `job_runs` rows (lineage) + audit event + SSE `job.run`.
 - **Stream**: `JOB_ASSIGN` down, `JOB_UNASSIGN` down, `JOB_RUN_RESULT` up (hook →
   `jobs.Controller.OnRunResult`).
-- **Known gap (tracked, see README §Next steps)**: scheduled runs execute task steps
-  with **no policy decision and no agent guardrail re-check** — `jobs.fire` builds a
-  `pb.TaskRun` with a nil `Decision` and `task.Runner`/`task.Executor` never consult one,
-  so a job assigned to a host runs its steps ungated (unlike manual `task.run` dispatch,
-  which is policy-gated + re-checked). Fix: evaluate under `task.run` at assign time,
-  carry a signed `Decision` in the assignment, re-check agent-side per fire.
+- **Policy gate (PRD §5.5, arch §5.3)**: job create/update evaluate the task under the
+  `task.run` action class for every host the selector matches, BEFORE persisting — a denied
+  host rejects the whole write (`403 policy_denied`). Each per-host `JOB_ASSIGN` carries a
+  signed `Decision` (run_id = job id: a standing authorization bound to the job + the
+  current policy bundle version). `POST /jobs/:id/run` (manual) signs a fresh per-run
+  decision, like `task.run` dispatch. The agent re-checks the decision via the guardrail
+  before **every** cron fire: missing decision, missing guard, bundle-version mismatch,
+  bad signature, or local re-eval denial → run reported `denied` (no retry, fail closed).
+  Consequence: after a policy bundle change or a server/agent upgrade, jobs must be
+  re-saved from the server to re-authorize.
 - REST: `GET/POST /api/v1/jobs`, `GET/PUT/DELETE /api/v1/jobs/:id`, `GET /jobs/:id/runs`,
   `POST /jobs/:id/run`, `GET /jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
 

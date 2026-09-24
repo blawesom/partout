@@ -4,6 +4,13 @@
 // (JobAssignment) to each, and records job runs (lineage) + audit when
 // agents report them. Agents run the schedule on their own clock, so the
 // server being down does not stop scheduled work.
+//
+// Policy: job create/update/RunNow are gated under the task.run action
+// class (PRD §5.5, arch §5.3). Each per-host assignment carries a signed
+// Decision (run_id = job id, a standing authorization bound to the job +
+// bundle version); the agent re-checks it via the guardrail before every
+// fire and fails closed on mismatch. Denied jobs are rejected before any
+// state is persisted.
 package jobs
 
 import (
@@ -11,9 +18,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/id"
+	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
@@ -22,10 +32,11 @@ import (
 
 // Controller manages scheduled jobs.
 type Controller struct {
-	st  *store.Store
-	h   *stream.Handler
-	sse *sse.Broker
-	log *log.Logger
+	st    *store.Store
+	h     *stream.Handler
+	sse   *sse.Broker
+	log   *log.Logger
+	ident *certutil.ServerIdentity
 }
 
 // New builds a Controller.
@@ -35,6 +46,24 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	}
 	return &Controller{st: st, h: h, sse: sseB, log: lg}
 }
+
+// SetIdentity installs the server's Ed25519 signing key (signs job
+// Decisions, like tasks/packages/files/sessions).
+func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
+
+// Actor carries the requester identity for audit + policy.
+type Actor struct {
+	Principal string
+	Role      string
+}
+
+// PolicyError is returned when a job write is rejected by the policy
+// deny-list (the task.run action class). The API layer maps it to 403.
+type PolicyError struct {
+	Reason string
+}
+
+func (e *PolicyError) Error() string { return "job denied by policy: " + e.Reason }
 
 // Job is the API-facing job spec (mirrors store.Job + selector).
 type Job struct {
@@ -53,7 +82,7 @@ type Job struct {
 }
 
 // create resolves the selector, saves the job, and pushes per-host schedules.
-func (c *Controller) Create(ctx context.Context, spec Job) (*store.Job, error) {
+func (c *Controller) Create(ctx context.Context, spec Job, actor Actor) (*store.Job, error) {
 	// Resolve the task version.
 	taskVer := spec.TaskVersion
 	if taskVer == 0 {
@@ -72,18 +101,16 @@ func (c *Controller) Create(ctx context.Context, spec Job) (*store.Job, error) {
 	if err != nil {
 		return nil, fmt.Errorf("jobs: decode steps: %w", err)
 	}
-	pbSteps := make([]*pb.TaskStep, 0, len(steps))
-	for _, s := range steps {
-		pbSteps = append(pbSteps, &pb.TaskStep{
-			Kind: s.Kind, Name: s.Name, When: s.When,
-			Command: s.Command, Args: s.Args, Env: s.Env,
-			Path: s.Path, Content: s.Content, Template: s.Template, Vars: s.Vars,
-			Mode: s.Mode, Package: s.Package, State: s.State,
-			Service: s.Service, User: s.User, Group: s.Group, Expr: s.Expr,
-		})
-	}
 
 	jobID := id.New("job")
+	// Policy gate BEFORE persisting: every host the selector matches must
+	// be allowed to run task.run. A denied host rejects the whole write
+	// (fail closed; no orphan job row, nothing assigned).
+	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role)
+	if err != nil {
+		return nil, err
+	}
+
 	job := &store.Job{
 		ID:            jobID,
 		Name:          spec.Name,
@@ -98,7 +125,7 @@ func (c *Controller) Create(ctx context.Context, spec Job) (*store.Job, error) {
 		return nil, fmt.Errorf("jobs: create: %w", err)
 	}
 
-	if err := c.resolveAndPush(job, spec, pbSteps); err != nil {
+	if err := c.resolveAndPush(job, spec, steps, decisions); err != nil {
 		// Leave the job row (operator can fix + re-save); report the error.
 		c.log.Printf("jobs: resolve %s: %v", jobID, err)
 		return job, fmt.Errorf("jobs: resolve selector: %w", err)
@@ -109,7 +136,7 @@ func (c *Controller) Create(ctx context.Context, spec Job) (*store.Job, error) {
 
 // Update modifies a job and re-resolves + re-pushes (PRD §5.4 acceptance:
 // editing a selector re-resolves and re-pushes per-host schedules).
-func (c *Controller) Update(ctx context.Context, jobID string, spec Job) (*store.Job, error) {
+func (c *Controller) Update(ctx context.Context, jobID string, spec Job, actor Actor) (*store.Job, error) {
 	job, err := c.st.GetJob(jobID)
 	if err != nil || job == nil {
 		return nil, fmt.Errorf("jobs: %s not found", jobID)
@@ -158,15 +185,13 @@ func (c *Controller) Update(ctx context.Context, jobID string, spec Job) (*store
 	if err != nil {
 		return nil, fmt.Errorf("jobs: decode steps: %w", err)
 	}
-	pbSteps := make([]*pb.TaskStep, 0, len(steps))
-	for _, s := range steps {
-		pbSteps = append(pbSteps, &pb.TaskStep{
-			Kind: s.Kind, Name: s.Name, When: s.When,
-			Command: s.Command, Args: s.Args, Env: s.Env,
-			Path: s.Path, Content: s.Content, Template: s.Template, Vars: s.Vars,
-			Mode: s.Mode, Package: s.Package, State: s.State,
-			Service: s.Service, User: s.User, Group: s.Group, Expr: s.Expr,
-		})
+
+	// Policy gate BEFORE mutating: re-authorization is required on every
+	// save (a fresh signed Decision per host, bound to the current bundle
+	// version). Denied → no change is persisted.
+	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role)
+	if err != nil {
+		return nil, err
 	}
 
 	job.Name = spec.Name
@@ -179,7 +204,7 @@ func (c *Controller) Update(ctx context.Context, jobID string, spec Job) (*store
 	if err := c.st.UpdateJob(job); err != nil {
 		return nil, fmt.Errorf("jobs: update: %w", err)
 	}
-	if err := c.resolveAndPush(job, spec, pbSteps); err != nil {
+	if err := c.resolveAndPush(job, spec, steps, decisions); err != nil {
 		return job, fmt.Errorf("jobs: resolve selector: %w", err)
 	}
 	c.audit("update", jobID, spec.Selector, 0)
@@ -203,8 +228,9 @@ func (c *Controller) Delete(ctx context.Context, jobID string) error {
 }
 
 // resolveAndPush resolves the selector to concrete agents and pushes a
-// per-host schedule to each. Records the selector snapshot on each assignment.
-func (c *Controller) resolveAndPush(job *store.Job, spec Job, pbSteps []*pb.TaskStep) error {
+// per-host schedule to each (with the pre-gated signed Decision per host).
+// Records the selector snapshot on each assignment.
+func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.TaskStep, decisions map[string]*pb.Decision) error {
 	// Resolve the selector to agent ids.
 	r := store.NewResolver(c.st)
 	agentsList, err := r.ResolveSelector(spec.Selector)
@@ -233,13 +259,14 @@ func (c *Controller) resolveAndPush(job *store.Job, spec Job, pbSteps []*pb.Task
 			Timezone:         tz,
 			TaskId:           job.TaskID,
 			TaskVersion:      int32(job.TaskVersion),
-			Steps:            pbSteps,
+			Steps:            toPBSteps(steps),
 			MaxRunS:          int32(job.MaxRunSeconds),
 			OverlapPolicy:    spec.OverlapPolicy,
 			FailurePolicy:    spec.FailurePolicy,
 			RetryBackoffS:    int32(spec.RetryBackoffS),
 			SelectorSnapshot: spec.Selector,
 			Version:          version,
+			Decision:         decisions[agentID],
 		}
 		// Push to the agent (best-effort; offline agents get it on reconnect
 		// via the server's down-queue in a later milestone).
@@ -250,6 +277,89 @@ func (c *Controller) resolveAndPush(job *store.Job, spec Job, pbSteps []*pb.Task
 		}
 	}
 	return nil
+}
+
+// gatePolicy resolves the selector and evaluates the task.run action class
+// for every matched host. Returns a per-host signed Decision map (run_id =
+// job id: a standing authorization bound to this job + the current bundle
+// version). If any host is denied, returns a *PolicyError naming the hosts.
+// Evaluation happens BEFORE any job state is persisted, so a denied write
+// leaves the store untouched.
+func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*pb.Decision, error) {
+	r := store.NewResolver(c.st)
+	agents, err := r.ResolveSelector(selector)
+	if err != nil {
+		return nil, fmt.Errorf("resolve selector %q: %w", selector, err)
+	}
+	d := make(map[string]*pb.Decision, len(agents))
+	var denied []string
+	for _, a := range agents {
+		host, _ := c.st.Agent(a.ID)
+		act := policy.Action{
+			ActorRole:   actorRole,
+			ActionClass: policy.ActionTaskRun,
+		}
+		if host != nil {
+			act.HostID = host.ID
+			if tags, _ := c.st.Tags(a.ID); len(tags) > 0 {
+				act.HostTags = tags
+			}
+			if roles, _ := c.st.Roles(a.ID); len(roles) > 0 {
+				act.HostRoles = roles
+			}
+		}
+		decision, reason, ok := c.signTaskRunDecision(jobID, actorRole, act)
+		if !ok {
+			denied = append(denied, fmt.Sprintf("%s (%s)", a.ID, reason))
+			continue
+		}
+		d[a.ID] = decision
+	}
+	if len(denied) > 0 {
+		return nil, &PolicyError{Reason: "task.run denied for host(s) " + strings.Join(denied, ", ")}
+	}
+	return d, nil
+}
+
+// signTaskRunDecision evaluates the task.run action class and, when allowed,
+// signs a Decision bound to runID. ok=false means the policy denied it
+// (reason carries the denial reason).
+func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Action) (*pb.Decision, string, bool) {
+	if c.ident == nil {
+		// No server identity (unit tests): skip the gate.
+		return nil, "", true
+	}
+	rules, _ := c.st.GetPolicyRules()
+	decision := policy.Evaluate(rules, act)
+	if decision.Effect != policy.EffectAllow {
+		return nil, decision.Reason, false
+	}
+	version, _ := c.st.PolicyBundleVersion()
+	sig := policy.SignDecision(c.ident.Priv, runID, version,
+		decision.Effect, decision.MatchedRules, actorRole)
+	return &pb.Decision{
+		RunId:         runID,
+		BundleVersion: version,
+		Effect:        decision.Effect,
+		MatchedRules:  decision.MatchedRules,
+		Sig:           sig,
+		ActorRole:     actorRole,
+	}, "", true
+}
+
+// toPBSteps converts store task steps to the wire format.
+func toPBSteps(steps []store.TaskStep) []*pb.TaskStep {
+	pbSteps := make([]*pb.TaskStep, 0, len(steps))
+	for _, s := range steps {
+		pbSteps = append(pbSteps, &pb.TaskStep{
+			Kind: s.Kind, Name: s.Name, When: s.When,
+			Command: s.Command, Args: s.Args, Env: s.Env,
+			Path: s.Path, Content: s.Content, Template: s.Template, Vars: s.Vars,
+			Mode: s.Mode, Package: s.Package, State: s.State,
+			Service: s.Service, User: s.User, Group: s.Group, Expr: s.Expr,
+		})
+	}
+	return pbSteps
 }
 
 // OnRunResult records a job run + audit when an agent reports a scheduled
@@ -309,8 +419,10 @@ func (c *Controller) ListRuns(limit int) ([]*store.JobRun, error) {
 	return c.st.ListJobRuns(limit)
 }
 
-// RunNow triggers an immediate run of a job on one host.
-func (c *Controller) RunNow(ctx context.Context, jobID, agentID string) error {
+// RunNow triggers an immediate run of a job on one host. Like manual
+// task.run, it is gated under the task.run action class: a denied host
+// records a 'denied' run and the dispatch never happens.
+func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Actor) error {
 	job, err := c.st.GetJob(jobID)
 	if err != nil || job == nil {
 		return fmt.Errorf("jobs: %s not found", jobID)
@@ -323,18 +435,36 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string) error {
 	if err != nil {
 		return fmt.Errorf("jobs: decode steps: %w", err)
 	}
-	// Dispatch a one-off task run to the agent (triggered by the job).
 	runID := id.New("jr")
-	pbSteps := make([]*pb.TaskStep, 0, len(steps))
-	for _, s := range steps {
-		pbSteps = append(pbSteps, &pb.TaskStep{
-			Kind: s.Kind, Name: s.Name, When: s.When,
-			Command: s.Command, Args: s.Args, Env: s.Env,
-			Path: s.Path, Content: s.Content, Template: s.Template, Vars: s.Vars,
-			Mode: s.Mode, Package: s.Package, State: s.State,
-			Service: s.Service, User: s.User, Group: s.Group, Expr: s.Expr,
-		})
+
+	// Policy gate: sign a fresh per-run decision for this host.
+	host, _ := c.st.Agent(agentID)
+	act := policy.Action{
+		ActorRole:   actor.Role,
+		ActionClass: policy.ActionTaskRun,
 	}
+	if host != nil {
+		act.HostID = host.ID
+		if tags, _ := c.st.Tags(agentID); len(tags) > 0 {
+			act.HostTags = tags
+		}
+		if roles, _ := c.st.Roles(agentID); len(roles) > 0 {
+			act.HostRoles = roles
+		}
+	}
+	decision, _, ok := c.signTaskRunDecision(runID, actor.Role, act)
+	if !ok {
+		_ = c.st.CreateJobRun(&store.JobRun{
+			ID: runID, JobID: jobID, AgentID: agentID,
+			TaskID: job.TaskID, TaskVersion: job.TaskVersion,
+			ScheduledAt: time.Now().Unix(), Trigger: "manual", State: "denied",
+			Error: "denied by policy",
+		})
+		_ = c.st.FinalizeJobRun(runID, "denied", "denied by policy")
+		c.audit("run-denied", jobID, "", 0)
+		return &PolicyError{Reason: "task.run denied for host " + agentID}
+	}
+
 	// Record the manual run.
 	run := &store.JobRun{
 		ID: runID, JobID: jobID, AgentID: agentID,
@@ -346,7 +476,8 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string) error {
 		RunId:       runID,
 		TaskId:      job.TaskID,
 		TaskVersion: int32(job.TaskVersion),
-		Steps:       pbSteps,
+		Steps:       toPBSteps(steps),
+		Decision:    decision,
 	})
 	_ = c.st.FinalizeJobRun(runID, "dispatched", "")
 	c.audit("run", jobID, "", 0)

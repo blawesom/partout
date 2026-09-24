@@ -206,6 +206,10 @@ one-directional.
 3. Check: stream reconnected, facts flowing, a dry-run command succeeded.
 4. Roll out to remaining hosts in waves. Agent-side jobs continue uninterrupted during
    upgrade (the stream drops and reconnects; spool buffers results).
+5. **Re-save scheduled jobs** after the fleet is on the new version: assignments saved
+   before the policy-gate change carry no signed decision, so cron fires fail closed with
+   state `denied` until each job is re-saved (`PUT /api/v1/jobs/:id` or `ctl jobs` delete
+   + create) to re-issue per-host signed decisions.
 
 **Version skew tolerance** (deployment §7): agent N works against server N and N+1, and vice
 versa. Rolling upgrades are safe in either order (server first is the standard path).

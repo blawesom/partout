@@ -2427,6 +2427,7 @@ type JobAssignment struct {
 	RetryBackoffS    int32                  `protobuf:"varint,11,opt,name=retry_backoff_s,json=retryBackoffS,proto3" json:"retry_backoff_s,omitempty"`       // retry delay (0 = no retry)
 	SelectorSnapshot string                 `protobuf:"bytes,12,opt,name=selector_snapshot,json=selectorSnapshot,proto3" json:"selector_snapshot,omitempty"` // selector text (recorded for audit)
 	Version          int64                  `protobuf:"varint,13,opt,name=version,proto3" json:"version,omitempty"`                                          // monotonic version (bump on job edit)
+	Decision         *Decision              `protobuf:"bytes,14,opt,name=decision,proto3" json:"decision,omitempty"`                                         // signed task.run authorization (server-signed at assign time;
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -2550,6 +2551,13 @@ func (x *JobAssignment) GetVersion() int64 {
 		return x.Version
 	}
 	return 0
+}
+
+func (x *JobAssignment) GetDecision() *Decision {
+	if x != nil {
+		return x.Decision
+	}
+	return nil
 }
 
 // JobUnassignment removes a job from an agent (down).
@@ -3974,7 +3982,7 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x120\n" +
-	"\x05steps\x18\x04 \x03(\v2\x1a.partout.v1.TaskStepResultR\x05steps\"\xab\x03\n" +
+	"\x05steps\x18\x04 \x03(\v2\x1a.partout.v1.TaskStepResultR\x05steps\"\xdd\x03\n" +
 	"\rJobAssignment\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -3989,7 +3997,8 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	" \x01(\tR\rfailurePolicy\x12&\n" +
 	"\x0fretry_backoff_s\x18\v \x01(\x05R\rretryBackoffS\x12+\n" +
 	"\x11selector_snapshot\x18\f \x01(\tR\x10selectorSnapshot\x12\x18\n" +
-	"\aversion\x18\r \x01(\x03R\aversion\"(\n" +
+	"\aversion\x18\r \x01(\x03R\aversion\x120\n" +
+	"\bdecision\x18\x0e \x01(\v2\x14.partout.v1.DecisionR\bdecision\"(\n" +
 	"\x0fJobUnassignment\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\"\x80\x02\n" +
 	"\fJobRunResult\x12\x15\n" +
@@ -4291,21 +4300,22 @@ var file_proto_partout_partout_proto_depIdxs = []int32{
 	30, // 45: partout.v1.TaskRun.decision:type_name -> partout.v1.Decision
 	22, // 46: partout.v1.TaskRunResult.steps:type_name -> partout.v1.TaskStepResult
 	20, // 47: partout.v1.JobAssignment.steps:type_name -> partout.v1.TaskStep
-	3,  // 48: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
-	28, // 49: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
-	29, // 50: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
-	45, // 51: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
-	30, // 52: partout.v1.Command.decision:type_name -> partout.v1.Decision
-	46, // 53: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
-	47, // 54: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
-	30, // 55: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
-	5,  // 56: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
-	5,  // 57: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
-	57, // [57:58] is the sub-list for method output_type
-	56, // [56:57] is the sub-list for method input_type
-	56, // [56:56] is the sub-list for extension type_name
-	56, // [56:56] is the sub-list for extension extendee
-	0,  // [0:56] is the sub-list for field type_name
+	30, // 48: partout.v1.JobAssignment.decision:type_name -> partout.v1.Decision
+	3,  // 49: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
+	28, // 50: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
+	29, // 51: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
+	45, // 52: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
+	30, // 53: partout.v1.Command.decision:type_name -> partout.v1.Decision
+	46, // 54: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
+	47, // 55: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
+	30, // 56: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
+	5,  // 57: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
+	5,  // 58: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
+	58, // [58:59] is the sub-list for method output_type
+	57, // [57:58] is the sub-list for method input_type
+	57, // [57:57] is the sub-list for extension type_name
+	57, // [57:57] is the sub-list for extension extendee
+	0,  // [0:57] is the sub-list for field type_name
 }
 
 func init() { file_proto_partout_partout_proto_init() }

@@ -166,6 +166,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	a.jobs = jobs.New(filepath.Join(cfg.DataDir, "jobs"), a.taskExec, func(r *jobs.Report) {
 		a.sendJobResult(r)
 	}, a.log)
+	a.jobs.SetGuard(a.guard) // policy re-check before every cron fire
 	// Session manager uses a closure that can reach the agent instance.
 	a.sessions = session.NewManager(func(sid string, exitCode int32, state string, durationMs int64) {
 		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
@@ -431,9 +432,9 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 
 	case env.GetJobAssign() != nil:
 		ja := env.GetJobAssign()
-		// Jobs are server-resolved per-host schedules: no exec decision to
-		// re-check (the task steps run under their own task.run gate when
-		// manually dispatched; scheduled runs are agent-side by design).
+		// Jobs carry a server-signed task.run Decision (PRD §5.5, arch
+		// §5.3). It is re-checked by the guardrail before every cron fire
+		// (Scheduler.fire fails closed on a missing/stale/bad decision).
 		a.jobs.Apply(jaToAssignment(ja))
 
 	case env.GetJobUnassign() != nil:
@@ -1037,5 +1038,6 @@ func jaToAssignment(ja *pb.JobAssignment) *jobs.Assignment {
 		RetryBackoffS:    ja.RetryBackoffS,
 		SelectorSnapshot: ja.SelectorSnapshot,
 		Version:          ja.Version,
+		Decision:         ja.Decision,
 	}
 }

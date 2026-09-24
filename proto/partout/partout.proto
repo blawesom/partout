@@ -345,6 +345,8 @@ message JobAssignment {
   int32 retry_backoff_s = 11; // retry delay (0 = no retry)
   string selector_snapshot = 12; // selector text (recorded for audit)
   int64 version = 13;        // monotonic version (bump on job edit)
+  Decision decision = 14;   // signed task.run authorization (server-signed at assign time;
+                            // agent re-checks guardrail before every fire, fail-closed)
 }
 
 // JobUnassignment removes a job from an agent (down).

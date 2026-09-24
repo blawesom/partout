@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/guardrail"
 	"github.com/blawesom/partout/internal/agent/task"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/robfig/cron/v3"
@@ -40,6 +41,12 @@ type Assignment struct {
 	RetryBackoffS    int32          `json:"retry_backoff_s"`
 	SelectorSnapshot string         `json:"selector_snapshot"`
 	Version          int64          `json:"version"`
+	// Decision is the server-signed task.run authorization for this job on
+	// this host (PRD §5.5, arch §5.3). It is re-checked via the guardrail
+	// before every fire; a missing or stale decision fails closed (the job
+	// must be re-saved from the server to re-authorize, e.g. after an
+	// upgrade or a policy bundle change).
+	Decision *pb.Decision `json:"decision"`
 }
 
 // Report is a job run outcome sent up to the server.
@@ -65,6 +72,7 @@ type runState struct {
 type Scheduler struct {
 	dataDir  string
 	exec     *task.Executor
+	guard    *guardrail.Guard // policy re-check before every fire (fail closed)
 	log      *log.Logger
 	cron     *cron.Cron
 	reportFn func(*Report) // send JobRunResult up (wired by agent)
@@ -93,6 +101,10 @@ func New(dataDir string, exec *task.Executor, reportFn func(*Report), lg *log.Lo
 		entries:   make(map[string]cron.EntryID),
 	}
 }
+
+// SetGuard installs the policy guardrail (the agent wires its guard here).
+// Fires fail closed until a decision can be verified.
+func (s *Scheduler) SetGuard(g *guardrail.Guard) { s.guard = g }
 
 // SetFacts updates the executor's fact set (called on facts receipt).
 func (s *Scheduler) SetFacts(f map[string]string) { s.exec.SetFacts(f) }
@@ -254,6 +266,29 @@ func (s *Scheduler) fire(a *Assignment, schedAt time.Time, trigger string, retry
 		TaskId:      a.TaskID,
 		TaskVersion: a.TaskVersion,
 		Steps:       a.Steps,
+		Decision:    a.Decision,
+	}
+	// Policy re-check (PRD §5.5, arch §5.3): the assignment's signed
+	// Decision is verified against the current policy bundle before
+	// execution. Fail closed on anything: missing decision, missing guard,
+	// stale bundle version, bad signature, or local re-eval says deny.
+	if a.Decision == nil {
+		s.report(&Report{RunID: runID, JobID: a.JobID, State: "denied",
+			Error:       "no signed policy decision in assignment (re-save the job)",
+			ScheduledAt: schedAt.Unix(), Trigger: trigger, RetryOf: int32(retry)})
+		return
+	}
+	if s.guard == nil {
+		s.report(&Report{RunID: runID, JobID: a.JobID, State: "denied",
+			Error:       "no policy guardrail available to verify decision",
+			ScheduledAt: schedAt.Unix(), Trigger: trigger, RetryOf: int32(retry)})
+		return
+	}
+	if ok, reason := s.guard.RecheckTask(taskRun); !ok {
+		s.log.Printf("jobs: %s DENIED: %s", a.JobID, reason)
+		s.report(&Report{RunID: runID, JobID: a.JobID, State: "denied", Error: reason,
+			ScheduledAt: schedAt.Unix(), Trigger: trigger, RetryOf: int32(retry)})
+		return
 	}
 	started := time.Now()
 	runner := task.New(s.exec)

@@ -13,11 +13,28 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/jobs"
 )
+
+// jobActor derives the requester identity (username + role).
+func (h *Handler) jobActor(r *http.Request) jobs.Actor {
+	principal, role := h.actorFor(r)
+	return jobs.Actor{Principal: principal, Role: role}
+}
+
+// writeJobErr writes a job error, mapping policy denials to 403.
+func writeJobErr(w http.ResponseWriter, err error) {
+	var pe *jobs.PolicyError
+	if errors.As(err, &pe) {
+		writeError(w, http.StatusForbidden, "policy_denied", pe.Error(), nil)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+}
 
 // RegisterJobs wires the job REST routes.
 func (h *Handler) RegisterJobs(mux *http.ServeMux) {
@@ -67,9 +84,9 @@ func (h *Handler) jobCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "name, cron, task_id, and selector required", nil)
 		return
 	}
-	job, err := h.jobs.Create(r.Context(), spec)
+	job, err := h.jobs.Create(r.Context(), spec, h.jobActor(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+		writeJobErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": job.ID})
@@ -98,9 +115,9 @@ func (h *Handler) jobUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
-	job, err := h.jobs.Update(r.Context(), id, spec)
+	job, err := h.jobs.Update(r.Context(), id, spec, h.jobActor(r))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+		writeJobErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": job.ID, "updated": job.Updated})
@@ -146,8 +163,8 @@ func (h *Handler) jobRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "agent_id required", nil)
 		return
 	}
-	if err := h.jobs.RunNow(r.Context(), id, body.AgentID); err != nil {
-		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+	if err := h.jobs.RunNow(r.Context(), id, body.AgentID, h.jobActor(r)); err != nil {
+		writeJobErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"dispatched": id, "agent": body.AgentID})

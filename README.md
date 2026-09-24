@@ -36,7 +36,7 @@ off and the docs become the implementation contract.
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
-| **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) scheduled job steps run **without a policy decision or agent guardrail** (manual `task.run` is gated; scheduled is not — security fix required); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
+| **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) ~~scheduled job steps run without a policy decision or agent guardrail~~ ✅ **fixed** — job create/update/RunNow now gated under `task.run`, per-host signed `Decision` in `JOB_ASSIGN`, agent re-checks guardrail before every fire (fail-closed); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
 | **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap); remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
 
@@ -116,12 +116,12 @@ Done so far:
 - ✅ **Package management** (PRD §5.6, arch §5.6): `list-updates` and `apply-updates` dispatch to the agent, which runs the native backend (apt/dnf, selected by os-release distro). **Dry-run is always run first** before apply; a before/after `dpkg-query`/`rpm -qa` journal is stored per action in `package_actions` (schema v7). Results ranked by CVE severity via the vuln cache (PRD §6.3). `pkg.apply` action class is policy-gated with a signed Decision (agent guardrail re-check). E2E-tested on a live Ubuntu host (real `apt-get -s upgrade` + phasing-deferred summary captured).
 - ✅ **REST** (`GET /packages/updates` viewer, `GET /packages/actions` viewer, `GET /packages/actions/:id` viewer, `POST /packages/apply` operator) and **CLI** (`ctl packages updates <agent> | apply <agent> [--dry-run] [--packages ...] | actions`).
 - ✅ **Tasks / Playbooks** (PRD §5.5, arch §4.5, §8.5): **versioned tasks** with 9 step kinds (`command`, `file`, `package`, `service`, `user`, `group`, `template`, `assert`, `reboot`), constrained **`when` guard** grammar (dotted fact refs, `==`/`!=`/`in [list]`, `and`/`or`, `!`, `file.exists(path)`), **task runs** recorded in `task_runs`/`task_run_steps` tables with per-step state (ok/changed/failed/skipped), **playbooks** bind a task + version + selector to hosts. Agent-side runner executes steps in order, stops on `failed`, reports aggregate state. Guardrail re-checks every run over the `task.run` action class. Server dispatches over the stream, waits for result, records audit events. CLI: `ctl tasks list|create|show|run|runs|run-show`, `ctl playbooks list|create`.
-- ✅ **Scheduled jobs** (PRD §5.4, arch §5.4.1): jobs = (selector, cron schedule, task). Server resolves the selector to concrete hosts at save/update time and pushes a per-host schedule (`JOB_ASSIGN` down). The agent runs each job on its own clock (robfig/cron), so a server outage does not stop scheduled work. Overlap policy (allow/skip/replace), failure policy (no_retry/retry with backoff). Job runs produce a `JobRunResult` (up) that the server records in `job_runs` (lineage) + audit. Assignments persist to disk (agent restart resumes schedules). REST: `GET/POST /api/v1/jobs`, `PUT/DELETE /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/runs`, `POST /api/v1/jobs/:id/run`, `GET /api/v1/jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
+- ✅ **Scheduled jobs** (PRD §5.4, arch §5.4.1): jobs = (selector, cron schedule, task). Server resolves the selector to concrete hosts at save/update time and pushes a per-host schedule (`JOB_ASSIGN` down). The agent runs each job on its own clock (robfig/cron), so a server outage does not stop scheduled work. Overlap policy (allow/skip/replace), failure policy (no_retry/retry with backoff). Job runs produce a `JobRunResult` (up) that the server records in `job_runs` (lineage) + audit. Assignments persist to disk (agent restart resumes schedules). **Policy-gated (security fix)**: create/update/`RunNow` evaluate the job's steps under the `task.run` action class per host BEFORE persisting (denied → `403 policy_denied`, nothing written); each `JOB_ASSIGN` carries a server-signed `Decision` (run_id = job id, bound to the policy bundle version); the agent re-checks it via the guardrail before **every** cron fire and fails closed (missing/stale/unsigned decision → run reported `denied`, no retry). REST: `GET/POST /api/v1/jobs`, `PUT/DELETE /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/runs`, `POST /api/v1/jobs/:id/run`, `GET /api/v1/jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
 
 ### Not started
 
 - M2 Web UI (xterm.js terminal + file browser frontend) — deferred to later V1 phase (backend complete)
-- M3 known gaps (from the verification audit, tracked in Next steps): scheduled-job policy enforcement, job dispatch E2E, reboot continuation
+- M3 known gaps (from the verification audit, tracked in Next steps): job dispatch E2E, reboot continuation
 - M4: approvals engine, full policy surface, MCP server (R11) + write tools
 - §6 observe layer + MCP read tools
 - M5: installers, cloud-init, Helm, status page
@@ -138,17 +138,12 @@ Done so far:
 8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
-11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; three known gaps tracked below
+11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; two known gaps tracked below
 12. **Web UI** (deferred V1 phase)
 
 ### Next (priority order, from the M3 verification audit)
 
-13. **Enforce policy on scheduled job steps** (security, M3/§5.4+§5.5) — scheduled runs
-    currently execute task steps with **no policy decision and no agent guardrail re-check**
-    (manual `task.run` dispatch is gated; `jobs.fire` builds a `pb.TaskRun` with a nil
-    `Decision` and the task executor never consults one). Close the bypass: evaluate the
-    job's steps under `task.run` at assign time (server), carry a signed `Decision` in the
-    assignment, and re-check agent-side before each fire.
+13. ~~**Enforce policy on scheduled job steps** (security, M3/§5.4+§5.5)~~ ✅ Done — job create/update/RunNow gated under `task.run`; per-host signed `Decision` in `JOB_ASSIGN`; agent guardrail re-check before every fire (fail-closed). **Upgrade note:** after upgrading, re-save each job (or delete + recreate) so the server re-issues signed decisions; until then, fires fail closed with state `denied`.
 14. **E2E test the job dispatch path** — `JOB_ASSIGN` → connected agent → cron fire →
     `JOB_RUN_RESULT` → `job_runs` row. Current tests stop at store/selector level and use a
     nil stream handler, so the real wire path is unverified.

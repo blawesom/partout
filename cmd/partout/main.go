@@ -222,6 +222,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	taskC.SetIdentity(ident)
 	apiH.SetTasks(taskC)
 	jobC := jobs.New(st, h, sseB, lg)
+	jobC.SetIdentity(ident)
 	apiH.SetJobs(jobC)
 	h.JobRunResultHook = func(agentID string, r *pb.JobRunResult) {
 		jobC.OnRunResult(agentID, r)

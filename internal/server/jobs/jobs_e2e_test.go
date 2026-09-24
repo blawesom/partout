@@ -221,7 +221,7 @@ func TestControllerCreateResolvesSelector(t *testing.T) {
 	job, err := ctrl.Create(context.Background(), jobs.Job{
 		Name: "cron job", TaskID: "task_test",
 		Cron: "* * * * *", Selector: "tag:env=test",
-	})
+	}, jobs.Actor{Principal: "admin", Role: "admin"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
