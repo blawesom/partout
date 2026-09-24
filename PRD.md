@@ -110,7 +110,7 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R2 | **Enrollment** (one-time token, hashed at rest, shown once) | One-time token, hashed at rest, shown once; token naming `par_enr_…`. |
 | R3 | **Ed25519 identity + challenge-response** per stream | `identity.json` mode `0600`; `sign(nonce ‖ uuid ‖ ts_be64)`; ±300s skew. |
 | R4 | **gRPC bidirectional stream** + reconnection backoff | The stream is event-*up* and adds a command-*down* channel on the same connection. |
-| R5 | **Outage spool** (SQLite `spool.db`, memory→disk→drop-oldest) | Also spools *outbound command results* and *inbound command delivery acknowledgements*. |
+| R5 | ~~**Outage spool**~~ ⬜ **REVIEW** (memory→disk→drop-oldest) | Also spools *outbound command results* and *inbound command delivery acknowledgements*. |
 | R6 | **Per-agent rate limiting** (token bucket) | Applies to both event upload and command dispatch. |
 | R7 | **Revoke/delete/edit-label** agent lifecycle | Cascade delete of all host-scoped rows. |
 | R8 | **`agent_id` on all entities** + cascade | Every command/file/job/package row carries `agent_id`. |
@@ -398,8 +398,12 @@ Client (UI/API/MCP)
 ### 6.2 Reconnection & delivery semantics
 
 - The spool (R5) now holds **both directions**: event upload and
-  **command result upload**. A command dispatched while an agent is offline is queued with a TTL;
-  on reconnect the agent fetches pending envelopes before streaming.
+  command result upload. A command dispatched while an agent is offline is queued with a TTL;
+  on reconnect the agent fetches pending envelopes before streaming. Replay is at-least-once,
+  deduped server-side by `(run_id, chunk_seq)`. **REVIEW: the original design specified an
+  in-process SQLite `spool.db`; the implementation uses per-run append-only `.sp` logs
+  (`<data dir>/spool/<run_id>.sp`), which is simpler and avoids WAL contention on the main DB.
+  Does the PRD requirement text need updating?**
 - **Idempotency / convergence**: a command interrupted by disconnect is reported as `interrupted`,
   not silently dropped. Tasks/playbooks are convergent (re-run to completion); ad-hoc commands are
   not auto-replayed unless flagged `retryable`.
