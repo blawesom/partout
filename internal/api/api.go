@@ -9,7 +9,9 @@ import (
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
+	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/provision"
+	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -20,6 +22,8 @@ type Handler struct {
 	st     *store.Store
 	ctrl   *control.Control
 	prov   *provision.Provisioner
+	files  *files.Controller
+	sess   *sessions.Manager
 	sse    *sse.Broker
 	log    *log.Logger
 	router http.Handler
@@ -76,6 +80,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 		writeJSON(w, http.StatusOK, map[string]string{"cert": handler.ca.CertPEM()})
 	})))
 
+	// M2: files + sessions (PRD §5.3, §5.2.2).
+	handler.RegisterFiles(mux)
+	handler.RegisterSessions(mux)
+
 	handler.router = mux
 	return handler
 }
@@ -102,6 +110,12 @@ func (h *Handler) SetTLS(ca *certutil.CA) {
 func (h *Handler) SetProvisioner(p *provision.Provisioner) {
 	h.prov = p
 }
+
+// SetFiles installs the files controller (M2, PRD §5.3).
+func (h *Handler) SetFiles(fc *files.Controller) { h.files = fc }
+
+// SetSessions installs the sessions manager (M2, PRD §5.2.2).
+func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }
 
 // Store returns the underlying store (for tests).
 func (h *Handler) Store() *store.Store {

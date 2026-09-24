@@ -1,8 +1,10 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAgentLifecycle tests full agent CRUD and cascade delete.
@@ -298,4 +300,96 @@ func InMemory() *Store {
 		panic("store: in-memory: " + err.Error())
 	}
 	return s
+}
+
+// ---- files_actions & sessions tables (M2) ------------------------------------
+
+// seedAgent inserts a minimal agent row so M2 tables' FK constraints pass.
+func seedAgent(db *Store, id string) {
+	if err := db.UpsertAgent(Agent{ID: id, UUID: "u_" + id, ED25519Pub: "k", X25519Pub: "k", Version: "1"}); err != nil {
+		panic("seedAgent: " + err.Error())
+	}
+}
+
+func TestFilesActionsInsert(t *testing.T) {
+	db, _ := setupTestDB(t)
+	seedAgent(db, "a1")
+	fa := FileAction{
+		ID:      "fa1", AgentID: "a1", Op: "upload",
+		Path: "/tmp/test", Actor: "op", State: "ok",
+		Size:  sql.NullInt64{Int64: 1234, Valid: true}, SHA256: "abc", Code: 0,
+		Created: time.Now().Unix(),
+	}
+	if err := db.InsertFileAction(fa); err != nil {
+		t.Fatalf("InsertFileAction: %v", err)
+	}
+}
+
+func TestSessionsCRUD(t *testing.T) {
+	db, _ := setupTestDB(t)
+	seedAgent(db, "a1")
+	now := time.Now().Unix()
+	s := Session{
+		ID: "s1", AgentID: "a1", Cmd: "/bin/bash",
+		ArgsJSON: `["-i"]`, Cols: 80, Rows: 24,
+		Record: true, State: "open", Actor: "op", Opened: now,
+	}
+	if err := db.CreateSession(s); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	got, err := db.GetSession("s1")
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.ID != "s1" || got.State != "open" {
+		t.Fatalf("got %+v", got)
+	}
+	if err := db.UpdateSessionState("s1", "closed", 0, ""); err != nil {
+		t.Fatalf("UpdateSessionState: %v", err)
+	}
+	got, _ = db.GetSession("s1")
+	if got.State != "closed" || !got.Closed.Valid || got.Closed.Int64 == 0 {
+		t.Fatalf("state=%s closed=%v", got.State, got.Closed)
+	}
+}
+
+func TestSessionRecords(t *testing.T) {
+	db, _ := setupTestDB(t)
+	seedAgent(db, "a1")
+	db.CreateSession(Session{ID: "s1", AgentID: "a1", State: "open", Opened: time.Now().Unix()})
+	if err := db.AppendSessionRecord("s1", 0, []byte("hello")); err != nil {
+		t.Fatalf("AppendSessionRecord: %v", err)
+	}
+	recs, err := db.ListSessionRecords("s1")
+	if err != nil {
+		t.Fatalf("ListSessionRecords: %v", err)
+	}
+	if len(recs) != 1 || string(recs[0].Data) != "hello" {
+		t.Fatalf("wrong records: %+v", recs)
+	}
+}
+
+func TestInterruptAgentSessions(t *testing.T) {
+	db, _ := setupTestDB(t)
+	seedAgent(db, "a1")
+	seedAgent(db, "a2")
+	now := time.Now().Unix()
+	db.CreateSession(Session{ID: "s1", AgentID: "a1", State: "open", Opened: now})
+	db.CreateSession(Session{ID: "s2", AgentID: "a1", State: "open", Opened: now})
+	db.CreateSession(Session{ID: "s3", AgentID: "a2", State: "open", Opened: now})
+	n, err := db.InterruptAgentSessions("a1")
+	if err != nil {
+		t.Fatalf("InterruptAgentSessions: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("interrupted %d, want 2", n)
+	}
+	s, _ := db.GetSession("s1")
+	if s.State != "interrupted" {
+		t.Fatalf("s1 state=%s", s.State)
+	}
+	s2, _ := db.GetSession("s3")
+	if s2.State != "open" {
+		t.Fatalf("s3 state=%s, want open", s2.State)
+	}
 }

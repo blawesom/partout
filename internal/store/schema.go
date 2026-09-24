@@ -143,7 +143,51 @@ CREATE TABLE IF NOT EXISTS provision_steps (
   finished       INTEGER,
   PRIMARY KEY (run_id, seq)
 );
+
+-- M2: files & sessions (PRD §5.2.2, §5.3; arch §8).
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id         TEXT PRIMARY KEY,
+  agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  cmd        TEXT NOT NULL,
+  args_json  TEXT,
+  cols       INTEGER,
+  rows       INTEGER,
+  record     INTEGER NOT NULL DEFAULT 0,  -- capture PTY output (PRD §9: 30 d)
+  state      TEXT NOT NULL DEFAULT 'open', -- open|closed|interrupted|denied
+  exit_code  INTEGER,
+  error      TEXT,
+  actor      TEXT NOT NULL,
+  opened     INTEGER NOT NULL,
+  closed     INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state);
+
+CREATE TABLE IF NOT EXISTS session_records (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  data       BLOB NOT NULL,
+  PRIMARY KEY (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS files_actions (
+  id       TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  kind     TEXT NOT NULL,   -- stat|list|download|upload|edit|perm
+  path     TEXT NOT NULL,
+  op_id    TEXT NOT NULL,   -- agent-side op id(s); joined with "+" for uploads
+  actor    TEXT NOT NULL,
+  state    TEXT NOT NULL,   -- ok|denied|error
+  code     INTEGER NOT NULL DEFAULT 0,
+  size     INTEGER,
+  sha256   TEXT,
+  error    TEXT,
+  created  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_files_actions_agent ON files_actions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_files_actions_created ON files_actions(created);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4

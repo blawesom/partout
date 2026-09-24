@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,6 +38,8 @@ import (
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
+	"github.com/blawesom/partout/internal/server/files"
+	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/server/provision"
 	"github.com/blawesom/partout/internal/server/stream"
@@ -170,6 +173,52 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	apiH.Control().SetIdentity(ident)
 	h.SetServerPubKey(ident.PubB64())
+
+	// M2: files + sessions (PRD §5.3, §5.2.2). Both sign Decisions with the
+	// same server identity (agent-side guardrail re-check).
+	fc := files.New(st, h, sseB, lg)
+	fc.SetIdentity(ident)
+	apiH.SetFiles(fc)
+	sm := sessions.New(st, h, sseB, lg)
+	sm.SetIdentity(ident)
+	apiH.SetSessions(sm)
+	// Chain the disconnect hook (control's hook is set in control.New):
+	// interrupt the agent's PTY sessions when the stream drops (D2).
+	prevHook := h.DisconnectHook
+	h.DisconnectHook = func(agentID string) {
+		if prevHook != nil {
+			prevHook(agentID)
+		}
+		sm.OnDisconnect(agentID)
+	}
+
+	// Retention sweeper (PRD §9: 30-day session-recording retention). Purges
+	// old recordings once at startup, then daily. The window is
+	// PARTOUT_SESSION_RETENTION_DAYS (default 30).
+	retentionDays := int64(30)
+	if v := os.Getenv("PARTOUT_SESSION_RETENTION_DAYS"); v != "" {
+		if d, err := strconv.ParseInt(v, 10, 64); err == nil && d > 0 {
+			retentionDays = d
+		}
+	}
+	go func() {
+		sweep := func() {
+			if n, err := sm.Retention(retentionDays); err == nil && n > 0 {
+				lg.Printf("retention: purged %d session-record chunk(s) older than %dd", n, retentionDays)
+			}
+		}
+		sweep()
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sweep()
+			}
+		}
+	}()
 
 	// Host provisioning (arch §3.5). SSH is the bootstrap channel only;
 	// Partout never creates/copies/persists operator credentials. The ssh dir

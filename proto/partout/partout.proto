@@ -33,12 +33,20 @@ enum EnvelopeKind {
   COMMAND_OUTPUT = 4;
   COMMAND_RESULT = 5;
   ACK = 6;
+  SESSION_DATA = 7;
+  SESSION_RESULT = 8;
+  FILE_OP_RESULT = 9;
 
   // Down (server -> agent)
   COMMAND = 10;
   POLICY_BUNDLE = 11;
   REVOKE = 12;
   CANCEL = 13;
+  SESSION_OPEN = 14;
+  SESSION_INPUT = 15;
+  SESSION_RESIZE = 16;
+  SESSION_CLOSE = 17;
+  FILE_OP = 18;
 
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
@@ -60,11 +68,19 @@ message Envelope {
     CommandOutput output = 23;
     CommandResult result = 24;
     Ack ack = 25;
+    SessionData session_data = 26;
+    SessionResult session_result = 27;
+    FileOpResult file_op_result = 28;
     // Down
     Command command = 30;
     PolicyBundle policy_bundle = 31;
     Revoke revoke = 32;
     Cancel cancel = 33;
+    SessionOpen session_open = 34;
+    SessionInput session_input = 35;
+    SessionResize session_resize = 36;
+    SessionClose session_close = 37;
+    FileOp file_op = 38;
     // Handshake
     Challenge challenge = 50;
     AuthProof auth_proof = 51;
@@ -130,6 +146,95 @@ message CommandResult {
   int64 duration_ms = 4;
 }
 
+// SessionData is one PTY output chunk from a session (PRD §5.2.2).
+message SessionData {
+  string session_id = 1;
+  uint64 seq = 2;            // per-session monotonic
+  bytes data = 3;
+}
+
+// SessionResult is the terminal state of a session.
+message SessionResult {
+  string session_id = 1;
+  int32 exit_code = 2;
+  string state = 3;          // succeeded|failed|timed_out|cancelled|interrupted|denied
+  int64 duration_ms = 4;
+  string error = 5;          // set when the session never ran (start/deny error)
+}
+
+// ---- Files (PRD §5.3) -----------------------------------------------------
+
+// FileOpKind identifies one file action (arch §3.2: FileOp carries
+// upload chunk / download request / edit CAS / stat / perm change).
+enum FileOpKind {
+  FILE_OP_KIND_UNSPECIFIED = 0;
+  FILE_OP_STAT = 1;
+  FILE_OP_LIST = 2;          // directory listing (file browser)
+  FILE_OP_DOWNLOAD = 3;      // chunked read, offset-resumable
+  FILE_OP_UPLOAD_BEGIN = 4;  // creates agent-side temp file
+  FILE_OP_UPLOAD_CHUNK = 5;  // append at offset
+  FILE_OP_UPLOAD_COMMIT = 6; // atomic temp -> path rename
+  FILE_OP_UPLOAD_ABORT = 7;  // remove temp file
+  FILE_OP_EDIT_CAS = 8;      // compare-and-swap on sha256
+  FILE_OP_SET_PERM = 9;      // chmod / chown
+}
+
+// FileOp is one file request from the server. op_id correlates it with the
+// FileOpResult. Write ops (upload/edit/perm) carry a signed Decision for the
+// agent-side guardrail re-check (arch §5.3, A6 action taxonomy).
+message FileOp {
+  string op_id = 1;          // request id (also envelope corr_id)
+  FileOpKind kind = 2;
+  string path = 3;           // absolute target path (no symlink components)
+  int64 total_size = 4;      // expected upload size; enforced cap at begin/commit
+  uint64 offset = 5;         // download offset / upload chunk offset
+  bytes data = 6;            // upload chunk payload / edit content
+  string mode = 7;           // octal mode string for SET_PERM ("0644")
+  string user = 8;           // optional new owner (SET_PERM)
+  string group = 9;          // optional new group (SET_PERM)
+  string expected_sha256 = 10; // EDIT_CAS: required current sha256
+  // UPLOAD_CHUNK / UPLOAD_COMMIT / UPLOAD_ABORT: the temp file path returned
+  // by UPLOAD_BEGIN (the server echoes it back; path stays the final target).
+  string temp_path = 11;
+  Decision decision = 12;    // present for upload/edit/perm (agent re-check)
+}
+
+// FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.
+message FileOpResult {
+  string op_id = 1;
+  FileOpKind kind = 2;
+  int32 code = 3;
+  string error = 4;
+  FileStat stat = 5;         // STAT
+  repeated FileEntry entries = 6; // LIST
+  bool truncated = 7;        // LIST: more entries than cap
+  bytes data = 8;            // DOWNLOAD: chunk bytes
+  bool done = 9;             // DOWNLOAD: no more data
+  string temp_path = 10;     // UPLOAD_BEGIN: absolute temp file path
+  uint64 received = 11;      // UPLOAD_CHUNK: cumulative bytes on disk
+  string new_sha256 = 12;    // EDIT_CAS / UPLOAD_COMMIT: resulting sha256
+}
+
+message FileStat {
+  int64 size = 1;
+  string mode = 2;           // octal, e.g. "0644"
+  string owner = 3;          // owner name
+  string group = 4;          // group name
+  int64 mtime_unix = 5;
+  string sha256 = 6;         // regular files only; "" otherwise
+  bool is_dir = 7;
+  bool is_symlink = 8;
+}
+
+message FileEntry {
+  string name = 1;
+  bool is_dir = 2;
+  bool is_symlink = 3;
+  int64 size = 4;
+  int64 mtime_unix = 5;
+  string mode = 6;
+}
+
 // ---- Down: server -> agent ------------------------------------------------
 
 message Decision {
@@ -172,6 +277,35 @@ message Revoke {
 // reports state=cancelled).
 message Cancel {
   string run_id = 1;
+}
+
+// SessionOpen starts a PTY session on the agent (PRD §5.2.2). The decision is
+// evaluated as an exec action (command regex applies to cmd + args).
+message SessionOpen {
+  string session_id = 1;
+  string cmd = 2;
+  repeated string args = 3;
+  string user = 4;
+  int32 cols = 5;
+  int32 rows = 6;
+  map<string, string> env = 7;
+  bool record = 8;           // capture PTY output for replay (PRD §9)
+  Decision decision = 9;
+}
+
+message SessionInput {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message SessionResize {
+  string session_id = 1;
+  int32 cols = 2;
+  int32 rows = 3;
+}
+
+message SessionClose {
+  string session_id = 1;
 }
 
 // ---- Handshake ------------------------------------------------------------

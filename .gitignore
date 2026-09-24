@@ -24,3 +24,6 @@ identity.json
 *.swp
 .idea/
 .vscode/
+
+# Generated protobuf (regenerate with protoc; committed copy is internal/proto/)
+proto/partout/*.pb.go

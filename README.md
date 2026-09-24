@@ -34,8 +34,8 @@ off and the docs become the implementation contract.
 | Milestone | Status | Notes |
 |---|---|---|
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
-| **M1 — First write path** | 🟡 In progress | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. Missing: Postgres backend (deferred to a later phase) |
-| **M2 — Files & sessions** | ⬜ Not started | — |
+| **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
+| **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
 | **M3 — Automation** | ⬜ Not started | — |
 | **M4 — Governance** | ⬜ Not started | — |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
@@ -61,7 +61,7 @@ off and the docs become the implementation contract.
 - ✅ `internal/id` — opaque TEXT keys (`prefix_` + 12 hex)
 - ✅ 124 tests, race detector clean (+3 opt-in live-sshd tests under `-tags live`)
 
-### M1 — First write path (in progress)
+### M1 — First write path (complete)
 
 Done:
 - ✅ Ad-hoc command execution with streamed output (stdout/stderr)
@@ -85,13 +85,27 @@ Remaining:
 - [ ] TLS cert rotation via the stream (v1.x) + optional revocation list
 - [ ] Dispatch to offline agents (server-side down-queue with TTL) — follow-up
 
+### M2 — Files & sessions (complete)
+
+Done (decisions D1–D5 per PRD review):
+- ✅ **File operations** (PRD §5.3, arch A6): `stat`, `list`, `download` (chunked, resumable offset), `upload` (atomic temp + rename, chunked 256 KiB), `edit` (compare-and-swap on sha256), `perm` (mode/owner/group). Synchronous request/response over the agent stream (`FILE_OP` down / `FILE_OP_RESULT` up), REST at `/api/v1/files/*`.
+- ✅ **Path safety (D4)**: absolute paths only; any symlink component in the path is rejected (no traversal across the transfer boundary); intermediate components must be real directories. Enforced agent-side in `internal/agent/fs`.
+- ✅ **Size caps (D3)**: 256 MiB max transfer, 256 KiB chunk, 1 MiB edit cap, 2048 list-entry cap (env-configurable).
+- ✅ **File policy posture (D1)**: reads (stat/list/download) bypass policy; writes (upload/edit/perm) require server-side policy evaluation over the `file.write`/`file.perm` action classes, attach a signed `Decision`, and the agent guardrail re-checks before executing. Deny → 403 + audit row.
+- ✅ **Auditability**: every file op records a `files_actions` row (op, path, actor, state, size, sha256) + append-only `audit_events` entry + `file.action` SSE event.
+- ✅ **PTY sessions** (PRD §5.2.2, arch §6.1): `open`/`input`/`resize`/`close` over the stream (`SESSION_*` envelopes), real PTY via `creack/pty`, 64 KiB chunks, SIGHUP-then-SIGKILL graceful close (1 s). REST at `/api/v1/sessions*`; live output via SSE (`session.data`, `session.result`, `session.opened`, `session.interrupted`).
+- ✅ **Session policy**: a session open is an `exec` action (command regex applies to `cmd args`); a deny records the session `denied` and blocks the agent.
+- ✅ **Recording + replay (PRD §9)**: optional per-session PTY capture to `session_records` (monotonic seq), `GET /api/v1/sessions/{id}/replay`, 30-day retention sweeper (daily, `PARTOUT_SESSION_RETENTION_DAYS`).
+- ✅ **Stream-drop semantics (D2)**: on agent disconnect the server interrupts all open sessions (`interrupted`); the agent kills all PTYs on stream end. PTY traffic is never spooled (sessions are live-only).
+- ✅ **CLI**: `partout ctl files stat|list|upload|edit|perm` and `partout ctl sessions open|close|list|replay`.
+- ✅ E2E tests: files over a live bufconn stream (stat/list/download/upload/edit-CAS/conflict/perm/symlink-rejection/policy-deny/audit) and sessions (open→data→close→result, recording+replay, policy deny, disconnect interruption).
+
 ### Not started
 
-- M2: file browser, transfers, PTY sessions, recording
+- M2 Web UI (xterm.js terminal + file browser frontend) — deferred to later V1 phase (backend complete)
 - M3: jobs, tasks/playbooks, packages, secrets, external data refresh
 - M4: approvals, full policy engine, MCP write tools
 - M5: installers, cloud-init, Helm, status page
-- Web UI (Vue 3 + TS + Pinia) — explicitly deferred to later V1 phase
 
 ## Next steps
 
@@ -103,7 +117,7 @@ Remaining:
 6. ~~**Finish M1**: host provisioning (fleet SSH)~~ ✅ Done (see M1 Done list)
 7. ~~**Finish M1**: offline spool~~ ✅ Done (see M1 Done list)
 8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
-9. **M2**: files & sessions
+9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
 11. **Web UI** (deferred V1 phase)
 

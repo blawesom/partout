@@ -441,13 +441,18 @@ Rule (one declarative object, stored in `policies`):
 ```
 
 - **Evaluation**: all matching rules considered; precedence `deny > require_approval > allow`.
+- **Action classes (M2, D1)**: `exec` (commands, incl. session opens), `file.read`
+  (stat/list/download — bypasses policy), `file.write` (upload/edit), `file.perm`
+  (mode/owner changes). A rule's `match.actions` may list `file` (the parent class, matching
+  any file op) or a specific class. File ops set `Action.Path` + `CommandLine = "kind path"`
+  so `command_regex` can gate on path. A session open is an `exec` action (`cmd args`).
 - **v1 default: default-allow** (deny-list model): an action with no matching rule is
-  allowed. The v0.1 proposal of default-deny writes is deferred: it needs the action-class
-  taxonomy (file writes, pkg.apply, …) that lands with M2 (files) and M3 (packages).
-  `require_approval` is accepted as an effect but evaluated as `deny` until the approvals
-  engine lands (M4).
+  allowed. `require_approval` is accepted as an effect but evaluated as `deny` until the
+  approvals engine lands (M4).
 - **Structured refusal**: every deny carries the matched rule id(s) + reason in the API
-  response, the run record (`state=denied`), and the audit log (`policy.deny`).
+  response, the run/session record (`state=denied`), and the audit log (`policy.deny`).
+  Write file ops additionally attach a signed `Decision` to the `FileOp` envelope so the
+  agent guardrail re-checks (arch §5.3); a mismatch → agent-side 403.
 
 ### 5.3 Server decision + agent re-check
 
@@ -462,7 +467,11 @@ Rule (one declarative object, stored in `policies`):
   verifies (a) decision signature, (b) `bundle_version` equals its cached bundle, and (c)
   re-evaluates the rule set over the local action (the bundle carries the agent's own
   `host_tags`/`host_roles`/`agent_id`; the decision carries `actor_role`). Any mismatch →
-  **deny**, emit `ACK_DENIED_AGENT` with the reason.
+  **deny**, emit `ACK_DENIED_AGENT` with the reason. **M2 (D1)**: write file ops (upload,
+  edit, perm) attach the same signed `Decision` to the `FileOp` envelope and go through
+  `guardrail.RecheckFile` before execution; read ops (stat/list/download) carry no decision
+  and skip the re-check (they are policy-bypass by design). Session opens reuse the exec
+  re-check path.
 - The guardrail **fails closed** until the first bundle is received; an *empty* rule set is a
   valid default-allow state. The bundle + server public key persist under `<data-dir>/agent/`
   so the guardrail is effective from agent start (survives restarts).
@@ -544,8 +553,20 @@ group:webservers               # a saved group (named selector)
   spec and constrained by policy). Precedence: per-command > host-level `--elevate`; `sudoers`
   wins over `sudo` at any level. Host-level `--elevate=none` (default **(proposed**) / `sudoers`
   / `sudo`) sets the floor; per-command can only tighten.
-- **fs** — atomic writes (temp + rename), stat, CAS edit (compare-and-swap on checksum),
-  size caps, no symlink traversal across the transfer boundary (PRD §5.3).
+- **fs** (M2, implemented) — atomic writes (temp + rename), stat, CAS edit (compare-and-swap
+  on sha256), chunked upload (256 KiB), chunked download (resumable offset), size caps
+  (256 MiB transfer / 1 MiB edit / 2048 list entries), no symlink traversal across the
+  transfer boundary (PRD §5.3, D4: any symlink component in the path is rejected; absolute
+  paths only; intermediate components must be real directories). `SafePath` is the single
+  choke point every op calls before touching the filesystem.
+- **session** (M2, implemented) — PTY session manager over `creack/pty`. `Open` spawns the
+  command in a PTY at the requested cols/rows, sanitizes the environment, and wires a
+  single read-loop that pumps 64 KiB chunks to the server (up `SESSION_DATA`) and, when the
+  process exits, reports `SESSION_RESULT {state, exit, duration}`. `Input`/`Resize` forward
+  terminal bytes / window size. `Close` sends SIGHUP, waits 1 s, escalates to SIGKILL
+  (graceful, deliberate → state `closed`); `KillAll` (stream drop, D2) kills immediately
+  (state `interrupted`). Only one goroutine ever calls `cmd.Wait()`, so exit is reported
+  exactly once.
 - **jobsched** — in-process cron on the agent's clock; stores resolved schedules + run state +
   overlap locks in agent-local state; overlap policy (allow/skip/replace) and failure
   retry-with-backoff executed here; results spool offline.
@@ -664,10 +685,12 @@ data set). One dialect abstraction (`internal/store`); no engine-specific querie
 
 ### 9.3 Retention sweeper
 
-A single server-side sweeper (hourly) enforces PRD §9: output chunks 30 d, session records
-30 d, job/task run history 90 d, facts history 90 d, spool age 24 h (agent-side). Audit and
-secret versions are **not** swept (operator-configurable floor for audit; secrets until
-rotated). Sweeper actions are themselves audited.
+A server-side sweeper enforces PRD §9. **M2 (implemented)**: session recordings are purged
+past 30 days (daily ticker; `PARTOUT_SESSION_RETENTION_DAYS` overrides the window; purged
+chunk count is logged). **Planned** (later milestones): output chunks 30 d, job/task run
+history 90 d, facts history 90 d, spool age 24 h (agent-side). Audit and secret versions are
+**not** swept (operator-configurable floor for audit; secrets until rotated). Sweeper actions
+are themselves audited.
 
 ---
 
@@ -697,7 +720,33 @@ error bodies `{code, message, details}`.
 | POST   | `/api/v1/agents/enroll` | — | Agent enrollment (token auth; accepts `csr` in TLS mode) |
 | POST   | `/api/v1/agents/enroll` (TLS) | — | enroll returns `tls.{ca_cert,leaf_cert}` when the server has a CA |
 | GET    | `/api/v1/tls/ca` | admin | Fetch the server root CA (PEM, `{"cert": ...}`) |
+| GET    | `/api/v1/files/stat` | viewer | File metadata (`stat` + sha256) |
+| GET    | `/api/v1/files/list` | viewer | Directory listing |
+| GET    | `/api/v1/files/download` | viewer | Chunked file download (resumable) |
+| POST   | `/api/v1/files/upload` | operator | Chunked upload (base64 in JSON) |
+| POST   | `/api/v1/files/edit` | operator | CAS edit (compare-and-swap on sha256) |
+| POST   | `/api/v1/files/perm` | operator | Change file mode/ownership |
+| POST   | `/api/v1/sessions` | operator | Open a PTY session |
+| POST   | `/api/v1/sessions/:id/input` | operator | Send terminal input |
+| POST   | `/api/v1/sessions/:id/resize` | operator | Resize terminal |
+| POST   | `/api/v1/sessions/:id/close` | operator | Close a PTY session |
+| GET    | `/api/v1/sessions` | viewer | Session list |
+| GET    | `/api/v1/sessions/:id` | viewer | Session detail |
+| GET    | `/api/v1/sessions/:id/replay` | viewer | Replay recorded PTY chunks |
 | GET    | `/api/v1/audit` | viewer | Audit event log |
+| GET    | `/api/v1/files/stat?agent_id=&path=` | viewer | File metadata (M2) |
+| GET    | `/api/v1/files/list?agent_id=&path=` | viewer | Directory listing (M2) |
+| GET    | `/api/v1/files/download?agent_id=&path=` | viewer | File bytes, `Range: bytes=N-` resumable (M2) |
+| POST   | `/api/v1/files/upload` | operator | `{agent_id, path, content_b64, mode}` → atomic (M2) |
+| POST   | `/api/v1/files/edit` | operator | `{agent_id, path, expected_sha256, content_b64}` → CAS (M2) |
+| POST   | `/api/v1/files/perm` | operator | `{agent_id, path, mode, owner, group}` (M2) |
+| POST   | `/api/v1/sessions` | operator | `{agent_id, cmd, args, cols, rows, record}` → open PTY (M2) |
+| POST   | `/api/v1/sessions/:id/input` | operator | `{data_b64}` terminal input (M2) |
+| POST   | `/api/v1/sessions/:id/resize` | operator | `{cols, rows}` (M2) |
+| POST   | `/api/v1/sessions/:id/close` | operator | End session (SIGHUP→SIGKILL, M2) |
+| GET    | `/api/v1/sessions` | viewer | Recent sessions (M2) |
+| GET    | `/api/v1/sessions/:id` | viewer | Session detail (M2) |
+| GET    | `/api/v1/sessions/:id/replay` | viewer | Recorded PTY chunks (M2) |
 | GET    | `/healthz` | — | Liveness |
 | GET    | `/readyz` | — | Readiness (DB ping) |
 | GET    | `/api/v1/events` | — | SSE event stream |

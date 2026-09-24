@@ -33,6 +33,16 @@ const (
 	EffectAllow           = "allow"
 )
 
+// Action classes (arch A6 taxonomy: file classes land with M2, pkg with M3).
+// Rules may name a class ("file.write"), a parent class ("file"), or leave
+// Actions empty (match every class).
+const (
+	ActionExec      = "exec"
+	ActionFileRead  = "file.read"
+	ActionFileWrite = "file.write"
+	ActionFilePerm  = "file.perm"
+)
+
 // Priority ordering for precedence: lower number = higher priority.
 const DefaultPriority = 0
 
@@ -61,7 +71,12 @@ type Action struct {
 	ActorRole   string // RBAC role of the requester (viewer, operator, admin)
 	Cmd         string
 	Args        []string
-	CommandLine string // "cmd args..." for regex matching; built from Cmd+Args
+	CommandLine string // "cmd args..." for exec; "kind path" for file actions
+	// ActionClass is the class being evaluated (M2 taxonomy). Empty means
+	// "exec" (legacy call sites).
+	ActionClass string
+	// Path is the target path for file actions.
+	Path string
 }
 
 // Decision is the outcome of evaluating rules against an action.
@@ -200,15 +215,18 @@ func selectorResolveSingle(predicates []selector.Predicate, a Action) bool {
 
 func matchActions(actions []string, a Action) bool {
 	if len(actions) == 0 {
-		return true
+		return true // no action filter → matches all
+	}
+	class := a.ActionClass
+	if class == "" {
+		class = ActionExec
 	}
 	for _, act := range actions {
-		if act == "exec" || act == "file" || act == "apply" || act == "pkg.apply" {
-			if strings.Contains(a.CommandLine, act) {
-				return true
-			}
+		if act == class {
+			return true // exact class match ("exec", "file.write", …)
 		}
-		if act == "exec" && a.Cmd != "" {
+		// Parent class: a rule naming "file" matches any file.* class.
+		if strings.HasPrefix(class, "file.") && act == "file" {
 			return true
 		}
 	}

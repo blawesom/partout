@@ -3,6 +3,7 @@ module github.com/blawesom/partout
 go 1.25.0
 
 require (
+	github.com/creack/pty v1.1.24
 	golang.org/x/crypto v0.54.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12

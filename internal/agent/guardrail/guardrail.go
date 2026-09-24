@@ -139,6 +139,48 @@ func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 	return true, ""
 }
 
+// RecheckFile verifies a file op's Decision the same way Recheck does for
+// commands (architecture §5.3): bundle version, signature, local re-eval
+// over the file action (class + path), and the server decision effect.
+// Fails closed on any mismatch.
+func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
+	if !g.loaded.Load() {
+		return false, "guardrail: no policy bundle received"
+	}
+	d := op.Decision
+	if d == nil {
+		return false, "guardrail: no decision in file op"
+	}
+	if d.BundleVersion != g.version {
+		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
+			d.BundleVersion, g.version)
+	}
+	if len(g.serverPub) > 0 {
+		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			return false, "guardrail: decision signature invalid"
+		}
+	}
+	class, ok := policy.FileOpClass(op.Kind)
+	if !ok {
+		return false, "guardrail: unknown file op kind"
+	}
+	action := policy.FileAction(class, op.Path)
+	action.HostID = g.agentID
+	action.HostTags = g.hostTags
+	action.HostRoles = g.hostRoles
+	action.ActorRole = d.ActorRole
+	dec := policy.Evaluate(g.rules, action)
+	if dec.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: local recheck says %s (%s)",
+			dec.Effect, dec.Reason)
+	}
+	if d.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: server decision is %s", d.Effect)
+	}
+	return true, ""
+}
+
 // ServerPubB64 returns the base64-encoded server public key (empty if unknown).
 func (g *Guard) ServerPubB64() string {
 	if len(g.serverPub) == 0 {

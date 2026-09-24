@@ -44,11 +44,19 @@ const (
 	EnvelopeKind_COMMAND_OUTPUT EnvelopeKind = 4
 	EnvelopeKind_COMMAND_RESULT EnvelopeKind = 5
 	EnvelopeKind_ACK            EnvelopeKind = 6
+	EnvelopeKind_SESSION_DATA   EnvelopeKind = 7
+	EnvelopeKind_SESSION_RESULT EnvelopeKind = 8
+	EnvelopeKind_FILE_OP_RESULT EnvelopeKind = 9
 	// Down (server -> agent)
-	EnvelopeKind_COMMAND       EnvelopeKind = 10
-	EnvelopeKind_POLICY_BUNDLE EnvelopeKind = 11
-	EnvelopeKind_REVOKE        EnvelopeKind = 12
-	EnvelopeKind_CANCEL        EnvelopeKind = 13
+	EnvelopeKind_COMMAND        EnvelopeKind = 10
+	EnvelopeKind_POLICY_BUNDLE  EnvelopeKind = 11
+	EnvelopeKind_REVOKE         EnvelopeKind = 12
+	EnvelopeKind_CANCEL         EnvelopeKind = 13
+	EnvelopeKind_SESSION_OPEN   EnvelopeKind = 14
+	EnvelopeKind_SESSION_INPUT  EnvelopeKind = 15
+	EnvelopeKind_SESSION_RESIZE EnvelopeKind = 16
+	EnvelopeKind_SESSION_CLOSE  EnvelopeKind = 17
+	EnvelopeKind_FILE_OP        EnvelopeKind = 18
 	// Handshake (per stream)
 	EnvelopeKind_CHALLENGE  EnvelopeKind = 40 // down: server issues
 	EnvelopeKind_AUTH_PROOF EnvelopeKind = 41 // up: agent replies
@@ -64,10 +72,18 @@ var (
 		4:  "COMMAND_OUTPUT",
 		5:  "COMMAND_RESULT",
 		6:  "ACK",
+		7:  "SESSION_DATA",
+		8:  "SESSION_RESULT",
+		9:  "FILE_OP_RESULT",
 		10: "COMMAND",
 		11: "POLICY_BUNDLE",
 		12: "REVOKE",
 		13: "CANCEL",
+		14: "SESSION_OPEN",
+		15: "SESSION_INPUT",
+		16: "SESSION_RESIZE",
+		17: "SESSION_CLOSE",
+		18: "FILE_OP",
 		40: "CHALLENGE",
 		41: "AUTH_PROOF",
 	}
@@ -79,10 +95,18 @@ var (
 		"COMMAND_OUTPUT":            4,
 		"COMMAND_RESULT":            5,
 		"ACK":                       6,
+		"SESSION_DATA":              7,
+		"SESSION_RESULT":            8,
+		"FILE_OP_RESULT":            9,
 		"COMMAND":                   10,
 		"POLICY_BUNDLE":             11,
 		"REVOKE":                    12,
 		"CANCEL":                    13,
+		"SESSION_OPEN":              14,
+		"SESSION_INPUT":             15,
+		"SESSION_RESIZE":            16,
+		"SESSION_CLOSE":             17,
+		"FILE_OP":                   18,
 		"CHALLENGE":                 40,
 		"AUTH_PROOF":                41,
 	}
@@ -213,6 +237,78 @@ func (OutputStream) EnumDescriptor() ([]byte, []int) {
 	return file_proto_partout_partout_proto_rawDescGZIP(), []int{2}
 }
 
+// FileOpKind identifies one file action (arch §3.2: FileOp carries
+// upload chunk / download request / edit CAS / stat / perm change).
+type FileOpKind int32
+
+const (
+	FileOpKind_FILE_OP_KIND_UNSPECIFIED FileOpKind = 0
+	FileOpKind_FILE_OP_STAT             FileOpKind = 1
+	FileOpKind_FILE_OP_LIST             FileOpKind = 2 // directory listing (file browser)
+	FileOpKind_FILE_OP_DOWNLOAD         FileOpKind = 3 // chunked read, offset-resumable
+	FileOpKind_FILE_OP_UPLOAD_BEGIN     FileOpKind = 4 // creates agent-side temp file
+	FileOpKind_FILE_OP_UPLOAD_CHUNK     FileOpKind = 5 // append at offset
+	FileOpKind_FILE_OP_UPLOAD_COMMIT    FileOpKind = 6 // atomic temp -> path rename
+	FileOpKind_FILE_OP_UPLOAD_ABORT     FileOpKind = 7 // remove temp file
+	FileOpKind_FILE_OP_EDIT_CAS         FileOpKind = 8 // compare-and-swap on sha256
+	FileOpKind_FILE_OP_SET_PERM         FileOpKind = 9 // chmod / chown
+)
+
+// Enum value maps for FileOpKind.
+var (
+	FileOpKind_name = map[int32]string{
+		0: "FILE_OP_KIND_UNSPECIFIED",
+		1: "FILE_OP_STAT",
+		2: "FILE_OP_LIST",
+		3: "FILE_OP_DOWNLOAD",
+		4: "FILE_OP_UPLOAD_BEGIN",
+		5: "FILE_OP_UPLOAD_CHUNK",
+		6: "FILE_OP_UPLOAD_COMMIT",
+		7: "FILE_OP_UPLOAD_ABORT",
+		8: "FILE_OP_EDIT_CAS",
+		9: "FILE_OP_SET_PERM",
+	}
+	FileOpKind_value = map[string]int32{
+		"FILE_OP_KIND_UNSPECIFIED": 0,
+		"FILE_OP_STAT":             1,
+		"FILE_OP_LIST":             2,
+		"FILE_OP_DOWNLOAD":         3,
+		"FILE_OP_UPLOAD_BEGIN":     4,
+		"FILE_OP_UPLOAD_CHUNK":     5,
+		"FILE_OP_UPLOAD_COMMIT":    6,
+		"FILE_OP_UPLOAD_ABORT":     7,
+		"FILE_OP_EDIT_CAS":         8,
+		"FILE_OP_SET_PERM":         9,
+	}
+)
+
+func (x FileOpKind) Enum() *FileOpKind {
+	p := new(FileOpKind)
+	*p = x
+	return p
+}
+
+func (x FileOpKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FileOpKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_proto_partout_partout_proto_enumTypes[3].Descriptor()
+}
+
+func (FileOpKind) Type() protoreflect.EnumType {
+	return &file_proto_partout_partout_proto_enumTypes[3]
+}
+
+func (x FileOpKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FileOpKind.Descriptor instead.
+func (FileOpKind) EnumDescriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{3}
+}
+
 // Envelope is the single message type on the stream.
 type Envelope struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
@@ -229,10 +325,18 @@ type Envelope struct {
 	//	*Envelope_Output
 	//	*Envelope_Result
 	//	*Envelope_Ack
+	//	*Envelope_SessionData
+	//	*Envelope_SessionResult
+	//	*Envelope_FileOpResult
 	//	*Envelope_Command
 	//	*Envelope_PolicyBundle
 	//	*Envelope_Revoke
 	//	*Envelope_Cancel
+	//	*Envelope_SessionOpen
+	//	*Envelope_SessionInput
+	//	*Envelope_SessionResize
+	//	*Envelope_SessionClose
+	//	*Envelope_FileOp
 	//	*Envelope_Challenge
 	//	*Envelope_AuthProof
 	Payload       isEnvelope_Payload `protobuf_oneof:"payload"`
@@ -366,6 +470,33 @@ func (x *Envelope) GetAck() *Ack {
 	return nil
 }
 
+func (x *Envelope) GetSessionData() *SessionData {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_SessionData); ok {
+			return x.SessionData
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetSessionResult() *SessionResult {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_SessionResult); ok {
+			return x.SessionResult
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetFileOpResult() *FileOpResult {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_FileOpResult); ok {
+			return x.FileOpResult
+		}
+	}
+	return nil
+}
+
 func (x *Envelope) GetCommand() *Command {
 	if x != nil {
 		if x, ok := x.Payload.(*Envelope_Command); ok {
@@ -397,6 +528,51 @@ func (x *Envelope) GetCancel() *Cancel {
 	if x != nil {
 		if x, ok := x.Payload.(*Envelope_Cancel); ok {
 			return x.Cancel
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetSessionOpen() *SessionOpen {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_SessionOpen); ok {
+			return x.SessionOpen
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetSessionInput() *SessionInput {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_SessionInput); ok {
+			return x.SessionInput
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetSessionResize() *SessionResize {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_SessionResize); ok {
+			return x.SessionResize
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetSessionClose() *SessionClose {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_SessionClose); ok {
+			return x.SessionClose
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetFileOp() *FileOp {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_FileOp); ok {
+			return x.FileOp
 		}
 	}
 	return nil
@@ -449,6 +625,18 @@ type Envelope_Ack struct {
 	Ack *Ack `protobuf:"bytes,25,opt,name=ack,proto3,oneof"`
 }
 
+type Envelope_SessionData struct {
+	SessionData *SessionData `protobuf:"bytes,26,opt,name=session_data,json=sessionData,proto3,oneof"`
+}
+
+type Envelope_SessionResult struct {
+	SessionResult *SessionResult `protobuf:"bytes,27,opt,name=session_result,json=sessionResult,proto3,oneof"`
+}
+
+type Envelope_FileOpResult struct {
+	FileOpResult *FileOpResult `protobuf:"bytes,28,opt,name=file_op_result,json=fileOpResult,proto3,oneof"`
+}
+
 type Envelope_Command struct {
 	// Down
 	Command *Command `protobuf:"bytes,30,opt,name=command,proto3,oneof"`
@@ -464,6 +652,26 @@ type Envelope_Revoke struct {
 
 type Envelope_Cancel struct {
 	Cancel *Cancel `protobuf:"bytes,33,opt,name=cancel,proto3,oneof"`
+}
+
+type Envelope_SessionOpen struct {
+	SessionOpen *SessionOpen `protobuf:"bytes,34,opt,name=session_open,json=sessionOpen,proto3,oneof"`
+}
+
+type Envelope_SessionInput struct {
+	SessionInput *SessionInput `protobuf:"bytes,35,opt,name=session_input,json=sessionInput,proto3,oneof"`
+}
+
+type Envelope_SessionResize struct {
+	SessionResize *SessionResize `protobuf:"bytes,36,opt,name=session_resize,json=sessionResize,proto3,oneof"`
+}
+
+type Envelope_SessionClose struct {
+	SessionClose *SessionClose `protobuf:"bytes,37,opt,name=session_close,json=sessionClose,proto3,oneof"`
+}
+
+type Envelope_FileOp struct {
+	FileOp *FileOp `protobuf:"bytes,38,opt,name=file_op,json=fileOp,proto3,oneof"`
 }
 
 type Envelope_Challenge struct {
@@ -487,6 +695,12 @@ func (*Envelope_Result) isEnvelope_Payload() {}
 
 func (*Envelope_Ack) isEnvelope_Payload() {}
 
+func (*Envelope_SessionData) isEnvelope_Payload() {}
+
+func (*Envelope_SessionResult) isEnvelope_Payload() {}
+
+func (*Envelope_FileOpResult) isEnvelope_Payload() {}
+
 func (*Envelope_Command) isEnvelope_Payload() {}
 
 func (*Envelope_PolicyBundle) isEnvelope_Payload() {}
@@ -494,6 +708,16 @@ func (*Envelope_PolicyBundle) isEnvelope_Payload() {}
 func (*Envelope_Revoke) isEnvelope_Payload() {}
 
 func (*Envelope_Cancel) isEnvelope_Payload() {}
+
+func (*Envelope_SessionOpen) isEnvelope_Payload() {}
+
+func (*Envelope_SessionInput) isEnvelope_Payload() {}
+
+func (*Envelope_SessionResize) isEnvelope_Payload() {}
+
+func (*Envelope_SessionClose) isEnvelope_Payload() {}
+
+func (*Envelope_FileOp) isEnvelope_Payload() {}
 
 func (*Envelope_Challenge) isEnvelope_Payload() {}
 
@@ -929,6 +1153,598 @@ func (x *CommandResult) GetDurationMs() int64 {
 	return 0
 }
 
+// SessionData is one PTY output chunk from a session (PRD §5.2.2).
+type SessionData struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Seq           uint64                 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"` // per-session monotonic
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionData) Reset() {
+	*x = SessionData{}
+	mi := &file_proto_partout_partout_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionData) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionData) ProtoMessage() {}
+
+func (x *SessionData) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionData.ProtoReflect.Descriptor instead.
+func (*SessionData) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SessionData) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionData) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *SessionData) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+// SessionResult is the terminal state of a session.
+type SessionResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	ExitCode      int32                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	State         string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"` // succeeded|failed|timed_out|cancelled|interrupted|denied
+	DurationMs    int64                  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	Error         string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"` // set when the session never ran (start/deny error)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionResult) Reset() {
+	*x = SessionResult{}
+	mi := &file_proto_partout_partout_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionResult) ProtoMessage() {}
+
+func (x *SessionResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionResult.ProtoReflect.Descriptor instead.
+func (*SessionResult) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SessionResult) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionResult) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *SessionResult) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *SessionResult) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+func (x *SessionResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// FileOp is one file request from the server. op_id correlates it with the
+// FileOpResult. Write ops (upload/edit/perm) carry a signed Decision for the
+// agent-side guardrail re-check (arch §5.3, A6 action taxonomy).
+type FileOp struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	OpId           string                 `protobuf:"bytes,1,opt,name=op_id,json=opId,proto3" json:"op_id,omitempty"` // request id (also envelope corr_id)
+	Kind           FileOpKind             `protobuf:"varint,2,opt,name=kind,proto3,enum=partout.v1.FileOpKind" json:"kind,omitempty"`
+	Path           string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`                                            // absolute target path (no symlink components)
+	TotalSize      int64                  `protobuf:"varint,4,opt,name=total_size,json=totalSize,proto3" json:"total_size,omitempty"`                // expected upload size; enforced cap at begin/commit
+	Offset         uint64                 `protobuf:"varint,5,opt,name=offset,proto3" json:"offset,omitempty"`                                       // download offset / upload chunk offset
+	Data           []byte                 `protobuf:"bytes,6,opt,name=data,proto3" json:"data,omitempty"`                                            // upload chunk payload / edit content
+	Mode           string                 `protobuf:"bytes,7,opt,name=mode,proto3" json:"mode,omitempty"`                                            // octal mode string for SET_PERM ("0644")
+	User           string                 `protobuf:"bytes,8,opt,name=user,proto3" json:"user,omitempty"`                                            // optional new owner (SET_PERM)
+	Group          string                 `protobuf:"bytes,9,opt,name=group,proto3" json:"group,omitempty"`                                          // optional new group (SET_PERM)
+	ExpectedSha256 string                 `protobuf:"bytes,10,opt,name=expected_sha256,json=expectedSha256,proto3" json:"expected_sha256,omitempty"` // EDIT_CAS: required current sha256
+	// UPLOAD_CHUNK / UPLOAD_COMMIT / UPLOAD_ABORT: the temp file path returned
+	// by UPLOAD_BEGIN (the server echoes it back; path stays the final target).
+	TempPath      string    `protobuf:"bytes,11,opt,name=temp_path,json=tempPath,proto3" json:"temp_path,omitempty"`
+	Decision      *Decision `protobuf:"bytes,12,opt,name=decision,proto3" json:"decision,omitempty"` // present for upload/edit/perm (agent re-check)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileOp) Reset() {
+	*x = FileOp{}
+	mi := &file_proto_partout_partout_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileOp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileOp) ProtoMessage() {}
+
+func (x *FileOp) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileOp.ProtoReflect.Descriptor instead.
+func (*FileOp) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *FileOp) GetOpId() string {
+	if x != nil {
+		return x.OpId
+	}
+	return ""
+}
+
+func (x *FileOp) GetKind() FileOpKind {
+	if x != nil {
+		return x.Kind
+	}
+	return FileOpKind_FILE_OP_KIND_UNSPECIFIED
+}
+
+func (x *FileOp) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *FileOp) GetTotalSize() int64 {
+	if x != nil {
+		return x.TotalSize
+	}
+	return 0
+}
+
+func (x *FileOp) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *FileOp) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *FileOp) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *FileOp) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *FileOp) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *FileOp) GetExpectedSha256() string {
+	if x != nil {
+		return x.ExpectedSha256
+	}
+	return ""
+}
+
+func (x *FileOp) GetTempPath() string {
+	if x != nil {
+		return x.TempPath
+	}
+	return ""
+}
+
+func (x *FileOp) GetDecision() *Decision {
+	if x != nil {
+		return x.Decision
+	}
+	return nil
+}
+
+// FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.
+type FileOpResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OpId          string                 `protobuf:"bytes,1,opt,name=op_id,json=opId,proto3" json:"op_id,omitempty"`
+	Kind          FileOpKind             `protobuf:"varint,2,opt,name=kind,proto3,enum=partout.v1.FileOpKind" json:"kind,omitempty"`
+	Code          int32                  `protobuf:"varint,3,opt,name=code,proto3" json:"code,omitempty"`
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	Stat          *FileStat              `protobuf:"bytes,5,opt,name=stat,proto3" json:"stat,omitempty"`                             // STAT
+	Entries       []*FileEntry           `protobuf:"bytes,6,rep,name=entries,proto3" json:"entries,omitempty"`                       // LIST
+	Truncated     bool                   `protobuf:"varint,7,opt,name=truncated,proto3" json:"truncated,omitempty"`                  // LIST: more entries than cap
+	Data          []byte                 `protobuf:"bytes,8,opt,name=data,proto3" json:"data,omitempty"`                             // DOWNLOAD: chunk bytes
+	Done          bool                   `protobuf:"varint,9,opt,name=done,proto3" json:"done,omitempty"`                            // DOWNLOAD: no more data
+	TempPath      string                 `protobuf:"bytes,10,opt,name=temp_path,json=tempPath,proto3" json:"temp_path,omitempty"`    // UPLOAD_BEGIN: absolute temp file path
+	Received      uint64                 `protobuf:"varint,11,opt,name=received,proto3" json:"received,omitempty"`                   // UPLOAD_CHUNK: cumulative bytes on disk
+	NewSha256     string                 `protobuf:"bytes,12,opt,name=new_sha256,json=newSha256,proto3" json:"new_sha256,omitempty"` // EDIT_CAS / UPLOAD_COMMIT: resulting sha256
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileOpResult) Reset() {
+	*x = FileOpResult{}
+	mi := &file_proto_partout_partout_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileOpResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileOpResult) ProtoMessage() {}
+
+func (x *FileOpResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileOpResult.ProtoReflect.Descriptor instead.
+func (*FileOpResult) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *FileOpResult) GetOpId() string {
+	if x != nil {
+		return x.OpId
+	}
+	return ""
+}
+
+func (x *FileOpResult) GetKind() FileOpKind {
+	if x != nil {
+		return x.Kind
+	}
+	return FileOpKind_FILE_OP_KIND_UNSPECIFIED
+}
+
+func (x *FileOpResult) GetCode() int32 {
+	if x != nil {
+		return x.Code
+	}
+	return 0
+}
+
+func (x *FileOpResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *FileOpResult) GetStat() *FileStat {
+	if x != nil {
+		return x.Stat
+	}
+	return nil
+}
+
+func (x *FileOpResult) GetEntries() []*FileEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *FileOpResult) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+func (x *FileOpResult) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *FileOpResult) GetDone() bool {
+	if x != nil {
+		return x.Done
+	}
+	return false
+}
+
+func (x *FileOpResult) GetTempPath() string {
+	if x != nil {
+		return x.TempPath
+	}
+	return ""
+}
+
+func (x *FileOpResult) GetReceived() uint64 {
+	if x != nil {
+		return x.Received
+	}
+	return 0
+}
+
+func (x *FileOpResult) GetNewSha256() string {
+	if x != nil {
+		return x.NewSha256
+	}
+	return ""
+}
+
+type FileStat struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Size          int64                  `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	Mode          string                 `protobuf:"bytes,2,opt,name=mode,proto3" json:"mode,omitempty"`   // octal, e.g. "0644"
+	Owner         string                 `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"` // owner name
+	Group         string                 `protobuf:"bytes,4,opt,name=group,proto3" json:"group,omitempty"` // group name
+	MtimeUnix     int64                  `protobuf:"varint,5,opt,name=mtime_unix,json=mtimeUnix,proto3" json:"mtime_unix,omitempty"`
+	Sha256        string                 `protobuf:"bytes,6,opt,name=sha256,proto3" json:"sha256,omitempty"` // regular files only; "" otherwise
+	IsDir         bool                   `protobuf:"varint,7,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
+	IsSymlink     bool                   `protobuf:"varint,8,opt,name=is_symlink,json=isSymlink,proto3" json:"is_symlink,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileStat) Reset() {
+	*x = FileStat{}
+	mi := &file_proto_partout_partout_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileStat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileStat) ProtoMessage() {}
+
+func (x *FileStat) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileStat.ProtoReflect.Descriptor instead.
+func (*FileStat) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *FileStat) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *FileStat) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *FileStat) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *FileStat) GetGroup() string {
+	if x != nil {
+		return x.Group
+	}
+	return ""
+}
+
+func (x *FileStat) GetMtimeUnix() int64 {
+	if x != nil {
+		return x.MtimeUnix
+	}
+	return 0
+}
+
+func (x *FileStat) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *FileStat) GetIsDir() bool {
+	if x != nil {
+		return x.IsDir
+	}
+	return false
+}
+
+func (x *FileStat) GetIsSymlink() bool {
+	if x != nil {
+		return x.IsSymlink
+	}
+	return false
+}
+
+type FileEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	IsDir         bool                   `protobuf:"varint,2,opt,name=is_dir,json=isDir,proto3" json:"is_dir,omitempty"`
+	IsSymlink     bool                   `protobuf:"varint,3,opt,name=is_symlink,json=isSymlink,proto3" json:"is_symlink,omitempty"`
+	Size          int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
+	MtimeUnix     int64                  `protobuf:"varint,5,opt,name=mtime_unix,json=mtimeUnix,proto3" json:"mtime_unix,omitempty"`
+	Mode          string                 `protobuf:"bytes,6,opt,name=mode,proto3" json:"mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FileEntry) Reset() {
+	*x = FileEntry{}
+	mi := &file_proto_partout_partout_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FileEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FileEntry) ProtoMessage() {}
+
+func (x *FileEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FileEntry.ProtoReflect.Descriptor instead.
+func (*FileEntry) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *FileEntry) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *FileEntry) GetIsDir() bool {
+	if x != nil {
+		return x.IsDir
+	}
+	return false
+}
+
+func (x *FileEntry) GetIsSymlink() bool {
+	if x != nil {
+		return x.IsSymlink
+	}
+	return false
+}
+
+func (x *FileEntry) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *FileEntry) GetMtimeUnix() int64 {
+	if x != nil {
+		return x.MtimeUnix
+	}
+	return 0
+}
+
+func (x *FileEntry) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
 type Decision struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -943,7 +1759,7 @@ type Decision struct {
 
 func (x *Decision) Reset() {
 	*x = Decision{}
-	mi := &file_proto_partout_partout_proto_msgTypes[8]
+	mi := &file_proto_partout_partout_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -955,7 +1771,7 @@ func (x *Decision) String() string {
 func (*Decision) ProtoMessage() {}
 
 func (x *Decision) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[8]
+	mi := &file_proto_partout_partout_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -968,7 +1784,7 @@ func (x *Decision) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Decision.ProtoReflect.Descriptor instead.
 func (*Decision) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{8}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Decision) GetRunId() string {
@@ -1031,7 +1847,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_proto_partout_partout_proto_msgTypes[9]
+	mi := &file_proto_partout_partout_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1043,7 +1859,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[9]
+	mi := &file_proto_partout_partout_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1056,7 +1872,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{9}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Command) GetRunId() string {
@@ -1144,7 +1960,7 @@ type PolicyBundle struct {
 
 func (x *PolicyBundle) Reset() {
 	*x = PolicyBundle{}
-	mi := &file_proto_partout_partout_proto_msgTypes[10]
+	mi := &file_proto_partout_partout_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1156,7 +1972,7 @@ func (x *PolicyBundle) String() string {
 func (*PolicyBundle) ProtoMessage() {}
 
 func (x *PolicyBundle) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[10]
+	mi := &file_proto_partout_partout_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1169,7 +1985,7 @@ func (x *PolicyBundle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyBundle.ProtoReflect.Descriptor instead.
 func (*PolicyBundle) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{10}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *PolicyBundle) GetVersion() uint64 {
@@ -1230,7 +2046,7 @@ type Revoke struct {
 
 func (x *Revoke) Reset() {
 	*x = Revoke{}
-	mi := &file_proto_partout_partout_proto_msgTypes[11]
+	mi := &file_proto_partout_partout_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1242,7 +2058,7 @@ func (x *Revoke) String() string {
 func (*Revoke) ProtoMessage() {}
 
 func (x *Revoke) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[11]
+	mi := &file_proto_partout_partout_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1255,7 +2071,7 @@ func (x *Revoke) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Revoke.ProtoReflect.Descriptor instead.
 func (*Revoke) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{11}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Revoke) GetReason() string {
@@ -1276,7 +2092,7 @@ type Cancel struct {
 
 func (x *Cancel) Reset() {
 	*x = Cancel{}
-	mi := &file_proto_partout_partout_proto_msgTypes[12]
+	mi := &file_proto_partout_partout_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1288,7 +2104,7 @@ func (x *Cancel) String() string {
 func (*Cancel) ProtoMessage() {}
 
 func (x *Cancel) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[12]
+	mi := &file_proto_partout_partout_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1301,12 +2117,278 @@ func (x *Cancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cancel.ProtoReflect.Descriptor instead.
 func (*Cancel) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{12}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Cancel) GetRunId() string {
 	if x != nil {
 		return x.RunId
+	}
+	return ""
+}
+
+// SessionOpen starts a PTY session on the agent (PRD §5.2.2). The decision is
+// evaluated as an exec action (command regex applies to cmd + args).
+type SessionOpen struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Cmd           string                 `protobuf:"bytes,2,opt,name=cmd,proto3" json:"cmd,omitempty"`
+	Args          []string               `protobuf:"bytes,3,rep,name=args,proto3" json:"args,omitempty"`
+	User          string                 `protobuf:"bytes,4,opt,name=user,proto3" json:"user,omitempty"`
+	Cols          int32                  `protobuf:"varint,5,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows          int32                  `protobuf:"varint,6,opt,name=rows,proto3" json:"rows,omitempty"`
+	Env           map[string]string      `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Record        bool                   `protobuf:"varint,8,opt,name=record,proto3" json:"record,omitempty"` // capture PTY output for replay (PRD §9)
+	Decision      *Decision              `protobuf:"bytes,9,opt,name=decision,proto3" json:"decision,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionOpen) Reset() {
+	*x = SessionOpen{}
+	mi := &file_proto_partout_partout_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionOpen) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionOpen) ProtoMessage() {}
+
+func (x *SessionOpen) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionOpen.ProtoReflect.Descriptor instead.
+func (*SessionOpen) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SessionOpen) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionOpen) GetCmd() string {
+	if x != nil {
+		return x.Cmd
+	}
+	return ""
+}
+
+func (x *SessionOpen) GetArgs() []string {
+	if x != nil {
+		return x.Args
+	}
+	return nil
+}
+
+func (x *SessionOpen) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *SessionOpen) GetCols() int32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *SessionOpen) GetRows() int32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+func (x *SessionOpen) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *SessionOpen) GetRecord() bool {
+	if x != nil {
+		return x.Record
+	}
+	return false
+}
+
+func (x *SessionOpen) GetDecision() *Decision {
+	if x != nil {
+		return x.Decision
+	}
+	return nil
+}
+
+type SessionInput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Data          []byte                 `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionInput) Reset() {
+	*x = SessionInput{}
+	mi := &file_proto_partout_partout_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionInput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionInput) ProtoMessage() {}
+
+func (x *SessionInput) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionInput.ProtoReflect.Descriptor instead.
+func (*SessionInput) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SessionInput) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionInput) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+type SessionResize struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Cols          int32                  `protobuf:"varint,2,opt,name=cols,proto3" json:"cols,omitempty"`
+	Rows          int32                  `protobuf:"varint,3,opt,name=rows,proto3" json:"rows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionResize) Reset() {
+	*x = SessionResize{}
+	mi := &file_proto_partout_partout_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionResize) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionResize) ProtoMessage() {}
+
+func (x *SessionResize) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionResize.ProtoReflect.Descriptor instead.
+func (*SessionResize) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *SessionResize) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *SessionResize) GetCols() int32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *SessionResize) GetRows() int32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+type SessionClose struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionClose) Reset() {
+	*x = SessionClose{}
+	mi := &file_proto_partout_partout_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionClose) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionClose) ProtoMessage() {}
+
+func (x *SessionClose) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_partout_partout_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionClose.ProtoReflect.Descriptor instead.
+func (*SessionClose) Descriptor() ([]byte, []int) {
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *SessionClose) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
 }
@@ -1322,7 +2404,7 @@ type Challenge struct {
 
 func (x *Challenge) Reset() {
 	*x = Challenge{}
-	mi := &file_proto_partout_partout_proto_msgTypes[13]
+	mi := &file_proto_partout_partout_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1334,7 +2416,7 @@ func (x *Challenge) String() string {
 func (*Challenge) ProtoMessage() {}
 
 func (x *Challenge) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[13]
+	mi := &file_proto_partout_partout_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1347,7 +2429,7 @@ func (x *Challenge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Challenge.ProtoReflect.Descriptor instead.
 func (*Challenge) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{13}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Challenge) GetNonce() []byte {
@@ -1376,7 +2458,7 @@ type AuthProof struct {
 
 func (x *AuthProof) Reset() {
 	*x = AuthProof{}
-	mi := &file_proto_partout_partout_proto_msgTypes[14]
+	mi := &file_proto_partout_partout_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1388,7 +2470,7 @@ func (x *AuthProof) String() string {
 func (*AuthProof) ProtoMessage() {}
 
 func (x *AuthProof) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_partout_partout_proto_msgTypes[14]
+	mi := &file_proto_partout_partout_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1401,7 +2483,7 @@ func (x *AuthProof) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthProof.ProtoReflect.Descriptor instead.
 func (*AuthProof) Descriptor() ([]byte, []int) {
-	return file_proto_partout_partout_proto_rawDescGZIP(), []int{14}
+	return file_proto_partout_partout_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *AuthProof) GetAgentUuid() string {
@@ -1430,7 +2512,7 @@ var File_proto_partout_partout_proto protoreflect.FileDescriptor
 const file_proto_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"\x1bproto/partout/partout.proto\x12\n" +
-	"partout.v1\"\xff\x05\n" +
+	"partout.v1\"\xf6\t\n" +
 	"\bEnvelope\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12,\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x18.partout.v1.EnvelopeKindR\x04kind\x12\x10\n" +
@@ -1442,11 +2524,19 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\x06events\x18\x16 \x01(\v2\x17.partout.v1.EventsBatchH\x00R\x06events\x123\n" +
 	"\x06output\x18\x17 \x01(\v2\x19.partout.v1.CommandOutputH\x00R\x06output\x123\n" +
 	"\x06result\x18\x18 \x01(\v2\x19.partout.v1.CommandResultH\x00R\x06result\x12#\n" +
-	"\x03ack\x18\x19 \x01(\v2\x0f.partout.v1.AckH\x00R\x03ack\x12/\n" +
+	"\x03ack\x18\x19 \x01(\v2\x0f.partout.v1.AckH\x00R\x03ack\x12<\n" +
+	"\fsession_data\x18\x1a \x01(\v2\x17.partout.v1.SessionDataH\x00R\vsessionData\x12B\n" +
+	"\x0esession_result\x18\x1b \x01(\v2\x19.partout.v1.SessionResultH\x00R\rsessionResult\x12@\n" +
+	"\x0efile_op_result\x18\x1c \x01(\v2\x18.partout.v1.FileOpResultH\x00R\ffileOpResult\x12/\n" +
 	"\acommand\x18\x1e \x01(\v2\x13.partout.v1.CommandH\x00R\acommand\x12?\n" +
 	"\rpolicy_bundle\x18\x1f \x01(\v2\x18.partout.v1.PolicyBundleH\x00R\fpolicyBundle\x12,\n" +
 	"\x06revoke\x18  \x01(\v2\x12.partout.v1.RevokeH\x00R\x06revoke\x12,\n" +
-	"\x06cancel\x18! \x01(\v2\x12.partout.v1.CancelH\x00R\x06cancel\x125\n" +
+	"\x06cancel\x18! \x01(\v2\x12.partout.v1.CancelH\x00R\x06cancel\x12<\n" +
+	"\fsession_open\x18\" \x01(\v2\x17.partout.v1.SessionOpenH\x00R\vsessionOpen\x12?\n" +
+	"\rsession_input\x18# \x01(\v2\x18.partout.v1.SessionInputH\x00R\fsessionInput\x12B\n" +
+	"\x0esession_resize\x18$ \x01(\v2\x19.partout.v1.SessionResizeH\x00R\rsessionResize\x12?\n" +
+	"\rsession_close\x18% \x01(\v2\x18.partout.v1.SessionCloseH\x00R\fsessionClose\x12-\n" +
+	"\afile_op\x18& \x01(\v2\x12.partout.v1.FileOpH\x00R\x06fileOp\x125\n" +
 	"\tchallenge\x182 \x01(\v2\x15.partout.v1.ChallengeH\x00R\tchallenge\x126\n" +
 	"\n" +
 	"auth_proof\x183 \x01(\v2\x15.partout.v1.AuthProofH\x00R\tauthProofB\t\n" +
@@ -1490,7 +2580,70 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1f\n" +
 	"\vduration_ms\x18\x04 \x01(\x03R\n" +
-	"durationMs\"\xb6\x01\n" +
+	"durationMs\"R\n" +
+	"\vSessionData\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\x98\x01\n" +
+	"\rSessionResult\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1b\n" +
+	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12\x14\n" +
+	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1f\n" +
+	"\vduration_ms\x18\x04 \x01(\x03R\n" +
+	"durationMs\x12\x14\n" +
+	"\x05error\x18\x05 \x01(\tR\x05error\"\xde\x02\n" +
+	"\x06FileOp\x12\x13\n" +
+	"\x05op_id\x18\x01 \x01(\tR\x04opId\x12*\n" +
+	"\x04kind\x18\x02 \x01(\x0e2\x16.partout.v1.FileOpKindR\x04kind\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1d\n" +
+	"\n" +
+	"total_size\x18\x04 \x01(\x03R\ttotalSize\x12\x16\n" +
+	"\x06offset\x18\x05 \x01(\x04R\x06offset\x12\x12\n" +
+	"\x04data\x18\x06 \x01(\fR\x04data\x12\x12\n" +
+	"\x04mode\x18\a \x01(\tR\x04mode\x12\x12\n" +
+	"\x04user\x18\b \x01(\tR\x04user\x12\x14\n" +
+	"\x05group\x18\t \x01(\tR\x05group\x12'\n" +
+	"\x0fexpected_sha256\x18\n" +
+	" \x01(\tR\x0eexpectedSha256\x12\x1b\n" +
+	"\ttemp_path\x18\v \x01(\tR\btempPath\x120\n" +
+	"\bdecision\x18\f \x01(\v2\x14.partout.v1.DecisionR\bdecision\"\xf2\x02\n" +
+	"\fFileOpResult\x12\x13\n" +
+	"\x05op_id\x18\x01 \x01(\tR\x04opId\x12*\n" +
+	"\x04kind\x18\x02 \x01(\x0e2\x16.partout.v1.FileOpKindR\x04kind\x12\x12\n" +
+	"\x04code\x18\x03 \x01(\x05R\x04code\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12(\n" +
+	"\x04stat\x18\x05 \x01(\v2\x14.partout.v1.FileStatR\x04stat\x12/\n" +
+	"\aentries\x18\x06 \x03(\v2\x15.partout.v1.FileEntryR\aentries\x12\x1c\n" +
+	"\ttruncated\x18\a \x01(\bR\ttruncated\x12\x12\n" +
+	"\x04data\x18\b \x01(\fR\x04data\x12\x12\n" +
+	"\x04done\x18\t \x01(\bR\x04done\x12\x1b\n" +
+	"\ttemp_path\x18\n" +
+	" \x01(\tR\btempPath\x12\x1a\n" +
+	"\breceived\x18\v \x01(\x04R\breceived\x12\x1d\n" +
+	"\n" +
+	"new_sha256\x18\f \x01(\tR\tnewSha256\"\xcb\x01\n" +
+	"\bFileStat\x12\x12\n" +
+	"\x04size\x18\x01 \x01(\x03R\x04size\x12\x12\n" +
+	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x14\n" +
+	"\x05owner\x18\x03 \x01(\tR\x05owner\x12\x14\n" +
+	"\x05group\x18\x04 \x01(\tR\x05group\x12\x1d\n" +
+	"\n" +
+	"mtime_unix\x18\x05 \x01(\x03R\tmtimeUnix\x12\x16\n" +
+	"\x06sha256\x18\x06 \x01(\tR\x06sha256\x12\x15\n" +
+	"\x06is_dir\x18\a \x01(\bR\x05isDir\x12\x1d\n" +
+	"\n" +
+	"is_symlink\x18\b \x01(\bR\tisSymlink\"\x9c\x01\n" +
+	"\tFileEntry\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x15\n" +
+	"\x06is_dir\x18\x02 \x01(\bR\x05isDir\x12\x1d\n" +
+	"\n" +
+	"is_symlink\x18\x03 \x01(\bR\tisSymlink\x12\x12\n" +
+	"\x04size\x18\x04 \x01(\x03R\x04size\x12\x1d\n" +
+	"\n" +
+	"mtime_unix\x18\x05 \x01(\x03R\tmtimeUnix\x12\x12\n" +
+	"\x04mode\x18\x06 \x01(\tR\x04mode\"\xb6\x01\n" +
 	"\bDecision\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12%\n" +
 	"\x0ebundle_version\x18\x02 \x01(\x04R\rbundleVersion\x12\x16\n" +
@@ -1530,7 +2683,33 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\x06Revoke\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\"\x1f\n" +
 	"\x06Cancel\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\tR\x05runId\">\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xc4\x02\n" +
+	"\vSessionOpen\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +
+	"\x03cmd\x18\x02 \x01(\tR\x03cmd\x12\x12\n" +
+	"\x04args\x18\x03 \x03(\tR\x04args\x12\x12\n" +
+	"\x04user\x18\x04 \x01(\tR\x04user\x12\x12\n" +
+	"\x04cols\x18\x05 \x01(\x05R\x04cols\x12\x12\n" +
+	"\x04rows\x18\x06 \x01(\x05R\x04rows\x122\n" +
+	"\x03env\x18\a \x03(\v2 .partout.v1.SessionOpen.EnvEntryR\x03env\x12\x16\n" +
+	"\x06record\x18\b \x01(\bR\x06record\x120\n" +
+	"\bdecision\x18\t \x01(\v2\x14.partout.v1.DecisionR\bdecision\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"A\n" +
+	"\fSessionInput\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04data\x18\x02 \x01(\fR\x04data\"V\n" +
+	"\rSessionResize\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x12\n" +
+	"\x04cols\x18\x02 \x01(\x05R\x04cols\x12\x12\n" +
+	"\x04rows\x18\x03 \x01(\x05R\x04rows\"-\n" +
+	"\fSessionClose\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\">\n" +
 	"\tChallenge\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\fR\x05nonce\x12\x1b\n" +
 	"\tserver_ts\x18\x02 \x01(\x03R\bserverTs\"L\n" +
@@ -1538,7 +2717,7 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"agent_uuid\x18\x01 \x01(\tR\tagentUuid\x12\x0e\n" +
 	"\x02ts\x18\x02 \x01(\x03R\x02ts\x12\x10\n" +
-	"\x03sig\x18\x03 \x01(\fR\x03sig*\xe7\x01\n" +
+	"\x03sig\x18\x03 \x01(\fR\x03sig*\xfa\x02\n" +
 	"\fEnvelopeKind\x12\x1d\n" +
 	"\x19ENVELOPE_KIND_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tHEARTBEAT\x10\x01\x12\x0f\n" +
@@ -1546,14 +2725,22 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\fEVENTS_BATCH\x10\x03\x12\x12\n" +
 	"\x0eCOMMAND_OUTPUT\x10\x04\x12\x12\n" +
 	"\x0eCOMMAND_RESULT\x10\x05\x12\a\n" +
-	"\x03ACK\x10\x06\x12\v\n" +
+	"\x03ACK\x10\x06\x12\x10\n" +
+	"\fSESSION_DATA\x10\a\x12\x12\n" +
+	"\x0eSESSION_RESULT\x10\b\x12\x12\n" +
+	"\x0eFILE_OP_RESULT\x10\t\x12\v\n" +
 	"\aCOMMAND\x10\n" +
 	"\x12\x11\n" +
 	"\rPOLICY_BUNDLE\x10\v\x12\n" +
 	"\n" +
 	"\x06REVOKE\x10\f\x12\n" +
 	"\n" +
-	"\x06CANCEL\x10\r\x12\r\n" +
+	"\x06CANCEL\x10\r\x12\x10\n" +
+	"\fSESSION_OPEN\x10\x0e\x12\x11\n" +
+	"\rSESSION_INPUT\x10\x0f\x12\x12\n" +
+	"\x0eSESSION_RESIZE\x10\x10\x12\x11\n" +
+	"\rSESSION_CLOSE\x10\x11\x12\v\n" +
+	"\aFILE_OP\x10\x12\x12\r\n" +
 	"\tCHALLENGE\x10(\x12\x0e\n" +
 	"\n" +
 	"AUTH_PROOF\x10)*I\n" +
@@ -1565,7 +2752,19 @@ const file_proto_partout_partout_proto_rawDesc = "" +
 	"\fOutputStream\x12\x1d\n" +
 	"\x19OUTPUT_STREAM_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rOUTPUT_STDOUT\x10\x01\x12\x11\n" +
-	"\rOUTPUT_STDERR\x10\x022G\n" +
+	"\rOUTPUT_STDERR\x10\x02*\xf9\x01\n" +
+	"\n" +
+	"FileOpKind\x12\x1c\n" +
+	"\x18FILE_OP_KIND_UNSPECIFIED\x10\x00\x12\x10\n" +
+	"\fFILE_OP_STAT\x10\x01\x12\x10\n" +
+	"\fFILE_OP_LIST\x10\x02\x12\x14\n" +
+	"\x10FILE_OP_DOWNLOAD\x10\x03\x12\x18\n" +
+	"\x14FILE_OP_UPLOAD_BEGIN\x10\x04\x12\x18\n" +
+	"\x14FILE_OP_UPLOAD_CHUNK\x10\x05\x12\x19\n" +
+	"\x15FILE_OP_UPLOAD_COMMIT\x10\x06\x12\x18\n" +
+	"\x14FILE_OP_UPLOAD_ABORT\x10\a\x12\x14\n" +
+	"\x10FILE_OP_EDIT_CAS\x10\b\x12\x14\n" +
+	"\x10FILE_OP_SET_PERM\x10\t2G\n" +
 	"\vAgentStream\x128\n" +
 	"\x06Stream\x12\x14.partout.v1.Envelope\x1a\x14.partout.v1.Envelope(\x010\x01B,Z*github.com/blawesom/partout/internal/protob\x06proto3"
 
@@ -1581,61 +2780,88 @@ func file_proto_partout_partout_proto_rawDescGZIP() []byte {
 	return file_proto_partout_partout_proto_rawDescData
 }
 
-var file_proto_partout_partout_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_proto_partout_partout_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_proto_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_proto_partout_partout_proto_goTypes = []any{
 	(EnvelopeKind)(0),     // 0: partout.v1.EnvelopeKind
 	(AckStatus)(0),        // 1: partout.v1.AckStatus
 	(OutputStream)(0),     // 2: partout.v1.OutputStream
-	(*Envelope)(nil),      // 3: partout.v1.Envelope
-	(*Ack)(nil),           // 4: partout.v1.Ack
-	(*Heartbeat)(nil),     // 5: partout.v1.Heartbeat
-	(*FactsBatch)(nil),    // 6: partout.v1.FactsBatch
-	(*EventsBatch)(nil),   // 7: partout.v1.EventsBatch
-	(*Event)(nil),         // 8: partout.v1.Event
-	(*CommandOutput)(nil), // 9: partout.v1.CommandOutput
-	(*CommandResult)(nil), // 10: partout.v1.CommandResult
-	(*Decision)(nil),      // 11: partout.v1.Decision
-	(*Command)(nil),       // 12: partout.v1.Command
-	(*PolicyBundle)(nil),  // 13: partout.v1.PolicyBundle
-	(*Revoke)(nil),        // 14: partout.v1.Revoke
-	(*Cancel)(nil),        // 15: partout.v1.Cancel
-	(*Challenge)(nil),     // 16: partout.v1.Challenge
-	(*AuthProof)(nil),     // 17: partout.v1.AuthProof
-	nil,                   // 18: partout.v1.FactsBatch.FactsEntry
-	nil,                   // 19: partout.v1.Event.AttrsEntry
-	nil,                   // 20: partout.v1.Command.EnvEntry
-	nil,                   // 21: partout.v1.PolicyBundle.HostTagsEntry
+	(FileOpKind)(0),       // 3: partout.v1.FileOpKind
+	(*Envelope)(nil),      // 4: partout.v1.Envelope
+	(*Ack)(nil),           // 5: partout.v1.Ack
+	(*Heartbeat)(nil),     // 6: partout.v1.Heartbeat
+	(*FactsBatch)(nil),    // 7: partout.v1.FactsBatch
+	(*EventsBatch)(nil),   // 8: partout.v1.EventsBatch
+	(*Event)(nil),         // 9: partout.v1.Event
+	(*CommandOutput)(nil), // 10: partout.v1.CommandOutput
+	(*CommandResult)(nil), // 11: partout.v1.CommandResult
+	(*SessionData)(nil),   // 12: partout.v1.SessionData
+	(*SessionResult)(nil), // 13: partout.v1.SessionResult
+	(*FileOp)(nil),        // 14: partout.v1.FileOp
+	(*FileOpResult)(nil),  // 15: partout.v1.FileOpResult
+	(*FileStat)(nil),      // 16: partout.v1.FileStat
+	(*FileEntry)(nil),     // 17: partout.v1.FileEntry
+	(*Decision)(nil),      // 18: partout.v1.Decision
+	(*Command)(nil),       // 19: partout.v1.Command
+	(*PolicyBundle)(nil),  // 20: partout.v1.PolicyBundle
+	(*Revoke)(nil),        // 21: partout.v1.Revoke
+	(*Cancel)(nil),        // 22: partout.v1.Cancel
+	(*SessionOpen)(nil),   // 23: partout.v1.SessionOpen
+	(*SessionInput)(nil),  // 24: partout.v1.SessionInput
+	(*SessionResize)(nil), // 25: partout.v1.SessionResize
+	(*SessionClose)(nil),  // 26: partout.v1.SessionClose
+	(*Challenge)(nil),     // 27: partout.v1.Challenge
+	(*AuthProof)(nil),     // 28: partout.v1.AuthProof
+	nil,                   // 29: partout.v1.FactsBatch.FactsEntry
+	nil,                   // 30: partout.v1.Event.AttrsEntry
+	nil,                   // 31: partout.v1.Command.EnvEntry
+	nil,                   // 32: partout.v1.PolicyBundle.HostTagsEntry
+	nil,                   // 33: partout.v1.SessionOpen.EnvEntry
 }
 var file_proto_partout_partout_proto_depIdxs = []int32{
 	0,  // 0: partout.v1.Envelope.kind:type_name -> partout.v1.EnvelopeKind
-	5,  // 1: partout.v1.Envelope.heartbeat:type_name -> partout.v1.Heartbeat
-	6,  // 2: partout.v1.Envelope.facts:type_name -> partout.v1.FactsBatch
-	7,  // 3: partout.v1.Envelope.events:type_name -> partout.v1.EventsBatch
-	9,  // 4: partout.v1.Envelope.output:type_name -> partout.v1.CommandOutput
-	10, // 5: partout.v1.Envelope.result:type_name -> partout.v1.CommandResult
-	4,  // 6: partout.v1.Envelope.ack:type_name -> partout.v1.Ack
-	12, // 7: partout.v1.Envelope.command:type_name -> partout.v1.Command
-	13, // 8: partout.v1.Envelope.policy_bundle:type_name -> partout.v1.PolicyBundle
-	14, // 9: partout.v1.Envelope.revoke:type_name -> partout.v1.Revoke
-	15, // 10: partout.v1.Envelope.cancel:type_name -> partout.v1.Cancel
-	16, // 11: partout.v1.Envelope.challenge:type_name -> partout.v1.Challenge
-	17, // 12: partout.v1.Envelope.auth_proof:type_name -> partout.v1.AuthProof
-	1,  // 13: partout.v1.Ack.status:type_name -> partout.v1.AckStatus
-	18, // 14: partout.v1.FactsBatch.facts:type_name -> partout.v1.FactsBatch.FactsEntry
-	8,  // 15: partout.v1.EventsBatch.events:type_name -> partout.v1.Event
-	19, // 16: partout.v1.Event.attrs:type_name -> partout.v1.Event.AttrsEntry
-	2,  // 17: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
-	20, // 18: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
-	11, // 19: partout.v1.Command.decision:type_name -> partout.v1.Decision
-	21, // 20: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
-	3,  // 21: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
-	3,  // 22: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
-	22, // [22:23] is the sub-list for method output_type
-	21, // [21:22] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	6,  // 1: partout.v1.Envelope.heartbeat:type_name -> partout.v1.Heartbeat
+	7,  // 2: partout.v1.Envelope.facts:type_name -> partout.v1.FactsBatch
+	8,  // 3: partout.v1.Envelope.events:type_name -> partout.v1.EventsBatch
+	10, // 4: partout.v1.Envelope.output:type_name -> partout.v1.CommandOutput
+	11, // 5: partout.v1.Envelope.result:type_name -> partout.v1.CommandResult
+	5,  // 6: partout.v1.Envelope.ack:type_name -> partout.v1.Ack
+	12, // 7: partout.v1.Envelope.session_data:type_name -> partout.v1.SessionData
+	13, // 8: partout.v1.Envelope.session_result:type_name -> partout.v1.SessionResult
+	15, // 9: partout.v1.Envelope.file_op_result:type_name -> partout.v1.FileOpResult
+	19, // 10: partout.v1.Envelope.command:type_name -> partout.v1.Command
+	20, // 11: partout.v1.Envelope.policy_bundle:type_name -> partout.v1.PolicyBundle
+	21, // 12: partout.v1.Envelope.revoke:type_name -> partout.v1.Revoke
+	22, // 13: partout.v1.Envelope.cancel:type_name -> partout.v1.Cancel
+	23, // 14: partout.v1.Envelope.session_open:type_name -> partout.v1.SessionOpen
+	24, // 15: partout.v1.Envelope.session_input:type_name -> partout.v1.SessionInput
+	25, // 16: partout.v1.Envelope.session_resize:type_name -> partout.v1.SessionResize
+	26, // 17: partout.v1.Envelope.session_close:type_name -> partout.v1.SessionClose
+	14, // 18: partout.v1.Envelope.file_op:type_name -> partout.v1.FileOp
+	27, // 19: partout.v1.Envelope.challenge:type_name -> partout.v1.Challenge
+	28, // 20: partout.v1.Envelope.auth_proof:type_name -> partout.v1.AuthProof
+	1,  // 21: partout.v1.Ack.status:type_name -> partout.v1.AckStatus
+	29, // 22: partout.v1.FactsBatch.facts:type_name -> partout.v1.FactsBatch.FactsEntry
+	9,  // 23: partout.v1.EventsBatch.events:type_name -> partout.v1.Event
+	30, // 24: partout.v1.Event.attrs:type_name -> partout.v1.Event.AttrsEntry
+	2,  // 25: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
+	3,  // 26: partout.v1.FileOp.kind:type_name -> partout.v1.FileOpKind
+	18, // 27: partout.v1.FileOp.decision:type_name -> partout.v1.Decision
+	3,  // 28: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
+	16, // 29: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
+	17, // 30: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
+	31, // 31: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
+	18, // 32: partout.v1.Command.decision:type_name -> partout.v1.Decision
+	32, // 33: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
+	33, // 34: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
+	18, // 35: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
+	4,  // 36: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
+	4,  // 37: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
+	37, // [37:38] is the sub-list for method output_type
+	36, // [36:37] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_proto_partout_partout_proto_init() }
@@ -1650,10 +2876,18 @@ func file_proto_partout_partout_proto_init() {
 		(*Envelope_Output)(nil),
 		(*Envelope_Result)(nil),
 		(*Envelope_Ack)(nil),
+		(*Envelope_SessionData)(nil),
+		(*Envelope_SessionResult)(nil),
+		(*Envelope_FileOpResult)(nil),
 		(*Envelope_Command)(nil),
 		(*Envelope_PolicyBundle)(nil),
 		(*Envelope_Revoke)(nil),
 		(*Envelope_Cancel)(nil),
+		(*Envelope_SessionOpen)(nil),
+		(*Envelope_SessionInput)(nil),
+		(*Envelope_SessionResize)(nil),
+		(*Envelope_SessionClose)(nil),
+		(*Envelope_FileOp)(nil),
 		(*Envelope_Challenge)(nil),
 		(*Envelope_AuthProof)(nil),
 	}
@@ -1662,8 +2896,8 @@ func file_proto_partout_partout_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_partout_partout_proto_rawDesc), len(file_proto_partout_partout_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   19,
+			NumEnums:      4,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

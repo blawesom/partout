@@ -13,11 +13,13 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -48,6 +50,15 @@ commands:
   policy <list|create|delete>                manage policy deny rules
   provision <new|list|get|key|cancel>        host provisioning (admin)
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
+  files stat  --agent A --path P             show file metadata
+  files list  --agent A --dir D              directory listing
+  files upload --agent A --path P --file F  upload a local file (base64) to agent
+  files edit  --agent A --path P --file F   compare-and-swap rewrite (needs sha)
+  files perm  --agent A --path P --mode M   change file mode/ownership
+  sessions open --agent A --cmd CMD         start an interactive PTY session
+  sessions close <id>                       end a PTY session
+  sessions list --agent A                   recent sessions
+  sessions replay <id>                      replay recorded PTY chunks
 `)
 	}
 	fs.Parse(reorderGlobalFlags(args))
@@ -109,6 +120,10 @@ commands:
 		c.cmdProvision(rest)
 	case "ca":
 		c.cmdCA()
+	case "files":
+		c.cmdFiles(rest)
+	case "sessions":
+		c.cmdSessions(rest)
 	case "help", "-h", "--help":
 		fs.Usage()
 	default:
@@ -727,3 +742,287 @@ func reorderGlobalFlags(args []string) []string {
 	}
 	return append(pre, post...)
 }
+
+// ---- M2 CLI: files ----------------------------------------------------------
+
+func (c *ctl) cmdFiles(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "ctl: files subcommand required (stat|list|upload|edit|perm)")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "stat":
+		c.cmdFileStat(args[1:])
+	case "list":
+		c.cmdFileList(args[1:])
+	case "upload":
+		c.cmdFileUpload(args[1:])
+	case "edit":
+		c.cmdFileEdit(args[1:])
+	case "perm":
+		c.cmdFilePerm(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: files: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) cmdFileStat(args []string) {
+	fs := flag.NewFlagSet("files stat", flag.ExitOnError)
+	var agent, path string
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&path, "path", "", "file path")
+	fs.Parse(args)
+	if agent == "" || path == "" {
+		fmt.Fprintln(os.Stderr, "ctl: files stat: --agent and --path required")
+		os.Exit(2)
+	}
+	var stat map[string]any
+	q := "agent_id=" + agent + "&path=" + path
+	if err := c.do("GET", "/api/v1/files/stat?"+q, nil, &stat); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: stat: %v\n", err)
+		os.Exit(1)
+	}
+	b, _ := json.MarshalIndent(stat, "", "  ")
+	fmt.Println(string(b))
+}
+
+func (c *ctl) cmdFileList(args []string) {
+	fs := flag.NewFlagSet("files list", flag.ExitOnError)
+	var agent, dir string
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&dir, "dir", "", "directory to list")
+	fs.Parse(args)
+	if agent == "" || dir == "" {
+		fmt.Fprintln(os.Stderr, "ctl: files list: --agent and --dir required")
+		os.Exit(2)
+	}
+	var result struct {
+		Entries   []map[string]any `json:"entries"`
+		Truncated bool             `json:"truncated"`
+	}
+	q := "agent_id=" + agent + "&path=" + dir
+	if err := c.do("GET", "/api/v1/files/list?"+q, nil, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: list: %v\n", err)
+		os.Exit(1)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tIS_DIR\tSIZE\tMODE\tMTIME")
+	for _, e := range result.Entries {
+		fmt.Fprintf(w, "%s\t%v\t%s\t%s\t%s\n",
+			e["name"], e["is_dir"], numStr(e["size"]), e["mode"], numStr(e["mtime_unix"]))
+	}
+	w.Flush()
+	if result.Truncated {
+		fmt.Fprintln(os.Stderr, "(list truncated — more entries in directory)")
+	}
+}
+
+func (c *ctl) cmdFileUpload(args []string) {
+	fs := flag.NewFlagSet("files upload", flag.ExitOnError)
+	var agent, path, file, mode string
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&path, "path", "", "remote file path")
+	fs.StringVar(&file, "file", "", "local file to upload")
+	fs.StringVar(&mode, "mode", "0644", "octal file mode")
+	fs.Parse(args)
+	if agent == "" || path == "" || file == "" {
+		fmt.Fprintln(os.Stderr, "ctl: files upload: --agent, --path and --file required")
+		os.Exit(2)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: read file: %v\n", err)
+		os.Exit(2)
+	}
+	enc := base64.StdEncoding.EncodeToString(b)
+	var resp map[string]string
+	body := map[string]any{"agent_id": agent, "path": path, "content_b64": enc, "mode": mode}
+	if err := c.do("POST", "/api/v1/files/upload", body, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: upload: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("uploaded sha256: %s\n", resp["sha256"])
+}
+
+func (c *ctl) cmdFileEdit(args []string) {
+	fs := flag.NewFlagSet("files edit", flag.ExitOnError)
+	var agent, path, file, sha string
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&path, "path", "", "file path to edit")
+	fs.StringVar(&file, "file", "", "local file with new content")
+	fs.StringVar(&sha, "sha", "", "expected sha256 (compare-and-swap)")
+	fs.Parse(args)
+	if agent == "" || path == "" || file == "" || sha == "" {
+		fmt.Fprintln(os.Stderr, "ctl: files edit: --agent, --path, --file and --sha required")
+		os.Exit(2)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: read file: %v\n", err)
+		os.Exit(2)
+	}
+	enc := base64.StdEncoding.EncodeToString(b)
+	var resp map[string]string
+	body := map[string]any{
+		"agent_id": agent, "path": path, "expected_sha256": sha,
+		"content_b64": enc,
+	}
+	if err := c.do("POST", "/api/v1/files/edit", body, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: edit: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("edited sha256: %s\n", resp["sha256"])
+}
+
+func (c *ctl) cmdFilePerm(args []string) {
+	fs := flag.NewFlagSet("files perm", flag.ExitOnError)
+	var agent, path, mode, owner, group string
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&path, "path", "", "file path")
+	fs.StringVar(&mode, "mode", "", "octal mode, e.g. 0644")
+	fs.StringVar(&owner, "owner", "", "new owner name")
+	fs.StringVar(&group, "group", "", "new group name")
+	fs.Parse(args)
+	if agent == "" || path == "" {
+		fmt.Fprintln(os.Stderr, "ctl: files perm: --agent and --path required")
+		os.Exit(2)
+	}
+	body := map[string]any{"agent_id": agent, "path": path}
+	if mode != "" {
+		body["mode"] = mode
+	}
+	if owner != "" {
+		body["owner"] = owner
+	}
+	if group != "" {
+		body["group"] = group
+	}
+	if body["mode"] == nil && body["owner"] == nil && body["group"] == nil {
+		fmt.Fprintln(os.Stderr, "ctl: files perm: --mode, --owner or --group required")
+		os.Exit(2)
+	}
+	var resp map[string]string
+	if err := c.do("POST", "/api/v1/files/perm", body, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: perm: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("permission changed")
+}
+
+// numStr renders a JSON-decoded number (float64) as an integer string.
+func numStr(v any) string {
+	if f, ok := v.(float64); ok {
+		return strconv.FormatInt(int64(f), 10)
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// ---- M2 CLI: sessions ------------------------------------------------------
+
+func (c *ctl) cmdSessions(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "ctl: sessions subcommand required (open|close|list|replay)")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "open":
+		c.cmdSessionOpen(args[1:])
+	case "close":
+		c.cmdSessionClose(args[1:])
+	case "list":
+		c.cmdSessionList(args[1:])
+	case "replay":
+		c.cmdSessionReplay(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: sessions: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) cmdSessionOpen(args []string) {
+	fs := flag.NewFlagSet("sessions open", flag.ExitOnError)
+	var agent, cmd string
+	var cols, rows int
+	var record bool
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&cmd, "cmd", "", "command to execute")
+	fs.IntVar(&cols, "cols", 80, "terminal columns")
+	fs.IntVar(&rows, "rows", 24, "terminal rows")
+	fs.BoolVar(&record, "record", false, "record PTY output for replay")
+	fs.Parse(args)
+	if agent == "" || cmd == "" {
+		fmt.Fprintln(os.Stderr, "ctl: sessions open: --agent and --cmd required")
+		os.Exit(2)
+	}
+	var resp map[string]any
+	body := map[string]any{
+		"agent_id": agent, "cmd": cmd,
+		"cols": cols, "rows": rows, "record": record,
+	}
+	if err := c.do("POST", "/api/v1/sessions", body, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: open: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("session opened: id=%s agent=%s cmd=%s state=%s\n",
+		resp["session_id"], resp["agent_id"], resp["cmd"], resp["state"])
+}
+
+func (c *ctl) cmdSessionClose(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "ctl: sessions close: <session_id> required")
+		os.Exit(2)
+	}
+	sid := args[0]
+	var resp map[string]string
+	if err := c.do("POST", "/api/v1/sessions/"+url.PathEscape(sid)+"/close", nil, &resp); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: close: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("session closed")
+}
+
+func (c *ctl) cmdSessionList(args []string) {
+	fs := flag.NewFlagSet("sessions list", flag.ExitOnError)
+	var agent string
+	fs.StringVar(&agent, "agent", "", "filter by agent ID")
+	fs.Parse(args)
+	q := "agent_id=" + agent
+	var result struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := c.do("GET", "/api/v1/sessions?"+q, nil, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: list sessions: %v\n", err)
+		os.Exit(1)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tAGENT\tCMD\tSTATE\tEXIT\tOPENED")
+	for _, s := range result.Sessions {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\t%s\n",
+			s["session_id"], s["agent_id"], s["cmd"], s["state"],
+			s["exit_code"], numStr(s["opened_unix"]))
+	}
+	w.Flush()
+}
+
+func (c *ctl) cmdSessionReplay(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "ctl: sessions replay: <session_id> required")
+		os.Exit(2)
+	}
+	sid := args[0]
+	var result struct {
+		Frames []map[string]any `json:"frames"`
+	}
+	if err := c.do("GET", "/api/v1/sessions/"+url.PathEscape(sid)+"/replay", nil, &result); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: replay: %v\n", err)
+		os.Exit(1)
+	}
+	for _, f := range result.Frames {
+		enc, _ := f["data_b64"].(string)
+		b, _ := base64.StdEncoding.DecodeString(enc)
+		fmt.Printf("[seq %s] %s\n", numStr(f["seq"]), strings.TrimRight(string(b), "\n"))
+	}
+}
+
+// ---- URL escape for session IDs in REST paths --------------------------------

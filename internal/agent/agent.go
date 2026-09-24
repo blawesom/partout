@@ -17,7 +17,9 @@ import (
 
 	"github.com/blawesom/partout/internal/agent/exec"
 	"github.com/blawesom/partout/internal/agent/facts"
+	"github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/agent/guardrail"
+	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
@@ -73,6 +75,13 @@ type Agent struct {
 	// an in-flight process.
 	activeMu      sync.Mutex
 	activeRunners map[string]context.CancelFunc
+
+	// sessions manages live PTY sessions (PRD §5.2.2). Killed on every
+	// stream end (D2): a PTY without a stream cannot be meaningfully resumed.
+	sessions *session.Manager
+
+	// fsCfg bounds file operations (D3 defaults; env-configurable later).
+	fsCfg fs.Config
 }
 
 // New builds an Agent. The identity must already be enrolled (server-side row
@@ -95,7 +104,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	if spoolErr != nil {
 		lg.Printf("agent: open spool: %v", spoolErr)
 	}
-	return &Agent{
+	a := &Agent{
 		id:            id,
 		cfg:           cfg,
 		log:           lg,
@@ -108,7 +117,19 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		spoolErr:      spoolErr,
 		spooled:       make(map[string]bool),
 		activeRunners: make(map[string]context.CancelFunc),
+		fsCfg:         fs.Config{},
 	}
+	// Session manager uses a closure that can reach the agent instance.
+	a.sessions = session.NewManager(func(sid string, exitCode int32, state string, durationMs int64) {
+		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
+		a.sendUpEnvelopeNoSpool(&pb.Envelope{
+			Kind: pb.EnvelopeKind_SESSION_RESULT,
+			Payload: &pb.Envelope_SessionResult{SessionResult: &pb.SessionResult{
+				SessionId: sid, ExitCode: exitCode, State: state, DurationMs: durationMs,
+			}},
+		})
+	})
+	return a
 }
 
 // GuardLoaded reports whether the agent has received (and cached) a policy
@@ -132,6 +153,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	backoff := backoffBase
 	for {
 		err := a.connectAndStream(ctx)
+		// D2: PTY sessions die with the stream (a dead terminal cannot be
+		// resumed); the server marks them interrupted on disconnect.
+		if n := a.sessions.KillAll(); n > 0 {
+			a.log.Printf("agent: killed %d session(s) on stream end", n)
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -301,6 +327,82 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 			cancel()
 		}
 
+	case env.GetFileOp() != nil:
+		op := env.GetFileOp()
+		// Write ops (upload begin, edit, perm) carry a signed decision and are
+		// re-checked by the guardrail (architecture §5.3, D1). Read ops carry
+		// no decision and run directly.
+		if op.Decision != nil {
+			if ok, reason := a.guard.RecheckFile(op); !ok {
+				a.log.Printf("agent: file op %s DENIED: %s", op.OpId, reason)
+				a.sendFileOpResult(&pb.FileOpResult{
+					OpId: op.OpId, Kind: op.Kind, Code: 403, Error: reason,
+				})
+				return nil
+			}
+		}
+		// Ops are request/response; run off the envelope loop so a slow
+		// transfer cannot starve CANCEL/heartbeat traffic.
+		go a.execFileOp(op)
+
+	case env.GetSessionOpen() != nil:
+		so := env.GetSessionOpen()
+		// A session is an exec action: reuse the command guardrail re-check
+		// (command regex applies to cmd + args, arch §5.3).
+		synthetic := &pb.Command{
+			RunId:    so.SessionId,
+			Cmd:      so.Cmd,
+			Args:     so.Args,
+			Decision: so.Decision,
+		}
+		if ok, reason := a.guard.Recheck(synthetic); !ok {
+			a.log.Printf("agent: session %s DENIED: %s", so.SessionId, reason)
+			a.sendUpEnvelopeNoSpool(&pb.Envelope{
+				Kind: pb.EnvelopeKind_SESSION_RESULT,
+				Payload: &pb.Envelope_SessionResult{SessionResult: &pb.SessionResult{
+					SessionId: so.SessionId, ExitCode: -1, State: "denied",
+				}},
+			})
+			return nil
+		}
+		err := a.sessions.Open(so.SessionId, so.Cmd, so.Args, so.Env,
+			so.Cols, so.Rows,
+			func(sid string, data []byte) {
+				a.sendUpEnvelopeNoSpool(&pb.Envelope{
+					Kind: pb.EnvelopeKind_SESSION_DATA,
+					Payload: &pb.Envelope_SessionData{SessionData: &pb.SessionData{
+						SessionId: sid, Data: data,
+					}},
+				})
+			})
+		if err != nil {
+			a.log.Printf("agent: session %s open failed: %v", so.SessionId, err)
+			a.sendUpEnvelopeNoSpool(&pb.Envelope{
+				Kind: pb.EnvelopeKind_SESSION_RESULT,
+				Payload: &pb.Envelope_SessionResult{SessionResult: &pb.SessionResult{
+					SessionId: so.SessionId, ExitCode: -1, State: "failed", Error: err.Error(),
+				}},
+			})
+		}
+
+	case env.GetSessionInput() != nil:
+		si := env.GetSessionInput()
+		if err := a.sessions.Input(si.SessionId, si.Data); err != nil {
+			a.log.Printf("agent: session input %s: %v", si.SessionId, err)
+		}
+
+	case env.GetSessionResize() != nil:
+		sr := env.GetSessionResize()
+		if err := a.sessions.Resize(sr.SessionId, sr.Cols, sr.Rows); err != nil {
+			a.log.Printf("agent: session resize %s: %v", sr.SessionId, err)
+		}
+
+	case env.GetSessionClose() != nil:
+		scl := env.GetSessionClose()
+		if err := a.sessions.Close(scl.SessionId); err != nil {
+			a.log.Printf("agent: session close %s: %v", scl.SessionId, err)
+		}
+
 	case env.GetPolicyBundle() != nil:
 		bundle := env.GetPolicyBundle()
 		a.log.Printf("agent: policy bundle v%d received", bundle.Version)
@@ -429,6 +531,18 @@ func (a *Agent) sendUpEnvelope(ctx context.Context, env *pb.Envelope) error {
 	return a.streamC.Send(ctx, env)
 }
 
+// sendUpEnvelopeNoSpool sends an up envelope that must never be spooled
+// (session control traffic: it is tied to the live stream, D2). A failed
+// send is logged, not returned: the stream teardown handles the rest.
+func (a *Agent) sendUpEnvelopeNoSpool(env *pb.Envelope) {
+	a.sendMu.Lock()
+	err := a.streamC.Send(context.Background(), env)
+	a.sendMu.Unlock()
+	if err != nil {
+		a.log.Printf("agent: up send %s failed: %v", env.Kind, err)
+	}
+}
+
 // savePolicy writes the policy bundle to the agent data dir (M0: store + hash).
 func (a *Agent) savePolicy(bundle *pb.PolicyBundle) error {
 	if err := os.MkdirAll(a.policyDir, 0o700); err != nil {
@@ -449,4 +563,153 @@ func jitter(d time.Duration) time.Duration {
 		return 0
 	}
 	return time.Duration(rand.Int63n(int64(d)))
+}
+
+// sendFileOpResult sends a FileOpResult up the stream (no spooling: file ops
+// are synchronous request/response, tied to the live stream).
+func (a *Agent) sendFileOpResult(res *pb.FileOpResult) {
+	a.sendMu.Lock()
+	err := a.streamC.Send(context.Background(), &pb.Envelope{
+		Kind:    pb.EnvelopeKind_FILE_OP_RESULT,
+		Payload: &pb.Envelope_FileOpResult{FileOpResult: res},
+	})
+	a.sendMu.Unlock()
+	if err != nil {
+		a.log.Printf("agent: file result %s send failed: %v", res.OpId, err)
+	}
+}
+
+// fileOpError maps an fs error to a stable FileOpResult code: 409 conflict
+// (CAS mismatch), 413 size cap, 400 bad path, 500 other.
+func fileOpError(op *pb.FileOp, err error) *pb.FileOpResult {
+	code := int32(500)
+	switch {
+	case errors.Is(err, fs.ErrConflict):
+		code = 409
+	case errors.Is(err, fs.ErrCapExceeded):
+		code = 413
+	case errors.Is(err, fs.ErrBadPath):
+		code = 400
+	}
+	return &pb.FileOpResult{
+		OpId: op.OpId, Kind: op.Kind, Code: code, Error: err.Error(),
+	}
+}
+
+// execFileOp executes one FileOp and sends its result (PRD §5.3). It runs
+// off the envelope loop so a slow transfer cannot starve CANCEL/heartbeat
+// traffic.
+func (a *Agent) execFileOp(op *pb.FileOp) {
+	cfg := a.fsCfg.Filled()
+	var res *pb.FileOpResult
+	switch op.Kind {
+	case pb.FileOpKind_FILE_OP_STAT:
+		st, err := fs.StatPath(op.Path)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				Stat: &pb.FileStat{
+					Size: st.Size, Mode: st.Mode, Owner: st.Owner, Group: st.Group,
+					MtimeUnix: st.MtimeUnix, Sha256: st.SHA256,
+					IsDir: st.IsDir, IsSymlink: st.IsSymlink,
+				},
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_LIST:
+		entries, truncated, err := fs.List(op.Path, cfg)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			pbEntries := make([]*pb.FileEntry, 0, len(entries))
+			for _, e := range entries {
+				pbEntries = append(pbEntries, &pb.FileEntry{
+					Name: e.Name, IsDir: e.IsDir, IsSymlink: e.IsSymlink,
+					Size: e.Size, MtimeUnix: e.MtimeUnix, Mode: e.Mode,
+				})
+			}
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				Entries: pbEntries, Truncated: truncated,
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_DOWNLOAD:
+		data, _, done, err := fs.DownloadAt(op.Path, int64(op.Offset), cfg)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				Data: data, Done: done,
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_UPLOAD_BEGIN:
+		temp, err := fs.UploadBegin(op.Path, op.TotalSize, cfg)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				TempPath: temp,
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_UPLOAD_CHUNK:
+		recv, err := fs.UploadChunk(op.TempPath, int64(op.Offset), op.Data, cfg)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				Received: uint64(recv),
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_UPLOAD_COMMIT:
+		sha, err := fs.UploadCommit(op.TempPath, op.Path, op.Mode, op.TotalSize)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				NewSha256: sha,
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_UPLOAD_ABORT:
+		if err := fs.UploadAbort(op.TempPath); err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 0}
+		}
+
+	case pb.FileOpKind_FILE_OP_EDIT_CAS:
+		newSha, err := fs.EditCAS(op.Path, op.ExpectedSha256, op.Data, cfg)
+		if err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{
+				OpId: op.OpId, Kind: op.Kind, Code: 0,
+				NewSha256: newSha,
+			}
+		}
+
+	case pb.FileOpKind_FILE_OP_SET_PERM:
+		if err := fs.SetPerm(op.Path, op.Mode, op.User, op.Group); err != nil {
+			res = fileOpError(op, err)
+		} else {
+			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 0}
+		}
+
+	default:
+		res = &pb.FileOpResult{
+			OpId: op.OpId, Kind: op.Kind, Code: 400,
+			Error: "unsupported file operation",
+		}
+	}
+	a.sendFileOpResult(res)
 }

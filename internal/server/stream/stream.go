@@ -40,6 +40,11 @@ type Handler struct {
 	mu       sync.Mutex
 	sessions map[string]*Session // agent_id -> active session
 
+	// fileMu guards filePending: op_id -> result channel for synchronous
+	// file request/response over the stream (M2, PRD §5.3).
+	fileMu      sync.Mutex
+	filePending map[string]chan *pb.FileOpResult
+
 	// ResultHook, if set, is called after a CommandResult is recorded with the
 	// execution id of the finished run. Control uses it to recompute the
 	// execution's aggregate state.
@@ -49,6 +54,16 @@ type Handler struct {
 	// Control uses it to mark in-flight runs interrupted and recompute the
 	// affected execution aggregates (architecture §3.4).
 	DisconnectHook func(agentID string)
+
+	// SessionDataHook, if set, receives every up PTY data chunk
+	// (agent, session, data). The sessions controller wires it for SSE +
+	// recording (PRD §5.2.2).
+	SessionDataHook func(agentID, sessionID string, data []byte)
+
+	// SessionResultHook, if set, is called when a PTY session terminates
+	// (agent, session, exit, state, duration). The sessions controller
+	// finalizes the store row.
+	SessionResultHook func(agentID, sessionID string, exitCode int32, state string, durationMs int64)
 }
 
 // NewHandler builds a stream handler.
@@ -56,7 +71,7 @@ func NewHandler(st *store.Store, sse Emitter, lg *log.Logger) *Handler {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session)}
+	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult)}
 }
 
 // SetServerPubKey installs the server's Ed25519 public key (b64) which is
@@ -189,6 +204,17 @@ func (h *Handler) Stream(stream pb.AgentStream_StreamServer) error {
 		if err := h.st.SetAgentState(agent.ID, "disconnected"); err != nil {
 			h.log.Printf("stream: set disconnected %s: %v", agent.ID, err)
 		}
+		// Fast-fail pending synchronous file ops for this agent (they are tied
+		// to the live stream; the waiter's ctx would time out anyway).
+		h.fileMu.Lock()
+		for opID, ch := range h.filePending {
+			delete(h.filePending, opID)
+			select {
+			case ch <- nil:
+			default:
+			}
+		}
+		h.fileMu.Unlock()
 		if h.sse != nil {
 			h.sse.Emit("host.state", map[string]string{"agent_id": agent.ID, "state": "disconnected"})
 		}
@@ -261,6 +287,28 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		a := msg.GetAck()
 		// For M0, we just log the ack.
 		h.log.Printf("stream: ack %s (status=%s)", a.EnvelopeId, a.Status)
+	case msg.GetFileOpResult() != nil:
+		fr := msg.GetFileOpResult()
+		h.fileMu.Lock()
+		ch := h.filePending[fr.OpId]
+		h.fileMu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- fr:
+			default:
+				// Waiter already gave up (timed out / stream closed); drop it.
+			}
+		}
+	case msg.GetSessionData() != nil:
+		sd := msg.GetSessionData()
+		if h.SessionDataHook != nil {
+			h.SessionDataHook(sess.AgentID, sd.SessionId, sd.Data)
+		}
+	case msg.GetSessionResult() != nil:
+		sr := msg.GetSessionResult()
+		if h.SessionResultHook != nil {
+			h.SessionResultHook(sess.AgentID, sr.SessionId, sr.ExitCode, sr.State, sr.DurationMs)
+		}
 	default:
 		// Unknown or handshake message — ignore.
 	}
@@ -297,6 +345,113 @@ func (h *Handler) SendCancel(agentID string, runID string) error {
 		Payload: &pb.Envelope_Cancel{Cancel: &pb.Cancel{RunId: runID}},
 	}
 	return sess.send(env)
+}
+
+// ---- Files (M2, PRD §5.3) ---------------------------------------------------
+
+// SendFileOp sends one file op down and registers a pending result slot.
+// The matching FileOpResult up resolves WaitFileResult.
+func (h *Handler) SendFileOp(agentID string, op *pb.FileOp) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	ch := make(chan *pb.FileOpResult, 1)
+	h.fileMu.Lock()
+	if old := h.filePending[op.OpId]; old != nil {
+		h.fileMu.Unlock()
+		return fmt.Errorf("stream: duplicate file op id %s", op.OpId)
+	}
+	h.filePending[op.OpId] = ch
+	h.fileMu.Unlock()
+	if err := sess.send(&pb.Envelope{
+		Kind:     pb.EnvelopeKind_FILE_OP,
+		CorrId:   op.OpId,
+		Payload:  &pb.Envelope_FileOp{FileOp: op},
+	}); err != nil {
+		h.fileMu.Lock()
+		delete(h.filePending, op.OpId)
+		h.fileMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// WaitFileResult blocks until the file op's result arrives (or the stream
+// drops / ctx ends). A nil result means the stream closed before a reply.
+// The caller owns the op's lifecycle: this deletes the pending slot when it
+// returns (success, timeout, or context cancellation), so a late-arriving
+// result is dropped rather than leaked.
+func (h *Handler) WaitFileResult(ctx context.Context, opID string) (*pb.FileOpResult, error) {
+	h.fileMu.Lock()
+	ch, ok := h.filePending[opID]
+	h.fileMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("stream: no pending file op %s", opID)
+	}
+	// Remove the slot once we are done waiting, regardless of outcome.
+	defer func() {
+		h.fileMu.Lock()
+		delete(h.filePending, opID)
+		h.fileMu.Unlock()
+	}()
+	select {
+	case res := <-ch:
+		if res == nil {
+			return nil, fmt.Errorf("stream: file op %s: stream closed", opID)
+		}
+		return res, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// ---- Sessions (M2, PRD §5.2.2) ------------------------------------------------
+
+func (h *Handler) sendSessionDown(agentID, sessionID string, env *pb.Envelope) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	return sess.send(env)
+}
+
+// SendSessionOpen dispatches a PTY session open to the agent.
+func (h *Handler) SendSessionOpen(agentID string, open *pb.SessionOpen) error {
+	return h.sendSessionDown(agentID, open.SessionId,
+		&pb.Envelope{Kind: pb.EnvelopeKind_SESSION_OPEN, CorrId: open.SessionId,
+			Payload: &pb.Envelope_SessionOpen{SessionOpen: open}})
+}
+
+// SendSessionInput forwards terminal input to the agent.
+func (h *Handler) SendSessionInput(agentID, sessionID string, data []byte) error {
+	return h.sendSessionDown(agentID, sessionID, &pb.Envelope{
+		Kind: pb.EnvelopeKind_SESSION_INPUT, CorrId: sessionID,
+		Payload: &pb.Envelope_SessionInput{SessionInput: &pb.SessionInput{
+			SessionId: sessionID, Data: data}},
+	})
+}
+
+// SendSessionResize forwards a terminal resize to the agent.
+func (h *Handler) SendSessionResize(agentID, sessionID string, cols, rows int32) error {
+	return h.sendSessionDown(agentID, sessionID, &pb.Envelope{
+		Kind: pb.EnvelopeKind_SESSION_RESIZE, CorrId: sessionID,
+		Payload: &pb.Envelope_SessionResize{SessionResize: &pb.SessionResize{
+			SessionId: sessionID, Cols: cols, Rows: rows}},
+	})
+}
+
+// SendSessionClose asks the agent to end a PTY session.
+func (h *Handler) SendSessionClose(agentID, sessionID string) error {
+	return h.sendSessionDown(agentID, sessionID, &pb.Envelope{
+		Kind: pb.EnvelopeKind_SESSION_CLOSE, CorrId: sessionID,
+		Payload: &pb.Envelope_SessionClose{SessionClose: &pb.SessionClose{
+			SessionId: sessionID}},
+	})
 }
 
 // AgentSession returns the active session for an agent (for tests).
