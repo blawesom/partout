@@ -11,6 +11,7 @@ import (
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/packages"
+	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
@@ -29,6 +30,7 @@ type Handler struct {
 	files      *files.Controller
 	pkgs       *packages.Controller
 	tasks      *tasks.Controller
+	jobs       *jobs.Controller
 	sess       *sessions.Manager
 	secretsMgr *serversecrets.Manager
 	extdata    *externaldata.Refresher
@@ -98,6 +100,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M3: tasks + playbooks (PRD §5.5).
 	handler.RegisterTasks(mux)
 
+	// M3: scheduled jobs (PRD §5.4).
+	handler.RegisterJobs(mux)
+
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
 
@@ -139,6 +144,9 @@ func (h *Handler) SetPkgs(pc *packages.Controller) { h.pkgs = pc }
 
 // SetTasks installs the tasks controller (M3, PRD §5.5).
 func (h *Handler) SetTasks(tc *tasks.Controller) { h.tasks = tc }
+
+// SetJobs installs the jobs controller (M3, PRD §5.4).
+func (h *Handler) SetJobs(jc *jobs.Controller) { h.jobs = jc }
 
 // SetSessions installs the sessions manager (M2, PRD §5.2.2).
 func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }

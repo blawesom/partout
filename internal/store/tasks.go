@@ -146,6 +146,12 @@ func (s *Store) LatestTaskVersion(taskID string) (*TaskVersion, error) {
 	return scanTaskVersion(row)
 }
 
+// TaskVersion returns one specific version of a task (nil, nil if absent).
+func (s *Store) TaskVersion(taskID string, version int) (*TaskVersion, error) {
+	row := s.db.QueryRow(`SELECT task_id, version, steps_json, created FROM task_versions WHERE task_id=? AND version=?`, taskID, version)
+	return scanTaskVersion(row)
+}
+
 // TaskVersions returns all versions of a task, ascending.
 func (s *Store) TaskVersions(taskID string) ([]*TaskVersion, error) {
 	rows, err := s.db.Query(`SELECT task_id, version, steps_json, created FROM task_versions WHERE task_id=? ORDER BY version ASC`, taskID)

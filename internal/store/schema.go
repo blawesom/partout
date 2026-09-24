@@ -328,7 +328,50 @@ CREATE TABLE IF NOT EXISTS playbooks (
   created      INTEGER NOT NULL,
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
+
+-- M3 jobs (PRD §5.4): scheduled tasks with agent-side execution.
+CREATE TABLE IF NOT EXISTS jobs (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  task_id       TEXT NOT NULL,
+  task_version  INTEGER NOT NULL,
+  cron          TEXT NOT NULL,
+  selector      TEXT NOT NULL,
+  max_run_s     INTEGER NOT NULL DEFAULT 1800,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  created       INTEGER NOT NULL,
+  updated       INTEGER NOT NULL,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS job_assignments (
+  job_id        TEXT NOT NULL,
+  agent_id      TEXT NOT NULL,
+  assigned_at   INTEGER NOT NULL,
+  last_run_at   INTEGER NOT NULL DEFAULT 0,
+  last_run_state TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (job_id, agent_id),
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS job_runs (
+  id            TEXT PRIMARY KEY,
+  job_id        TEXT NOT NULL,
+  agent_id      TEXT NOT NULL,
+  task_id       TEXT NOT NULL,
+  task_version  INTEGER NOT NULL,
+  scheduled_at  INTEGER NOT NULL,
+  started_at    INTEGER NOT NULL DEFAULT 0,
+  finished_at   INTEGER NOT NULL DEFAULT 0,
+  state         TEXT NOT NULL DEFAULT 'pending',
+  trigger       TEXT NOT NULL DEFAULT 'cron',
+  error         TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_runs_agent ON job_runs(agent_id);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 8
+const currentSchemaVersion = 9

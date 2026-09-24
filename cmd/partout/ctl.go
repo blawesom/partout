@@ -132,6 +132,8 @@ commands:
 		c.cmdTasks(rest)
 	case "playbooks":
 		c.cmdPlaybooks(rest)
+	case "jobs":
+		c.cmdJobs(rest)
 	case "external-data":
 		c.cmdExternalData(rest)
 	case "help", "-h", "--help":
@@ -1443,6 +1445,110 @@ func (c *ctl) cmdPlaybooks(args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: playbooks: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) cmdJobs(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl jobs <list|create|show|update|delete|run|runs|list-runs>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "list":
+		var list []map[string]any
+		if err := c.do("GET", "/api/v1/jobs", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		for _, j := range list {
+			fmt.Printf("%s  %-30s  cron=%s  enabled=%v\n", j["id"], j["name"], j["cron"], j["enabled"])
+		}
+
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl jobs create <file.json>")
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		var body any
+		if err := json.Unmarshal(data, &body); err != nil {
+			fmt.Fprintln(os.Stderr, "error: bad JSON:", err)
+			os.Exit(1)
+		}
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/jobs", body, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Println(string(data))
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl jobs show <id>")
+			os.Exit(2)
+		}
+		var out map[string]any
+		if err := c.do("GET", "/api/v1/jobs/"+args[1], nil, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+
+	case "delete":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl jobs delete <id>")
+			os.Exit(2)
+		}
+		if err := c.do("DELETE", "/api/v1/jobs/"+args[1], nil, nil); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Println("deleted", args[1])
+
+	case "run":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl jobs run <id> <agent_id>")
+			os.Exit(2)
+		}
+		body := map[string]string{"agent_id": args[2]}
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/jobs/"+args[1]+"/run", body, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+
+	case "runs":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl jobs runs <job_id>")
+			os.Exit(2)
+		}
+		var list []map[string]any
+		if err := c.do("GET", "/api/v1/jobs/"+args[1]+"/runs", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(list, "", "  ")
+		fmt.Println(string(b))
+
+	case "list-runs":
+		var list []map[string]any
+		if err := c.do("GET", "/api/v1/jobs/runs", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(list, "", "  ")
+		fmt.Println(string(b))
+
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: jobs: unknown subcommand %q\n", args[0])
 		os.Exit(2)
 	}
 }

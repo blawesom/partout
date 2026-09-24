@@ -37,10 +37,12 @@ import (
 	agentfacts "github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
+	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/files"
+	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/sessions"
@@ -189,6 +191,11 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	taskC := tasks.New(st, h, sseB, lg)
 	taskC.SetIdentity(ident)
 	apiH.SetTasks(taskC)
+	jobC := jobs.New(st, h, sseB, lg)
+	apiH.SetJobs(jobC)
+	h.JobRunResultHook = func(agentID string, r *pb.JobRunResult) {
+		jobC.OnRunResult(agentID, r)
+	}
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)
 	apiH.SetSessions(sm)

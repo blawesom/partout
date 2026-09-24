@@ -12,7 +12,7 @@ syntax = "proto3";
 
 package partout.v1;
 
-option go_package = "github.com/blawesom/partout/internal/proto";
+option go_package = "internal/proto";
 
 // AgentStream is the sole data channel between one agent and the server.
 service AgentStream {
@@ -52,6 +52,9 @@ enum EnvelopeKind {
   PKG_RESULT = 21;         // up: agent sends package operation result
   TASK_RUN = 22;            // down: server dispatches a task run
   TASK_RUN_RESULT = 23;     // up: agent reports task run result
+  JOB_ASSIGN = 24;          // down: server assigns a job to an agent
+  JOB_UNASSIGN = 25;        // down: server removes a job from an agent
+  JOB_RUN_RESULT = 26;      // up: agent reports job run result
 
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
@@ -79,6 +82,9 @@ message Envelope {
     PkgResult pkg_result = 29;     // up: package operation result
     TaskRunResult task_run_result = 41; // up: task run result
     TaskRun task_run = 42;              // down: task run dispatch
+    JobAssignment job_assign = 43; // down: job assignment
+    JobRunResult job_run_result = 44; // up: job run result
+    JobUnassignment job_unassign = 45; // down: job unassignment
     // Down
     Command command = 30;
     PolicyBundle policy_bundle = 31;
@@ -318,6 +324,45 @@ message TaskRunResult {
   string state = 2;        // succeeded | failed | interrupted
   string error = 3;
   repeated TaskStepResult steps = 4;
+}
+
+// ---- M3 jobs (PRD §5.4) -----------------------------------------------------
+
+// JobAssignment is a resolved per-host job schedule (down). The server
+// resolves the job's selector to concrete agents; each agent receives its
+// own schedule + task. The agent runs this on its own clock.
+message JobAssignment {
+  string job_id = 1;
+  string name = 2;
+  string cron = 3;         // cron expression (5 fields) or @daily/@weekly/@monthly
+  string timezone = 4;     // IANA tz (e.g. "UTC")
+  string task_id = 5;
+  int32 task_version = 6;
+  repeated TaskStep steps = 7;
+  int32 max_run_s = 8;     // per-run deadline (0 = 30 min)
+  string overlap_policy = 9;  // allow | skip | replace
+  string failure_policy = 10; // no_retry | retry
+  int32 retry_backoff_s = 11; // retry delay (0 = no retry)
+  string selector_snapshot = 12; // selector text (recorded for audit)
+  int64 version = 13;        // monotonic version (bump on job edit)
+}
+
+// JobUnassignment removes a job from an agent (down).
+message JobUnassignment {
+  string job_id = 1;
+}
+
+// JobRunResult is the agent's report for one scheduled job run (up).
+message JobRunResult {
+  string run_id = 1;
+  string job_id = 2;
+  string state = 3;        // succeeded | failed | timeout
+  string error = 4;
+  int64 scheduled_at = 5;
+  int64 started_at = 6;
+  int64 finished_at = 7;
+  string trigger = 8;      // cron | manual | resume
+  int32 retry_of = 9;      // 0 = first attempt; >0 = retry N
 }
 
 // FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.

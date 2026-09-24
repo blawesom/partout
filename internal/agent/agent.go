@@ -22,6 +22,7 @@ import (
 	pkg "github.com/blawesom/partout/internal/agent/pkg"
 	agentsecrets "github.com/blawesom/partout/internal/agent/secrets"
 	"github.com/blawesom/partout/internal/agent/task"
+	"github.com/blawesom/partout/internal/agent/jobs"
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/config"
@@ -69,6 +70,9 @@ type Agent struct {
 	taskRunner *task.Runner
 	// taskExec carries facts/secrets for the task executor.
 	taskExec *task.Executor
+
+	// jobs runs scheduled jobs on the agent's own clock (M3, PRD §5.4).
+	jobs *jobs.Scheduler
 
 	// sendMu serializes all up-sends (direct + spool drain) on the stream.
 	sendMu sync.Mutex
@@ -159,6 +163,9 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	}
 	a.taskExec = task.NewExecutor(secLookup)
 	a.taskRunner = task.New(a.taskExec)
+	a.jobs = jobs.New(filepath.Join(cfg.DataDir, "jobs"), a.taskExec, func(r *jobs.Report) {
+		a.sendJobResult(r)
+	}, a.log)
 	// Session manager uses a closure that can reach the agent instance.
 	a.sessions = session.NewManager(func(sid string, exitCode int32, state string, durationMs int64) {
 		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
@@ -189,6 +196,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	if a.spool != nil {
 		defer a.spool.Close()
+	}
+	// M3 jobs: restore persisted schedules and start the agent-side clock
+	// (PRD §5.4). Runs continue even while the stream is down.
+	if a.jobs != nil {
+		if err := a.jobs.Load(); err != nil {
+			a.log.Printf("agent: jobs load: %v", err)
+		}
+		a.jobs.Start()
+		defer a.jobs.Stop()
 	}
 	backoff := backoffBase
 	for {
@@ -412,6 +428,17 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		}
 		// Run off the envelope loop.
 		go a.execTaskRun(run)
+
+	case env.GetJobAssign() != nil:
+		ja := env.GetJobAssign()
+		// Jobs are server-resolved per-host schedules: no exec decision to
+		// re-check (the task steps run under their own task.run gate when
+		// manually dispatched; scheduled runs are agent-side by design).
+		a.jobs.Apply(jaToAssignment(ja))
+
+	case env.GetJobUnassign() != nil:
+		ju := env.GetJobUnassign()
+		a.jobs.Remove(ju.JobId)
 
 	case env.GetSessionOpen() != nil:
 		so := env.GetSessionOpen()
@@ -968,5 +995,49 @@ func (a *Agent) sendTaskResult(runID, state, errMsg string, steps []*pb.TaskStep
 	a.sendMu.Unlock()
 	if err != nil {
 		a.log.Printf("agent: task result %s send failed: %v", runID, err)
+	}
+}
+
+// sendJobResult sends a JobRunResult up the stream (M3, PRD §5.4).
+func (a *Agent) sendJobResult(r *jobs.Report) {
+	a.sendMu.Lock()
+	err := a.streamC.Send(context.Background(), &pb.Envelope{
+		Kind:    pb.EnvelopeKind_JOB_RUN_RESULT,
+		CorrId:  r.RunID,
+		Payload: &pb.Envelope_JobRunResult{JobRunResult: &pb.JobRunResult{
+			RunId:      r.RunID,
+			JobId:      r.JobID,
+			State:      r.State,
+			Error:      r.Error,
+			ScheduledAt: r.ScheduledAt,
+			StartedAt:  r.StartedAt,
+			FinishedAt: r.FinishedAt,
+			Trigger:    r.Trigger,
+			RetryOf:    r.RetryOf,
+		}},
+	})
+	a.sendMu.Unlock()
+	if err != nil {
+		a.log.Printf("agent: job result %s send failed: %v", r.RunID, err)
+	}
+}
+
+
+// jaToAssignment converts a proto JobAssignment to the agent's local type.
+func jaToAssignment(ja *pb.JobAssignment) *jobs.Assignment {
+	return &jobs.Assignment{
+		JobID:            ja.JobId,
+		Name:             ja.Name,
+		Cron:             ja.Cron,
+		Timezone:         ja.Timezone,
+		TaskID:           ja.TaskId,
+		TaskVersion:      ja.TaskVersion,
+		Steps:            ja.Steps,
+		MaxRunS:          ja.MaxRunS,
+		OverlapPolicy:    ja.OverlapPolicy,
+		FailurePolicy:    ja.FailurePolicy,
+		RetryBackoffS:    ja.RetryBackoffS,
+		SelectorSnapshot: ja.SelectorSnapshot,
+		Version:          ja.Version,
 	}
 }

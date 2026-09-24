@@ -530,6 +530,28 @@ Rule (one declarative object, stored in `policies`):
   `GET /api/v1/tasks/runs/:id` (run detail + steps), `GET/POST /api/v1/playbooks`.
 - CLI: `ctl tasks list|create|show|run <id> <agent>|runs|run-show <id>`, `ctl playbooks list|create`.
 
+### 5.5.2 Scheduled Jobs (M3, PRD §5.4)
+
+- Store: `jobs` (name, task_id+version, cron, selector, overlap/failure policy, enabled),
+  `job_assignments` (composite PK `job_id,agent_id`; last_run_state/at), `job_runs`
+  (lineage: job_id, agent_id, task_id+version, scheduled/started/finished, state, trigger, error).
+- **Server-side selector resolution** (PRD §5.4): at save/update the job's selector
+  resolves to concrete hosts; each agent gets its own `JobAssignment` (cron + tz + task
+  steps + policies). The agent never sees the selector — only the resolved schedule
+  (plus a `selector_snapshot` recorded for audit). Editing a selector re-resolves and
+  re-pushes per-host schedules (acceptance criterion).
+- **Agent-side execution**: `internal/agent/jobs` scheduler uses `robfig/cron/v3`;
+  each job runs on the agent's own clock, so a server outage or partition does not stop
+  scheduled work. Assignments persist to `<data>/jobs.json` (0600) and reload on restart.
+- **Overlap policy** (per job): `allow` (concurrent), `skip` (skip if in flight),
+  `replace` (cancel prior). **Failure policy**: `no_retry` | `retry` with backoff (max 3).
+- **Per-run deadline** (`max_run_s`, default 30 min) → `timeout` state.
+- Runs produce `job_runs` rows (lineage) + audit event + SSE `job.run`.
+- **Stream**: `JOB_ASSIGN` down, `JOB_UNASSIGN` down, `JOB_RUN_RESULT` up (hook →
+  `jobs.Controller.OnRunResult`).
+- REST: `GET/POST /api/v1/jobs`, `GET/PUT/DELETE /api/v1/jobs/:id`, `GET /jobs/:id/runs`,
+  `POST /jobs/:id/run`, `GET /jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
+
 ### 5.6 Audit
 
 - `audit_events`: append-only; no update/delete endpoints (PRD §5.8). One writer goroutine,
@@ -709,8 +731,8 @@ data set). One dialect abstraction (`internal/store`); no engine-specific querie
 | `sessions`, `session_records` | PTY byte streams; 30-day retention; optional capture |
 | `files_actions` | upload/download/edit/stat/perm audit rows |
 | `secrets`, `secret_versions`, `secret_bindings` | HKDF-encrypted at rest; versioned; per-materialization audit |
-| `jobs`, `job_runs` | resolved per-host schedule stored with job; run lineage |
 | `tasks`, `task_versions`, `playbooks`, `task_runs`, `task_run_steps` | versioned; step state per §4 |
+| `jobs`, `job_assignments`, `job_runs` | scheduled jobs (agent-side cron, PRD §5.4) |
 | `package_actions` | list/apply/dry-run + per-host before/after journal |
 | `eol_cache`, `vuln_cache` | external data (§8) |
 | `secrets`, `secret_versions`, `secret_bindings` | values encrypted at rest (HKDF-derived keys) |
@@ -776,6 +798,29 @@ error bodies `{code, message, details}`.
 | POST   | `/api/v1/secrets/:name/rotate` | admin | New version `{value}`; revokes all prior versions |
 | POST   | `/api/v1/secrets/:name/revoke` | admin | Revoke the current version |
 | DELETE | `/api/v1/secrets/:name` | admin | Delete secret + all versions |
+| GET    | `/api/v1/packages/updates?agent_id=` | viewer | CVE-ranked package updates (M3 §5.6) |
+| POST   | `/api/v1/packages/apply` | operator | `{agent_id, packages[], dry_run}` → dry-run first (M3 §5.6) |
+| GET    | `/api/v1/packages/actions` | viewer | List package actions (M3 §5.6) |
+| GET    | `/api/v1/packages/actions/:id` | viewer | Package action detail (M3 §5.6) |
+| GET    | `/api/v1/tasks` | viewer | List tasks (M3 §5.5) |
+| POST   | `/api/v1/tasks` | operator | Create task `{name, steps[]}` (M3 §5.5) |
+| GET    | `/api/v1/tasks/:id` | viewer | Task + latest steps (M3 §5.5) |
+| POST   | `/api/v1/tasks/:id/run` | operator | `{agent_id}` → run task (M3 §5.5) |
+| GET    | `/api/v1/tasks/runs` | viewer | List task runs (M3 §5.5) |
+| GET    | `/api/v1/tasks/runs/:id` | viewer | Run detail + steps (M3 §5.5) |
+| GET    | `/api/v1/playbooks` | viewer | List playbooks (M3 §5.5) |
+| POST   | `/api/v1/playbooks` | operator | Create playbook `{name, task_id, selector}` (M3 §5.5) |
+| GET    | `/api/v1/jobs` | viewer | List scheduled jobs (M3 §5.4) |
+| POST   | `/api/v1/jobs` | operator | Create job `{name, task_id, cron, selector}` → resolves + pushes (M3 §5.4) |
+| GET    | `/api/v1/jobs/:id` | viewer | Job detail (M3 §5.4) |
+| PUT    | `/api/v1/jobs/:id` | operator | Update job → re-resolve + re-push (M3 §5.4) |
+| DELETE | `/api/v1/jobs/:id` | operator | Delete job + unassign hosts (M3 §5.4) |
+| GET    | `/api/v1/jobs/:id/runs` | viewer | Job run lineage (M3 §5.4) |
+| POST   | `/api/v1/jobs/:id/run` | operator | `{agent_id}` → dispatch manual run (M3 §5.4) |
+| GET    | `/api/v1/jobs/runs` | viewer | All job runs (M3 §5.4) |
+| GET    | `/api/v1/hosts/:id/eol` | viewer | EOL state from os-release facts (M3 §6.3) |
+| GET    | `/api/v1/external-data/status` | viewer | External data refresh status (M3 §6.3) |
+| POST   | `/api/v1/external-data/refresh` | admin | Trigger external data refresh (M3 §6.3) |
 | GET    | `/api/v1/files/stat?agent_id=&path=` | viewer | File metadata (M2) |
 | GET    | `/api/v1/files/list?agent_id=&path=` | viewer | Directory listing (M2) |
 | GET    | `/api/v1/files/download?agent_id=&path=` | viewer | File bytes, `Range: bytes=N-` resumable (M2) |

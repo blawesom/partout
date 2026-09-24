@@ -74,6 +74,11 @@ type Handler struct {
 	// (agent, session, exit, state, duration). The sessions controller
 	// finalizes the store row.
 	SessionResultHook func(agentID, sessionID string, exitCode int32, state string, durationMs int64)
+
+	// JobRunResultHook, if set, is called when an agent reports a scheduled
+	// job run (M3, PRD §5.4). The jobs controller records the job_run row +
+	// audit event.
+	JobRunResultHook func(agentID string, r *pb.JobRunResult)
 }
 
 // NewHandler builds a stream handler.
@@ -333,6 +338,11 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 				// Waiter already gave up.
 			}
 		}
+	case msg.GetJobRunResult() != nil:
+		jr := msg.GetJobRunResult()
+		if h.JobRunResultHook != nil {
+			h.JobRunResultHook(sess.AgentID, jr)
+		}
 	case msg.GetSessionData() != nil:
 		sd := msg.GetSessionData()
 		if h.SessionDataHook != nil {
@@ -554,6 +564,40 @@ func (h *Handler) WaitTaskResult(ctx context.Context, runID string) (*pb.TaskRun
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// ---- Jobs (M3, PRD §5.4) ----------------------------------------------------
+
+// SendJobAssign pushes a job assignment down to an agent (fire-and-forget;
+// the agent schedules it on its own clock). Returns an error only if the
+// agent is not currently connected.
+func (h *Handler) SendJobAssign(agentID string, a *pb.JobAssignment) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	return sess.send(&pb.Envelope{
+		Kind:    pb.EnvelopeKind_JOB_ASSIGN,
+		CorrId:  a.JobId,
+		Payload: &pb.Envelope_JobAssign{JobAssign: a},
+	})
+}
+
+// SendJobUnassign removes a job from an agent (fire-and-forget).
+func (h *Handler) SendJobUnassign(agentID, jobID string) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	return sess.send(&pb.Envelope{
+		Kind:    pb.EnvelopeKind_JOB_UNASSIGN,
+		CorrId:  jobID,
+		Payload: &pb.Envelope_JobUnassign{JobUnassign: &pb.JobUnassignment{JobId: jobID}},
+	})
 }
 
 // ---- Sessions (M2, PRD §5.2.2) ------------------------------------------------
