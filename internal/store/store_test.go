@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +292,122 @@ func setupTestDB(t *testing.T) (*Store, string) {
 		t.Fatalf("New: %v", err)
 	}
 	return s, dir
+}
+
+// TestFileDSNOpensCleanPath verifies the opened file is exactly the dsn path
+// (regression guard for the pre-fix "&_pragma=..." filename quirk) and that
+// WAL + foreign_keys are actually applied.
+func TestFileDSNOpensCleanPath(t *testing.T) {
+	dir := t.TempDir()
+	s, err := New("sqlite:" + dir + "/clean.db")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer s.Close()
+
+	var mode string
+	if err := s.db.QueryRow(`PRAGMA journal_mode`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "wal" {
+		t.Fatalf("journal_mode=%q, want wal (pragma not applied?)", mode)
+	}
+	var fk int
+	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		t.Fatal(err)
+	}
+	if fk != 1 {
+		t.Fatalf("foreign_keys=%d, want 1", fk)
+	}
+
+	// Exactly one DB file, with the clean name.
+	entries, _ := os.ReadDir(dir)
+	var dbs []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".db") {
+			dbs = append(dbs, e.Name())
+		}
+	}
+	if len(dbs) != 1 || dbs[0] != "clean.db" {
+		t.Fatalf("db files in dir: %v, want [clean.db]", dbs)
+	}
+}
+
+// TestLegacyDBNameMigration verifies a pre-fix DB file (name embedded with
+// the pragma suffix) is renamed to the clean path on open, data intact.
+func TestLegacyDBNameMigration(t *testing.T) {
+	dir := t.TempDir()
+	legacyName := "old.db" + legacyPragmaSuffix
+
+	// Create the legacy file exactly the way pre-fix code did (the whole
+	// string is the filename) and write a row.
+	s, err := New("sqlite:" + dir + "/" + legacyName)
+	if err != nil {
+		t.Fatalf("New legacy: %v", err)
+	}
+	if err := s.CreateTask(&Task{ID: "task_leg", Name: "legacy"}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	s.Close()
+
+	// Open via the clean path: the legacy file must be renamed + readable.
+	s2, err := New("sqlite:" + dir + "/old.db")
+	if err != nil {
+		t.Fatalf("New clean: %v", err)
+	}
+	defer s2.Close()
+	task, err := s2.Task("task_leg")
+	if err != nil || task == nil {
+		t.Fatalf("legacy data not visible after rename: %v %v", err, task)
+	}
+
+	var dbs []string
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".db") {
+			dbs = append(dbs, e.Name())
+		}
+	}
+	if len(dbs) != 1 || dbs[0] != "old.db" {
+		t.Fatalf("db files after migration: %v, want [old.db]", dbs)
+	}
+}
+
+// TestLegacyMigrationNeverClobbers verifies the migration does not rename
+// over an existing clean-path database.
+func TestLegacyMigrationNeverClobbers(t *testing.T) {
+	dir := t.TempDir()
+	legacyName := "dup.db" + legacyPragmaSuffix
+
+	// Clean-path DB with a marker row.
+	s, err := New("sqlite:" + dir + "/dup.db")
+	if err != nil {
+		t.Fatalf("New clean: %v", err)
+	}
+	if err := s.CreateTask(&Task{ID: "task_clean", Name: "clean"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Legacy file with a different marker row.
+	sl, err := New("sqlite:" + dir + "/" + legacyName)
+	if err != nil {
+		t.Fatalf("New legacy: %v", err)
+	}
+	if err := sl.CreateTask(&Task{ID: "task_legacy", Name: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	sl.Close()
+
+	// Open the clean path: no rename, clean data intact.
+	s2, err := New("sqlite:" + dir + "/dup.db")
+	if err != nil {
+		t.Fatalf("New clean again: %v", err)
+	}
+	defer s2.Close()
+	if _, err := s2.Task("task_clean"); err != nil {
+		t.Fatalf("clean DB was clobbered: %v", err)
+	}
 }
 
 // InMemoryStore is a Store backed by an in-memory database for tests.

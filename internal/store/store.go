@@ -10,6 +10,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // registers "sqlite"
@@ -27,6 +29,11 @@ type Store struct {
 //
 //	"sqlite:/var/lib/partout/server/db.partout"
 //	"sqlite::memory:"
+//
+// The DB file is exactly the path in the dsn. Pre-fix versions wrote a file
+// named "<path>&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)" (the
+// pragma suffix had leaked into the filename); such a legacy file is
+// transparently renamed to the clean path on open.
 func New(dsn string) (*Store, error) {
 	dialect, connect, err := parseDSN(dsn)
 	if err != nil {
@@ -35,6 +42,7 @@ func New(dsn string) (*Store, error) {
 	if dialect == "postgres" {
 		return nil, fmt.Errorf("store: postgres not yet compiled in (SQLite is default for M0)")
 	}
+	migrateLegacyDBName(dsn)
 
 	db, err := sql.Open("sqlite", connect)
 	if err != nil {
@@ -51,19 +59,54 @@ func New(dsn string) (*Store, error) {
 	return s, nil
 }
 
+// legacyPragmaSuffix is what pre-fix parseDSN appended to the file path —
+// with '&' instead of '?', so it became part of the literal filename.
+const legacyPragmaSuffix = "&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+
+// migrateLegacyDBName renames a pre-fix DB file (name embedded with the
+// pragma suffix) to the clean path, including its -wal/-shm sidecars.
+// No-op when the legacy name is absent or the clean path already exists
+// (never clobbers an existing database).
+func migrateLegacyDBName(dsn string) {
+	if len(dsn) < 7 || dsn[:7] != "sqlite:" {
+		return
+	}
+	raw := dsn[7:]
+	if raw == "" || raw == ":memory:" || strings.Contains(raw, "?") {
+		return
+	}
+	legacy := raw + legacyPragmaSuffix
+	if _, err := os.Stat(legacy); err != nil {
+		return
+	}
+	if _, err := os.Stat(raw); err == nil {
+		return // clean path already in use; operator must resolve manually
+	}
+	_ = os.Rename(legacy, raw)
+	for _, ext := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(legacy + ext); err == nil {
+			_ = os.Rename(legacy+ext, raw+ext)
+		}
+	}
+}
+
 // parseDSN returns (dialect, connectArg).
 func parseDSN(dsn string) (string, string, error) {
 	if len(dsn) >= 7 && dsn[:7] == "sqlite:" {
 		raw := dsn[7:]
-		// PRAGMAs apply to every connection. With SetMaxOpenConns(1) that is
-		// one stable connection, so foreign_keys(1) persists (required for
-		// ON DELETE CASCADE — including on in-memory test DBs).
-		pragma := "?_pragma=foreign_keys(1)"
 		if raw == ":memory:" || raw == "" {
-			return "sqlite", ":memory:" + pragma, nil
+			return "sqlite", ":memory:?_pragma=foreign_keys(1)", nil
 		}
-		// File-backed: also enable WAL.
-		return "sqlite", raw + "&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", nil
+		// File-based: also enable WAL. The pragmas are a query string on the
+		// path — '?' when the path has no query yet — so the opened file is
+		// exactly `raw` (PRAGMAs apply to every connection; with
+		// SetMaxOpenConns(1) that is one stable connection, so
+		// foreign_keys(1) persists — required for ON DELETE CASCADE).
+		sep := "?"
+		if strings.Contains(raw, "?") {
+			sep = "&"
+		}
+		return "sqlite", raw + sep + "_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", nil
 	}
 	return "", "", fmt.Errorf("store: unknown dsn %q (want sqlite:...)", dsn)
 }

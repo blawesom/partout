@@ -195,6 +195,10 @@ anchor for forensics.
 2. `systemctl stop partout-server` (short downtime is unavoidable — single-writer, no
    self-HA).
 3. Replace the binary, `systemctl start partout-server`. Migrations auto-run at boot.
+   *Note (this version):* the SQLite file is now exactly the `PARTOUT_DB_PATH` you set.
+   Pre-fix versions wrote a file named `<path>&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)`;
+   on first start it is **transparently renamed** to the clean path (data intact). If you
+   already had a clean-path file, the legacy one is left untouched — resolve manually.
 4. Verify: `GET /healthz` → 200; UI loads.
 
 **Rollback**: restore the DB from backup + revert the binary + restart. Migrations are
