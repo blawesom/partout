@@ -493,10 +493,14 @@ Rule (one declarative object, stored in `policies`):
 - Keys: master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`; per-secret
   keys = HKDF(master, secret_id) (PRD §5.7). No key → feature disabled at startup with a clear
   error.
-- Distribution: `SecretMaterialize{ciphertext_to_agent, version}` over the authenticated
-  (TLS) stream; ciphertext additionally X25519-encrypted to the agent's transport key so the
-  on-disk spool never holds cleartext. Agent decrypts in memory, materializes only for the
-  lifetime of the declaring task/command, and wipes on completion.
+- Distribution: `SecretMaterialize{ref, version, eph_pub, sealed, cache_ttl_s}` over the
+  authenticated (TLS) stream. The server decrypts the at-rest ciphertext, then seals the
+  plaintext with an **ephemeral** X25519 key (ECDH with the agent's enrolled transport key,
+  HKDF-derived AES-256-GCM) so the server holds the cleartext for a single materialization
+  only and the sealed form is E2E-bound to that agent. The agent decrypts in memory,
+  materializes only for the lifetime of the declaring task/command, and wipes on completion.
+  With `cache_ttl_s > 0` it persists the **sealed form only** (0600, never cleartext) so a
+  restart within the window can still serve the value while offline.
 - **Offline**: default fail-closed ("secret unavailable", recorded). Per-secret `offline_ttl`
   (default 0) allows a bounded encrypted cache agent-side.
 - Rotation: new version → prior binding invalidated; audit records which version each run used.
@@ -673,6 +677,7 @@ data set). One dialect abstraction (`internal/store`); no engine-specific querie
 | `output_chunks` | `(run_id, chunk_seq)` unique; stream-to-disk above 1 MiB/run **(proposed)**; 30-day retention |
 | `sessions`, `session_records` | PTY byte streams; 30-day retention; optional capture |
 | `files_actions` | upload/download/edit/stat/perm audit rows |
+| `secrets`, `secret_versions`, `secret_bindings` | HKDF-encrypted at rest; versioned; per-materialization audit |
 | `jobs`, `job_runs` | resolved per-host schedule stored with job; run lineage |
 | `tasks`, `task_versions`, `playbooks`, `task_runs`, `task_run_steps` | versioned; step state per §4 |
 | `package_actions` | list/apply/dry-run + per-host before/after journal |
@@ -734,6 +739,12 @@ error bodies `{code, message, details}`.
 | GET    | `/api/v1/sessions/:id` | viewer | Session detail |
 | GET    | `/api/v1/sessions/:id/replay` | viewer | Replay recorded PTY chunks |
 | GET    | `/api/v1/audit` | viewer | Audit event log |
+| GET    | `/api/v1/secrets` | operator | List secret metadata (**never values**) |
+| GET    | `/api/v1/secrets/:name` | operator | Secret metadata (version, selector, agent count) |
+| POST   | `/api/v1/secrets` | admin | Create `{name, value, selector, offline_ttl_s}` (value write-only) |
+| POST   | `/api/v1/secrets/:name/rotate` | admin | New version `{value}`; revokes all prior versions |
+| POST   | `/api/v1/secrets/:name/revoke` | admin | Revoke the current version |
+| DELETE | `/api/v1/secrets/:name` | admin | Delete secret + all versions |
 | GET    | `/api/v1/files/stat?agent_id=&path=` | viewer | File metadata (M2) |
 | GET    | `/api/v1/files/list?agent_id=&path=` | viewer | Directory listing (M2) |
 | GET    | `/api/v1/files/download?agent_id=&path=` | viewer | File bytes, `Range: bytes=N-` resumable (M2) |

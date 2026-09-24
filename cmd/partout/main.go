@@ -38,6 +38,7 @@ import (
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
+	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/identity"
@@ -190,6 +191,21 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 			prevHook(agentID)
 		}
 		sm.OnDisconnect(agentID)
+	}
+
+	// M3: secrets (PRD §5.7). The feature is enabled only when a master key
+	// is configured; otherwise the endpoints stay 503 with a clear reason.
+	if master, err := serversecrets.LoadMasterKey(); err == nil {
+		secMgr, err := serversecrets.New(st, h, master, lg)
+		if err != nil {
+			return fmt.Errorf("secrets manager: %w", err)
+		}
+		apiH.SetSecrets(secMgr)
+		lg.Printf("server: secrets feature enabled (master key configured)")
+	} else if !errors.Is(err, serversecrets.ErrDisabled) {
+		return fmt.Errorf("secrets: %w", err)
+	} else {
+		lg.Printf("server: secrets feature disabled (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY to enable)")
 	}
 
 	// Retention sweeper (PRD §9: 30-day session-recording retention). Purges

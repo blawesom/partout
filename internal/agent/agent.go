@@ -19,6 +19,7 @@ import (
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/agent/guardrail"
+	agentsecrets "github.com/blawesom/partout/internal/agent/secrets"
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/config"
@@ -56,6 +57,11 @@ type Agent struct {
 	// drop does not kill the running process; its output spools instead and
 	// replays on reconnect (architecture §3.4).
 	rootCtx context.Context
+
+	// secrets is the E2E secret materialization cache (M3, PRD §5.7). It may
+	// be nil when the agent lacks an x25519 private key; then secret steps
+	// fail closed.
+	secrets *agentsecrets.Cache
 
 	// sendMu serializes all up-sends (direct + spool drain) on the stream.
 	sendMu sync.Mutex
@@ -104,6 +110,19 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	if spoolErr != nil {
 		lg.Printf("agent: open spool: %v", spoolErr)
 	}
+	// Secret cache (M3, PRD §5.7): holds materialized values in memory and,
+	// for secrets with offline_ttl, the sealed form on disk (0600). A
+	// failure to open it is logged but not fatal: secret-less runs work, and
+	// declaring a secret then fails closed ("secret unavailable").
+	var secCache *agentsecrets.Cache
+	if id.X25519Priv != nil {
+		var serr error
+		secCache, serr = agentsecrets.New(filepath.Join(cfg.DataDir, "agent"), id.X25519Priv)
+		if serr != nil {
+			lg.Printf("agent: open secret cache: %v", serr)
+			secCache = nil
+		}
+	}
 	a := &Agent{
 		id:            id,
 		cfg:           cfg,
@@ -115,6 +134,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		guard:         g,
 		spool:         sp,
 		spoolErr:      spoolErr,
+		secrets:       secCache,
 		spooled:       make(map[string]bool),
 		activeRunners: make(map[string]context.CancelFunc),
 		fsCfg:         fs.Config{},
@@ -414,6 +434,20 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 	case env.GetRevoke() != nil:
 		a.log.Printf("agent: REVOKED: %s", env.GetRevoke().Reason)
 		return ErrRevoked
+
+	case env.GetSecretMaterialize() != nil:
+		sm := env.GetSecretMaterialize()
+		if a.secrets == nil {
+			a.log.Printf("agent: secret %s materialized but cache unavailable (no x25519 key)", sm.Ref)
+			return nil
+		}
+		if _, err := a.secrets.Handle(sm); err != nil {
+			// Fails closed: the value is not stored, so any run that declares
+			// it will report "secret unavailable". Log (never the value).
+			a.log.Printf("agent: secret %s materialize FAILED: %v", sm.Ref, err)
+			return nil
+		}
+		a.log.Printf("agent: secret %s v%d materialized (ttl=%ds)", sm.Ref, sm.Version, sm.CacheTtlS)
 
 	default:
 		return nil

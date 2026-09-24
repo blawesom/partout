@@ -47,6 +47,7 @@ enum EnvelopeKind {
   SESSION_RESIZE = 16;
   SESSION_CLOSE = 17;
   FILE_OP = 18;
+  SECRET_MATERIALIZE = 19; // down: E2E-encrypted secret for a run
 
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
@@ -81,6 +82,7 @@ message Envelope {
     SessionResize session_resize = 36;
     SessionClose session_close = 37;
     FileOp file_op = 38;
+    SecretMaterialize secret_materialize = 39; // down: E2E secret
     // Handshake
     Challenge challenge = 50;
     AuthProof auth_proof = 51;
@@ -197,6 +199,21 @@ message FileOp {
   // by UPLOAD_BEGIN (the server echoes it back; path stays the final target).
   string temp_path = 11;
   Decision decision = 12;    // present for upload/edit/perm (agent re-check)
+}
+
+// SecretMaterialize delivers a secret value to an agent, E2E-encrypted
+// (PRD §5.7). The server seals the plaintext with an ephemeral X25519 key:
+// shared = X25519(server_eph_priv, agent_x25519_pub), key = HKDF(shared,
+// "partout:secret-e2e:v1:<ref>:<version>"). Only the enrolled agent can open
+// it. The agent holds the value for the lifetime of the declaring run (in
+// memory) and, when cache_ttl_s > 0, may persist the sealed form (never the
+// plaintext) for offline use within that window.
+message SecretMaterialize {
+  string ref = 1;        // secret name declared by the run
+  int64 version = 2;     // version being materialized (audit)
+  bytes eph_pub = 3;     // server ephemeral X25519 public key (32 bytes)
+  bytes sealed = 4;      // AES-256-GCM(value) under the E2E-derived key
+  int64 cache_ttl_s = 5; // 0 = in-memory only; >0 = may cache sealed form
 }
 
 // FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.

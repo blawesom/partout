@@ -454,6 +454,25 @@ func (h *Handler) SendSessionClose(agentID, sessionID string) error {
 	})
 }
 
+// ---- Secrets (M3, PRD §5.7) -------------------------------------------------
+
+// SendSecretMaterialize delivers an E2E-encrypted secret to an agent. The
+// agent holds it for the lifetime of the declaring run (and optionally
+// caches the sealed form for offline use, per cache_ttl_s).
+func (h *Handler) SendSecretMaterialize(agentID string, sm *pb.SecretMaterialize) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	return sess.send(&pb.Envelope{
+		Kind:    pb.EnvelopeKind_SECRET_MATERIALIZE,
+		CorrId:  sm.Ref,
+		Payload: &pb.Envelope_SecretMaterialize{SecretMaterialize: sm},
+	})
+}
+
 // AgentSession returns the active session for an agent (for tests).
 func (h *Handler) AgentSession(agentID string) *Session {
 	h.mu.Lock()

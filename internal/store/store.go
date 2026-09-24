@@ -55,11 +55,15 @@ func New(dsn string) (*Store, error) {
 func parseDSN(dsn string) (string, string, error) {
 	if len(dsn) >= 7 && dsn[:7] == "sqlite:" {
 		raw := dsn[7:]
+		// PRAGMAs apply to every connection. With SetMaxOpenConns(1) that is
+		// one stable connection, so foreign_keys(1) persists (required for
+		// ON DELETE CASCADE — including on in-memory test DBs).
+		pragma := "?_pragma=foreign_keys(1)"
 		if raw == ":memory:" || raw == "" {
-			return "sqlite", ":memory:", nil
+			return "sqlite", ":memory:" + pragma, nil
 		}
-		// Append SQLite PRAGMA for WAL + foreign keys.
-		return "sqlite", raw + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", nil
+		// File-backed: also enable WAL.
+		return "sqlite", raw + "&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", nil
 	}
 	return "", "", fmt.Errorf("store: unknown dsn %q (want sqlite:...)", dsn)
 }

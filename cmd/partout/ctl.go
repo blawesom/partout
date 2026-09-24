@@ -124,6 +124,8 @@ commands:
 		c.cmdFiles(rest)
 	case "sessions":
 		c.cmdSessions(rest)
+	case "secrets":
+		c.cmdSecrets(rest)
 	case "help", "-h", "--help":
 		fs.Usage()
 	default:
@@ -1026,3 +1028,136 @@ func (c *ctl) cmdSessionReplay(args []string) {
 }
 
 // ---- URL escape for session IDs in REST paths --------------------------------
+
+// ---- secrets (M3, PRD §5.7) -------------------------------------------------
+
+func (c *ctl) cmdSecrets(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl secrets <list|create|rotate|revoke|delete> ...")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "list":
+		c.secretList()
+	case "create":
+		c.secretCreate(args[1:])
+	case "rotate":
+		c.secretRotate(args[1:])
+	case "revoke":
+		c.secretRevoke(args[1:])
+	case "delete":
+		c.secretDelete(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: secrets: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) secretList() {
+	var out struct {
+		Secrets []map[string]any `json:"secrets"`
+	}
+	if err := c.do("GET", "/api/v1/secrets", nil, &out); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: secrets list: %v\n", err)
+		os.Exit(1)
+	}
+	if len(out.Secrets) == 0 {
+		fmt.Println("(no secrets)")
+		return
+	}
+	fmt.Printf("%-24s %-16s %-6s %-8s\n", "NAME", "SELECTOR", "VER", "AGENTS")
+	for _, s := range out.Secrets {
+		fmt.Printf("%-24s %-16s %-6s %-8s\n",
+			numStr(s["name"]), numStr(s["selector"]), numStr(s["version"]), numStr(s["agent_count"]))
+	}
+}
+
+func (c *ctl) secretCreate(args []string) {
+	fs := flag.NewFlagSet("secrets create", flag.ExitOnError)
+	value := fs.String("value", "", "secret value (required)")
+	valueFile := fs.String("value-file", "", "read value from file (mutually exclusive with -value)")
+	selector := fs.String("selector", "", "selector expression (empty = all hosts)")
+	ttl := fs.Int64("offline-ttl", 0, "agent-side encrypted cache window in seconds (0 = never)")
+	fs.Parse(args)
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl secrets create <name> [-value=... | -value-file=...] [-selector=...] [-offline-ttl=N]")
+		os.Exit(2)
+	}
+	name := fs.Arg(0)
+	v := *value
+	if *valueFile != "" {
+		b, err := os.ReadFile(*valueFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: read -value-file: %v\n", err)
+			os.Exit(1)
+		}
+		v = string(bytes.TrimSpace(b))
+	}
+	if v == "" {
+		fmt.Fprintln(os.Stderr, "ctl: -value or -value-file required")
+		os.Exit(2)
+	}
+	body := map[string]any{"name": name, "value": v, "selector": *selector, "offline_ttl_s": *ttl}
+	if err := c.do("POST", "/api/v1/secrets", body, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: create: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("created secret %q (version 1)\n", name)
+}
+
+func (c *ctl) secretRotate(args []string) {
+	fs := flag.NewFlagSet("secrets rotate", flag.ExitOnError)
+	value := fs.String("value", "", "new value (required)")
+	valueFile := fs.String("value-file", "", "read new value from file")
+	fs.Parse(args)
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl secrets rotate <name> [-value=... | -value-file=...]")
+		os.Exit(2)
+	}
+	name := fs.Arg(0)
+	v := *value
+	if *valueFile != "" {
+		b, err := os.ReadFile(*valueFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: read -value-file: %v\n", err)
+			os.Exit(1)
+		}
+		v = string(bytes.TrimSpace(b))
+	}
+	if v == "" {
+		fmt.Fprintln(os.Stderr, "ctl: -value or -value-file required")
+		os.Exit(2)
+	}
+	var out struct {
+		Version int64 `json:"version"`
+	}
+	if err := c.do("POST", "/api/v1/secrets/"+url.PathEscape(name)+"/rotate", map[string]string{"value": v}, &out); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: rotate: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("rotated %q to version %d (prior versions revoked)\n", name, out.Version)
+}
+
+func (c *ctl) secretRevoke(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl secrets revoke <name>")
+		os.Exit(2)
+	}
+	if err := c.do("POST", "/api/v1/secrets/"+url.PathEscape(args[0])+"/revoke", map[string]string{}, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: revoke: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("revoked %q (current version no longer materializable)\n", args[0])
+}
+
+func (c *ctl) secretDelete(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl secrets delete <name>")
+		os.Exit(2)
+	}
+	if err := c.do("DELETE", "/api/v1/secrets/"+url.PathEscape(args[0]), nil, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "ctl: delete: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("deleted %q\n", args[0])
+}

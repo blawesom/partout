@@ -10,6 +10,7 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/server/files"
+	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/provision"
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/server/stream"
@@ -24,6 +25,7 @@ type Handler struct {
 	prov   *provision.Provisioner
 	files  *files.Controller
 	sess   *sessions.Manager
+	secretsMgr *serversecrets.Manager
 	sse    *sse.Broker
 	log    *log.Logger
 	router http.Handler
@@ -83,6 +85,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M2: files + sessions (PRD §5.3, §5.2.2).
 	handler.RegisterFiles(mux)
 	handler.RegisterSessions(mux)
+
+	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
+	handler.RegisterSecrets(mux)
 
 	handler.router = mux
 	return handler

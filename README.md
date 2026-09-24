@@ -36,7 +36,7 @@ off and the docs become the implementation contract.
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
-| **M3 — Automation** | ⬜ Not started | — |
+| **M3 — Automation** | 🚧 In progress | Secrets ✅ (v1 store, E2E distribution, offline cache, REST + CLI). Remaining: external data refresh, packages, tasks/playbooks, jobs |
 | **M4 — Governance** | ⬜ Not started | — |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
 
@@ -100,10 +100,23 @@ Done (decisions D1–D5 per PRD review):
 - ✅ **CLI**: `partout ctl files stat|list|upload|edit|perm` and `partout ctl sessions open|close|list|replay`.
 - ✅ E2E tests: files over a live bufconn stream (stat/list/download/upload/edit-CAS/conflict/perm/symlink-rejection/policy-deny/audit) and sessions (open→data→close→result, recording+replay, policy deny, disconnect interruption).
 
+### M3 — Automation (in progress)
+
+Done so far:
+- ✅ **Secrets** (PRD §5.7, arch §5.5): server-side encrypted store — master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`, per-secret keys = HKDF(master, secret_id), values AES-256-GCM at rest, versioned. **No master key → feature disabled with a clear message** (503 on the endpoints).
+- ✅ **Rotation**: new version revokes all prior versions; audit records which version each materialization used (`secret_bindings`). Revoke and delete included.
+- ✅ **E2E distribution**: `SecretMaterialize{ref, version, eph_pub, sealed, cache_ttl_s}` down envelope. Server decrypts at-rest, seals with an **ephemeral X25519** ECDH key to the agent's enrolled transport key (HKDF → AES-256-GCM). Cleartext held in server memory for one materialization only; the sealed form is bound to that agent (a different agent cannot open it — tested).
+- ✅ **Agent cache** (`internal/agent/secrets`): in-memory for the declaring run's lifetime; with `offline_ttl_s > 0` persists the **sealed form only** (0600 JSON, never plaintext — asserted by test) so a restart within the window still serves the value offline. Fail-closed otherwise ("secret unavailable").
+- ✅ **Read APIs never return values**: `GET /api/v1/secrets` and `/secrets/:name` return metadata (name, selector, version, agent count) only. Values are write-only via create/rotate.
+- ✅ **Audit**: `secret.created/rotated/revoked/materialized/updated/deleted` with master-key digest (never the key), version, agent, run ref.
+- ✅ **REST** (`/api/v1/secrets*`; reads = operator+, writes = admin) and **CLI** (`partout ctl secrets list|create|rotate|revoke|delete`, `-value` or `-value-file`).
+- ✅ Tests: store (CRUD/rotate/revoke/cascade), agent cache (roundtrip, no-plaintext-on-disk, expiry, cross-agent rejection), E2E over a live bufconn stream (materialize→agent decrypt, rotation invalidation, selector binding, offline reopen).
+- 🚧 Remaining M3: external data refresh (§6.3), package management (§5.6), tasks/playbooks (§5.5), scheduled jobs (§5.4).
+
 ### Not started
 
 - M2 Web UI (xterm.js terminal + file browser frontend) — deferred to later V1 phase (backend complete)
-- M3: jobs, tasks/playbooks, packages, secrets, external data refresh
+- M3 (remainder): external data refresh, packages, tasks/playbooks, jobs
 - M4: approvals, full policy engine, MCP write tools
 - M5: installers, cloud-init, Helm, status page
 
@@ -119,7 +132,8 @@ Done (decisions D1–D5 per PRD review):
 8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
-11. **Web UI** (deferred V1 phase)
+11. **M3 (remainder)**: external data refresh → packages → tasks/playbooks → scheduled jobs
+12. **Web UI** (deferred V1 phase)
 
 ## TLS / transport security (implemented)
 

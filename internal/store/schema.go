@@ -187,7 +187,40 @@ CREATE TABLE IF NOT EXISTS files_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_files_actions_agent ON files_actions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_files_actions_created ON files_actions(created);
+
+-- M3: secrets (PRD §5.7): encrypted at rest (HKDF from master key),
+-- versioned, bound to a selector; values never returned by read APIs.
+
+CREATE TABLE IF NOT EXISTS secrets (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL UNIQUE,
+  selector    TEXT NOT NULL DEFAULT '',   -- hosts the secret may materialize on
+  offline_ttl INTEGER NOT NULL DEFAULT 0, -- agent-side encrypted cache window (s); 0 = never
+  created     INTEGER NOT NULL,
+  updated     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS secret_versions (
+  id         TEXT PRIMARY KEY,
+  secret_id  TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+  version    INTEGER NOT NULL,
+  ciphertext BLOB NOT NULL,  -- AES-GCM(value) under HKDF(master, secret_id)
+  created    INTEGER NOT NULL,
+  revoked    INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (secret_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS secret_bindings (
+  id        TEXT PRIMARY KEY,
+  secret_id TEXT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+  version   INTEGER NOT NULL,   -- which version was materialized (audit)
+  agent_id  TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  ref       TEXT NOT NULL,      -- task/execution run that declared it
+  ts        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_secret_bindings_agent ON secret_bindings(agent_id);
+CREATE INDEX IF NOT EXISTS idx_secret_bindings_ref ON secret_bindings(ref);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
