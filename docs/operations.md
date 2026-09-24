@@ -1,32 +1,34 @@
 # Partout — Operations
 
-**Status:** Draft v0.1 — day-2 runbook for the *planned* control plane. Reflects the
-**v0.1.0 binary** where stated; steps for features that ship later are marked
-*(proposed)*.
+**Status:** Draft v0.3 — day-2 runbook for the control plane. Reflects the current
+implementation (M0–M3 complete, M4 in progress) where stated; steps for features that
+ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
 
 Day-2 guide for the Partout control plane: first-time setup, daily operations, backups, upgrades,
 incident response, capacity, compliance, and a go-live checklist.
 
-> **v0.1 reality check** (binary tag `v0.1.0`):
-> - Auth is **local users** (login → session token; first-run admin bootstrap, M4) **plus**
+> **v0.3 reality check** (current implementation):
+> - Auth is **local users** (login → session token; first-run admin bootstrap) **plus**
 >   static bearer tokens (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) for CLI/scripts; with no
 >   users and no tokens, single-user local mode.
 > - Server state = the **SQLite file** (`PARTOUT_DB_PATH`, default `./partout.db`) plus
->   `<db dir>/tls/` when `PARTOUT_TLS=on` and `<db dir>/identity/` (server Ed25519 signing key,
->   v0.2). No output blobs, extern cache, spool, or Postgres yet.
+>   `<db dir>/tls/` when `PARTOUT_TLS=on` and `<db dir>/identity/` (server Ed25519 signing
+>   key). External data cache is in-DB (`eol_cache`/`vuln_cache`); Postgres is not wired.
 > - Agent state = `<data dir>/identity.json` + `<data dir>/tls/` (mTLS leaf/key) +
->   `<data dir>/agent/` (cached policy bundle + server pubkey, v0.2).
+>   `<data dir>/agent/` (cached policy bundle + server pubkey) + `<data dir>/spool/`
+>   (offline spool).
 > - **v0.2.0 adds the policy deny-list engine** (rule CRUD, dispatch gating, signed decisions,
->   agent re-check). Steps below marked *(v0.2)* are live on tag `v0.2.0`.
-> - **v0.3 adds host provisioning over fleet SSH** (PRD R17): `partout ctl provision new
->   --host user@host` (server-side 5-step run, `key_confirm` gate). New vars
->   `PARTOUT_SSH_DIR` / `PARTOUT_SERVER_HOST` (deployment §4.1).
-> - No Web UI in v0.1: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
-> - Not wired in v0.3 (planned, see deployment §4.4): `PARTOUT_SECRET_KEY*`,
->   `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation hardcoded `none`), `PARTOUT_SPOOL_*`,
->   `PARTOUT_RETENTION_*`, `PARTOUT_MAX_*`, `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH`,
->   `PARTOUT_MCP_ENABLED`, `PARTOUT_LOG_LEVEL`.
+>   agent re-check).
+> - **v0.3 adds host provisioning over fleet SSH** (PRD R17) plus the M2/M3 features:
+>   files & sessions, secrets, external data, packages, tasks/playbooks, scheduled jobs.
+> - **M4 in progress**: local user auth (login, sessions, user management) is done; the
+>   approvals engine, full policy surface, and MCP server are still to come.
+> - No Web UI yet: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
+> - Not wired (planned, see deployment §4.4): `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation
+>   hardcoded `none`), `PARTOUT_SPOOL_*`, `PARTOUT_RETENTION_*` (except
+>   `PARTOUT_SESSION_RETENTION_DAYS`), `PARTOUT_MAX_*`, `PARTOUT_MCP_ENABLED`,
+>   `PARTOUT_LOG_LEVEL`.
 
 ---
 
@@ -36,15 +38,15 @@ Where everything lives (for backup/restore/troubleshooting):
 
 | Component | Path / Resource | Notes |
 |---|---|---|
-| Server DB | `PARTOUT_DB_PATH` (default `./partout.db`; `db.partout` when using `PARTOUT_DATA_DIR`) | SQLite WAL *(Postgres proposed)*; `<db dir>/tls/` holds the CA + server leaf when `PARTOUT_TLS=on`; `<db dir>/admin_password.txt` (0600) holds the first-run admin password until rotated |
-| Server output blobs | `PARTOUT_DATA_DIR/output/` | large command output, session recordings; retention-bounded *(P)* |
-| Server extern cache | `PARTOUT_DATA_DIR/extern/` | EOL dates, vulnerability data *(P)* |
-| Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`) | **critical** — losing it = lost secret store (PRD §5.7) *(P)* |
+| Server DB | `PARTOUT_DB_PATH` (default `./partout.db`) | SQLite WAL *(Postgres proposed)*; `<db dir>/tls/` holds the CA + server leaf when `PARTOUT_TLS=on`; `<db dir>/admin_password.txt` (0600) holds the first-run admin password until rotated |
+| Server output / recordings | DB `output_chunks` + `session_records` | command output chunks and PTY session recordings, retention-bounded (PRD §9) |
+| Server extern cache | DB `eol_cache` + `vuln_cache` | EOL dates and vulnerability data (architecture §8) |
+| Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`) or `PARTOUT_SECRET_KEY` | **critical** — losing it = lost secret store (PRD §5.7) |
 | Server config | `/etc/partout/server.env` (systemd) | env vars (PRD R15) |
-| Server SSH dir | `PARTOUT_SSH_DIR` (default: service user's `$HOME/.ssh`) | fleet keys + `known_hosts` used for provisioning (R17) — **critical asset**: server compromise ⇒ fleet-key exposure *(P)* |
+| Server SSH dir | `PARTOUT_SSH_DIR` (default: service user's `$HOME/.ssh`) | fleet keys + `known_hosts` used for provisioning (R17) — **critical asset**: server compromise ⇒ fleet-key exposure |
 | Server UI/API | `http(s)://:8443` | main listener |
 | Agent identity | `/var/lib/partout/agent/identity.json` (0600) | **critical** — losing = re-enroll with new keypair |
-| Agent TLS | `/var/lib/partout/agent/tls/` (0700) | CA, CA-signed leaf (0644), private key (0600) — mTLS material *(v0.1, when `PARTOUT_TLS_CA` set)* |
+| Agent TLS | `/var/lib/partout/agent/tls/` (0700) | CA, CA-signed leaf (0644), private key (0600) — mTLS material *(when `PARTOUT_TLS_CA` is set)* |
 | Agent spool | `/var/lib/partout/agent/spool/` | in-flight output chunks + results buffered during a server outage (`<run_id>.sp`, 0600); replayed on reconnect |
 | Agent config | `/etc/partout/agent.env` | env vars |
 | Provision runs | DB `provision_runs` + `provision_steps` (v0.3) | per-run state + per-step excerpts; `key_line`/`token_hash` are never serialized over the API; captured in the DB backup |
@@ -59,10 +61,10 @@ Step-by-step bring-up, also referenced in deployment §6:
 
 1. **Install the server** (§3.1 of deployment). Create the `partout` system user. Start the
    systemd unit. `journalctl -u partout-server` should show a clean startup: DB ready,
-   listener on the configured port. *(v0.1: no secret key; if `PARTOUT_TLS=on` the local CA
-   bootstrap runs here.)*
+   listener on the configured port. *(If `PARTOUT_SECRET_KEY_FILE`/`PARTOUT_SECRET_KEY` is
+   set the secret store enables here; if `PARTOUT_TLS=on` the local CA bootstrap runs here.)*
 2. **Set up auth**: on first run the server bootstraps an `admin` local user
-   (M4 local-user auth, PRD Decision 6). Either pre-seed it with `PARTOUT_ADMIN_PASSWORD`
+   (PRD Decision 6). Either pre-seed it with `PARTOUT_ADMIN_PASSWORD`
    in `/etc/partout/server.env`, or read the generated password from
    `<db dir>/admin_password.txt` (0600), then **log in, change the password, and delete the
    file**. Static env tokens (`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`,
@@ -74,7 +76,7 @@ Step-by-step bring-up, also referenced in deployment §6:
    partout ctl --server … --token $ADMIN …
    ```
 3. **Verify the health endpoint**: `curl -sf http://localhost:8443/healthz` should return 200.
-   *(The Web UI is proposed — not in v0.1; use `partout ctl` or REST/SSE.)*
+   *(The Web UI is not yet shipped; use `partout ctl` or REST/SSE.)*
 4. **Create a baseline policy** *(v0.2 — implemented on tag `v0.2.0`; the engine is a
    default-allow deny-list, and `require_approval` acts as a hard deny until the M4 approvals
    engine)*:
@@ -92,7 +94,7 @@ Step-by-step bring-up, also referenced in deployment §6:
      starts the server-side run — a key_confirm gate pauses until the admin reviews
      and confirms the fingerprint, then preflight → scp binary → install unit → wait-enroll.
      `partout ctl provision get <id>` polls progress; `key <id> confirm` confirms.
-   - **v0.1 manual path**: mint a token (`partout ctl enroll-token`), install the binary
+   - **Manual path**: mint a token (`partout ctl enroll-token`), install the binary
      + agent unit on the host (§3.2) with that token.
    - Host should appear with facts in `<10 s` (PRD §5.1 acceptance).
 6. **Run a test command**: `whoami` or `hostname` against the new host. Verify the audit log
@@ -128,8 +130,9 @@ Step-by-step bring-up, also referenced in deployment §6:
 - v1: local users only (PRD Decision 6). Roles: `viewer` (read-only), `operator` (exec,
   files, jobs, tasks, secret read-use, request approval), `admin` (all + principals + policy
   + approvals act).
-- **v0.1**: auth is **bearer tokens** (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`), not a user DB.
-  No principals/identities yet — audit rows carry `actor` (token role) + agent id.
+- Auth is **local users** (login → session token) **plus** static bearer tokens
+  (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) working side-by-side; audit rows carry the
+  authenticated principal (user name or token role).
 - OIDC is post-v1 (PRD Decision 6). Until then, manage the local user DB; remove
   departed operators promptly — every action is attributable.
 - Periodic access review: export the audit log filtered by `principal` and check for
@@ -175,15 +178,15 @@ Step-by-step bring-up, also referenced in deployment §6:
 
 | What | How | RPO target |
 |---|---|---|
-| Server DB (SQLite) | `sqlite3 db.partout ".backup '/backup/db.partout.bak'"` (atomic hot copy) or `cp` after WAL checkpoint | per-hour or nightly |
-| Server output blobs | `rsync` or `cp -l` — large, append-only; prune by retention | daily |
-| Extern cache | included in DB backup | nightly |
+| Server DB (SQLite) | `sqlite3 partout.db ".backup '/backup/partout.db.bak'"` (atomic hot copy) or `cp` after WAL checkpoint | per-hour or nightly |
+| Server output / recordings | in-DB (`output_chunks` + `session_records`); included in the DB backup | daily |
+| Extern cache | in-DB (`eol_cache` + `vuln_cache`); included in the DB backup | nightly |
 | Secret key file | encrypted offsite copy (GPG, HSM) | **always available** |
 | Agent identity dir | optional — losing it = re-enroll with new keypair; backup for audit replay of session recordings (agent stores locally) | optional |
 | Config files | version-controlled (git) | commit, not backup |
 | Audit export (optional) | `GET /api/v1/audit?format=json | crontab → remote S3 / syslog / WORM | continuous |
 
-**Restore**: stop the server, replace `db.partout` from backup, start. Migrations will run
+**Restore**: stop the server, replace `partout.db` from backup, start. Migrations will run
 forward. If the server was down longer than the retention window, some output/session data
 may be gone (by design; PRD §9). The audit log (the immutable record) is the recovery
 anchor for forensics.
@@ -221,7 +224,7 @@ versa. Rolling upgrades are safe in either order (server first is the standard p
 ### 4.3 External data
 
 - The server fetches daily at startup and on a daily cadence (PRD Decision 9). Manual
-  refresh: `POST /api/v1/extern/refresh`.
+  refresh: `POST /api/v1/external-data/refresh` (admin).
 - Air-gapped: `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH=true` disables all fetching; the last
   cached copy or the embedded EOL fallback applies (architecture §8).
 - Check the logs for "extern refresh completed" or "extern refresh partial — previous cache
@@ -248,7 +251,7 @@ versa. Rolling upgrades are safe in either order (server first is the standard p
 ### 4.5 Retention & disk
 
 - The retention sweeper (hourly, architecture A14) prunes output chunks and session records
-  per PRD §9. Run `sqlite3 db.partout "SELECT count(*) FROM output_chunks WHERE created <
+  per PRD §9. Run `sqlite3 partout.db "SELECT count(*) FROM output_chunks WHERE created <
   datetime('now', '−30 days');"` to check how much is due for cleanup.
 - **Disk budgeting** (rough): ~500 KB/hour/host for facts + heartbeats in audit; command
   output varies wildly (stream large logs to disk — architecture §13). Set retention
@@ -464,23 +467,24 @@ never connects.
 
 ## 10. Go-live checklist
 
-v0.1 items first; items marked *(P)* are proposed and track later milestones.
+Current items first; items marked *(P)* track later milestones (M4/M5).
 
 - [ ] Server installed, systemd unit active, `GET /healthz` returns 200
-- [ ] RBAC bearer tokens set (admin/operator/viewer) and verified (`/api/v1/hosts` → 401 without, 200 with)
+- [ ] First-run admin user created (pre-seeded via `PARTOUT_ADMIN_PASSWORD`, or the generated
+  password read from `<db dir>/admin_password.txt` and rotated); RBAC bearer tokens set
+  (admin/operator/viewer) and verified (`/api/v1/hosts` → 401 without, 200 with)
 - [ ] TLS enabled if exposing beyond localhost (`PARTOUT_TLS=on`); CA fetched via `partout ctl ca`; `ca.crt` in the agent env
 - [ ] ≥1 agent enrolled; facts visible <10 s; test command executed and audited (`partout ctl run`)
-- [ ] Backup runbook tested: DB + `<db dir>/tls/` restored from backup; audit log intact
+- [ ] Backup runbook tested: DB + `<db dir>/tls/` + secret key file restored from backup; audit log intact
 - [ ] Upgrades tested on a non-prod host: new binary → restart → reconnect → command works
-- [ ] *(P)* Admin principal / password bootstrap (v0.1 uses bearer tokens only)
-- [ ] *(P)* Secret key file set and **backed up** (encrypted offsite) — secret store feature
-- [ ] *(P)* Baseline policy: deny on elevation, require-approval on patch, allow-list for routine
+- [ ] Baseline policy: deny destructive commands (e.g. `rm -rf`, `mkfs`), host/role-scoped denies as needed
+- [ ] Air-gap mode tested (if applicable): `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH=true`
+- [ ] *(P)* Approvals workflow (M4): require-approval rules, approval queue
 - [ ] *(P)* Alert channels configured: host state (disconnected), approval request
 - [ ] *(P)* Capacity baseline: disk usage recorded; retention set; spool limits appropriate
 - [ ] *(P)* Access review process documented (who gets operator/admin, quarterly review)
-- [ ] *(P)* Air-gap mode tested (if applicable): `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH=true`
-- [ ] Operator training: UI tour for hosts, execute, sessions, jobs, tasks, updates, secrets,
-  policy, audit, observe pages
+- [ ] Operator training: hosts, execute, sessions, jobs, tasks, updates, secrets, policy,
+  audit (CLI + REST; the Web UI ships in a later V1 phase)
 - [ ] Runbooks accessible: this document published to the team's knowledge base
 
 ---

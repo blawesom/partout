@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.1 (implementation-level design)
+**Status:** Draft v0.3 (implementation-level design)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and
@@ -13,8 +13,7 @@ are marked **(proposed)** and need sign-off.
 ## 1. Repository & binary layout
 
 Single Go module, single binary, three modes (`--mode=server|agent|embedded`), Vue 3 frontend
-embedded via `embed.FS` (PRD R1). Module path: `github.com/<org>/partout` (final org pending the
-repo rename from `hiersoir`).
+embedded via `embed.FS` (PRD R1). Module path: `github.com/blawesom/partout`.
 
 ```
 partout/
