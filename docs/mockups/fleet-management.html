@@ -1,0 +1,603 @@
+<!doctype html>
+<!--
+  Partout — Fleet Management page, STATIC DESIGN MOCK.
+
+  This is a design mockup, not the application. No build step, no framework,
+  no network fetches. It renders the v0.4 guidelines
+  (docs/ui-guidelines.md) so the shell, tokens, state vocabulary and the
+  capability/role gating convention can be reviewed visually.
+
+  Data is hard-coded sample data. The bottom-right panel simulates the
+  `GET /api/v1/capabilities` probe and the current principal's role so both
+  gating axes are demonstrable.
+
+  Real app: Vue 3 + TS + Pinia + Tailwind, embedded via go:embed. Not this.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partout — Fleet Management (design mock)</title>
+<style>
+  /* ---- tokens (ui-guidelines §7) ------------------------------------- */
+  :root {
+    --brand: #2563eb;            /* blue-600 */
+    --brand-subtle: #eff6ff;     /* blue-50 */
+    --surface: #ffffff;
+    --surface-app: #f8fafc;      /* slate-50 */
+    --surface-sunken: #f1f5f9;   /* slate-100 */
+    --border: #e2e8f0;           /* slate-200 */
+    --border-strong: #cbd5e1;    /* slate-300 */
+    --text: #0f172a;             /* slate-900 */
+    --text-muted: #475569;       /* slate-600 */
+    --text-faint: #94a3b8;       /* slate-400 */
+    --healthy: #059669;          /* emerald-600 */
+    --warning: #d97706;          /* amber-600 */
+    --critical: #dc2626;         /* red-600 */
+    --info: var(--brand);
+    --neutral: #64748b;          /* slate-500 */
+    --critical-subtle: #fef2f2;  /* red-50  */
+    --critical-border: #fecaca;  /* red-200 */
+    --warning-subtle: #fffbeb;   /* amber-50 */
+    --r-card: 12px; --r-ctl: 8px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--surface-app); color: var(--text);
+    font: 14px/1.45 var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: var(--mono); }
+  .ic { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
+        stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .ic-lg { width: 20px; height: 20px; }
+
+  /* ---- shell --------------------------------------------------------- */
+  .shell { display: grid; grid-template-columns: 270px 1fr; height: 100%; }
+
+  /* ---- sidebar ------------------------------------------------------- */
+  .sidebar {
+    background: var(--surface); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 16px; border-bottom: 1px solid var(--border); }
+  .brand-mark {
+    width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+    background: var(--brand); border-radius: 9px; color: #fff;
+  }
+  .brand-text { min-width: 0; }
+  .brand-name { font-weight: 650; font-size: 15px; letter-spacing: -.01em; }
+  .brand-line { font-size: 11.5px; color: var(--text-faint); }
+  .port { margin-left: auto; font: 11px/1 var(--mono); color: var(--text-faint);
+          background: var(--surface-sunken); border: 1px solid var(--border); padding: 4px 6px; border-radius: 6px; }
+
+  .nav { padding: 12px 10px; overflow-y: auto; flex: 1; min-height: 0; }
+  .nav-label { font-size: 10.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+               color: var(--text-faint); padding: 14px 10px 6px; }
+  .nav-label:first-child { padding-top: 2px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r-ctl);
+    color: var(--text-muted); text-decoration: none; font-size: 13.5px;
+  }
+  .nav-item + .nav-item { margin-top: 1px; }
+  .nav-item:hover { background: var(--surface-sunken); color: var(--text); }
+  .nav-item.is-active { background: var(--brand-subtle); color: var(--brand); font-weight: 600; }
+  .nav-item.is-disabled { color: var(--text-faint); cursor: not-allowed; }
+  .nav-item.is-disabled:hover { background: transparent; color: var(--text-faint); }
+  .nav-tail { margin-left: auto; }
+  .scope { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--r-ctl);
+           color: var(--text-muted); font-size: 13.5px; cursor: pointer; }
+  .scope:hover { background: var(--surface-sunken); }
+  .scope.is-active { background: var(--surface-sunken); color: var(--text); font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 99px; flex: none; }
+  .dot-prod { background: var(--healthy); } .dot-stg { background: var(--warning); } .dot-dev { background: var(--brand); }
+
+  .user-card { border-top: 1px solid var(--border); padding: 12px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .user-card:hover { background: var(--surface-sunken); }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 99px; flex: none; display: grid; place-items: center;
+    background: var(--brand-subtle); color: var(--brand); font-size: 12px; font-weight: 700;
+    border: 1px solid #dbeafe;
+  }
+  .user-name { font-size: 13px; font-weight: 600; }
+  .user-meta { font-size: 11.5px; color: var(--text-faint); display: flex; align-items: center; gap: 6px; }
+
+  /* ---- top bar ------------------------------------------------------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; padding: 0 28px; height: 64px; flex: none;
+  }
+  .crumbs { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text-faint); min-width: 0; }
+  .crumbs b { color: var(--text); font-weight: 650; }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .sse { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-muted); }
+  .pulse { width: 8px; height: 8px; border-radius: 99px; background: var(--healthy); flex: none; }
+  .pulse.is-amber { background: var(--warning); }
+  .pulse.is-red { background: var(--critical); }
+  .vsep { width: 1px; height: 22px; background: var(--border); }
+
+  /* ---- controls ------------------------------------------------------ */
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px; font: 600 13px var(--sans);
+    padding: 7px 12px; border-radius: var(--r-ctl); border: 1px solid transparent;
+    cursor: pointer; text-decoration: none; white-space: nowrap;
+  }
+  .btn-primary { background: var(--brand); color: #fff; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-secondary { background: var(--surface); color: var(--text); border-color: var(--border-strong); }
+  .btn-secondary:hover { background: var(--surface-sunken); }
+  .btn-ghost { background: transparent; color: var(--text-muted); }
+  .btn-ghost:hover { background: var(--surface-sunken); color: var(--text); }
+  .btn-sm { padding: 5px 9px; font-size: 12px; }
+  .btn[aria-disabled="true"] { background: var(--surface-sunken); color: var(--text-faint);
+    border-color: var(--border); cursor: not-allowed; }
+  .linklike { background: none; border: 0; padding: 0; font: 600 12.5px var(--sans); color: var(--brand); cursor: pointer; }
+
+  .input {
+    display: flex; align-items: center; gap: 8px; background: var(--surface);
+    border: 1px solid var(--border-strong); border-radius: var(--r-ctl); padding: 7px 10px; min-width: 0;
+  }
+  .input input { border: 0; outline: 0; font: 13px var(--mono); color: var(--text); background: transparent; width: 100%; }
+  .input input::placeholder { color: var(--text-faint); }
+
+  /* ---- chips --------------------------------------------------------- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 650;
+    padding: 2px 8px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
+  }
+  .chip-neutral { background: var(--surface-sunken); color: var(--text-muted); }
+  .chip-rule { background: var(--surface-sunken); color: var(--text-muted); font-family: var(--mono); font-weight: 500; }
+  .chip-healthy { background: #ecfdf5; color: #047857; }
+  .chip-warning { background: var(--warning-subtle); color: #b45309; }
+  .chip-critical { background: var(--critical-subtle); color: var(--critical); }
+  .chip-info { background: var(--brand-subtle); color: #1d4ed8; }
+  /* outline variants: refusal / nothing-ran — not the same as a failure */
+  .chip-outline-critical { background: transparent; border-color: var(--critical-border); color: var(--critical); }
+  .chip-outline-warning { background: transparent; border-color: #fde68a; color: #b45309; }
+  .chip-dashed { background: transparent; border: 1px dashed var(--border-strong); color: var(--neutral); }
+  /* gating chip: "not in this build" */
+  .chip-na { background: var(--surface-sunken); color: var(--text-faint); border-color: var(--border); font-weight: 600; }
+  .chip-lock { background: transparent; border-color: var(--border-strong); color: var(--text-faint); font-weight: 600; }
+  .chip-running { background: var(--brand-subtle); color: #1d4ed8; }
+  .spin { width: 7px; height: 7px; border-radius: 99px; background: var(--brand); animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none } }
+
+  /* ---- content ------------------------------------------------------- */
+  .content { padding: 26px 28px 60px; overflow-y: auto; min-height: 0; }
+  .page-head { display: flex; align-items: flex-end; gap: 12px; margin-bottom: 20px; }
+  .page-head h1 { font-size: 19px; margin: 0; letter-spacing: -.01em; }
+  .page-head .sub { color: var(--text-faint); font-size: 12.5px; margin-left: auto; }
+
+  .section { margin-top: 28px; }
+  .section:first-of-type { margin-top: 0; }
+  .section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .section-head h2 { font-size: 15px; margin: 0; letter-spacing: -.01em; }
+  .section-head .cap { margin-left: auto; font-size: 12px; color: var(--text-faint); }
+
+  .stats { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 14px 16px; }
+  .stat-top { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-muted); }
+  .stat-num { font-size: 30px; font-weight: 650; letter-spacing: -.02em; margin-top: 6px; }
+  .c-healthy { color: var(--healthy); } .c-warning { color: var(--warning); }
+  .c-critical { color: var(--critical); } .c-info { color: var(--info); } .c-neutral { color: var(--neutral); }
+
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .resolve { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-muted); }
+  .toolbar .grow { flex: 1; min-width: 240px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--text-faint); font-weight: 700; padding: 10px 16px; border-bottom: 1px solid var(--border);
+    background: #fcfdff;
+  }
+  tbody td { padding: 11px 16px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: #fbfdff; }
+  td.host { font-family: var(--mono); font-size: 12.5px; color: var(--text); font-weight: 500; }
+  td.dim { color: var(--text-faint); font-size: 12.5px; }
+  .cell-state { display: inline-flex; align-items: center; gap: 7px; }
+  .row-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+  /* ---- gate helper: capability + role gating (§4) --------------------- */
+  .gate { display: inline-flex; align-items: center; gap: 6px; }
+  /* in the sidebar a gate wraps stacked nav items, so it must be a block */
+  .nav > .gate { display: block; }
+  .nav > .gate > .when-on, .nav > .gate > .when-off { display: block; }
+  .nav > .gate[data-cap] .nav-item { width: 100%; }
+  .gate.is-off > .when-on { display: none; }
+  .gate:not(.is-off) > .when-off { display: none; }
+
+  /* ---- mock controls (not part of the design) ------------------------ */
+  .mockctl {
+    position: fixed; right: 18px; bottom: 18px; z-index: 20;
+    background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 10px 12px;
+    font: 11.5px/1.5 var(--mono); box-shadow: 0 8px 26px rgba(15,23,42,.28); width: 264px;
+  }
+  .mockctl h4 { margin: 0 0 8px; font: 700 10px/1 var(--sans); letter-spacing: .1em; text-transform: uppercase; color: #94a3b8; }
+  .mockctl .row { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .mockctl .row span { color: #94a3b8; width: 62px; flex: none; }
+  .mockctl button {
+    font: 600 11px var(--mono); padding: 3px 8px; border-radius: 6px; cursor: pointer;
+    background: #1e293b; color: #cbd5e1; border: 1px solid #334155;
+  }
+  .mockctl button[aria-pressed="true"] { background: var(--brand); color: #fff; border-color: var(--brand); }
+  .mockctl p { margin: 9px 0 0; color: #64748b; font-size: 10.5px; }
+</style>
+</head>
+<body>
+
+<!-- icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-hex" viewBox="0 0 24 24"><path d="M12 2.6l8.1 4.7v9.4L12 21.4l-8.1-4.7V7.3z"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></symbol>
+  <symbol id="i-scroll" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M9 21h6M12 17v4"/></symbol>
+  <symbol id="i-screen" viewBox="0 0 24 24"><rect x="2.5" y="4.5" width="19" height="15" rx="2"/><path d="M6.5 9.5l2.5 2.5-2.5 2.5M12 15h5"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-checks" viewBox="0 0 24 24"><path d="M3 7l2 2 3-3M3 16l2 2 3-3M13 8h8M13 17h8"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M3 8l9-5 9 5v8l-9 5-9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l2 2M14 9l2 2"/></symbol>
+  <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M7 7l-4 7h8zM17 7l-4 7h8z"/></symbol>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a4 4 0 010-8 5.5 5.5 0 0110.6 1.5A3.5 3.5 0 0117 18z"/><path d="M12 12v6M9.5 14.5L12 12l2.5 2.5"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20a6 6 0 0112 0"/><path d="M16 5.5a3.2 3.2 0 010 6M18 20a6 6 0 00-2.5-4.9"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3l9.5 17h-19z"/><path d="M12 9v5M12 17h.01"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10" width="15" height="10" rx="2"/><path d="M8.5 10V7a3.5 3.5 0 017 0v3"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M8 9l4-4 4 4M8 15l4 4 4-4"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" fill="currentColor" stroke="none"/></symbol>
+</svg>
+
+<div class="shell">
+
+  <!-- ================= sidebar ================= -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark"><svg class="ic ic-lg" style="stroke-width:1.8;fill:rgba(255,255,255,.18)"><use href="#i-hex"/></svg></span>
+      <span class="brand-text">
+        <div class="brand-name">Partout</div>
+        <div class="brand-line">Fleet Management</div>
+      </span>
+      <span class="port">:8443</span>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-label">Fleet</div>
+
+      <a class="nav-item is-active" href="#"><svg class="ic"><use href="#i-shield"/></svg>Fleet Management</a>
+      <a class="nav-item" href="#"><svg class="ic"><use href="#i-terminal"/></svg>Execute</a>
+      <a class="nav-item" href="#"><svg class="ic"><use href="#i-scroll"/></svg>Audit Log</a>
+
+      <span class="gate" data-cap="sessions"><span class="when-on"><a class="nav-item" href="#"><svg class="ic"><use href="#i-screen"/></svg>Sessions</a></span><span class="when-off"><span class="nav-item is-disabled"><svg class="ic"><use href="#i-screen"/></svg>Sessions<span class="nav-tail chip chip-na">M2</span></span></span></span>
+      <span class="gate" data-cap="files"><span class="when-on"><a class="nav-item" href="#"><svg class="ic"><use href="#i-folder"/></svg>Files</a></span><span class="when-off"><span class="nav-item is-disabled"><svg class="ic"><use href="#i-folder"/></svg>Files<span class="nav-tail chip chip-na">M2</span></span></span></span>
+      <span class="gate" data-cap="jobs"><span class="when-on"><a class="nav-item" href="#"><svg class="ic"><use href="#i-clock"/></svg>Jobs</a></span><span class="when-off"><span class="nav-item is-disabled"><svg class="ic"><use href="#i-clock"/></svg>Jobs<span class="nav-tail chip chip-na">M3</span></span></span></span>
+      <span class="gate" data-cap="tasks"><span class="when-on"><a class="nav-item" href="#"><svg class="ic"><use href="#i-checks"/></svg>Tasks &amp; Playbooks</a></span><span class="when-off"><span class="nav-item is-disabled"><svg class="ic"><use href="#i-checks"/></svg>Tasks &amp; Playbooks<span class="nav-tail chip chip-na">M3</span></span></span></span>
+      <span class="gate" data-cap="packages"><span class="when-on"><a class="nav-item" href="#"><svg class="ic"><use href="#i-box"/></svg>Updates</a></span><span class="when-off"><span class="nav-item is-disabled"><svg class="ic"><use href="#i-box"/></svg>Updates<span class="nav-tail chip chip-na">M3</span></span></span></span>
+      <span class="gate" data-cap="secrets"><span class="when-on"><a class="nav-item" href="#"><svg class="ic"><use href="#i-key"/></svg>Secrets</a></span><span class="when-off"><span class="nav-item is-disabled"><svg class="ic"><use href="#i-key"/></svg>Secrets<span class="nav-tail chip chip-na">M3</span></span></span></span>
+      <a class="nav-item" href="#"><svg class="ic"><use href="#i-scale"/></svg>Policies</a>
+      <!-- admin-only -->
+      <span class="gate gate-role" data-min="admin">
+        <span class="when-on">
+          <a class="nav-item" href="#"><svg class="ic"><use href="#i-cloud"/></svg>Provision</a>
+          <a class="nav-item" href="#"><svg class="ic"><use href="#i-users"/></svg>Users</a>
+        </span>
+        <span class="when-off">
+          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-cloud"/></svg>Provision
+            <span class="nav-tail chip chip-lock"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>admin</span>
+          </span>
+          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-users"/></svg>Users
+            <span class="nav-tail chip chip-lock"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>admin</span>
+          </span>
+        </span>
+      </span>
+
+      <!-- not in this build (M5) -->
+      <span class="gate" data-cap="observe">
+        <span class="when-on">
+          <a class="nav-item" href="#"><svg class="ic"><use href="#i-monitor"/></svg>Monitoring</a>
+        </span>
+        <span class="when-off">
+          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-monitor"/></svg>Monitoring
+            <span class="nav-tail chip chip-na">M5</span>
+          </span>
+        </span>
+      </span>
+
+      <div class="nav-label">Groups</div>
+      <div class="scope"><span class="dot dot-prod"></span>prod</div>
+      <div class="scope is-active"><span class="dot dot-stg"></span>staging</div>
+      <div class="scope"><span class="dot dot-dev"></span>lab</div>
+    </nav>
+
+    <div class="user-card">
+      <span class="avatar">dw</span>
+      <span style="min-width:0">
+        <div class="user-name">dana.whitfield</div>
+        <div class="user-meta"><span id="role-badge" class="chip chip-info">admin</span></div>
+      </span>
+      <svg class="ic nav-tail" style="color:var(--text-faint)"><use href="#i-chev"/></svg>
+    </div>
+  </aside>
+
+  <!-- ================= main ================= -->
+  <div class="main">
+    <header class="topbar">
+      <div class="crumbs"><span>Fleet</span><span>/</span><b>Fleet Management</b></div>
+      <div class="topbar-right">
+        <span class="sse"><span class="pulse" id="sse-dot"></span><span id="sse-text">SSE connected</span></span>
+        <span class="vsep"></span>
+
+        <span class="gate gate-role" data-min="admin">
+          <span class="when-on"><button class="btn btn-secondary">Provision host</button></span>
+          <span class="when-off">
+            <button class="btn btn-secondary" aria-disabled="true">
+              <svg class="ic" style="width:12px;height:12px"><use href="#i-lock"/></svg>Provision host
+            </button>
+          </span>
+        </span>
+
+        <span class="gate" data-cap="enroll">
+          <span class="when-on"><button class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>Enroll host</button></span>
+          <span class="when-off"><span class="chip chip-na">Enrollment not available</span></span>
+        </span>
+      </div>
+    </header>
+
+    <main class="content">
+
+      <div class="page-head">
+        <h1>Fleet Management</h1>
+        <span class="sub">12 hosts &middot; last fact refresh 2 min ago</span>
+      </div>
+
+      <!-- Fleet Health: exactly three cards (§9) -->
+      <section class="section">
+        <div class="section-head">
+          <h2>Fleet Health</h2>
+          <span class="cap">from <span class="mono">host.state</span> over SSE</span>
+        </div>
+        <div class="stats">
+          <div class="stat">
+            <div class="stat-top c-healthy"><svg class="ic" style="width:14px;height:14px"><use href="#i-shield"/></svg>Connected</div>
+            <div class="stat-num">9</div>
+          </div>
+          <div class="stat">
+            <div class="stat-top c-critical"><svg class="ic" style="width:14px;height:14px"><use href="#i-x"/></svg>Disconnected</div>
+            <div class="stat-num">2</div>
+          </div>
+          <div class="stat">
+            <div class="stat-top c-info"><svg class="ic" style="width:14px;height:14px"><use href="#i-clock"/></svg>Pending</div>
+            <div class="stat-num">1</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Hosts -->
+      <section class="section">
+        <div class="section-head">
+          <h2>Hosts</h2>
+          <span class="cap">cursor-paginated &middot; no polling</span>
+        </div>
+
+        <div class="toolbar">
+          <span class="input grow">
+            <svg class="ic" style="color:var(--text-faint)"><use href="#i-search"/></svg>
+            <input value="group:staging" aria-label="Selector" spellcheck="false">
+          </span>
+          <!-- selector preview: server resolves, UI only renders (B2) -->
+          <span class="resolve">
+            <span class="chip chip-info">resolves to 3 hosts</span>
+            preview
+          </span>
+          <span class="gate gate-role" data-min="operator">
+            <span class="when-on"><button class="btn btn-primary">Run command</button></span>
+            <span class="when-off"><span class="chip chip-lock"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>Requires operator</span></span>
+          </span>
+        </div>
+
+        <div class="card">
+          <table>
+            <thead>
+              <tr>
+                <th>Host</th><th>State</th><th>OS</th><th>Agent</th><th>Last seen</th><th style="text-align:right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="host">node-84-prod</td>
+                <td><span class="cell-state c-healthy"><svg class="ic" style="width:13px;height:13px"><use href="#i-dot"/></svg>connected</span></td>
+                <td class="dim">Ubuntu 22.04</td><td class="dim mono">v0.3.1</td><td class="dim">12 s ago</td>
+                <td>
+                  <div class="row-actions">
+                    <span class="gate" data-cap="sessions"><span class="when-on"><span class="gate gate-role" data-min="operator"><span class="when-on"><button class="btn btn-ghost btn-sm">Terminal</button></span><span class="when-off"><button class="btn btn-ghost btn-sm" aria-disabled="true"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>Terminal</button></span></span></span><span class="when-off"><span class="chip chip-na">Terminal</span></span></span>
+                    <span class="gate" data-cap="files"><span class="when-on"><button class="btn btn-ghost btn-sm">Files</button></span><span class="when-off"><span class="chip chip-na">Files</span></span></span>
+                    <span class="gate gate-role" data-min="operator"><span class="when-on"><button class="btn btn-secondary btn-sm">Run</button></span><span class="when-off"><button class="btn btn-secondary btn-sm" aria-disabled="true"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>Run</button></span></span>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="host">node-12-stg</td>
+                <td><span class="cell-state c-healthy"><svg class="ic" style="width:13px;height:13px"><use href="#i-dot"/></svg>connected</span></td>
+                <td class="dim">Debian 12</td><td class="dim mono">v0.3.1</td><td class="dim">8 s ago</td>
+                <td>
+                  <div class="row-actions">
+                    <span class="gate" data-cap="sessions"><span class="when-on"><span class="gate gate-role" data-min="operator"><span class="when-on"><button class="btn btn-ghost btn-sm">Terminal</button></span><span class="when-off"><button class="btn btn-ghost btn-sm" aria-disabled="true"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>Terminal</button></span></span></span><span class="when-off"><span class="chip chip-na">Terminal</span></span></span>
+                    <span class="gate" data-cap="files"><span class="when-on"><button class="btn btn-ghost btn-sm">Files</button></span><span class="when-off"><span class="chip chip-na">Files</span></span></span>
+                    <span class="gate gate-role" data-min="operator"><span class="when-on"><button class="btn btn-secondary btn-sm">Run</button></span><span class="when-off"><button class="btn btn-secondary btn-sm" aria-disabled="true"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>Run</button></span></span>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="host">node-07-dev</td>
+                <td><span class="cell-state c-critical"><svg class="ic" style="width:13px;height:13px"><use href="#i-x"/></svg>disconnected</span></td>
+                <td class="dim">Rocky 9.3</td><td class="dim mono">v0.3.1</td><td class="dim">3 h ago</td>
+                <td>
+                  <div class="row-actions">
+                    <!-- reachability, not capability: a different reason than "not in this build" -->
+                    <span class="chip chip-neutral">host offline</span>
+                    <span class="gate" data-cap="agent_delete">
+                      <span class="when-on"><span class="gate gate-role" data-min="admin"><span class="when-on"><button class="btn btn-ghost btn-sm">Remove</button></span><span class="when-off"><button class="btn btn-ghost btn-sm" aria-disabled="true"><svg class="ic" style="width:11px;height:11px"><use href="#i-lock"/></svg>Remove</button></span></span></span>
+                      <span class="when-off"><span class="chip chip-na">Remove (B3)</span></span>
+                    </span>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td class="host">db-01-prod</td>
+                <td><span class="cell-state c-info"><svg class="ic" style="width:13px;height:13px"><use href="#i-clock"/></svg>pending</span></td>
+                <td class="dim">&mdash;</td><td class="dim mono">&mdash;</td><td class="dim">never</td>
+                <td>
+                  <div class="row-actions">
+                    <span class="chip chip-info">awaiting first handshake</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Recent executions: exercises the whole state vocabulary (§9) -->
+      <section class="section">
+        <div class="section-head">
+          <h2>Recent executions</h2>
+          <a class="cap linklike" href="#">Open Audit Log</a>
+        </div>
+        <div class="card">
+          <table>
+            <thead>
+              <tr><th>State</th><th>Selector</th><th>Command</th><th>Hosts</th><th>Actor</th><th>When</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="chip chip-healthy">&#10003; succeeded</span></td>
+                <td class="mono dim">role:prod</td>
+                <td class="mono dim">whoami</td><td class="dim">9 / 9</td>
+                <td class="dim">dana.whitfield</td><td class="dim">4 min ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-running"><span class="spin"></span>running</span></td>
+                <td class="mono dim">group:staging</td>
+                <td class="mono dim">apt-get -y upgrade</td><td class="dim">2 / 3</td>
+                <td class="dim">dana.whitfield</td><td class="dim">now</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-warning">&#9201; timed_out</span></td>
+                <td class="mono dim">host:node-07-dev</td>
+                <td class="mono dim">systemctl restart nginx</td><td class="dim">0 / 1</td>
+                <td class="dim">dana.whitfield</td><td class="dim">26 min ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-warning">&#9680; partial</span></td>
+                <td class="mono dim">all</td>
+                <td class="mono dim">partout-facts --refresh</td><td class="dim">10 / 12</td>
+                <td class="dim">scheduler</td><td class="dim">1 h ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-outline-critical">&#8856; denied</span></td>
+                <td class="mono dim">role:prod</td>
+                <td class="mono dim">rm -rf /var/log/old</td><td class="dim">0 / 9</td>
+                <td class="dim">dana.whitfield</td><td class="dim">2 h ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-outline-warning">&#9888; not_delivered</span></td>
+                <td class="mono dim">host:db-01-prod</td>
+                <td class="mono dim">uptime</td><td class="dim">0 / 1</td>
+                <td class="dim">dana.whitfield</td><td class="dim">3 h ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-dashed">&#8709; interrupted</span></td>
+                <td class="mono dim">group:lab</td>
+                <td class="mono dim">tail -f /var/log/syslog</td><td class="dim">1 / 2</td>
+                <td class="dim">dana.whitfield</td><td class="dim">yesterday</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- ============ mock-only controls (not part of the design) ============ -->
+<div class="mockctl">
+  <h4>Mock controls</h4>
+  <div class="row"><span>capability</span>
+    <button data-profile="full" aria-pressed="true">full build</button>
+    <button data-profile="core">core only</button>
+  </div>
+  <div class="row"><span>role</span>
+    <button data-role="viewer">viewer</button>
+    <button data-role="operator">operator</button>
+    <button data-role="admin" aria-pressed="true">admin</button>
+  </div>
+  <p>Simulates <span style="color:#94a3b8">GET /api/v1/capabilities</span> and the current
+     principal's role. Every <span style="color:#94a3b8">[data-cap]</span> and
+     <span style="color:#94a3b8">[data-min]</span> control re-resolves &mdash;
+     "not in this build" and "requires role" are deliberately different affordances.</p>
+</div>
+
+<script>
+// Capability profiles stand in for GET /api/v1/capabilities.
+var CAPS = {
+  full: { enroll:1, exec:1, sessions:1, files:1, jobs:1, tasks:1, packages:1,
+          secrets:1, policies:1, provision:1, users:1, agent_delete:1,
+          approvals:0, observe:0 },
+  core: { enroll:1, exec:1, sessions:0, files:0, jobs:0, tasks:0, packages:0,
+          secrets:0, policies:1, provision:1, users:1, agent_delete:0,
+          approvals:0, observe:0 }
+};
+var RANK = { viewer:1, operator:2, admin:3 };
+var profile = 'full', role = 'admin';
+
+function apply() {
+  var caps = CAPS[profile];
+  document.querySelectorAll('.gate[data-cap]').forEach(function (g) {
+    var on = !!caps[g.dataset.cap];
+    g.classList.toggle('is-off', !on);
+  });
+  document.querySelectorAll('.gate-role').forEach(function (g) {
+    var on = RANK[role] >= RANK[g.dataset.min];
+    g.classList.toggle('is-off', !on);
+  });
+  document.querySelectorAll('.gate-role .when-off .chip-lock').forEach(function (c) {
+    var g = c.closest('.gate-role');
+    c.lastChild.nodeValue = ' Requires ' + g.dataset.min;
+  });
+  document.getElementById('role-badge').textContent = role;
+}
+
+document.querySelectorAll('.mockctl [data-profile]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    profile = b.dataset.profile;
+    document.querySelectorAll('.mockctl [data-profile]').forEach(function (o) {
+      o.setAttribute('aria-pressed', String(o === b));
+    });
+    apply();
+  });
+});
+document.querySelectorAll('.mockctl [data-role]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    role = b.dataset.role;
+    document.querySelectorAll('.mockctl [data-role]').forEach(function (o) {
+      o.setAttribute('aria-pressed', String(o === b));
+    });
+    apply();
+  });
+});
+apply();
+</script>
+</body>
+</html>
