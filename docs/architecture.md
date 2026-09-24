@@ -505,6 +505,31 @@ Rule (one declarative object, stored in `policies`):
   (default 0) allows a bounded encrypted cache agent-side.
 - Rotation: new version → prior binding invalidated; audit records which version each run used.
 
+### 5.5.1 Tasks / Playbooks (M3, PRD §5.5)
+
+- Store: `tasks` (name/description), `task_versions` (composite PK `task_id,version`; JSON `steps_json`),
+  `task_runs` (agent, task, version, state, started, finished), `task_run_steps` (composite PK `run_id,step_index`;
+  kind, name, state, detail, started, finished), `playbooks` (task_id + version + selector).
+- Steps: 9 kinds — `command` (exec.CommandContext), `file` (idempotent write), `package` (apt/dnf
+  by distro fact), `service` (systemctl), `user` (id + useradd), `group` (getent + groupadd),
+  `template` (Go text/template with facts + vars), `assert` (when-evaluator expression),
+  `reboot` (returns "reboot requested", stub for resume-after-reboot).
+- **`when` guards**: constrained fact-based guard grammar — tokenizer + recursive-descent parser
+  + evaluator. Supports: `==`, `!=`, `in [list]`, `!`, `and`, `or`, parentheses, string/number/bool
+  literals, dotted fact refs (e.g. `host.distro`), `file.exists('path')` predicate. Fail-closed
+  on unknown identifiers.
+- **Runner**: executes steps in order, stops on `failed`, reports aggregate state in `task_runs`.
+  False `when` → step skipped. Re-runs are idempotent (ok/changed, never duplicate side-effects).
+- **Server dispatch**: `POST /api/v1/tasks/:id/run` → policy gate over `task.run` action class
+  (signs Decision) → dispatch `TASK_RUN` down the stream → wait for `TASK_RUN_RESULT` → record
+  per-step results in `task_run_steps` → emit SSE audit event.
+- **Agent guardrail**: `RecheckTask(run)` verifies bundle version, decision signature (Ed25519),
+  local policy re-evaluation over `task.run` action class, and server effect. Deny → step aborted.
+- REST: `GET/POST /api/v1/tasks` (list/create task), `GET /api/v1/tasks/:id` (show task),
+  `POST /api/v1/tasks/:id/run` (run on host), `GET /api/v1/tasks/runs` (list runs),
+  `GET /api/v1/tasks/runs/:id` (run detail + steps), `GET/POST /api/v1/playbooks`.
+- CLI: `ctl tasks list|create|show|run <id> <agent>|runs|run-show <id>`, `ctl playbooks list|create`.
+
 ### 5.6 Audit
 
 - `audit_events`: append-only; no update/delete endpoints (PRD §5.8). One writer goroutine,

@@ -272,7 +272,63 @@ CREATE TABLE IF NOT EXISTS package_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_pkg_actions_agent ON package_actions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_pkg_actions_created ON package_actions(created);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id        TEXT PRIMARY KEY,
+  name      TEXT NOT NULL UNIQUE,
+  description TEXT,
+  created   INTEGER NOT NULL,
+  updated   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_versions (
+  task_id   TEXT NOT NULL,
+  version   INTEGER NOT NULL,
+  steps_json TEXT NOT NULL,     -- JSON []TaskStep
+  created   INTEGER NOT NULL,
+  PRIMARY KEY (task_id, version),
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS task_runs (
+  id           TEXT PRIMARY KEY,
+  task_id      TEXT NOT NULL,
+  task_version INTEGER NOT NULL,
+  agent_id     TEXT NOT NULL,   -- target host
+  state        TEXT NOT NULL,   -- running | succeeded | failed | interrupted
+  started      INTEGER NOT NULL,
+  finished     INTEGER,
+  error        TEXT,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_runs_agent ON task_runs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_runs_state ON task_runs(state);
+
+CREATE TABLE IF NOT EXISTS task_run_steps (
+  run_id     TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  kind       TEXT NOT NULL,   -- command|file|package|service|user|group|template|assert|reboot
+  name       TEXT,
+  state      TEXT NOT NULL,   -- pending|running|ok|changed|failed|skipped
+  detail     TEXT,
+  started    INTEGER,
+  finished   INTEGER,
+  PRIMARY KEY (run_id, step_index),
+  FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_run_steps ON task_run_steps(run_id);
+
+CREATE TABLE IF NOT EXISTS playbooks (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  task_id      TEXT NOT NULL,
+  task_version INTEGER NOT NULL,
+  selector     TEXT NOT NULL,
+  created      INTEGER NOT NULL,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 7
+const currentSchemaVersion = 8

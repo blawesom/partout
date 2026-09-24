@@ -50,6 +50,8 @@ enum EnvelopeKind {
   SECRET_MATERIALIZE = 19; // down: E2E-encrypted secret for a run
   PKG_OP = 20;              // down: server dispatches package operation
   PKG_RESULT = 21;         // up: agent sends package operation result
+  TASK_RUN = 22;            // down: server dispatches a task run
+  TASK_RUN_RESULT = 23;     // up: agent reports task run result
 
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
@@ -75,6 +77,8 @@ message Envelope {
     SessionResult session_result = 27;
     FileOpResult file_op_result = 28;
     PkgResult pkg_result = 29;     // up: package operation result
+    TaskRunResult task_run_result = 41; // up: task run result
+    TaskRun task_run = 42;              // down: task run dispatch
     // Down
     Command command = 30;
     PolicyBundle policy_bundle = 31;
@@ -260,6 +264,60 @@ message PkgResult {
   int64 applied_count = 9;
   int64 skipped_count = 10;
   bool applied = 11;          // true if the real (non-dry-run) apply happened
+}
+
+// ---- Tasks / playbooks (M3, PRD §5.5) --------------------------------------
+
+// TaskStep is one intent-based step in a task (not free-form shell).
+// Fields are optional; the `kind` field selects which fields apply.
+message TaskStep {
+  string kind = 1;         // command|file|package|service|user|group|template|assert|reboot
+  string name = 2;         // display name
+  string when = 3;         // constrained fact expression (empty = always)
+  // command
+  string command = 10;
+  repeated string args = 11;
+  map<string, string> env = 12;
+  // file / template
+  string path = 20;
+  string content = 21;     // for kind=file
+  string template = 22;    // for kind=template
+  map<string, string> vars = 23; // for kind=template
+  string mode = 24;        // for kind=file
+  // package / service / user / group
+  string package = 30;
+  string state = 31;       // present|absent|latest | started|stopped|enabled|disabled
+  string service = 32;
+  string user = 33;
+  string group = 34;
+  // assert
+  string expr = 40;        // fact expression
+}
+
+// TaskRun dispatches a task to the agent (down).
+message TaskRun {
+  string run_id = 1;
+  string task_id = 2;
+  int32 task_version = 3;
+  repeated TaskStep steps = 4;
+  Decision decision = 5;   // signed (task.run action class)
+}
+
+// TaskStepResult is the agent's report for one step.
+message TaskStepResult {
+  int32 step_index = 1;
+  string state = 2;        // ok | changed | failed | skipped
+  string detail = 3;
+  int64 started = 4;
+  int64 finished = 5;
+}
+
+// TaskRunResult is the agent's final report for a task run (up).
+message TaskRunResult {
+  string run_id = 1;
+  string state = 2;        // succeeded | failed | interrupted
+  string error = 3;
+  repeated TaskStepResult steps = 4;
 }
 
 // FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.

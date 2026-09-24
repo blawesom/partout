@@ -226,6 +226,45 @@ func (g *Guard) RecheckPkg(op *pb.PkgOp) (bool, string) {
 	return true, ""
 }
 
+// RecheckTask verifies a task run's Decision the same way (architecture §5.3):
+// bundle version, signature, local re-eval over the task.run action class,
+// and the server decision effect. Fails closed on any mismatch.
+func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
+	if !g.loaded.Load() {
+		return false, "guardrail: no policy bundle received"
+	}
+	d := run.Decision
+	if d == nil {
+		return false, "guardrail: no decision in task run"
+	}
+	if d.BundleVersion != g.version {
+		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
+			d.BundleVersion, g.version)
+	}
+	if len(g.serverPub) > 0 {
+		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			return false, "guardrail: decision signature invalid"
+		}
+	}
+	action := policy.Action{
+		HostID:      g.agentID,
+		HostTags:    g.hostTags,
+		HostRoles:   g.hostRoles,
+		ActorRole:   d.ActorRole,
+		ActionClass: policy.ActionTaskRun,
+	}
+	dec := policy.Evaluate(g.rules, action)
+	if dec.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: local recheck says %s (%s)",
+			dec.Effect, dec.Reason)
+	}
+	if d.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: server decision is %s", d.Effect)
+	}
+	return true, ""
+}
+
 // ServerPubB64 returns the base64-encoded server public key (empty if unknown).
 func (g *Guard) ServerPubB64() string {
 	if len(g.serverPub) == 0 {

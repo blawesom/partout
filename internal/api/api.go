@@ -11,6 +11,7 @@ import (
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/packages"
+	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/provision"
@@ -27,6 +28,7 @@ type Handler struct {
 	prov   *provision.Provisioner
 	files      *files.Controller
 	pkgs       *packages.Controller
+	tasks      *tasks.Controller
 	sess       *sessions.Manager
 	secretsMgr *serversecrets.Manager
 	extdata    *externaldata.Refresher
@@ -93,6 +95,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M3: packages (PRD §5.6).
 	handler.RegisterPackages(mux)
 
+	// M3: tasks + playbooks (PRD §5.5).
+	handler.RegisterTasks(mux)
+
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
 
@@ -131,6 +136,9 @@ func (h *Handler) SetFiles(fc *files.Controller) { h.files = fc }
 
 // SetPkgs installs the packages controller (M3, PRD §5.6).
 func (h *Handler) SetPkgs(pc *packages.Controller) { h.pkgs = pc }
+
+// SetTasks installs the tasks controller (M3, PRD §5.5).
+func (h *Handler) SetTasks(tc *tasks.Controller) { h.tasks = tc }
 
 // SetSessions installs the sessions manager (M2, PRD §5.2.2).
 func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }

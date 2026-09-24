@@ -43,6 +43,9 @@ const (
 	ActionFilePerm  = "file.perm"
 	ActionPkgList   = "pkg.list"
 	ActionPkgApply  = "pkg.apply"
+
+	// M3 tasks (PRD §5.5).
+	ActionTaskRun = "task.run"
 )
 
 // Priority ordering for precedence: lower number = higher priority.

@@ -42,6 +42,7 @@ import (
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/packages"
+	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/server/provision"
@@ -185,6 +186,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	pkgC := packages.New(st, h, sseB, lg)
 	pkgC.SetIdentity(ident)
 	apiH.SetPkgs(pkgC)
+	taskC := tasks.New(st, h, sseB, lg)
+	taskC.SetIdentity(ident)
+	apiH.SetTasks(taskC)
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)
 	apiH.SetSessions(sm)

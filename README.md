@@ -36,7 +36,7 @@ off and the docs become the implementation contract.
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
-| **M3 — Automation** | 🚧 In progress | Secrets ✅, external data ✅ (EOL + OSV CVE correlation), packages ✅ (list/apply + journal + audit). Remaining: tasks/playbooks, jobs |
+| **M3 — Automation** | ✅ Done | Secrets ✅, external data ✅ (EOL + OSV CVE correlation), packages ✅ (list/apply + journal + audit), **tasks/playbooks** ✅ (versioned tasks, 9 step kinds, `when` guard grammar, task runs with step tracking, playbooks) |
 | **M4 — Governance** | ⬜ Not started | — |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
 
@@ -115,12 +115,12 @@ Done so far:
 - ✅ Tests: store (CRUD/rotate/revoke/cascade), agent cache (roundtrip, no-plaintext-on-disk, expiry, cross-agent rejection), E2E over a live bufconn stream (materialize→agent decrypt, rotation invalidation, selector binding, offline reopen).
 - ✅ **Package management** (PRD §5.6, arch §5.6): `list-updates` and `apply-updates` dispatch to the agent, which runs the native backend (apt/dnf, selected by os-release distro). **Dry-run is always run first** before apply; a before/after `dpkg-query`/`rpm -qa` journal is stored per action in `package_actions` (schema v7). Results ranked by CVE severity via the vuln cache (PRD §6.3). `pkg.apply` action class is policy-gated with a signed Decision (agent guardrail re-check). E2E-tested on a live Ubuntu host (real `apt-get -s upgrade` + phasing-deferred summary captured).
 - ✅ **REST** (`GET /packages/updates` viewer, `GET /packages/actions` viewer, `GET /packages/actions/:id` viewer, `POST /packages/apply` operator) and **CLI** (`ctl packages updates <agent> | apply <agent> [--dry-run] [--packages ...] | actions`).
-- 🚧 Remaining M3: tasks/playbooks (§5.5), scheduled jobs (§5.4).
+- ✅ **Tasks / Playbooks** (PRD §5.5, arch §4.5, §8.5): **versioned tasks** with 9 step kinds (`command`, `file`, `package`, `service`, `user`, `group`, `template`, `assert`, `reboot`), constrained **`when` guard** grammar (dotted fact refs, `==`/`!=`/`in [list]`, `and`/`or`, `!`, `file.exists(path)`), **task runs** recorded in `task_runs`/`task_run_steps` tables with per-step state (ok/changed/failed/skipped), **playbooks** bind a task + version + selector to hosts. Agent-side runner executes steps in order, stops on `failed`, reports aggregate state. Guardrail re-checks every run over the `task.run` action class. Server dispatches over the stream, waits for result, records audit events. CLI: `ctl tasks list|create|show|run|runs|run-show`, `ctl playbooks list|create`.
 
 ### Not started
 
 - M2 Web UI (xterm.js terminal + file browser frontend) — deferred to later V1 phase (backend complete)
-- M3 (remainder): external data refresh, packages, tasks/playbooks, jobs
+- M3 (remainder): scheduled jobs (§5.4)
 - M4: approvals, full policy engine, MCP write tools
 - M5: installers, cloud-init, Helm, status page
 
@@ -136,7 +136,7 @@ Done so far:
 8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
-11. **M3 (remainder)**: external data refresh → packages → tasks/playbooks → scheduled jobs
+11. **M3 (remainder)**: scheduled jobs (§5.4)
 12. **Web UI** (deferred V1 phase)
 
 ## TLS / transport security (implemented)

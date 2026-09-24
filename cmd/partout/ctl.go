@@ -128,6 +128,10 @@ commands:
 		c.cmdSecrets(rest)
 	case "packages":
 		c.cmdPackages(rest)
+	case "tasks":
+		c.cmdTasks(rest)
+	case "playbooks":
+		c.cmdPlaybooks(rest)
 	case "external-data":
 		c.cmdExternalData(rest)
 	case "help", "-h", "--help":
@@ -1297,6 +1301,148 @@ func (c *ctl) cmdPackages(args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: packages: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) cmdTasks(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl tasks <list|create|show|run|runs|run-show>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "list":
+		var list []struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := c.do("GET", "/api/v1/tasks", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		for _, t := range list {
+			fmt.Printf("%s  %-30s  %s\n", t.ID, t.Name, t.Description)
+		}
+
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl tasks create <file.json>")
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		var body any
+		if err := json.Unmarshal(data, &body); err != nil {
+			fmt.Fprintln(os.Stderr, "error: bad JSON:", err)
+			os.Exit(1)
+		}
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/tasks", body, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+
+	case "show":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl tasks show <id>")
+			os.Exit(2)
+		}
+		var out map[string]any
+		if err := c.do("GET", "/api/v1/tasks/"+args[1], nil, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+
+	case "run":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl tasks run <id> <agent_id>")
+			os.Exit(2)
+		}
+		body := map[string]string{"agent_id": args[2]}
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/tasks/"+args[1]+"/run", body, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+
+	case "runs":
+		var list []map[string]any
+		if err := c.do("GET", "/api/v1/tasks/runs", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(list, "", "  ")
+		fmt.Println(string(b))
+
+	case "run-show":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl tasks run-show <run_id>")
+			os.Exit(2)
+		}
+		var out map[string]any
+		if err := c.do("GET", "/api/v1/tasks/runs/"+args[1], nil, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: tasks: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) cmdPlaybooks(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl playbooks <list|create>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "list":
+		var list []map[string]any
+		if err := c.do("GET", "/api/v1/playbooks", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(list, "", "  ")
+		fmt.Println(string(b))
+
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl playbooks create <file.json>")
+			os.Exit(2)
+		}
+		data, err := os.ReadFile(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		var body any
+		if err := json.Unmarshal(data, &body); err != nil {
+			fmt.Fprintln(os.Stderr, "error: bad JSON:", err)
+			os.Exit(1)
+		}
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/playbooks", body, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.Marshal(out)
+		fmt.Println(string(b))
+
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: playbooks: unknown subcommand %q\n", args[0])
 		os.Exit(2)
 	}
 }

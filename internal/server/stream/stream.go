@@ -50,6 +50,11 @@ type Handler struct {
 	pkgMu      sync.Mutex
 	pkgPending map[string]chan *pb.PkgResult
 
+	// taskMu guards taskPending: run_id -> result channel for synchronous
+	// task request/response over the stream (M3, PRD §5.5).
+	taskMu      sync.Mutex
+	taskPending map[string]chan *pb.TaskRunResult
+
 	// ResultHook, if set, is called after a CommandResult is recorded with the
 	// execution id of the finished run. Control uses it to recompute the
 	// execution's aggregate state.
@@ -76,7 +81,7 @@ func NewHandler(st *store.Store, sse Emitter, lg *log.Logger) *Handler {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult), pkgPending: make(map[string]chan *pb.PkgResult)}
+	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult), pkgPending: make(map[string]chan *pb.PkgResult), taskPending: make(map[string]chan *pb.TaskRunResult)}
 }
 
 // SetServerPubKey installs the server's Ed25519 public key (b64) which is
@@ -316,6 +321,18 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 				// Waiter already gave up (timed out / stream closed); drop it.
 			}
 		}
+	case msg.GetTaskRunResult() != nil:
+		tr := msg.GetTaskRunResult()
+		h.taskMu.Lock()
+		ch := h.taskPending[tr.RunId]
+		h.taskMu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- tr:
+			default:
+				// Waiter already gave up.
+			}
+		}
 	case msg.GetSessionData() != nil:
 		sd := msg.GetSessionData()
 		if h.SessionDataHook != nil {
@@ -475,6 +492,63 @@ func (h *Handler) WaitPkgResult(ctx context.Context, opID string) (*pb.PkgResult
 	case res := <-ch:
 		if res == nil {
 			return nil, fmt.Errorf("stream: pkg op %s: stream closed", opID)
+		}
+		return res, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// ---- Tasks (M3, PRD §5.5) --------------------------------------------------
+
+// SendTaskRun dispatches a task run down the stream and registers a pending
+// result slot. The matching TaskRunResult up resolves WaitTaskResult.
+func (h *Handler) SendTaskRun(agentID string, run *pb.TaskRun) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	ch := make(chan *pb.TaskRunResult, 1)
+	h.taskMu.Lock()
+	if old := h.taskPending[run.RunId]; old != nil {
+		h.taskMu.Unlock()
+		return fmt.Errorf("stream: duplicate task run id %s", run.RunId)
+	}
+	h.taskPending[run.RunId] = ch
+	h.taskMu.Unlock()
+	if err := sess.send(&pb.Envelope{
+		Kind:    pb.EnvelopeKind_TASK_RUN,
+		CorrId:  run.RunId,
+		Payload: &pb.Envelope_TaskRun{TaskRun: run},
+	}); err != nil {
+		h.taskMu.Lock()
+		delete(h.taskPending, run.RunId)
+		h.taskMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// WaitTaskResult blocks until the task run's result arrives (or the stream
+// drops / ctx ends).
+func (h *Handler) WaitTaskResult(ctx context.Context, runID string) (*pb.TaskRunResult, error) {
+	h.taskMu.Lock()
+	ch, ok := h.taskPending[runID]
+	h.taskMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("stream: no pending task run %s", runID)
+	}
+	defer func() {
+		h.taskMu.Lock()
+		delete(h.taskPending, runID)
+		h.taskMu.Unlock()
+	}()
+	select {
+	case res := <-ch:
+		if res == nil {
+			return nil, fmt.Errorf("stream: task run %s: stream closed", runID)
 		}
 		return res, nil
 	case <-ctx.Done():

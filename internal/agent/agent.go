@@ -21,6 +21,7 @@ import (
 	"github.com/blawesom/partout/internal/agent/guardrail"
 	pkg "github.com/blawesom/partout/internal/agent/pkg"
 	agentsecrets "github.com/blawesom/partout/internal/agent/secrets"
+	"github.com/blawesom/partout/internal/agent/task"
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/config"
@@ -63,6 +64,11 @@ type Agent struct {
 	// be nil when the agent lacks an x25519 private key; then secret steps
 	// fail closed.
 	secrets *agentsecrets.Cache
+
+	// taskRunner executes task runs (M3, PRD §5.5).
+	taskRunner *task.Runner
+	// taskExec carries facts/secrets for the task executor.
+	taskExec *task.Executor
 
 	// sendMu serializes all up-sends (direct + spool drain) on the stream.
 	sendMu sync.Mutex
@@ -140,6 +146,19 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		activeRunners: make(map[string]context.CancelFunc),
 		fsCfg:         fs.Config{},
 	}
+	// Task runner (M3, PRD §5.5): secrets lookup uses the E2E cache.
+	var secLookup func(ref string, version int64) (string, error)
+	if secCache != nil {
+		secLookup = func(ref string, _ int64) (string, error) {
+			v, ok := secCache.Get(ref)
+			if !ok {
+				return "", fmt.Errorf("secret %q unavailable", ref)
+			}
+			return v, nil
+		}
+	}
+	a.taskExec = task.NewExecutor(secLookup)
+	a.taskRunner = task.New(a.taskExec)
 	// Session manager uses a closure that can reach the agent instance.
 	a.sessions = session.NewManager(func(sid string, exitCode int32, state string, durationMs int64) {
 		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
@@ -382,6 +401,17 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		}
 		// Run off the envelope loop (apt/dnf can be slow).
 		go a.execPkgOp(op)
+
+	case env.GetTaskRun() != nil:
+		run := env.GetTaskRun()
+		// Task runs are gated by the task.run action class (M3, PRD §5.5).
+		if ok, reason := a.guard.RecheckTask(run); !ok {
+			a.log.Printf("agent: task %s DENIED: %s", run.RunId, reason)
+			a.sendTaskResult(run.RunId, "failed", reason, nil)
+			return nil
+		}
+		// Run off the envelope loop.
+		go a.execTaskRun(run)
 
 	case env.GetSessionOpen() != nil:
 		so := env.GetSessionOpen()
@@ -895,4 +925,48 @@ func countPkgChanges(before, after []pkg.PkgUpdate) int64 {
 		}
 	}
 	return n
+}
+
+// ---------------------------------------------------------------------------
+// Task runs (M3, PRD §5.5)
+// ---------------------------------------------------------------------------
+
+// execTaskRun executes a TaskRun envelope and sends the result up.
+func (a *Agent) execTaskRun(run *pb.TaskRun) {
+	// Update the executor with the latest facts before running.
+	a.taskExec.SetFacts(a.factset)
+
+	// Run the task.
+	res := a.taskRunner.Run(context.Background(), run)
+
+	// Convert agent step results → proto.
+	steps := make([]*pb.TaskStepResult, 0, len(res.Steps))
+	for _, s := range res.Steps {
+		steps = append(steps, &pb.TaskStepResult{
+			StepIndex: int32(s.Index), State: s.State, Detail: s.Detail,
+			Started: s.Started, Finished: s.Finished,
+		})
+	}
+
+	// Send result up.
+	a.sendTaskResult(run.GetRunId(), res.State, res.Error, steps)
+}
+
+// sendTaskResult sends a TaskRunResult up the stream (no spooling).
+func (a *Agent) sendTaskResult(runID, state, errMsg string, steps []*pb.TaskStepResult) {
+	a.sendMu.Lock()
+	err := a.streamC.Send(context.Background(), &pb.Envelope{
+		Kind:    pb.EnvelopeKind_TASK_RUN_RESULT,
+		CorrId:  runID,
+		Payload: &pb.Envelope_TaskRunResult{TaskRunResult: &pb.TaskRunResult{
+			RunId:  runID,
+			State:  state,
+			Error:  errMsg,
+			Steps:  steps,
+		}},
+	})
+	a.sendMu.Unlock()
+	if err != nil {
+		a.log.Printf("agent: task result %s send failed: %v", runID, err)
+	}
 }
