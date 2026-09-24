@@ -257,7 +257,22 @@ CREATE TABLE IF NOT EXISTS external_meta (
   key    TEXT PRIMARY KEY,   -- last_refresh, last_refresh_ok, last_error, ...
   value  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS package_actions (
+  id           TEXT PRIMARY KEY,
+  agent_id     TEXT NOT NULL,
+  kind         TEXT NOT NULL,   -- list | dry_run | apply
+  status       TEXT NOT NULL,   -- running | succeeded | failed
+  dry_summary  TEXT,            -- dry-run output (truncated)
+  before_json  TEXT,            -- before-state journal (JSON []PkgUpdate)
+  after_json   TEXT,            -- after-state journal (JSON []PkgUpdate)
+  applied_count INTEGER NOT NULL DEFAULT 0,
+  error        TEXT,
+  created      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pkg_actions_agent ON package_actions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_pkg_actions_created ON package_actions(created);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 6
+const currentSchemaVersion = 7

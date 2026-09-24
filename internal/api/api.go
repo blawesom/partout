@@ -10,6 +10,7 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/server/files"
+	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/provision"
@@ -25,6 +26,7 @@ type Handler struct {
 	ctrl   *control.Control
 	prov   *provision.Provisioner
 	files      *files.Controller
+	pkgs       *packages.Controller
 	sess       *sessions.Manager
 	secretsMgr *serversecrets.Manager
 	extdata    *externaldata.Refresher
@@ -88,6 +90,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	handler.RegisterFiles(mux)
 	handler.RegisterSessions(mux)
 
+	// M3: packages (PRD §5.6).
+	handler.RegisterPackages(mux)
+
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
 
@@ -123,6 +128,9 @@ func (h *Handler) SetProvisioner(p *provision.Provisioner) {
 
 // SetFiles installs the files controller (M2, PRD §5.3).
 func (h *Handler) SetFiles(fc *files.Controller) { h.files = fc }
+
+// SetPkgs installs the packages controller (M3, PRD §5.6).
+func (h *Handler) SetPkgs(pc *packages.Controller) { h.pkgs = pc }
 
 // SetSessions installs the sessions manager (M2, PRD §5.2.2).
 func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }

@@ -19,6 +19,7 @@ import (
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/agent/guardrail"
+	pkg "github.com/blawesom/partout/internal/agent/pkg"
 	agentsecrets "github.com/blawesom/partout/internal/agent/secrets"
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
@@ -364,6 +365,23 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		// Ops are request/response; run off the envelope loop so a slow
 		// transfer cannot starve CANCEL/heartbeat traffic.
 		go a.execFileOp(op)
+
+	case env.GetPkgOp() != nil:
+		op := env.GetPkgOp()
+		// Apply ops carry a signed decision and are re-checked by the
+		// guardrail (architecture §5.3, A6). List ops are read-only and
+		// run directly.
+		if op.Decision != nil {
+			if ok, reason := a.guard.RecheckPkg(op); !ok {
+				a.log.Printf("agent: pkg op %s DENIED: %s", op.OpId, reason)
+				a.sendPkgResult(&pb.PkgResult{
+					OpId: op.OpId, Kind: op.Kind, Code: 403, Error: reason,
+				})
+				return nil
+			}
+		}
+		// Run off the envelope loop (apt/dnf can be slow).
+		go a.execPkgOp(op)
 
 	case env.GetSessionOpen() != nil:
 		so := env.GetSessionOpen()
@@ -746,4 +764,135 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 	}
 	a.sendFileOpResult(res)
+}
+
+
+// ---------------------------------------------------------------------------
+// Package operations (PRD §5.6)
+// ---------------------------------------------------------------------------
+
+// pkgBackend selects the agent's package backend from the current fact set.
+// The backend is stateless, so a fresh instance is safe to create per op.
+func (a *Agent) pkgBackend() pkg.Backend {
+	return pkg.SelectBackend(a.factset)
+}
+
+// sendPkgResult sends a PkgResult up the stream (no spooling: pkg ops are
+// synchronous request/response, tied to the live stream).
+func (a *Agent) sendPkgResult(res *pb.PkgResult) {
+	a.sendMu.Lock()
+	err := a.streamC.Send(context.Background(), &pb.Envelope{
+		Kind:    pb.EnvelopeKind_PKG_RESULT,
+		Payload: &pb.Envelope_PkgResult{PkgResult: res},
+	})
+	a.sendMu.Unlock()
+	if err != nil {
+		a.log.Printf("agent: pkg result %s send failed: %v", res.OpId, err)
+	}
+}
+
+// execPkgOp executes one PkgOp and sends its result (PRD §5.6).
+func (a *Agent) execPkgOp(op *pb.PkgOp) {
+	var res *pb.PkgResult
+	switch op.Kind {
+	case pb.PkgOpKind_PKG_LIST_UPDATES:
+		updates, err := a.pkgBackend().List(context.Background())
+		if err != nil {
+			res = &pb.PkgResult{OpId: op.OpId, Kind: op.Kind, Code: 500, Error: err.Error()}
+		} else {
+			res = &pb.PkgResult{OpId: op.OpId, Kind: op.Kind, Code: 0, Updates: toPbUpdates(updates)}
+		}
+
+	case pb.PkgOpKind_PKG_APPLY:
+		res = a.execPkgApply(op)
+
+	default:
+		res = &pb.PkgResult{OpId: op.OpId, Kind: op.Kind, Code: 400, Error: "unsupported package operation"}
+	}
+	a.sendPkgResult(res)
+}
+
+// execPkgApply implements the apply flow (PRD §5.6): journal before, dry-run
+// first, then (unless dry-run only) the real apply, then journal after.
+func (a *Agent) execPkgApply(op *pb.PkgOp) *pb.PkgResult {
+	kind := op.Kind
+	b := a.pkgBackend()
+
+	// 1. Before-state journal.
+	before, err := b.Installed(context.Background())
+	if err != nil {
+		return &pb.PkgResult{OpId: op.OpId, Kind: kind, Code: 500, Error: "journal: " + err.Error()}
+	}
+
+	// 2. Dry-run — always, per PRD §5.6.
+	drySummary, err := b.DryRun(context.Background())
+	if err != nil {
+		return &pb.PkgResult{
+			OpId: op.OpId, Kind: kind, Code: 500,
+			Error: "dry-run: " + err.Error(), DryRunSummary: drySummary,
+		}
+	}
+
+	// Dry-run-only mode: stop here.
+	if op.DryRun {
+		return &pb.PkgResult{
+			OpId: op.OpId, Kind: kind, Code: 0,
+			DryRunSummary: drySummary, Before: toPbUpdates(before),
+		}
+	}
+
+	// 3. Real apply.
+	if err := b.Apply(context.Background()); err != nil {
+		return &pb.PkgResult{
+			OpId: op.OpId, Kind: kind, Code: 500,
+			Error: "apply: " + err.Error(), DryRunSummary: drySummary,
+			Before: toPbUpdates(before),
+		}
+	}
+
+	// 4. After-state journal.
+	after, err := b.Installed(context.Background())
+	if err != nil {
+		return &pb.PkgResult{
+			OpId: op.OpId, Kind: kind, Code: 500,
+			Error: "after-journal: " + err.Error(), DryRunSummary: drySummary,
+			Before: toPbUpdates(before),
+		}
+	}
+
+	return &pb.PkgResult{
+		OpId: op.OpId, Kind: kind, Code: 0,
+		Applied:       true,
+		AppliedCount:  countPkgChanges(before, after),
+		DryRunSummary: drySummary,
+		Before:        toPbUpdates(before),
+		After:         toPbUpdates(after),
+	}
+}
+
+// toPbUpdates converts internal PkgUpdate slices to proto PkgUpdate slices.
+func toPbUpdates(ups []pkg.PkgUpdate) []*pb.PkgUpdate {
+	out := make([]*pb.PkgUpdate, 0, len(ups))
+	for _, u := range ups {
+		out = append(out, &pb.PkgUpdate{
+			Name: u.Name, Installed: u.Installed, Available: u.Available,
+			VulnCount: u.VulnCount, MaxSeverity: u.MaxSeverity, IsSecurity: u.IsSecurity,
+		})
+	}
+	return out
+}
+
+// countPkgChanges counts packages whose installed version changed.
+func countPkgChanges(before, after []pkg.PkgUpdate) int64 {
+	afterByName := make(map[string]string, len(after))
+	for _, u := range after {
+		afterByName[u.Name] = u.Installed
+	}
+	var n int64
+	for _, u := range before {
+		if v, ok := afterByName[u.Name]; ok && v != u.Installed {
+			n++
+		}
+	}
+	return n
 }

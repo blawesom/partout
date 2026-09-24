@@ -36,7 +36,7 @@ off and the docs become the implementation contract.
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
-| **M3 — Automation** | 🚧 In progress | Secrets ✅, external data refresh ✅ (EOL + OSV correlation). Remaining: packages, tasks/playbooks, jobs |
+| **M3 — Automation** | 🚧 In progress | Secrets ✅, external data ✅ (EOL + OSV CVE correlation), packages ✅ (list/apply + journal + audit). Remaining: tasks/playbooks, jobs |
 | **M4 — Governance** | ⬜ Not started | — |
 | **M5 — Distribution & polish** | ⬜ Not started | — |
 
@@ -113,8 +113,9 @@ Done so far:
 - ✅ **External data refresh** (PRD §6.3, arch §8): EOL dates from **endoflife.date** for 10 distros, fetched at startup + daily (24 h), **all-or-nothing** (a failed feed keeps the previous cache, sets `last_error`, one log line). `GET /api/v1/hosts/:id/eol` computes per-host `supported / ending_soon / ended` from os-release facts — the agent now ships `host.distro` / `host.distro_version` / `host.distro_codename` / `host.distro_name` parsed from `/etc/os-release`. Vulnerability correlation goes through **OSV.dev** `querybatch` at `list-updates` time (not at refresh): 1 h TTL in `vuln_cache`, clean packages tombstone-cached (`vuln_id="-"`), air-gapped sites serve the stale cache. `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` disables all fetching.
 - ✅ **REST** (`GET /external-data/status` viewer, `POST /external-data/refresh` admin, `GET /hosts/:id/eol` viewer) and **CLI** (`ctl external-data status|refresh|host-eol`).
 - ✅ Tests: store (CRUD/rotate/revoke/cascade), agent cache (roundtrip, no-plaintext-on-disk, expiry, cross-agent rejection), E2E over a live bufconn stream (materialize→agent decrypt, rotation invalidation, selector binding, offline reopen).
-- ✅ **External data refresh** (PRD §6.3): EOL dates from endoflife.date (10 distros), fetched at startup + daily, all-or-nothing (a failed feed keeps the previous cache, one log line). `GET /api/v1/hosts/:id/eol` computes per-host `supported/ending_soon/ended` from os-release facts (new `host.distro*` facts from /etc/os-release). Vulnerability correlation via OSV.dev (`list-updates` on demand, 1 h TTL in `vuln_cache`, clean packages tombstone-cached); `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` turns fetching off for air-gapped deployments. CLI: `ctl external-data status|refresh|host-eol`.
-- 🚧 Remaining M3: package management (§5.6), tasks/playbooks (§5.5), scheduled jobs (§5.4).
+- ✅ **Package management** (PRD §5.6, arch §5.6): `list-updates` and `apply-updates` dispatch to the agent, which runs the native backend (apt/dnf, selected by os-release distro). **Dry-run is always run first** before apply; a before/after `dpkg-query`/`rpm -qa` journal is stored per action in `package_actions` (schema v7). Results ranked by CVE severity via the vuln cache (PRD §6.3). `pkg.apply` action class is policy-gated with a signed Decision (agent guardrail re-check). E2E-tested on a live Ubuntu host (real `apt-get -s upgrade` + phasing-deferred summary captured).
+- ✅ **REST** (`GET /packages/updates` viewer, `GET /packages/actions` viewer, `GET /packages/actions/:id` viewer, `POST /packages/apply` operator) and **CLI** (`ctl packages updates <agent> | apply <agent> [--dry-run] [--packages ...] | actions`).
+- 🚧 Remaining M3: tasks/playbooks (§5.5), scheduled jobs (§5.4).
 
 ### Not started
 

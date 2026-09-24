@@ -45,6 +45,11 @@ type Handler struct {
 	fileMu      sync.Mutex
 	filePending map[string]chan *pb.FileOpResult
 
+	// pkgMu guards pkgPending: op_id -> result channel for synchronous
+	// package request/response over the stream (M3, PRD §5.6).
+	pkgMu      sync.Mutex
+	pkgPending map[string]chan *pb.PkgResult
+
 	// ResultHook, if set, is called after a CommandResult is recorded with the
 	// execution id of the finished run. Control uses it to recompute the
 	// execution's aggregate state.
@@ -71,7 +76,7 @@ func NewHandler(st *store.Store, sse Emitter, lg *log.Logger) *Handler {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult)}
+	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult), pkgPending: make(map[string]chan *pb.PkgResult)}
 }
 
 // SetServerPubKey installs the server's Ed25519 public key (b64) which is
@@ -299,6 +304,18 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 				// Waiter already gave up (timed out / stream closed); drop it.
 			}
 		}
+	case msg.GetPkgResult() != nil:
+		pk := msg.GetPkgResult()
+		h.pkgMu.Lock()
+		ch := h.pkgPending[pk.OpId]
+		h.pkgMu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- pk:
+			default:
+				// Waiter already gave up (timed out / stream closed); drop it.
+			}
+		}
 	case msg.GetSessionData() != nil:
 		sd := msg.GetSessionData()
 		if h.SessionDataHook != nil {
@@ -401,6 +418,63 @@ func (h *Handler) WaitFileResult(ctx context.Context, opID string) (*pb.FileOpRe
 	case res := <-ch:
 		if res == nil {
 			return nil, fmt.Errorf("stream: file op %s: stream closed", opID)
+		}
+		return res, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// ---- Packages (M3, PRD §5.6) -------------------------------------------------
+
+// SendPkgOp sends one package op down and registers a pending result slot.
+// The matching PkgResult up resolves WaitPkgResult.
+func (h *Handler) SendPkgOp(agentID string, op *pb.PkgOp) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("stream: no active session for %s", agentID)
+	}
+	ch := make(chan *pb.PkgResult, 1)
+	h.pkgMu.Lock()
+	if old := h.pkgPending[op.OpId]; old != nil {
+		h.pkgMu.Unlock()
+		return fmt.Errorf("stream: duplicate pkg op id %s", op.OpId)
+	}
+	h.pkgPending[op.OpId] = ch
+	h.pkgMu.Unlock()
+	if err := sess.send(&pb.Envelope{
+		Kind:     pb.EnvelopeKind_PKG_OP,
+		CorrId:   op.OpId,
+		Payload:  &pb.Envelope_PkgOp{PkgOp: op},
+	}); err != nil {
+		h.pkgMu.Lock()
+		delete(h.pkgPending, op.OpId)
+		h.pkgMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// WaitPkgResult blocks until the package op's result arrives (or the stream
+// drops / ctx ends). A nil result means the stream closed before a reply.
+func (h *Handler) WaitPkgResult(ctx context.Context, opID string) (*pb.PkgResult, error) {
+	h.pkgMu.Lock()
+	ch, ok := h.pkgPending[opID]
+	h.pkgMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("stream: no pending pkg op %s", opID)
+	}
+	defer func() {
+		h.pkgMu.Lock()
+		delete(h.pkgPending, opID)
+		h.pkgMu.Unlock()
+	}()
+	select {
+	case res := <-ch:
+		if res == nil {
+			return nil, fmt.Errorf("stream: pkg op %s: stream closed", opID)
 		}
 		return res, nil
 	case <-ctx.Done():

@@ -41,6 +41,7 @@ import (
 	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/files"
+	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/server/provision"
@@ -181,6 +182,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	fc := files.New(st, h, sseB, lg)
 	fc.SetIdentity(ident)
 	apiH.SetFiles(fc)
+	pkgC := packages.New(st, h, sseB, lg)
+	pkgC.SetIdentity(ident)
+	apiH.SetPkgs(pkgC)
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)
 	apiH.SetSessions(sm)
@@ -190,6 +194,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// list-updates. PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH turns fetching off
 	// (air-gapped): the last cached copy applies.
 	eolRefresher := externaldata.New(st, lg)
+	pkgC.SetRefresher(eolRefresher)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()

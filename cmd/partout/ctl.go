@@ -126,6 +126,8 @@ commands:
 		c.cmdSessions(rest)
 	case "secrets":
 		c.cmdSecrets(rest)
+	case "packages":
+		c.cmdPackages(rest)
 	case "external-data":
 		c.cmdExternalData(rest)
 	case "help", "-h", "--help":
@@ -1207,6 +1209,94 @@ func (c *ctl) cmdExternalData(args []string) {
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: external-data: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+// ---- packages (M3, PRD §5.6) -----------------------------------------------
+
+func (c *ctl) cmdPackages(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl packages <updates|apply|actions> ...")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "updates":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: ctl packages updates <agent_id>")
+			os.Exit(2)
+		}
+		agentID := args[1]
+		var ups []map[string]any
+		if err := c.do("GET", "/api/v1/packages/updates?agent_id="+url.PathEscape(agentID), nil, &ups); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: updates: %v\n", err)
+			os.Exit(1)
+		}
+		if len(ups) == 0 {
+			fmt.Println("no updates available")
+			return
+		}
+		fmt.Printf("%-30s %-25s %-25s %-8s %s\n", "NAME", "INSTALLED", "AVAILABLE", "CVEs", "SEVERITY")
+		for _, u := range ups {
+			fmt.Printf("%-30s %-25s %-25s %-8s %s\n",
+				u["name"], u["installed"], u["available"],
+				u["vuln_count"], u["max_severity"])
+		}
+
+	case "apply":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: ctl packages apply <agent_id> [--dry-run] [--packages pkg1 pkg2]")
+			os.Exit(2)
+		}
+		agentID := args[1]
+		var pkgs []string
+		dry := false
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--dry-run":
+				dry = true
+			case "--packages":
+				i++
+				if i < len(args) {
+					pkgs = append(pkgs, args[i])
+				}
+			}
+		}
+		body := map[string]any{"agent_id": agentID, "dry_run": dry}
+		if len(pkgs) > 0 {
+			body["packages"] = pkgs
+		}
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/packages/apply", body, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: apply: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("status: %s  applied: %d  dry_run: %v\n", out["status"], out["applied_count"], dry)
+		if out["error"] != "" {
+			fmt.Fprintf(os.Stderr, "error: %v\n", out["error"])
+		}
+		if sum, ok := out["dry_summary"].(string); ok && sum != "" {
+			lines := strings.Split(sum, "\n")
+			for _, l := range lines {
+				fmt.Println("  " + l)
+			}
+		}
+
+	case "actions":
+		var out []map[string]any
+		if err := c.do("GET", "/api/v1/packages/actions", nil, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: actions: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%-18s %-10s %-12s %-6s %s\n", "ID", "KIND", "STATUS", "APPLIED", "ERROR")
+		for _, a := range out {
+			fmt.Printf("%-18s %-10s %-12s %-6d %s\n",
+				a["id"], a["kind"], a["status"], a["applied_count"],
+				a["error"])
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: packages: unknown subcommand %q\n", args[0])
 		os.Exit(2)
 	}
 }

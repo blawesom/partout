@@ -143,6 +143,10 @@ func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 // commands (architecture §5.3): bundle version, signature, local re-eval
 // over the file action (class + path), and the server decision effect.
 // Fails closed on any mismatch.
+// RecheckFile verifies a file op's Decision the same way Recheck does for
+// commands (architecture §5.3): bundle version, signature, local re-eval
+// over the file action (class + path), and the server decision effect.
+// Fails closed on any mismatch.
 func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 	if !g.loaded.Load() {
 		return false, "guardrail: no policy bundle received"
@@ -166,6 +170,47 @@ func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 		return false, "guardrail: unknown file op kind"
 	}
 	action := policy.FileAction(class, op.Path)
+	action.HostID = g.agentID
+	action.HostTags = g.hostTags
+	action.HostRoles = g.hostRoles
+	action.ActorRole = d.ActorRole
+	dec := policy.Evaluate(g.rules, action)
+	if dec.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: local recheck says %s (%s)",
+			dec.Effect, dec.Reason)
+	}
+	if d.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: server decision is %s", d.Effect)
+	}
+	return true, ""
+}
+
+// RecheckPkg verifies a package op's Decision the same way as commands and
+// file ops: bundle version, signature, local re-eval over the pkg action
+// class, and the server decision effect. Fails closed on any mismatch.
+func (g *Guard) RecheckPkg(op *pb.PkgOp) (bool, string) {
+	if !g.loaded.Load() {
+		return false, "guardrail: no policy bundle received"
+	}
+	d := op.Decision
+	if d == nil {
+		return false, "guardrail: no decision in pkg op"
+	}
+	if d.BundleVersion != g.version {
+		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
+			d.BundleVersion, g.version)
+	}
+	if len(g.serverPub) > 0 {
+		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			return false, "guardrail: decision signature invalid"
+		}
+	}
+	class, ok := policy.PkgOpClass(op.Kind)
+	if !ok {
+		return false, "guardrail: unknown pkg op kind"
+	}
+	action := policy.PkgAction(class, "")
 	action.HostID = g.agentID
 	action.HostTags = g.hostTags
 	action.HostRoles = g.hostRoles

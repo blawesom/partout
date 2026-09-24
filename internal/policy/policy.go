@@ -41,6 +41,8 @@ const (
 	ActionFileRead  = "file.read"
 	ActionFileWrite = "file.write"
 	ActionFilePerm  = "file.perm"
+	ActionPkgList   = "pkg.list"
+	ActionPkgApply  = "pkg.apply"
 )
 
 // Priority ordering for precedence: lower number = higher priority.

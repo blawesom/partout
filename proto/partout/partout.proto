@@ -48,6 +48,8 @@ enum EnvelopeKind {
   SESSION_CLOSE = 17;
   FILE_OP = 18;
   SECRET_MATERIALIZE = 19; // down: E2E-encrypted secret for a run
+  PKG_OP = 20;              // down: server dispatches package operation
+  PKG_RESULT = 21;         // up: agent sends package operation result
 
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
@@ -72,6 +74,7 @@ message Envelope {
     SessionData session_data = 26;
     SessionResult session_result = 27;
     FileOpResult file_op_result = 28;
+    PkgResult pkg_result = 29;     // up: package operation result
     // Down
     Command command = 30;
     PolicyBundle policy_bundle = 31;
@@ -83,6 +86,7 @@ message Envelope {
     SessionClose session_close = 37;
     FileOp file_op = 38;
     SecretMaterialize secret_materialize = 39; // down: E2E secret
+    PkgOp pkg_op = 40;             // down: package operation
     // Handshake
     Challenge challenge = 50;
     AuthProof auth_proof = 51;
@@ -214,6 +218,48 @@ message SecretMaterialize {
   bytes eph_pub = 3;     // server ephemeral X25519 public key (32 bytes)
   bytes sealed = 4;      // AES-256-GCM(value) under the E2E-derived key
   int64 cache_ttl_s = 5; // 0 = in-memory only; >0 = may cache sealed form
+}
+
+// PkgOpKind enumerates the package operations (PRD §5.6).
+enum PkgOpKind {
+  PKG_OP_UNSPECIFIED = 0;
+  PKG_LIST_UPDATES = 1; // list available updates (read-only, no mutation)
+  PKG_APPLY = 2;        // apply updates: always dry-run first, then apply
+}
+
+// PkgUpdate is one package's update status (list-updates / apply journal).
+message PkgUpdate {
+  string name = 1;
+  string installed = 2;
+  string available = 3;
+  int64 vuln_count = 4;    // correlated CVEs against the *installed* version
+  string max_severity = 5; // critical | high | medium | low | ""
+  bool is_security = 6;    // distro flagged it as a security update
+}
+
+// PkgOp dispatches a package operation to the agent (PRD §5.6).
+message PkgOp {
+  string op_id = 1;
+  PkgOpKind kind = 2;
+  Decision decision = 3;   // signed decision (PKG_APPLY only; agent re-check)
+  int64 seq = 4;
+  repeated string packages = 5; // restrict to these names; empty = all
+  bool dry_run = 6;        // apply in dry-run mode only (no mutation)
+}
+
+// PkgResult is the agent's reply to a PkgOp.
+message PkgResult {
+  string op_id = 1;
+  PkgOpKind kind = 2;
+  int32 code = 3;         // 0 = ok, >0 = error
+  string error = 4;
+  repeated PkgUpdate updates = 5; // LIST: available updates
+  repeated PkgUpdate before = 6;  // APPLY journal: state before
+  repeated PkgUpdate after = 7;   // APPLY journal: state after
+  string dry_run_summary = 8;     // APPLY: truncated dry-run output
+  int64 applied_count = 9;
+  int64 skipped_count = 10;
+  bool applied = 11;          // true if the real (non-dry-run) apply happened
 }
 
 // FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.

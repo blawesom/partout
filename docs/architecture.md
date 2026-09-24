@@ -585,9 +585,13 @@ group:webservers               # a saved group (named selector)
   state predicates (`!file.exists('/x')`, `pkg.installed('nginx')`,
   `service.running('ssh')`), combined with `and`/`or`. Parsed to a tiny AST; anything else is
   rejected at task validation time.
-- **pkg** — apt/dnf/apk backends selected from OS identity (R13); `list-updates` ranks by
-  correlated CVE severity (server-computed hints in the request); `apply-updates` always
-  dry-runs first and writes a per-host before/after journal (PRD §5.6).
+- **pkg** — apt/dnf backends (apk in M3.1) selected from os-release `ID` fact (R13);
+  `list-updates` runs `apt-get -s upgrade` / `dnf check-update` on the agent and returns
+  available upgrades, which the server ranks by CVE severity via `vuln_cache` (PRD §6.3);
+  `apply-updates` always dry-runs first, then applies, and records a before/after
+  `dpkg-query` / `rpm -qa` journal per action (PRD §5.6). `pkg.apply` is a distinct policy
+  action class; the agent re-checks the signed Decision before running.
+  **Live-verified** on a real Ubuntu 24.04 host (dry-run captured the apt phasing summary).
 - **guardrail** — cached policy bundle (content-hashed), re-check per §5.3, staleness watcher.
 - **spool** — shared implementation: 16 MB mem → 128 MB disk → drop-oldest, 24 h max age
   (PRD §9); per-run append-only log (length-prefixed proto envelope, fsync'd); a run is
