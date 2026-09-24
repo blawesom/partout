@@ -10,6 +10,7 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/server/files"
+	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/provision"
 	"github.com/blawesom/partout/internal/server/sessions"
@@ -23,10 +24,11 @@ type Handler struct {
 	st     *store.Store
 	ctrl   *control.Control
 	prov   *provision.Provisioner
-	files  *files.Controller
-	sess   *sessions.Manager
+	files      *files.Controller
+	sess       *sessions.Manager
 	secretsMgr *serversecrets.Manager
-	sse    *sse.Broker
+	extdata    *externaldata.Refresher
+	sse        *sse.Broker
 	log    *log.Logger
 	router http.Handler
 	auth   *auth
@@ -89,6 +91,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
 
+	// M3: external data status/refresh (PRD §6.3).
+	handler.RegisterExternalData(mux)
+
 	handler.router = mux
 	return handler
 }
@@ -121,6 +126,9 @@ func (h *Handler) SetFiles(fc *files.Controller) { h.files = fc }
 
 // SetSessions installs the sessions manager (M2, PRD §5.2.2).
 func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }
+
+// SetExternalData installs the EOL/vuln refresher (M3, PRD §6.3).
+func (h *Handler) SetExternalData(r *externaldata.Refresher) { h.extdata = r }
 
 // Store returns the underlying store (for tests).
 func (h *Handler) Store() *store.Store {

@@ -37,6 +37,13 @@ func Collector(id *identity.Identity, factsInterval int) map[string]string {
 	if kr := kernelRelease(); kr != "" {
 		m["host.kernel"] = kr
 	}
+	// OS identity from /etc/os-release (drives package backend selection,
+	// EOL state, and vulnerability correlation — PRD §5.6, §6.3).
+	if osRelease() != nil {
+		for k, v := range osRelease() {
+			m["host."+k] = v
+		}
+	}
 	if mem, ok := memTotalBytes(); ok {
 		m["host.mem_total_bytes"] = strconv.FormatUint(mem, 10)
 	}
@@ -56,6 +63,43 @@ func kernelRelease() string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// osRelease parses /etc/os-release into the subset of fields the server
+// needs for OS identity (PRD §6.3: distro + version decide the package
+// backend and the EOL/vuln correlation). Returns nil when the file is
+// missing (non-Linux dev boxes).
+func osRelease() map[string]string {
+	b, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string, 6)
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key, val := kv[0], strings.Trim(kv[1], "\"")
+		switch key {
+		case "ID":
+			out["distro"] = val
+		case "VERSION_ID":
+			out["distro_version"] = val
+		case "VERSION_CODENAME":
+			out["distro_codename"] = val
+		case "NAME":
+			out["distro_name"] = val
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // memTotalBytes reads MemTotal (bytes) from /proc/meminfo.

@@ -628,17 +628,19 @@ architectural coupling to the control plane:
 ## 8. External data service (PRD §6.3)
 
 ```
-startup ──► refresh ◄── daily timer
+startup ──► refresh ◄── daily timer (24 h)
              │                ▲
-             ▼                └── POST /api/v1/extern/refresh (manual)
-        fetchers (parallel, per-source timeout 30 s):
-          • endoflife.date          → eol_cache
-          • distro security trackers→ vuln_cache (distro CVE/USN/errata entries)
-          • OSV.dev / GHSA          → vuln_cache (cross-distro, deduped by CVE id)
-             │
-             ▼
-   all-or-nothing: every fetch must succeed AND parse → atomic cache replace
-   any failure    → previous cache untouched, one log line, retry next cadence
+             ▼                └── POST /api/v1/external-data/refresh (manual)
+        fetchers (endoflife.date, per-distro):
+          • debian, ubuntu, rhel, alpine, rocky-linux, almalinux,
+            fedora, centos, oracle-linux, opensuse  → eol_cache
+   all-or-nothing: every feed must fetch AND parse → atomic eol_cache replace
+   any failure    → previous cache untouched, one log line, last_error set
+
+vuln_cache (on demand, not at refresh):
+   list-updates correlation → OSV.dev /v1/querybatch (pkg, ecosystem, version)
+   → 1 h TTL in vuln_cache; clean packages get a tombstone row (vuln_id="-")
+   → air-gapped: stale cache served, no network
 ```
 
 - Cache is in-DB (SQL tables `eol_cache`, `vuln_cache`) so it survives restarts and is

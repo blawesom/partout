@@ -38,6 +38,7 @@ import (
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
+	"github.com/blawesom/partout/internal/server/externaldata"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/sessions"
@@ -183,6 +184,40 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)
 	apiH.SetSessions(sm)
+
+	// M3: external data refresh (PRD §6.3). EOL feed fetched at startup and
+	// daily; vulnerability correlation (OSV.dev) happens on demand by
+	// list-updates. PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH turns fetching off
+	// (air-gapped): the last cached copy applies.
+	eolRefresher := externaldata.New(st, lg)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if n, err := eolRefresher.DoRefresh(ctx); err == nil && n > 0 {
+			lg.Printf("externaldata: initial EOL refresh (%d rows)", n)
+		} else if err != nil {
+			lg.Printf("externaldata: initial refresh: %v", err)
+		}
+	}()
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				if n, err := eolRefresher.DoRefresh(tctx); err == nil && n > 0 {
+					lg.Printf("externaldata: daily refresh (%d rows)", n)
+				} else if err != nil {
+					lg.Printf("externaldata: daily refresh: %v", err)
+				}
+				cancel()
+			}
+		}
+	}()
+	apiH.SetExternalData(eolRefresher)
 	// Chain the disconnect hook (control's hook is set in control.New):
 	// interrupt the agent's PTY sessions when the stream drops (D2).
 	prevHook := h.DisconnectHook

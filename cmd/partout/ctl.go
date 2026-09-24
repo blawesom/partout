@@ -126,6 +126,8 @@ commands:
 		c.cmdSessions(rest)
 	case "secrets":
 		c.cmdSecrets(rest)
+	case "external-data":
+		c.cmdExternalData(rest)
 	case "help", "-h", "--help":
 		fs.Usage()
 	default:
@@ -1160,4 +1162,51 @@ func (c *ctl) secretDelete(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("deleted %q\n", args[0])
+}
+
+// ---- external data (M3, PRD §6.3) -------------------------------------------
+
+func (c *ctl) cmdExternalData(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: ctl external-data <status|refresh|host-eol> ...")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "status":
+		var out map[string]any
+		if err := c.do("GET", "/api/v1/external-data/status", nil, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: status: %v\n", err)
+			os.Exit(1)
+		}
+		for _, k := range []string{"air_gapped", "last_at", "last_error", "eol_count", "vuln_cached"} {
+			if v, ok := out[k]; ok {
+				fmt.Printf("%-12s %v\n", k+":", v)
+			}
+		}
+	case "refresh":
+		var out map[string]any
+		if err := c.do("POST", "/api/v1/external-data/refresh", map[string]string{}, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: refresh: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("refresh: %v rows\n", out["rows"])
+	case "host-eol":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: ctl external-data host-eol <agent_id>")
+			os.Exit(2)
+		}
+		var out map[string]any
+		if err := c.do("GET", "/api/v1/hosts/"+url.PathEscape(args[1])+"/eol", nil, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "ctl: host-eol: %v\n", err)
+			os.Exit(1)
+		}
+		for _, k := range []string{"state", "distro", "cycle", "eol_date", "extended_support", "cache_age_days"} {
+			if v, ok := out[k]; ok {
+				fmt.Printf("%-18s %v\n", k+":", v)
+			}
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: external-data: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
 }

@@ -220,7 +220,44 @@ CREATE TABLE IF NOT EXISTS secret_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_secret_bindings_agent ON secret_bindings(agent_id);
 CREATE INDEX IF NOT EXISTS idx_secret_bindings_ref ON secret_bindings(ref);
+
+-- M3: external data refresh (PRD §6.3). Live public feeds fetched by the
+-- server (which has outbound access) and cached. Agents never fetch these.
+-- EOL: one row per distro+cycle; replaced all-or-nothing on refresh.
+-- Vulns: per CVE, populated lazily by list-updates correlation (OSV.dev),
+-- TTL-cached.
+
+CREATE TABLE IF NOT EXISTS eol_cache (
+  distro              TEXT NOT NULL,   -- e.g. debian, ubuntu, rhel
+  cycle               TEXT NOT NULL,   -- e.g. 12, 24.04
+  codename            TEXT,
+  release_date        TEXT,
+  eol_date            TEXT NOT NULL,
+  support_date        TEXT,
+  extended_support    TEXT,
+  latest              TEXT,
+  fetched_at          INTEGER NOT NULL,
+  PRIMARY KEY (distro, cycle)
+);
+
+CREATE TABLE IF NOT EXISTS vuln_cache (
+  vuln_id      TEXT NOT NULL,
+  package      TEXT NOT NULL,   -- source package name
+  ecosystem    TEXT NOT NULL,   -- e.g. "Debian:12"
+  version      TEXT NOT NULL,   -- affected version (as queried)
+  severity     REAL,            -- CVSS score (0-10); NULL if ungraded
+  summary      TEXT,
+  url          TEXT,
+  fetched_at   INTEGER NOT NULL,
+  PRIMARY KEY (vuln_id, package, ecosystem, version)
+);
+CREATE INDEX IF NOT EXISTS idx_vuln_pkg ON vuln_cache(package, ecosystem);
+
+CREATE TABLE IF NOT EXISTS external_meta (
+  key    TEXT PRIMARY KEY,   -- last_refresh, last_refresh_ok, last_error, ...
+  value  TEXT NOT NULL
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 5
+const currentSchemaVersion = 6
