@@ -280,3 +280,99 @@ func TestVerifyPasswordArgon2Compat(t *testing.T) {
 		t.Fatal("reference argon2.IDKey does not reproduce the stored hash")
 	}
 }
+
+// --- login throttle, sweeper, timing equalizer (review fixes) -----------------
+
+// TestLoginThrottle verifies consecutive failures lock a username out with
+// backoff, that the lockout applies to correct passwords too, and that a
+// successful login clears it.
+func TestLoginThrottle(t *testing.T) {
+	st := newTestStore(t)
+	seedUser(t, st, "alice", "passw0rd!", "admin")
+	c := serverauth.New(st, nil)
+	c.SetThrottle(3, 200*time.Millisecond, 2*time.Second)
+
+	// Two failures: still allowed through to the credential check.
+	for i := 0; i < 2; i++ {
+		if _, err := c.Login("alice", "wrong"); err != serverauth.ErrBadCredentials {
+			t.Fatalf("attempt %d: got %v, want ErrBadCredentials", i+1, err)
+		}
+	}
+	// Third failure arms the lockout.
+	if _, err := c.Login("alice", "wrong"); err != serverauth.ErrBadCredentials {
+		t.Fatalf("third failure: got %v", err)
+	}
+	// Even the correct password is rejected while throttled.
+	if _, err := c.Login("alice", "passw0rd!"); err != serverauth.ErrThrottled {
+		t.Fatalf("throttled attempt: got %v, want ErrThrottled", err)
+	}
+	// After the window, login succeeds and clears the state.
+	time.Sleep(250 * time.Millisecond)
+	if _, err := c.Login("alice", "passw0rd!"); err != nil {
+		t.Fatalf("after backoff: %v", err)
+	}
+	if _, err := c.Login("alice", "passw0rd!"); err != nil {
+		t.Fatalf("after reset: %v", err)
+	}
+}
+
+// TestLoginThrottleCoversUnknownUsers verifies unknown usernames are throttled
+// identically (no enumeration via lockout behaviour, and no unbounded growth:
+// the map is capped).
+func TestLoginThrottleCoversUnknownUsers(t *testing.T) {
+	st := newTestStore(t)
+	c := serverauth.New(st, nil)
+	c.SetThrottle(2, 500*time.Millisecond, time.Second)
+
+	c.Login("ghost", "x")
+	c.Login("ghost", "x")
+	if _, err := c.Login("ghost", "x"); err != serverauth.ErrThrottled {
+		t.Fatalf("unknown user throttle: got %v, want ErrThrottled", err)
+	}
+}
+
+// TestSessionCapPerUser verifies repeated logins by one user do not grow the
+// session map without bound.
+func TestSessionCapPerUser(t *testing.T) {
+	st := newTestStore(t)
+	seedUser(t, st, "alice", "passw0rd!", "viewer")
+	c := serverauth.New(st, nil)
+
+	first, err := c.Login("alice", "passw0rd!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// maxSessionsPerUser is 8: after 12 logins the oldest must be evicted.
+	for i := 1; i < 12; i++ {
+		if _, err := c.Login("alice", "passw0rd!"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.Validate(first.Token); err == nil {
+		t.Fatal("oldest session should have been evicted by the per-user cap")
+	}
+}
+
+// TestDecoyHashMatchesHashParameters guards the timing equalizer: the decoy
+// must use the same argon2id parameters as real hashes, or login latency
+// would leak which usernames exist.
+func TestDecoyHashMatchesHashParameters(t *testing.T) {
+	decoy := serverauth.DecoyHashForTest()
+	real, err := serverauth.HashPassword("whatever-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := func(phc string) string {
+		f := strings.Split(phc, "$")
+		if len(f) != 5 {
+			t.Fatalf("bad PHC: %q", phc)
+		}
+		return strings.Join(f[:3], "$")
+	}
+	if params(decoy) != params(real) {
+		t.Fatalf("decoy params %q != real params %q", params(decoy), params(real))
+	}
+	if serverauth.VerifyPassword(decoy, "anything") {
+		t.Fatal("decoy hash must never verify successfully")
+	}
+}

@@ -9,6 +9,11 @@
 //     (default 12 h). Tokens live in memory: a server restart logs everyone
 //     out (accepted v1 posture; the audit log records logins).
 //   - A password change invalidates that user's sessions.
+//   - Login failures are throttled per username with exponential backoff
+//     (see SetThrottle); unknown usernames are throttled identically.
+//   - Unknown/disabled usernames still pay a full argon2 verification
+//     against a decoy hash, so response time does not disclose which
+//     usernames exist.
 //   - Last-admin protection: the last active admin cannot be deleted,
 //     disabled, or demoted. Users cannot delete themselves.
 package auth
@@ -48,6 +53,29 @@ var (
 	ErrLastAdmin      = errors.New("auth: cannot remove the last active admin")
 	ErrSelfDelete     = errors.New("auth: cannot delete your own account")
 	ErrSelfModify     = errors.New("auth: cannot change your own account")
+	ErrThrottled      = errors.New("auth: too many failed attempts; retry later")
+)
+
+// decoyHash is a valid argon2id PHC string (same parameters as HashPassword)
+// verified against for unknown/disabled usernames so that login latency does
+// not reveal which accounts exist. The password it encodes is never accepted:
+// the result is discarded.
+const decoyHash = "argon2id$v=19$m=65536,t=3,p=4$ad/jeXxztGN89/QaZL57DA$oQYRtPAtHvaWIMRfBhZtAJG73FhYKHdpGrC025xYV14"
+
+// DecoyHashForTest exposes the decoy PHC string so tests can assert it uses
+// the same argon2id parameters as HashPassword (timing-equalizer invariant).
+func DecoyHashForTest() string { return decoyHash }
+
+// Login throttle defaults: after maxLoginFailures consecutive failures for a
+// username, attempts back off exponentially up to maxThrottle. Throttle state
+// is in-memory and bounded (maxThrottleEntries), so it cannot be used to grow
+// memory without limit.
+const (
+	maxLoginFailures   = 5
+	baseThrottle       = 2 * time.Second
+	maxThrottle        = 5 * time.Minute
+	maxThrottleEntries = 4096
+	maxSessionsPerUser = 8
 )
 
 // Session is a validated login.
@@ -59,6 +87,13 @@ type Session struct {
 	ExpiresUnix int64
 }
 
+// throttle tracks consecutive login failures for one username.
+type throttle struct {
+	fails int
+	until time.Time // attempts rejected before this instant
+	last  time.Time // last failure (for lazy pruning)
+}
+
 // Controller manages principals + sessions.
 type Controller struct {
 	st       *store.Store
@@ -66,6 +101,13 @@ type Controller struct {
 	ttl      time.Duration
 	sessMu   sync.Mutex
 	sessions map[string]*Session
+
+	// Login throttle (bounded, in-memory). Config via SetThrottle.
+	thrMu        sync.Mutex
+	throttled    map[string]*throttle
+	maxFails     int
+	baseThrottle time.Duration
+	maxThrottle  time.Duration
 }
 
 // New builds a Controller with the given session TTL (0 → 12 h).
@@ -73,13 +115,36 @@ func New(st *store.Store, lg *log.Logger) *Controller {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Controller{st: st, log: lg, ttl: 12 * time.Hour, sessions: make(map[string]*Session)}
+	return &Controller{
+		st: st, log: lg, ttl: 12 * time.Hour,
+		sessions:     make(map[string]*Session),
+		throttled:    make(map[string]*throttle),
+		maxFails:     maxLoginFailures,
+		baseThrottle: baseThrottle,
+		maxThrottle:  maxThrottle,
+	}
 }
 
 // SetTTL overrides the session TTL.
 func (c *Controller) SetTTL(d time.Duration) {
 	if d > 0 {
 		c.ttl = d
+	}
+}
+
+// SetThrottle overrides the login backoff policy (0 values keep the default).
+// maxFails consecutive failures lock a username out for baseThrottle, doubling
+// per further failure up to max. Operators can lower maxFails to harden a
+// deployment; tests use it to exercise the path quickly.
+func (c *Controller) SetThrottle(maxFails int, base, max time.Duration) {
+	if maxFails > 0 {
+		c.maxFails = maxFails
+	}
+	if base > 0 {
+		c.baseThrottle = base
+	}
+	if max > 0 {
+		c.maxThrottle = max
 	}
 }
 
@@ -139,17 +204,31 @@ func newToken() (string, error) {
 }
 
 // Login authenticates username/password and issues a session token.
-// Audits auth.login / auth.login_failed.
+// Audits auth.login / auth.login_failed / auth.login_throttled.
+//
+// Unknown and disabled usernames pay a decoy argon2 verification so latency
+// does not disclose which accounts exist, and consecutive failures throttle
+// the username (unknown ones included) with exponential backoff.
 func (c *Controller) Login(username, password string) (*Session, error) {
+	if wait, until := c.throttleCheck(username); wait {
+		c.audit("auth.login_throttled", username, "retry after "+until.UTC().Format(time.RFC3339))
+		return nil, ErrThrottled
+	}
+
 	p, err := c.st.Principal(username)
 	if err != nil || p.Disabled {
+		VerifyPassword(decoyHash, password) // equalize timing; result discarded
+		c.throttleFail(username)
 		c.audit("auth.login_failed", username, "bad credentials")
 		return nil, ErrBadCredentials
 	}
 	if !VerifyPassword(p.PasswordHash, password) {
+		c.throttleFail(username)
 		c.audit("auth.login_failed", username, "bad credentials")
 		return nil, ErrBadCredentials
 	}
+	c.throttleReset(username)
+
 	tok, err := newToken()
 	if err != nil {
 		return nil, err
@@ -160,10 +239,131 @@ func (c *Controller) Login(username, password string) (*Session, error) {
 		Expires: now.Add(c.ttl), ExpiresUnix: now.Add(c.ttl).Unix(),
 	}
 	c.sessMu.Lock()
+	c.pruneSessionsLocked(now)
+	c.evictUserSessionsLocked(p.Username)
 	c.sessions[tok] = sess
 	c.sessMu.Unlock()
 	c.audit("auth.login", p.Username, "ok")
 	return sess, nil
+}
+
+// --- login throttle -----------------------------------------------------------
+
+// throttleCheck reports whether attempts for username are currently rejected,
+// and until when.
+func (c *Controller) throttleCheck(username string) (bool, time.Time) {
+	now := time.Now()
+	c.thrMu.Lock()
+	defer c.thrMu.Unlock()
+	t, ok := c.throttled[username]
+	if !ok {
+		return false, time.Time{}
+	}
+	if now.Before(t.until) {
+		return true, t.until
+	}
+	return false, time.Time{}
+}
+
+// throttleFail records a failure and arms the backoff window.
+func (c *Controller) throttleFail(username string) {
+	now := time.Now()
+	c.thrMu.Lock()
+	defer c.thrMu.Unlock()
+	c.pruneThrottleLocked(now)
+	t, ok := c.throttled[username]
+	if !ok {
+		// Bound the map: attacker-chosen usernames must not grow memory.
+		if len(c.throttled) >= maxThrottleEntries {
+			return
+		}
+		t = &throttle{}
+		c.throttled[username] = t
+	}
+	t.fails++
+	t.last = now
+	if t.fails >= c.maxFails {
+		d := c.baseThrottle << uint(min(t.fails-c.maxFails, 16))
+		if d <= 0 || d > c.maxThrottle {
+			d = c.maxThrottle
+		}
+		t.until = now.Add(d)
+	}
+}
+
+// throttleReset clears a username's failure state after a successful login.
+func (c *Controller) throttleReset(username string) {
+	c.thrMu.Lock()
+	delete(c.throttled, username)
+	c.thrMu.Unlock()
+}
+
+// pruneThrottleLocked drops entries whose backoff has expired and whose last
+// failure is old. Caller holds thrMu.
+func (c *Controller) pruneThrottleLocked(now time.Time) {
+	for u, t := range c.throttled {
+		if now.After(t.until) && now.Sub(t.last) > c.maxThrottle {
+			delete(c.throttled, u)
+		}
+	}
+}
+
+// --- session housekeeping --------------------------------------------------------
+
+// Sweep drops expired sessions and stale throttle entries, returning how many
+// of each were removed. Safe to call concurrently; wire it to a ticker.
+func (c *Controller) Sweep() (sessions, throttled int) {
+	now := time.Now()
+	c.sessMu.Lock()
+	n := c.pruneSessionsLocked(now)
+	c.sessMu.Unlock()
+	c.thrMu.Lock()
+	before := len(c.throttled)
+	c.pruneThrottleLocked(now)
+	m := before - len(c.throttled)
+	c.thrMu.Unlock()
+	return n, m
+}
+
+// pruneSessionsLocked removes expired sessions. Caller holds sessMu.
+func (c *Controller) pruneSessionsLocked(now time.Time) int {
+	n := 0
+	for tok, s := range c.sessions {
+		if now.After(s.Expires) {
+			delete(c.sessions, tok)
+			n++
+		}
+	}
+	return n
+}
+
+// evictUserSessionsLocked keeps at most maxSessionsPerUser sessions per user,
+// dropping the ones that expire soonest. Caller holds sessMu.
+func (c *Controller) evictUserSessionsLocked(username string) {
+	if maxSessionsPerUser <= 0 {
+		return
+	}
+	var mine []*Session
+	for _, s := range c.sessions {
+		if s.Username == username {
+			mine = append(mine, s)
+		}
+	}
+	for len(mine) >= maxSessionsPerUser {
+		oldest := mine[0]
+		for _, s := range mine[1:] {
+			if s.Expires.Before(oldest.Expires) {
+				oldest = s
+			}
+		}
+		delete(c.sessions, oldest.Token)
+		for i, s := range mine {
+			if s == oldest {
+				mine = append(mine[:i], mine[i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 // Validate checks a session token (expiry enforced; expired sessions are

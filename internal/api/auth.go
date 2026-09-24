@@ -58,7 +58,18 @@ func (h *Handler) authLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "username and password required", nil)
 		return
 	}
+	// Bound the username: it is echoed into audit rows and throttle keys, so
+	// unbounded input would be a log/memory amplification vector.
+	if len(body.Username) > 64 || len(body.Password) > 1024 {
+		writeError(w, http.StatusBadRequest, "bad_request", "username or password too long", nil)
+		return
+	}
 	sess, err := h.authC.Login(body.Username, body.Password)
+	if errors.Is(err, serverauth.ErrThrottled) {
+		writeError(w, http.StatusTooManyRequests, "throttled",
+			"too many failed attempts; retry later", nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid credentials", nil)
 		return

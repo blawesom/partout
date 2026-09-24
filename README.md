@@ -265,7 +265,9 @@ Local username/password identity (PRD Decision 6) — no OIDC (post-v1). Replace
 (side-by-side; useful for the CLI and scripts).
 
 - **First-run bootstrap**: with no users, the server creates an `admin` user. The password
-  comes from `PARTOUT_ADMIN_PASSWORD` (or `--admin-password`); otherwise a random password is
+  comes from `PARTOUT_ADMIN_PASSWORD` (or the `--admin-password` flag — note a password on
+  the command line is visible in `ps`, so the env var is preferred); otherwise a random
+  password is
   generated, written to `<db dir>/admin_password.txt` (0600), and the operator is logged a
   pointer to rotate it after first login.
 - **Passwords**: argon2id (OWASP params) + a fresh 16-byte pepper per password; stored as a
@@ -278,10 +280,21 @@ Local username/password identity (PRD Decision 6) — no OIDC (post-v1). Replace
 - **Guards**: last-active-admin cannot be deleted/disabled/demoted; no self-delete or
   self-modify; password change / reset / disable / role change invalidate that user's
   sessions. Login failures and user ops are audited (`auth.*`, `user.*`); login returns a
-  generic 401 (no user enumeration).
+  generic 401 (no user enumeration) and unknown usernames pay a decoy argon2 verification
+  so response *timing* does not disclose them either.
+- **Login throttling**: consecutive failures per username (unknown usernames included)
+  back off exponentially (5 failures, then 2 s doubling to a 5 min cap) and return 429
+  `throttled`; a successful login clears the counter. Throttle state is in-memory and
+  bounded.
+- **Session hygiene**: expired sessions are pruned on access and by a background sweeper
+  (15 min); at most 8 live sessions per user are kept (oldest evicted), so neither repeated
+  logins nor abandoned browsers grow memory without bound.
 - **RBAC**: session tokens and static env tokens both authorize. Once any user exists the
   single-user local-mode exemption is lifted — unauthenticated requests get 401 (public
-  routes like `/healthz` and `/api/v1/auth/login` stay open).
+  routes like `/healthz` and `/api/v1/auth/login` stay open). In single-user local mode
+  (no users, no tokens) requests are treated as **role `admin`** for RBAC *and* for policy
+  `actor_roles` matching (it used to present as the non-role label `local` — a rule set that
+  matched `actor_roles: ["local"]` must be updated to `["admin"]`).
 - **CLI**: `partout ctl auth login --username U --password P` stores the session token at
   `~/.config/partout/token`; `ctl` auto-uses it when no `--token`/`PARTOUT_CTL_TOKEN` is set.
 

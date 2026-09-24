@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	serverauth "github.com/blawesom/partout/internal/server/auth"
 )
@@ -280,3 +281,43 @@ func TestAuthStaticTokensStillWork(t *testing.T) {
 }
 
 const staticAdminToken = "static-admin-token"
+
+// TestAuthLoginInputBounds verifies oversized login input is rejected before
+// it reaches the throttle map or the audit log.
+func TestAuthLoginInputBounds(t *testing.T) {
+	_, base := startAuthTest(t)
+
+	long := strings.Repeat("u", 65)
+	code, _ := apiReq(t, "POST", base+"/api/v1/auth/login", "",
+		`{"username":"`+long+`","password":"whatever"}`)
+	if code != 400 {
+		t.Fatalf("oversized username: %d, want 400", code)
+	}
+}
+
+// TestAuthLoginThrottled verifies repeated failures return 429.
+func TestAuthLoginThrottled(t *testing.T) {
+	apiH, _, srv := startAPITest(t)
+	seedUserStore(t, apiH.Store(), "admin", "adminpass1", "admin")
+	c := serverauth.New(apiH.Store(), nil)
+	// Lock out after two failures to keep the test fast.
+	c.SetThrottle(2, 500*time.Millisecond, time.Second)
+	apiH.SetAuthController(c)
+	base := srv.URL
+
+	for i := 0; i < 2; i++ {
+		code, _ := apiReq(t, "POST", base+"/api/v1/auth/login", "",
+			`{"username":"admin","password":"wrong"}`)
+		if code != 401 {
+			t.Fatalf("failure %d: %d, want 401", i+1, code)
+		}
+	}
+	code, b := apiReq(t, "POST", base+"/api/v1/auth/login", "",
+		`{"username":"admin","password":"adminpass1"}`)
+	if code != 429 {
+		t.Fatalf("throttled login: %d (%s), want 429", code, b)
+	}
+	if !bytes.Contains(b, []byte("throttled")) {
+		t.Fatalf("throttled body = %s, want code=throttled", b)
+	}
+}

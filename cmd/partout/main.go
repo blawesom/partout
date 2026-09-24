@@ -81,6 +81,7 @@ func main() {
 	adminTok := fs.String("admin-token", cfg.AdminToken, "server: RBAC admin bearer token")
 	opTok := fs.String("operator-token", cfg.OperatorToken, "server: RBAC operator bearer token")
 	viewerTok := fs.String("viewer-token", cfg.ViewerToken, "server: RBAC viewer bearer token")
+	adminPassword := fs.String("admin-password", cfg.AdminPassword, "server: first-run admin password (default: generated into <db dir>/admin_password.txt; visible in process args — prefer PARTOUT_ADMIN_PASSWORD)")
 	tlsOn := fs.String("tls", tlsDefault(cfg.TLS), "server: TLS mode on|off (generates a local root CA on first run)")
 	tlsNames := fs.String("tls-names", cfg.TLSNames, "server: comma-separated SAN names for the server leaf cert (default localhost,127.0.0.1,hostname)")
 	caFile := fs.String("ca-file", cfg.TLSCAFile, "agent: path to the server root CA (PEM); enables TLS enrollment + mTLS stream")
@@ -101,6 +102,7 @@ func main() {
 	cfg.AdminToken = *adminTok
 	cfg.OperatorToken = *opTok
 	cfg.ViewerToken = *viewerTok
+	cfg.AdminPassword = *adminPassword
 	cfg.TLSNames = *tlsNames
 	cfg.TLSCAFile = *caFile
 	switch strings.ToLower(*tlsOn) {
@@ -199,6 +201,22 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		}
 	}
 	apiH.SetAuthController(authC)
+	// Drop expired sessions + stale login-throttle entries in the background
+	// (the maps are in-memory and would otherwise only shrink on access).
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if sess, thr := authC.Sweep(); sess > 0 || thr > 0 {
+					lg.Printf("auth: swept %d expired session(s), %d stale throttle entr(ies)", sess, thr)
+				}
+			}
+		}
+	}()
 
 	// Load or create the server's Ed25519 identity (signs policy decisions
 	// and is published in policy bundles so agents can verify them).

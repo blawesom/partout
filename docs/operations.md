@@ -63,7 +63,7 @@ Step-by-step bring-up, also referenced in deployment §6:
    bootstrap runs here.)*
 2. **Set up auth**: on first run the server bootstraps an `admin` local user
    (M4 local-user auth, PRD Decision 6). Either pre-seed it with `PARTOUT_ADMIN_PASSWORD`
-   in `/env/partout/server.env`, or read the generated password from
+   in `/etc/partout/server.env`, or read the generated password from
    `<db dir>/admin_password.txt` (0600), then **log in, change the password, and delete the
    file**. Static env tokens (`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`,
    `PARTOUT_TOKEN_VIEWER`) still work side-by-side for the CLI/scripts.

@@ -906,8 +906,12 @@ Two credential kinds, checked in order: (1) a **local-user session token** from
 (`PARTOUT_TOKEN_ADMIN`, `PARTOUT_TOKEN_OPERATOR`, `PARTOUT_TOKEN_VIEWER`). Once any user
 exists the single-user local mode is lifted and unauthenticated requests get 401; with no
 users and no tokens the server still runs in single-user local mode (all requests allowed,
-single log warning). First run bootstraps an `admin` user (`PARTOUT_ADMIN_PASSWORD` or a
-generated password in `<db dir>/admin_password.txt`).
+single log warning) and requests present as role **`admin`** — including for policy
+`actor_roles` matching. First run bootstraps an `admin` user (`PARTOUT_ADMIN_PASSWORD`,
+`--admin-password`, or a generated password in `<db dir>/admin_password.txt`). Login
+failures are throttled per username (exponential backoff, 429 `throttled`), and unknown
+usernames pay a decoy argon2 verification so neither messages nor timing disclose which
+accounts exist.
 
 ### 10.2 SSE
 
