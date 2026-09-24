@@ -37,18 +37,18 @@ import (
 	agentfacts "github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
-	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/config"
+	"github.com/blawesom/partout/internal/identity"
+	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/externaldata"
-	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/server/packages"
-	"github.com/blawesom/partout/internal/server/tasks"
-	"github.com/blawesom/partout/internal/server/sessions"
-	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/server/provision"
+	serversecrets "github.com/blawesom/partout/internal/server/secrets"
+	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/server/stream"
+	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
@@ -378,12 +378,33 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		lg.Printf("gRPC + REST + SSE on :%d, db %s", cfg.Port, cfg.DBPath)
 	}
 
+	// shutdownDone is closed once the gRPC server has fully stopped and the
+	// listening socket is released. Callers that restart on the same port
+	// (embedded mode, tests) must wait for it: Serve() returning only means
+	// the HTTP side stopped accepting, not that the port is free.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// HTTP first: it owns the shared listener and closes it, which also
+		// stops the REST/SSE side. Then drain the gRPC server so in-flight
+		// streams finish before we report the port released.
 		_ = httpSrv.Shutdown(shutdownCtx)
-		gs.GracefulStop()
+		stopped := make(chan struct{})
+		go func() {
+			gs.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-shutdownCtx.Done():
+			// A stuck stream must not hang shutdown; force it closed so the
+			// port is released within the shutdown window.
+			gs.Stop()
+			<-stopped
+		}
 	}()
 
 	var serveErr error
@@ -395,6 +416,11 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	if serveErr != nil && serveErr != http.ErrServerClosed {
 		return fmt.Errorf("serve: %w", serveErr)
+	}
+	// Wait for the listener + gRPC server to be fully released so a restart
+	// on the same port cannot race the teardown.
+	if ctx.Err() != nil {
+		<-shutdownDone
 	}
 	lg.Printf("bye")
 	return nil

@@ -15,8 +15,8 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
-	"github.com/blawesom/partout/internal/server/stream"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -35,7 +35,7 @@ type Manager struct {
 	log   *log.Logger
 	ident *certutil.ServerIdentity
 
-	mu  sync.Mutex
+	mu     sync.Mutex
 	active map[string]activeSession
 
 	// seqMu guards seq: per-session recording seq counters.
@@ -273,6 +273,20 @@ func (m *Manager) onSessionResult(agentID, sessionID string, exitCode int32, sta
 	m.mu.Lock()
 	delete(m.active, sessionID)
 	m.mu.Unlock()
+
+	// A result may arrive after the server already declared the session
+	// terminal (OnDisconnect marks open sessions "interrupted", D2/arch §3.4).
+	// That decision is authoritative: a late or replayed agent result must
+	// not resurrect a session the server has already closed out.
+	if prev, err := m.st.GetSession(sessionID); err == nil && prev != nil {
+		switch prev.State {
+		case "interrupted", "closed", "denied", "failed":
+			m.log.Printf("sessions: %s already %s; ignoring late result (state=%s)",
+				sessionID, prev.State, state)
+			return
+		}
+	}
+
 	switch state {
 	case "interrupted":
 		state = "interrupted"

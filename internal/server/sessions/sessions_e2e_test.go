@@ -32,6 +32,21 @@ import (
 //   - SESSION_CLOSE: emits a SessionResult (succeeded, exit 0).
 func startSessionsServer(t *testing.T) (*store.Store, *sessions.Manager, func()) {
 	t.Helper()
+	st, sm, _, _, cleanup := startSessionsServerFull(t)
+	return st, sm, cleanup
+}
+
+// startSessionsServerWithResult additionally returns the stream handler and a
+// SESSION_RESULT sender so tests can exercise the up-envelope path directly.
+func startSessionsServerWithResult(t *testing.T) (*store.Store, *sessions.Manager, *stream.Handler, func(sessionID string, exit int32, state string) error, func()) {
+	t.Helper()
+	return startSessionsServerFull(t)
+}
+
+// startSessionsServerFull starts the store + manager + a handshaken fake agent
+// and exposes the raw stream for tests that need to send up envelopes.
+func startSessionsServerFull(t *testing.T) (*store.Store, *sessions.Manager, *stream.Handler, func(sessionID string, exit int32, state string) error, func()) {
+	t.Helper()
 	st, err := store.New("sqlite::memory:")
 	if err != nil {
 		t.Fatalf("store: %v", err)
@@ -132,6 +147,15 @@ func startSessionsServer(t *testing.T) (*store.Store, *sessions.Manager, func())
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	sendResult := func(sessionID string, exit int32, state string) error {
+		return s.Send(&pb.Envelope{
+			Kind: pb.EnvelopeKind_SESSION_RESULT,
+			Payload: &pb.Envelope_SessionResult{SessionResult: &pb.SessionResult{
+				SessionId: sessionID, ExitCode: exit, State: state, DurationMs: 1,
+			}},
+		})
+	}
+
 	cleanup := func() {
 		s.CloseSend()
 		select {
@@ -142,7 +166,7 @@ func startSessionsServer(t *testing.T) (*store.Store, *sessions.Manager, func())
 		conn.Close()
 		st.Close()
 	}
-	return st, sm, cleanup
+	return st, sm, h, sendResult, cleanup
 }
 
 // TestSessionOpenDataClose verifies: open → data recorded → close → result
@@ -218,6 +242,55 @@ func TestSessionPolicyDeny(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "denied by policy") {
 		t.Fatalf("error=%v, want 'denied by policy'", err)
+	}
+}
+
+// TestSessionLateResultDoesNotResurrectInterrupted pins the D2 guarantee
+// (arch §3.4): once a disconnect has marked an open session "interrupted",
+// a late or replayed SESSION_RESULT from the agent must not overwrite that
+// terminal state with "closed".
+//
+// This drives the real up-stream path (SESSION_RESULT envelope -> stream
+// SessionResultHook -> manager.onSessionResult) rather than calling the
+// private method, so it also guards the hook wiring.
+func TestSessionLateResultDoesNotResurrectInterrupted(t *testing.T) {
+	st, sm, _, sendResult, cleanup := startSessionsServerWithResult(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	sess, err := sm.Open(ctx, sessions.OpenRequest{
+		AgentID: "ag_sess", Cmd: "/bin/sh", Actor: "local", Role: "local",
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Stream drops: the server declares the session interrupted (D2).
+	sm.OnDisconnect("ag_sess")
+	got, err := st.GetSession(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.State != "interrupted" {
+		t.Fatalf("after disconnect: state=%s, want interrupted", got.State)
+	}
+
+	// A late result arrives over the stream (replay / in-flight race).
+	if err := sendResult(sess.ID, 0, "succeeded"); err != nil {
+		t.Fatalf("sendResult: %v", err)
+	}
+
+	// Give the hook a moment to run, then assert the state is unchanged.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err = st.GetSession(sess.ID)
+		if err != nil {
+			t.Fatalf("GetSession after late result: %v", err)
+		}
+		if got.State != "interrupted" {
+			t.Fatalf("late result resurrected session: state=%s, want interrupted", got.State)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

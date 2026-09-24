@@ -18,15 +18,24 @@ import (
 	"github.com/blawesom/partout/internal/config"
 )
 
-// freePort returns a port that is (almost certainly) free right now.
+// freePort returns a port that is free right now and confirmed bindable on
+// the wildcard address runEmbedded actually uses (":port"), so a restart
+// cannot collide with a lingering listener from a previous instance.
 func freePort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("freePort: %v", err)
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	// Confirm the wildcard bind (what runEmbedded uses) also succeeds.
+	wl, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("freePort: wildcard bind :%d: %v", port, err)
+	}
+	wl.Close()
+	return port
 }
 
 // runEmbeddedOnce starts embedded mode on the given port/tmp dir, waits for
@@ -56,6 +65,14 @@ func runEmbeddedOnce(t *testing.T, port int, tmp string) string {
 	var hostID string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) && hostID == "" {
+		// Fail fast if runEmbedded died (e.g. the port was still bound by a
+		// previous instance). Otherwise the loop spins for the full 30s and
+		// reports a misleading "did not become connected" error.
+		select {
+		case e := <-errCh:
+			t.Fatalf("runEmbedded exited early: %v", e)
+		default:
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			break
