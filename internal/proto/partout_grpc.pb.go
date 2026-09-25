@@ -13,7 +13,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             v3.21.12
-// source: proto/partout/partout.proto
+// source: partout/partout.proto
 
 package proto
 
@@ -132,5 +132,5 @@ var AgentStream_ServiceDesc = grpc.ServiceDesc{
 			ClientStreams: true,
 		},
 	},
-	Metadata: "proto/partout/partout.proto",
+	Metadata: "partout/partout.proto",
 }

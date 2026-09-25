@@ -1,33 +1,94 @@
-// Package observe provides server-side fact ingestion for the observe layer
-// (M5, R18–R20). The agent uploads structured facts as JSON blobs via the
-// OBSERVE_FACTS gRPC envelope. The server upserts them into the host_facts
-// JSON blob alongside the flat FactsBatch (architecture §7.3).
+// Package observe provides typed views over the structured observe facts
+// stored in the host_facts JSON document (M5, R18–R20; architecture §7).
+//
+// Storage: the agent uploads one OBSERVE_FACTS envelope per domain
+// (services, configs, certs); the stream handler merges each domain into the
+// host's single host_facts JSON document (store.UpsertHostFactsJSON), which
+// also carries the flat fact keys. This package parses that document into
+// the typed structs the REST API and (M6) alert engine consume.
 
 package observe
 
-import (
-	"encoding/json"
-	"fmt"
-	"time"
+import "encoding/json"
 
-	"github.com/blawesom/partout/internal/proto"
-)
-
-// Kind identifies the observation domain.
-type Kind string
-
+// Domain keys inside the host_facts JSON document.
 const (
-	KindServices Kind = "services"
-	KindConfigs  Kind = "configs"
-	KindCerts    Kind = "certs"
+	KeyServices = "services_detailed"
+	KeyConfigs  = "configs"
+	KeyCerts    = "certificates"
 )
 
-// Facts is the top-level facts blob the server stores as a key in host_facts.
-// Each observation domain uses the same envelope with a different `kind` label.
-type Facts struct {
-	ServicesDetailed *ServiceFacts `json:"services_detailed,omitempty"` // R18
-	Configs          *ConfigFacts  `json:"configs,omitempty"`           // R19
-	Certificates     *CertFacts    `json:"certificates,omitempty"`      // R20
+// Document is the full host_facts document (flat keys + structured
+// observe facts).
+type Document struct {
+	// Flat carries the scalar fact keys (host.*, partout.*, runtime.*).
+	Flat map[string]string `json:"-"`
+	// Structured carries the observe fact objects by domain key.
+	Structured map[string]json.RawMessage `json:"-"`
+}
+
+// ParseDocument splits a host_facts JSON document into its flat (string)
+// and structured (object) parts.
+func ParseDocument(blob string) (*Document, error) {
+	doc := &Document{Flat: make(map[string]string), Structured: make(map[string]json.RawMessage)}
+	if blob == "" {
+		return doc, nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(blob), &raw); err != nil {
+		return nil, err
+	}
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			doc.Flat[k] = s
+			continue
+		}
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		doc.Structured[k] = b
+	}
+	return doc, nil
+}
+
+// Services returns the services domain (R18), or nil when absent.
+func (d *Document) Services() *ServiceFacts {
+	b, ok := d.Structured[KeyServices]
+	if !ok {
+		return nil
+	}
+	var f ServiceFacts
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil
+	}
+	return &f
+}
+
+// Configs returns the configs domain (R19), or nil when absent.
+func (d *Document) Configs() *ConfigFacts {
+	b, ok := d.Structured[KeyConfigs]
+	if !ok {
+		return nil
+	}
+	var f ConfigFacts
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil
+	}
+	return &f
+}
+
+// Certificates returns the certs domain (R20), or nil when absent.
+func (d *Document) Certificates() *CertFacts {
+	b, ok := d.Structured[KeyCerts]
+	if !ok {
+		return nil
+	}
+	var f CertFacts
+	if err := json.Unmarshal(b, &f); err != nil {
+		return nil
+	}
+	return &f
 }
 
 // ServiceFacts carries systemd unit facts for the server to aggregate and
@@ -62,13 +123,13 @@ type ConfigFacts struct {
 
 // HAProxyConfig is haproxy's config fact set.
 type HAProxyConfig struct {
-	Present      bool            `json:"present"`
-	Version      string          `json:"version"`
-	ConfigFile   string          `json:"config_file"`
-	ConfigSHA256 string          `json:"config_sha256"`
-	ConfigValid  bool            `json:"config_valid"`
-	Backends     []BackendFact   `json:"backends"`
-	Listeners    []ListenerFact  `json:"listeners"`
+	Present      bool           `json:"present"`
+	Version      string         `json:"version"`
+	ConfigFile   string         `json:"config_file"`
+	ConfigSHA256 string         `json:"config_sha256"`
+	ConfigValid  bool           `json:"config_valid"`
+	Backends     []BackendFact  `json:"backends"`
+	Listeners    []ListenerFact `json:"listeners"`
 }
 
 // NginxConfig is nginx's config fact set.
@@ -127,35 +188,4 @@ type CertFact struct {
 	OCSPStapling  bool     `json:"ocsp_stapling"`
 	OCSPStatus    string   `json:"ocsp_status"`
 	Labels        []string `json:"labels,omitempty"`
-}
-
-// Ingest parses an ObserveFacts envelope and merges it into the host_facts
-// JSON blob. Returns the new facts blob (as JSON string) for the caller to
-// upsert.
-func Ingest(factsBlob string, env *proto.ObserveFacts) (string, error) {
-	if env == nil {
-		return factsBlob, nil
-	}
-	// Parse existing blob
-	var facts Facts
-	if factsBlob != "" {
-		if err := json.Unmarshal([]byte(factsBlob), &facts); err != nil {
-			return "", fmt.Errorf("parse host_facts: %w", err)
-		}
-	}
-	// Merge incoming facts
-	if err := json.Unmarshal([]byte(env.GetJson()), &facts); err != nil {
-		return "", fmt.Errorf("parse observe facts kind %q: %w", env.GetKind(), err)
-	}
-	// Serialize back
-	out, err := json.Marshal(&facts)
-	if err != nil {
-		return "", fmt.Errorf("marshal merged facts: %w", err)
-	}
-	return string(out), nil
-}
-
-// Timestamp returns the server-side ingestion timestamp.
-func Timestamp() time.Time {
-	return time.Now()
 }

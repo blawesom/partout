@@ -22,10 +22,10 @@ incident response, capacity, compliance, and a go-live checklist.
 >   agent re-check).
 > - **v0.3 adds host provisioning over fleet SSH** (PRD R17) plus the M2/M3 features:
   files & sessions, secrets, external data, packages, tasks/playbooks, scheduled jobs.
-- **M5 (in progress)**: observe layer — service/config/cert fact collectors upload
+- **M5 (done)**: observe layer — service/config/cert fact collectors upload
   structured JSON via `OBSERVE_FACTS` gRPC envelope (M5). Server-side `observe/`
-  upserts into `host_facts` JSON. Read-only API endpoints + MCP read tools. No alerting
-  yet (alert engine is M6).
+  upserts into `host_facts` JSON. Read-only API endpoints (`/services`,
+  `/certificates`, `/configs`). No alerting yet (alert engine is M6).
 - **M6** (planned): alert engine — threshold rules, evaluation, firing/resolved states,
   SSE fan-out. Alert store (`alerts`, `alert_rules` tables).
 - **M7** (planned): UI pages — Services, Certificates, Configs sub-pages.

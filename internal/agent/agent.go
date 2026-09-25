@@ -5,6 +5,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/blawesom/partout/internal/agent/exec"
 	"github.com/blawesom/partout/internal/agent/facts"
+	"github.com/blawesom/partout/internal/agent/factscollect"
 	"github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/agent/guardrail"
 	"github.com/blawesom/partout/internal/agent/jobs"
@@ -45,15 +47,20 @@ const (
 
 // Agent is the long-running agent process.
 type Agent struct {
-	id        *identity.Identity
-	cfg       *config.Config
-	log       *log.Logger
-	streamC   *stream.Client
-	start     time.Time
-	factset   map[string]string
-	policyDir string
-	guard     *guardrail.Guard
-	spool     *spool.Spool
+	id      *identity.Identity
+	cfg     *config.Config
+	log     *log.Logger
+	streamC *stream.Client
+	start   time.Time
+	factset map[string]string
+
+	// obsCollecting guards the observe-facts collection goroutine (M5):
+	// a tick arriving while the previous collection is still running is
+	// skipped — systemctl probes can block for seconds.
+	obsCollecting atomic.Bool
+	policyDir     string
+	guard         *guardrail.Guard
+	spool         *spool.Spool
 
 	// rootCtx is the top-level agent context (from Run). In-flight runs are
 	// derived from it — not from a per-stream session context — so a stream
@@ -250,6 +257,9 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	if err := a.sendFacts(sessCtx, true); err != nil {
 		return fmt.Errorf("agent: send facts: %w", err)
 	}
+	// Initial structured observe facts (M5, R18–R20): async — collection
+	// probes systemd/TLS and can take seconds; the stream must not stall.
+	a.launchObserveFacts(sessCtx)
 	// Drain spooled output from any previous disconnection before processing
 	// new down traffic (architecture §3.1.4). On the first connection this is
 	// a fast no-op. A drain failure keeps the spool for the next attempt and
@@ -263,6 +273,12 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	defer hbTimer.Stop()
 	factTimer := time.NewTicker(time.Duration(a.cfg.FactsInterval) * time.Second)
 	defer factTimer.Stop()
+	obsInterval := a.cfg.ObserveFactsInterval
+	if obsInterval <= 0 {
+		obsInterval = 300 // default cadence (PARTOUT_OBSERVE_FACTS_INTERVAL)
+	}
+	obsTimer := time.NewTicker(time.Duration(obsInterval) * time.Second)
+	defer obsTimer.Stop()
 
 	type downMsg struct {
 		env *pb.Envelope
@@ -304,6 +320,9 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 				return fmt.Errorf("agent: send facts: %w", err)
 			}
 
+		case <-obsTimer.C:
+			a.launchObserveFacts(sessCtx)
+
 		case m := <-down:
 			if m.err != nil {
 				return m.err
@@ -329,6 +348,67 @@ func (a *Agent) sendFacts(ctx context.Context, full bool) error {
 			Facts: a.factset,
 		}},
 	})
+}
+
+// launchObserveFacts kicks off a structured observe-facts collection (M5,
+// R18–R20) off the loop goroutine. Re-entrant ticks are skipped: the
+// previous collection may still be probing.
+func (a *Agent) launchObserveFacts(ctx context.Context) {
+	if !a.obsCollecting.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer a.obsCollecting.Store(false)
+		a.sendObserveFacts(ctx)
+	}()
+}
+
+// sendObserveFacts collects structured facts and uploads one OBSERVE_FACTS
+// envelope per non-empty domain (services, configs, certs). Collection runs
+// in a goroutine (systemctl probes can block for seconds); send failures
+// are logged, not returned — facts are periodic snapshots, so the next tick
+// re-collects. Never spooled: tied to the live stream like session traffic.
+func (a *Agent) sendObserveFacts(ctx context.Context) {
+	cfg := &factscollect.Config{
+		ServiceLabels:        a.cfg.ServiceLabels,
+		CertPaths:            a.cfg.CertPaths,
+		ObserveFactsInterval: a.cfg.ObserveFactsInterval,
+	}
+	ch := make(chan *factscollect.Facts, 1)
+	go func() { ch <- factscollect.Collect(cfg) }()
+	select {
+	case <-ctx.Done():
+		return
+	case f := <-ch:
+		if f == nil {
+			return // nothing to upload on this host
+		}
+		for _, s := range []struct {
+			kind string
+			blob *factscollect.Facts
+		}{
+			{string(factscollect.KindServices), &factscollect.Facts{ServicesDetailed: f.ServicesDetailed}},
+			{string(factscollect.KindConfigs), &factscollect.Facts{Configs: f.Configs}},
+			{string(factscollect.KindCerts), &factscollect.Facts{Certificates: f.Certificates}},
+		} {
+			if s.blob.ServicesDetailed == nil && s.blob.Configs == nil && s.blob.Certificates == nil {
+				continue
+			}
+			data, err := json.Marshal(s.blob)
+			if err != nil {
+				a.log.Printf("agent: marshal observe facts %s: %v", s.kind, err)
+				continue
+			}
+			a.sendUpEnvelopeNoSpool(&pb.Envelope{
+				Kind: pb.EnvelopeKind_OBSERVE_FACTS,
+				Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
+					Kind:   s.kind,
+					Json:   string(data),
+					HostId: a.id.UUID,
+				}},
+			})
+		}
+	}
 }
 
 // handleDown processes one down envelope.

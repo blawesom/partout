@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -400,4 +401,86 @@ func TestAgentSpoolLayoutAndFailFast(t *testing.T) {
 			t.Errorf("error %q does not mention the spool", err)
 		}
 	})
+}
+
+// TestAgentObserveFactsUpload is the M5 E2E: a connected agent collects
+// structured facts (services/configs/certs) and uploads OBSERVE_FACTS
+// envelopes; the server merges them into the host_facts JSON blob. On hosts
+// without systemd or TLS material the collectors return nil and the test
+// skips — the envelope path itself is covered by TestObserveFactsIngestion.
+func TestAgentObserveFactsUpload(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	defer st.Close()
+
+	sseB := sse.New()
+	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gs := grpc.NewServer()
+	h.Register(gs)
+	go func() { _ = gs.Serve(lis) }()
+	defer gs.Stop()
+
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_obs", UUID: id.UUID,
+		ED25519Pub: id.Ed25519PubB64(), X25519Pub: id.X25519PubB64(),
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	agentCfg := &config.Config{
+		Mode:                 "agent",
+		ServerURL:            lis.Addr().String(),
+		DataDir:              t.TempDir(),
+		FactsInterval:        3600,
+		ObserveFactsInterval: 1,
+		Elevate:              "none",
+		Root:                 "/",
+	}
+	ag := agent.New(id, agentCfg, log.New(io.Discard, "agent: ", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ag.Run(ctx) }()
+
+	// Wait for the agent to connect, then poll for the observe facts blob.
+	// Collection probes systemctl/openssl and can take several seconds; the
+	// flat facts row lands first, so wait for a domain key, not any blob.
+	var blob string
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := st.LatestHostFactsJSON("ag_obs")
+		if err == nil && (strings.Contains(b, "\"services_detailed\"") || strings.Contains(b, "\"configs\"") || strings.Contains(b, "\"certificates\"")) {
+			blob = b
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if blob == "" {
+		t.Skip("no structured facts collected (no systemd/TLS material on this host)")
+	}
+	// The blob must be valid JSON with at least one known domain key.
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(blob), &parsed); err != nil {
+		t.Fatalf("host_facts blob is not valid JSON: %v\nblob: %s", err, blob)
+	}
+	found := false
+	for _, key := range []string{"services_detailed", "configs", "certificates"} {
+		if _, ok := parsed[key]; ok {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("blob has no known domain key: %s", blob)
+	}
 }

@@ -739,7 +739,9 @@ feature paywall (R14). Consequences that follow from "everything free":
   (expiry, chain, SAN, OCSP). Server: `observe/facts.go` upserts into `host_facts` JSON.
   New API endpoints: `GET /services`, `GET /certificates`, `GET /configs` (read-only, no
   alerting). MCP read tools: `list_services`, `get_service_state`, `list_certificates`,
-  `get_cert_detail`, `list_configs`. No UI pages yet — data is browsable via API/CLI only.
+  `get_cert_detail`, `list_configs` — ship with the R11 MCP server (the REST endpoints
+  above are their backing surface; M5 delivers the data path). No UI pages yet — data is
+  browsable via API/CLI only.
   **Exit:** `GET /api/v1/services?label=myapp` returns live unit state from a connected agent.
 
 - **M6 — Observe: alert engine (`R23`, `R25`).** Makes the data actionable.

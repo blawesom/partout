@@ -187,3 +187,44 @@ func TestEmbedded(t *testing.T) {
 		t.Errorf("mode = %q, want embedded", c.Mode)
 	}
 }
+
+func TestObserveFactsDefaults(t *testing.T) {
+	clearPartout(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.ObserveFactsInterval != 300 {
+		t.Errorf("ObserveFactsInterval = %d, want default 300", c.ObserveFactsInterval)
+	}
+	if c.ServiceLabels != "" {
+		t.Errorf("ServiceLabels = %q, want empty", c.ServiceLabels)
+	}
+	if c.CertPaths != "" {
+		t.Errorf("CertPaths = %q, want empty", c.CertPaths)
+	}
+}
+
+func TestObserveFactsEnv(t *testing.T) {
+	clearPartout(t)
+	setenv(t,
+		"PARTOUT_MODE", "agent",
+		"PARTOUT_SERVER", "x:1",
+		"PARTOUT_OBSERVE_FACTS_INTERVAL", "60",
+		"PARTOUT_SERVICE_LABELS", "myapp,critical",
+		"PARTOUT_CERT_PATHS", "/etc/ssl/myapp",
+	)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.ObserveFactsInterval != 60 {
+		t.Errorf("ObserveFactsInterval = %d, want 60", c.ObserveFactsInterval)
+	}
+	if c.ServiceLabels != "myapp,critical" {
+		t.Errorf("ServiceLabels = %q, want myapp,critical", c.ServiceLabels)
+	}
+	if c.CertPaths != "/etc/ssl/myapp" {
+		t.Errorf("CertPaths = %q, want /etc/ssl/myapp", c.CertPaths)
+	}
+}

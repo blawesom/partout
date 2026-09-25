@@ -737,9 +737,12 @@ my hosts" and "something is wrong" — the observe side of the "observe → act 
                into one JSON blob per host)
 ```
 
-Key principle: all fact kinds merge into one `host_facts` JSON blob per host. There are no
-separate tables per fact kind. The schema is: `host_facts(agent_id, facts_json, facts_hash,
-updated_at)`. Fact collectors produce named keys in the JSON:
+Key principle: all fact kinds merge into one `host_facts` JSON document per host. There are no
+separate tables per fact kind. The table is `host_facts(agent_id, ts, data)` (an
+append-only snapshot log; readers take the latest ts), and `data` holds both the flat
+scalar fact keys (`host.*`, `partout.*`, `runtime.*`) and the structured observe fact
+objects below. Every upsert merges into the latest document, so the flat facts stream
+and the observe facts stream never clobber each other. Fact collectors produce named keys in the JSON:
 
 ```json
 {

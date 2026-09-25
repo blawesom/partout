@@ -30,13 +30,14 @@ New env vars: `PARTOUT_SSH_DIR`, `PARTOUT_SERVER_HOST`.
 **What v0.3 also ships (M2–M3, M4 in progress):** offline spool (R5), files &
 sessions (M2), secrets (C7), external data refresh (§6.3), package management (C6),
 tasks/playbooks (C5), scheduled jobs (C4), and local user auth (C9, M4).
-**What v0.4 adds (M5, in progress):** observe layer fact collectors — systemd
+**What v0.4 adds (M5, done):** observe layer fact collectors — systemd
 service facts (R18), webservice config facts (R19, `haproxy`/`nginx`), TLS
 certificate facts (R20, expiry/chain/SAN/OCSP). Agent-side collectors upload
 structured JSON via a new `OBSERVE_FACTS` gRPC envelope. Server-side
 `observe/facts.go` upserts into `host_facts` JSON blob. Read-only REST endpoints
-(`/services`, `/certificates`, `/configs`) and MCP read tools. No alerting yet
-(alert engine is M6). See `PRD.md` §14 for the M5–M8 milestone breakdown.
+(`/services`, `/certificates`, `/configs`) serve the data (MCP read tools ship with the
+R11 MCP server). No alerting yet (alert engine is M6). See `PRD.md` §14 for the
+M5–M8 milestone breakdown.
 
 **Not yet wired:** Web UI, elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
 `none`/`/`), Postgres backend, the approvals engine + full policy surface, the MCP

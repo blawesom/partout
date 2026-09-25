@@ -49,6 +49,13 @@ type Config struct {
 	ServerURL     string // server host:port (gRPC + REST, single port)
 	Token         string // one-time enrollment token (first boot)
 	FactsInterval int    // facts refresh, seconds
+	// ObserveFactsInterval: structured fact upload cadence, seconds (M5, R18–R20).
+	ObserveFactsInterval int
+	// ServiceLabels: comma-separated operator labels marking custom units (M5, R18).
+	ServiceLabels string
+	// CertPaths: comma-separated TLS cert discovery paths, in addition to the
+	// defaults /etc/ssl and /etc/pki/tls (M5, R20).
+	CertPaths string
 	// TLSCAFile: path to the server root CA (PEM); enables HTTPS
 	// enrollment + mTLS stream.
 	TLSCAFile string
@@ -71,20 +78,23 @@ func Load() (*Config, error) {
 		mode = "server"
 	}
 	c := &Config{
-		Mode:          mode,
-		Port:          envInt("PARTOUT_PORT", 8443),
-		DBPath:        envStr("PARTOUT_DB_PATH", "./partout.db"),
-		DataDir:       os.Getenv("PARTOUT_DATA_DIR"),
-		TLS:           envBool("PARTOUT_TLS"),
-		TLSNames:      os.Getenv("PARTOUT_TLS_SERVER_NAMES"),
-		AdminToken:    os.Getenv("PARTOUT_TOKEN_ADMIN"),
-		OperatorToken: os.Getenv("PARTOUT_TOKEN_OPERATOR"),
-		ViewerToken:   os.Getenv("PARTOUT_TOKEN_VIEWER"),
-		AdminPassword: os.Getenv("PARTOUT_ADMIN_PASSWORD"),
-		ServerURL:     os.Getenv("PARTOUT_SERVER"),
-		Token:         os.Getenv("PARTOUT_TOKEN"),
-		FactsInterval: envInt("PARTOUT_FACTS_INTERVAL", 3600),
-		TLSCAFile:     os.Getenv("PARTOUT_TLS_CA"),
+		Mode:                 mode,
+		Port:                 envInt("PARTOUT_PORT", 8443),
+		DBPath:               envStr("PARTOUT_DB_PATH", "./partout.db"),
+		DataDir:              os.Getenv("PARTOUT_DATA_DIR"),
+		TLS:                  envBool("PARTOUT_TLS"),
+		TLSNames:             os.Getenv("PARTOUT_TLS_SERVER_NAMES"),
+		AdminToken:           os.Getenv("PARTOUT_TOKEN_ADMIN"),
+		OperatorToken:        os.Getenv("PARTOUT_TOKEN_OPERATOR"),
+		ViewerToken:          os.Getenv("PARTOUT_TOKEN_VIEWER"),
+		AdminPassword:        os.Getenv("PARTOUT_ADMIN_PASSWORD"),
+		ServerURL:            os.Getenv("PARTOUT_SERVER"),
+		Token:                os.Getenv("PARTOUT_TOKEN"),
+		FactsInterval:        envInt("PARTOUT_FACTS_INTERVAL", 3600),
+		ObserveFactsInterval: envInt("PARTOUT_OBSERVE_FACTS_INTERVAL", 300),
+		ServiceLabels:        os.Getenv("PARTOUT_SERVICE_LABELS"),
+		CertPaths:            os.Getenv("PARTOUT_CERT_PATHS"),
+		TLSCAFile:            os.Getenv("PARTOUT_TLS_CA"),
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err

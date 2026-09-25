@@ -22,7 +22,6 @@ import (
 	"github.com/blawesom/partout/internal/hsauth"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/store"
-	"github.com/blawesom/partout/internal/server/observe"
 )
 
 // Emitter is the subset of sse.Broker the handler needs.
@@ -351,22 +350,10 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		}
 	case msg.GetObserveFacts() != nil:
 		of := msg.GetObserveFacts()
-		// Merge structured facts into host_facts JSON blob (M5).
-		if blob, err := h.st.LatestHostFactsJSON(sess.AgentID); err == nil {
-			merged, err := observe.Ingest(blob, &pb.ObserveFacts{
-				Kind:   of.Kind,
-				Json:   of.Json,
-				HostId: of.HostId,
-			})
-			if err != nil {
-				h.log.Printf("stream: merge observe facts %s: %v", of.Kind, err)
-			} else {
-				if err := h.st.UpsertHostFactsJSON(sess.AgentID, merged); err != nil {
-					h.log.Printf("stream: upsert observe facts %s: %v", of.Kind, err)
-				}
-			}
-		} else {
-			h.log.Printf("stream: get host facts for %s: %v", sess.AgentID, err)
+		// Merge structured facts into the host_facts JSON document (M5,
+		// R18–R20); the store preserves the flat fact keys.
+		if err := h.st.UpsertHostFactsJSON(sess.AgentID, of.Json); err != nil {
+			h.log.Printf("stream: upsert observe facts %s: %v", of.Kind, err)
 		}
 		if h.ObserveFactsHook != nil {
 			h.ObserveFactsHook(sess.AgentID)

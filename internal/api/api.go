@@ -57,6 +57,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	handler.RegisterExecutions(mux)
 	handler.RegisterHosts(mux)
 	handler.RegisterPolicies(mux)
+	handler.RegisterObserve(mux)
 
 	// GET /api/v1/events — SSE event stream.
 	mux.Handle("/api/v1/events", sseB)

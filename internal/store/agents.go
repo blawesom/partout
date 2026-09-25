@@ -208,24 +208,33 @@ func (s *Store) ConsumeEnrollmentToken(tokenHash string) (bool, error) {
 }
 
 // ---- facts ----------------------------------------------------------------
+//
+// host_facts.data is a single JSON document per host (architecture §7.3):
+// flat fact keys (host.*, partout.*, runtime.*) as top-level string values,
+// plus structured observe facts (M5, R18–R20) as nested objects under
+// services_detailed / configs / certificates. Every upsert merges into the
+// latest document so the two fact streams never clobber each other.
 
-// UpsertFacts stores a fact snapshot for an agent.
+// UpsertFacts stores a flat fact snapshot for an agent, merging the scalar
+// keys into the latest host_facts document (structured observe facts are
+// preserved).
 func (s *Store) UpsertFacts(f Facts) error {
 	if f.TS == 0 {
 		f.TS = now()
 	}
-	data, err := json.Marshal(f.Data)
+	doc, err := s.latestFactsDoc(f.AgentID)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`
-		INSERT INTO host_facts(agent_id, ts, data) VALUES(?,?,?)
-		ON CONFLICT(agent_id, ts) DO UPDATE SET data=excluded.data
-	`, f.AgentID, f.TS, string(data))
-	return err
+	for k, v := range f.Data {
+		doc[k] = v
+	}
+	return s.writeFactsDoc(f.AgentID, f.TS, doc)
 }
 
-// LatestFacts returns the most recent fact set for an agent.
+// LatestFacts returns the most recent flat fact set for an agent. Only
+// string values are surfaced; structured observe fact objects are excluded
+// from the flat view (read them via LatestHostFactsJSON).
 func (s *Store) LatestFacts(agentID string) (*Facts, error) {
 	var (
 		ts   int64
@@ -240,11 +249,90 @@ func (s *Store) LatestFacts(agentID string) (*Facts, error) {
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(data), &m); err != nil {
+	var doc map[string]any
+	if data != "" {
+		if err := json.Unmarshal([]byte(data), &doc); err != nil {
+			return nil, err
+		}
+	}
+	flat := make(map[string]string, len(doc))
+	for k, v := range doc {
+		if str, ok := v.(string); ok {
+			flat[k] = str
+		}
+	}
+	return &Facts{AgentID: agentID, TS: ts, Data: flat}, nil
+}
+
+// UpsertHostFactsJSON merges a structured observe-facts JSON document (M5,
+// R18–R20) into the latest host_facts document, preserving the flat fact
+// keys. The incoming document carries any of the domain keys
+// services_detailed / configs / certificates.
+func (s *Store) UpsertHostFactsJSON(agentID, blob string) error {
+	if blob == "" {
+		return nil
+	}
+	var incoming map[string]any
+	if err := json.Unmarshal([]byte(blob), &incoming); err != nil {
+		return fmt.Errorf("parse observe facts: %w", err)
+	}
+	doc, err := s.latestFactsDoc(agentID)
+	if err != nil {
+		return err
+	}
+	for k, v := range incoming {
+		doc[k] = v
+	}
+	return s.writeFactsDoc(agentID, now(), doc)
+}
+
+// LatestHostFactsJSON returns the full latest host_facts document (flat +
+// structured) as a JSON string. Empty string when the host has no facts.
+func (s *Store) LatestHostFactsJSON(agentID string) (string, error) {
+	var data string
+	err := s.db.QueryRow(`
+		SELECT data FROM host_facts WHERE agent_id=? ORDER BY ts DESC LIMIT 1
+	`, agentID).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return data, err
+}
+
+// latestFactsDoc returns the latest host_facts document as a map (empty
+// map when none exists).
+func (s *Store) latestFactsDoc(agentID string) (map[string]any, error) {
+	doc := make(map[string]any)
+	var data string
+	err := s.db.QueryRow(`
+		SELECT data FROM host_facts WHERE agent_id=? ORDER BY ts DESC LIMIT 1
+	`, agentID).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return doc, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	return &Facts{AgentID: agentID, TS: ts, Data: m}, nil
+	if data != "" {
+		if err := json.Unmarshal([]byte(data), &doc); err != nil {
+			return nil, err
+		}
+	}
+	return doc, nil
+}
+
+// writeFactsDoc marshals the document and stores it as a new row (the table
+// is an append-only snapshot log; readers always take the latest ts).
+func (s *Store) writeFactsDoc(agentID string, ts int64, doc map[string]any) error {
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO host_facts(agent_id, ts, data) VALUES(?,?,?)
+		ON CONFLICT(agent_id, ts) DO UPDATE SET data=excluded.data
+	`, agentID, ts, string(data))
+	return err
 }
 
 // ---- tags / roles ---------------------------------------------------------
@@ -360,33 +448,4 @@ func (s *Store) Groups() (map[string]string, error) {
 		out[name] = sel
 	}
 	return out, rows.Err()
-}
-
-// UpsertHostFactsJSON stores a structured fact JSON blob for an agent
-// (M5, R18–R20). The blob is stored as-is in the `data` column, alongside
-// the flat FactsBatch. The blob is a JSON object with keys like
-// "services_detailed", "configs", "certificates".
-func (s *Store) UpsertHostFactsJSON(agentID string, blob string) error {
-	if blob == "" {
-		return nil
-	}
-	ts := now()
-	_, err := s.db.Exec(`
-		INSERT INTO host_facts(agent_id, ts, data) VALUES(?,?,?)
-		ON CONFLICT(agent_id, ts) DO UPDATE SET data=excluded.data
-	`, agentID, ts, blob)
-	return err
-}
-
-// LatestHostFactsJSON returns the most recent structured fact JSON blob
-// for an agent (M5). Returns empty string if no facts exist.
-func (s *Store) LatestHostFactsJSON(agentID string) (string, error) {
-	var data string
-	err := s.db.QueryRow(`
-		SELECT data FROM host_facts WHERE agent_id=? ORDER BY ts DESC LIMIT 1
-	`, agentID).Scan(&data)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return data, err
 }

@@ -10,9 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
-	"strconv"
 )
 
 // Kind identifies the observation domain.
@@ -87,20 +87,20 @@ type ServiceFacts struct {
 
 // UnitFact is one systemd unit's state, dependencies, enablement, and labels.
 type UnitFact struct {
-	Name          string         `json:"name"`
-	Type          string         `json:"type"`
-	State         string         `json:"state"`
-	SubState      string         `json:"sub_state"`
-	Enabled       bool           `json:"enabled"`
-	WantedBy      []string       `json:"wanted_by,omitempty"`
-	RequiredBy    []string       `json:"required_by,omitempty"`
-	After         []string       `json:"after,omitempty"`
-	RestartPolicy string         `json:"restart_policy,omitempty"`
-	MemoryCurrent uint64         `json:"memory_current,omitempty"`
-	CPUUsageSec   string         `json:"cpu_usage_sec,omitempty"`
-	LastExitCode  int            `json:"last_exit_code,omitempty"`
-	LastExitStatus string        `json:"last_exit_status,omitempty"`
-	Labels        []string       `json:"labels,omitempty"`
+	Name           string   `json:"name"`
+	Type           string   `json:"type"`
+	State          string   `json:"state"`
+	SubState       string   `json:"sub_state"`
+	Enabled        bool     `json:"enabled"`
+	WantedBy       []string `json:"wanted_by,omitempty"`
+	RequiredBy     []string `json:"required_by,omitempty"`
+	After          []string `json:"after,omitempty"`
+	RestartPolicy  string   `json:"restart_policy,omitempty"`
+	MemoryCurrent  uint64   `json:"memory_current,omitempty"`
+	CPUUsageSec    string   `json:"cpu_usage_sec,omitempty"`
+	LastExitCode   int      `json:"last_exit_code,omitempty"`
+	LastExitStatus string   `json:"last_exit_status,omitempty"`
+	Labels         []string `json:"labels,omitempty"`
 }
 
 // collectServices runs `systemctl list-units` + `systemctl show` to collect
@@ -244,30 +244,30 @@ type ConfigFacts struct {
 
 // HAProxyConfig is haproxy's config fact set.
 type HAProxyConfig struct {
-	Present     bool              `json:"present"`
-	Version     string            `json:"version"`
-	ConfigFile  string            `json:"config_file"`
-	ConfigSHA256 string           `json:"config_sha256"`
-	ConfigValid bool              `json:"config_valid"`
-	Backends    []BackendFact     `json:"backends"`
-	Listeners   []ListenerFact    `json:"listeners"`
+	Present      bool           `json:"present"`
+	Version      string         `json:"version"`
+	ConfigFile   string         `json:"config_file"`
+	ConfigSHA256 string         `json:"config_sha256"`
+	ConfigValid  bool           `json:"config_valid"`
+	Backends     []BackendFact  `json:"backends"`
+	Listeners    []ListenerFact `json:"listeners"`
 }
 
 // NginxConfig is nginx's config fact set.
 type NginxConfig struct {
-	Present     bool          `json:"present"`
-	Version     string        `json:"version"`
-	ConfigFile  string        `json:"config_file"`
-	ConfigSHA256 string        `json:"config_sha256"`
-	ConfigValid bool          `json:"config_valid"`
-	Vhosts      []VHostFact   `json:"vhosts"`
+	Present      bool        `json:"present"`
+	Version      string      `json:"version"`
+	ConfigFile   string      `json:"config_file"`
+	ConfigSHA256 string      `json:"config_sha256"`
+	ConfigValid  bool        `json:"config_valid"`
+	Vhosts       []VHostFact `json:"vhosts"`
 }
 
 // BackendFact is one haproxy backend's server state.
 type BackendFact struct {
-	Name   string        `json:"name"`
-	Servers int64       `json:"servers"`
-	Active int64         `json:"active"`
+	Name    string `json:"name"`
+	Servers int64  `json:"servers"`
+	Active  int64  `json:"active"`
 }
 
 // ListenerFact is one haproxy frontend/listener.
@@ -395,21 +395,21 @@ type CertFacts struct {
 
 // CertFact is one certificate's details (arch §7.2).
 type CertFact struct {
-	Path         string   `json:"path"`
-	Subject      string   `json:"subject"`
-	Issuer       string   `json:"issuer"`
-	Serial       string   `json:"serial"`
-	NotBefore    int64    `json:"not_before"` // epoch
-	NotAfter     int64    `json:"not_after"`  // epoch
-	DaysRemaining int64   `json:"days_remaining"`
-	KeyType      string   `json:"key_type"`
-	SANs         []string `json:"san"`
-	ChainValid   bool     `json:"chain_valid"`
-	ChainLength  int      `json:"chain_length"`
-	SelfSigned   bool     `json:"self_signed"`
-	OCSPStapling bool     `json:"ocsp_stapling"`
-	OCSPStatus   string   `json:"ocsp_status"`
-	Labels       []string `json:"labels,omitempty"`
+	Path          string   `json:"path"`
+	Subject       string   `json:"subject"`
+	Issuer        string   `json:"issuer"`
+	Serial        string   `json:"serial"`
+	NotBefore     int64    `json:"not_before"` // epoch
+	NotAfter      int64    `json:"not_after"`  // epoch
+	DaysRemaining int64    `json:"days_remaining"`
+	KeyType       string   `json:"key_type"`
+	SANs          []string `json:"san"`
+	ChainValid    bool     `json:"chain_valid"`
+	ChainLength   int      `json:"chain_length"`
+	SelfSigned    bool     `json:"self_signed"`
+	OCSPStapling  bool     `json:"ocsp_stapling"`
+	OCSPStatus    string   `json:"ocsp_status"`
+	Labels        []string `json:"labels,omitempty"`
 }
 
 // collectCerts walks cert directories and runs openssl x509 on each file.
@@ -710,7 +710,6 @@ func fileSHA256(path string) (string, error) {
 	return "", fmt.Errorf("sha256sum not available")
 }
 
-
 // parseHAProxyTopology does lightweight regex/line-based parsing of the
 // haproxy config to extract backends, servers, frontends, TLS bindings.
 // No full YAML parsing dependency — just line scanning.
@@ -848,6 +847,6 @@ func parseNginxServerBlock(block string) VHostFact {
 }
 
 // Exported helpers for testing.
-func SplitListForTest(s string) []string     { return splitList(s) }
+func SplitListForTest(s string) []string          { return splitList(s) }
 func ParseUint64ForTest(s string) (uint64, error) { return parseUint64(s) }
-func ParseExitCodeForTest(s string) int       { return parseExitCode(s) }
+func ParseExitCodeForTest(s string) int           { return parseExitCode(s) }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -471,5 +472,112 @@ func TestDisconnectInterruptsRuns(t *testing.T) {
 	}
 	if exec.State != "failed" {
 		t.Fatalf("execution state = %q, want failed", exec.State)
+	}
+}
+
+// TestObserveFactsIngestion verifies that an OBSERVE_FACTS envelope is merged
+// into the host_facts JSON blob (M5, R18–R20).
+func TestObserveFactsIngestion(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_obs", UUID: id.UUID,
+		ED25519Pub: base64.StdEncoding.EncodeToString(id.Ed25519Pub),
+		X25519Pub:  base64.StdEncoding.EncodeToString(id.X25519Pub),
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	_, conn := startBufServer(t, st)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	agentClient := pb.NewAgentStreamClient(conn)
+	streamClient, err := agentClient.Stream(ctx)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	// Handshake.
+	env, err := streamClient.Recv()
+	if err != nil {
+		t.Fatalf("Recv challenge: %v", err)
+	}
+	ch := env.GetChallenge()
+	ts := time.Now().Unix()
+	sig := id.Sign(hsauth.BuildMsg(ch.Nonce, id.UUID, ts))
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_AUTH_PROOF,
+		Payload: &pb.Envelope_AuthProof{AuthProof: &pb.AuthProof{
+			AgentUuid: id.UUID, Ts: ts, Sig: sig,
+		}},
+	}); err != nil {
+		t.Fatalf("Send proof: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Send an observe facts envelope (services domain).
+	servicesJSON := `{"services_detailed":{"units":[{"name":"myapp","state":"active","enabled":true}]}}`
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_OBSERVE_FACTS,
+		Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
+			Kind:   "services",
+			Json:   servicesJSON,
+			HostId: "ag_obs",
+		}},
+	}); err != nil {
+		t.Fatalf("Send observe facts: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify the blob was stored.
+	blob, err := st.LatestHostFactsJSON("ag_obs")
+	if err != nil {
+		t.Fatalf("LatestHostFactsJSON: %v", err)
+	}
+	if blob == "" {
+		t.Fatal("expected non-empty host_facts blob")
+	}
+	if !strings.Contains(blob, `"myapp"`) {
+		t.Errorf("blob missing myapp: %s", blob)
+	}
+	if !strings.Contains(blob, `"services_detailed"`) {
+		t.Errorf("blob missing services_detailed key: %s", blob)
+	}
+
+	// Send a second envelope (certs domain) — should merge, not overwrite.
+	certsJSON := `{"certificates":{"items":[{"path":"/etc/ssl/test.pem","days_remaining":90}]}}`
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_OBSERVE_FACTS,
+		Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
+			Kind:   "certs",
+			Json:   certsJSON,
+			HostId: "ag_obs",
+		}},
+	}); err != nil {
+		t.Fatalf("Send certs: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	blob, err = st.LatestHostFactsJSON("ag_obs")
+	if err != nil {
+		t.Fatalf("LatestHostFactsJSON (2nd): %v", err)
+	}
+	if !strings.Contains(blob, `"myapp"`) {
+		t.Errorf("2nd blob lost services: %s", blob)
+	}
+	if !strings.Contains(blob, `"certificates"`) {
+		t.Errorf("2nd blob missing certificates: %s", blob)
+	}
+
+	if err := streamClient.CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
 	}
 }
