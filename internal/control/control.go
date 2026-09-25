@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blawesom/partout/internal/certutil"
@@ -28,6 +29,12 @@ type Control struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity // signs policy Decisions; nil = unsigned (tests)
+
+	// finMu serializes execution-aggregate finalization. The result hook and
+	// the disconnect hook can both finalize the same execution concurrently
+	// (replay vs late disconnect); without this the read-compute-write
+	// interleaves and a stale terminal state can win (flaky TestOfflineSpoolReplay).
+	finMu sync.Mutex
 }
 
 // New builds a Control. It also wires the stream handler's result hook so
@@ -284,6 +291,8 @@ func (c *Control) CancelExecution(execID string, actor string) (*CancelResult, e
 // FinalizeExecution recomputes the execution's aggregate state from its runs
 // and updates it. Called after all runs reach a terminal state.
 func (c *Control) FinalizeExecution(execID string) error {
+	c.finMu.Lock()
+	defer c.finMu.Unlock()
 	runs, err := c.st.ListRunsForExecution(execID)
 	if err != nil {
 		return err
