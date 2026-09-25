@@ -1133,7 +1133,7 @@ error bodies `{code, message, details}`.
 | GET    | `/api/v1/sessions/:id/replay` | viewer | Recorded PTY chunks (M2) |
 | GET    | `/healthz` | — | Liveness |
 | GET    | `/readyz` | — | Readiness (DB ping) |
-| GET    | `/api/v1/events` | — | SSE event stream |
+| GET    | `/api/v1/events` | viewer | SSE event stream. Auth-gated like the read surface it mirrors; accepts `?token=<jwt>` in addition to the `Authorization` header (EventSource cannot set headers) |
 
 #### Planned additions (not implemented)
 
@@ -1142,11 +1142,8 @@ prerequisite for a UI slice and none exist today.
 
 | Method | Path | RBAC | Why |
 |--------|------|------|-----|
-| GET | `/api/v1/capabilities` | viewer | Boolean per subsystem, so the UI greys controls from data instead of hardcoded milestones. Complements the existing `503 <subsystem>_disabled` codes |
-| GET | `/api/v1/hosts?selector=<sel>` | viewer | Selector **preview** before dispatch. Today resolution only happens inside `Control.Dispatch`, so the UI cannot show the resolved host set first |
 | DELETE | `/api/v1/agents/{id}` | admin | `store.DeleteAgent` exists but has no HTTP route, so a decommissioned host can never leave the fleet; also makes the `revoked` agent state reachable |
 | GET | `/api/v1/audit?agent_id=` | viewer | Per-host audit view; client-side filtering is adequate until log volume grows |
-| GET | `/api/v1/services` | viewer | Fleet service health: aggregated view filtered by label/state/group | R18 |
 | GET | `/api/v1/alerts` | viewer | Active + recently resolved alerts, filterable by kind/severity | R25 |
 | GET | `/api/v1/alerts/:id` | viewer | Single alert detail | R25 |
 | GET | `/api/v1/alerts/rules` | admin | Alert rule list | R25 |

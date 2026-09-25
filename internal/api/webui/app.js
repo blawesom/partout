@@ -832,7 +832,7 @@
         this.stopSSE();
         this.sseStatus = "reconnecting";
         let opened = false;
-        const es = new EventSource("/api/v1/events");
+        const es = new EventSource("/api/v1/events" + (this.token ? "?token=" + encodeURIComponent(this.token) : ""));
         this._es = es;
         es.onopen = () => {
           this.sseStatus = "connected";

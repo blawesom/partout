@@ -59,8 +59,11 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	handler.RegisterPolicies(mux)
 	handler.RegisterObserve(mux)
 
-	// GET /api/v1/events — SSE event stream.
-	mux.Handle("/api/v1/events", sseB)
+	// GET /api/v1/events — SSE event stream (PRD R10). Auth-gated: mirrors the
+	// read surface it exposes (executions/output/audit/hosts), so any
+	// authenticated role may subscribe. Accepts ?token= (EventSource cannot set
+	// headers) in addition to the Authorization header.
+	mux.Handle("/api/v1/events", handler.requireSSE(roleViewer)(sseB))
 
 	// GET /healthz — health check.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

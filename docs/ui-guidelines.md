@@ -371,7 +371,8 @@ tell the operator whether anything executed at all.
 
 ## 10. State, liveness, and reconciliation
 
-- **One SSE subscription**, `GET /api/v1/events`, established after login. Pages filter
+- **One SSE subscription**, `GET /api/v1/events`, established after login, authenticated
+  with the session token as `?token=<jwt>` (EventSource cannot set headers). Pages filter
   event kinds; they never open their own stream. No polling, ever.
 - **Event → UI map:**
 

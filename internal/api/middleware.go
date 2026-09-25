@@ -125,8 +125,33 @@ func (h *Handler) actorFor(r *http.Request) (string, string) {
 	return role.String(), role.String()
 }
 
-// requireRole wraps a handler with a minimum-role check.
+// requireRole wraps a handler with a minimum-role check, reading the credential
+// from the Authorization header only.
 func (h *Handler) requireRole(min role) func(http.Handler) http.Handler {
+	return h.requireCredential(min, bearerToken)
+}
+
+// requireSSE wraps a handler with a minimum-role check for the SSE stream.
+// EventSource cannot set request headers, so the credential may also arrive as
+// a ?token=<jwt> query parameter. The query form is accepted ONLY here, never
+// on the general API (tokens in URLs are logged by proxies/access logs); header
+// auth still works and is preferred.
+func (h *Handler) requireSSE(min role) func(http.Handler) http.Handler {
+	return h.requireCredential(min, sseToken)
+}
+
+// sseToken reads the bearer credential from the Authorization header or the
+// ?token= query parameter (SSE only).
+func sseToken(r *http.Request) string {
+	if tok := bearerToken(r); tok != "" {
+		return tok
+	}
+	return r.URL.Query().Get("token")
+}
+
+// requireCredential is the shared minimum-role gate. source extracts the token
+// from the request (header-only for the general API; header-or-query for SSE).
+func (h *Handler) requireCredential(min role, source func(*http.Request) string) func(http.Handler) http.Handler {
 	var warnedOnce atomic.Bool
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -137,7 +162,7 @@ func (h *Handler) requireRole(min role) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			tok := bearerToken(r)
+			tok := source(r)
 			if tok == "" {
 				writeError(w, http.StatusUnauthorized, "unauthorized",
 					"missing bearer token (Authorization: Bearer <token>)", nil)
