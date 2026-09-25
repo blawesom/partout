@@ -211,8 +211,11 @@ func TestSessionOpenDataClose(t *testing.T) {
 	// Wait for the agent's recorded data frame to land before closing. The
 	// fake agent replies to SESSION_OPEN with a SESSION_DATA uplink; if we
 	// closed before it was recorded, the close could drop it and the replay
-	// assertion below would flake (previously failed ~1/N under CI load).
-	dataDeadline := time.Now().Add(5 * time.Second)
+	// assertion below would flake. The round trip (open → down envelope →
+	// agent recv → up envelope → server record) can exceed a few seconds under
+	// CI load (-race -count=2, all packages in parallel), so use a generous
+	// budget; a missing frame is still a hard fail, not a hang.
+	dataDeadline := time.Now().Add(20 * time.Second)
 	for {
 		recs, _ := sm.Replay(sess.ID)
 		if len(recs) == 1 && string(recs[0].Data) == "hello pty\n" {
