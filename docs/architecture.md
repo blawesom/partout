@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.4 — observe layer: services, configs, TLS certs (implementation-level design)
+**Status:** Draft v0.5 — observe layer: services, configs, TLS certs + embedded Web UI (implementation-level design)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and

@@ -6,11 +6,73 @@ for AI assistants.
 
 | Doc | What it covers | Status |
 |---|---|---|
-| [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions | **v0.4** (observe layer: services, configs, TLS certs) |
-| [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, control plane, storage, testing | **Draft v0.4** (observe layer: services, configs, TLS certs) |
-| [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference, recipes | Draft v0.3 |
-| [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, incident runbooks, troubleshooting, compliance, go-live | Draft v0.3 |
-| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: mockup reconciliation, capability gating, IA/tokens/components, slice plan (guidelines, not implementation) | Draft v0.4 |
+| [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions | **v0.5** (observe layer + Web UI shipped) |
+| [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, control plane, storage, testing | **Draft v0.5** (observe layer + Web UI) |
+| [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference, recipes | Draft v0.5 |
+| [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, incident runbooks, troubleshooting, compliance, go-live | Draft v0.5 |
+| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: mockup reconciliation, capability gating, IA/tokens/components, slice plan | v0.5 (S0 shell + M1–M5 data pages built) |
+
+## Quick start
+
+Five minutes to a working control plane with one managed host. Build once, then run a server
+and an agent. (Prefer a one-process demo? `./partout --mode=embedded` starts the server **and**
+a co-located local agent together — open the UI and it's already connected.)
+
+```bash
+go build -o partout ./cmd/partout
+```
+
+**1. Start the server** (plaintext, on one terminal). `PARTOUT_ADMIN_PASSWORD` bootstraps the
+first-run `admin` user for the **web UI**; `PARTOUT_TOKEN_ADMIN` gives the **CLI** a static
+token so you don't have to log in twice. Both coexist.
+
+```bash
+PARTOUT_PORT=8443 PARTOUT_DB_PATH=./partout.db PARTOUT_MODE=server \
+  PARTOUT_ADMIN_PASSWORD='change-me-123' \
+  PARTOUT_TOKEN_ADMIN='cli-admin-token' \
+  ./partout
+```
+
+Open **http://localhost:8443** and sign in as `admin` / `change-me-123`.
+
+**2. Mint a one-time enrollment token** (second terminal):
+
+```bash
+PARTOUT_SERVER=localhost:8443 PARTOUT_CTL_TOKEN='cli-admin-token' \
+  ./partout ctl enroll-token
+# → token:  par_enr_…
+```
+
+**3. Run the agent** on the host you want to manage (third terminal; loopback here):
+
+```bash
+PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' ./partout --mode=agent
+```
+
+The host now appears in the **Fleet** page. Drive it two ways:
+
+```bash
+# CLI
+PARTOUT_SERVER=localhost:8443 PARTOUT_CTL_TOKEN='cli-admin-token' \
+  ./partout ctl run --selector all -- hostname
+```
+…or the **Execute** page in the UI (pick a selector → type a command → Run → watch output).
+
+Observe facts (services, TLS certs, webservice configs) appear automatically on the **Observe**
+pages after the first facts upload.
+
+### Token env vars (don't mix these up)
+
+| Where | Env var | Purpose |
+|---|---|---|
+| Server (static CLI/script tokens) | `PARTOUT_TOKEN_ADMIN` / `_OPERATOR` / `_VIEWER` | RBAC bearer tokens for the three roles |
+| Server (web UI login) | `PARTOUT_ADMIN_PASSWORD` | bootstraps the first-run `admin` user the UI login form uses |
+| CLI (`partout ctl`) | `PARTOUT_CTL_TOKEN` (or `--token`) | the bearer token the CLI sends |
+| Agent (enroll) | `PARTOUT_TOKEN` (or `--token`) | the one-time enrollment token from `ctl enroll-token` |
+
+> The web **UI login form only accepts username/password** (a local user). If you start the
+> server with a static token but **no** `PARTOUT_ADMIN_PASSWORD`, the UI login form has no user
+> to sign in as — set `PARTOUT_ADMIN_PASSWORD` for UI access, and/or a static token for the CLI.
 
 ## Positioning
 
@@ -37,10 +99,11 @@ off and the docs become the implementation contract.
 |---|---|---|
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
-| **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
+| **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI: files browser + sessions list/replay built; live PTY (xterm.js) terminal deferred to a later V1 phase |
 | **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) ~~scheduled job steps run without a policy decision or agent guardrail~~ ✅ **fixed** — job create/update/RunNow now gated under `task.run`, per-host signed `Decision` in `JOB_ASSIGN`, agent re-checks guardrail before every fire (fail-closed); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
-| **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap); remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
-| **M5 — Observe: fact collectors** | ⬜ Not started | R18–R20: agent collectors for service/config/cert facts. Server upsert into host_facts JSON. Read-only API endpoints + MCP read tools. |
+| **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap) + **SSE stream auth-gated ✅**; remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
+| **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
+| **M7 — Observe: Web UI pages** | ✅ Built (v0.5) | S0 shell + data pages for M1–M5 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, Provision, Users, Services, Certificates, Configs). Remaining: cert→config→service cross-links, config drift, task actions, live PTY; Alerts page is a labeled M6 placeholder. |
 
 ### M0 — Spine (complete)
 
@@ -120,13 +183,24 @@ Done so far:
 - ✅ **Tasks / Playbooks** (PRD §5.5, arch §4.5, §8.5): **versioned tasks** with 9 step kinds (`command`, `file`, `package`, `service`, `user`, `group`, `template`, `assert`, `reboot`), constrained **`when` guard** grammar (dotted fact refs, `==`/`!=`/`in [list]`, `and`/`or`, `!`, `file.exists(path)`), **task runs** recorded in `task_runs`/`task_run_steps` tables with per-step state (ok/changed/failed/skipped), **playbooks** bind a task + version + selector to hosts. Agent-side runner executes steps in order, stops on `failed`, reports aggregate state. Guardrail re-checks every run over the `task.run` action class. Server dispatches over the stream, waits for result, records audit events. CLI: `ctl tasks list|create|show|run|runs|run-show`, `ctl playbooks list|create`.
 - ✅ **Scheduled jobs** (PRD §5.4, arch §5.4.1): jobs = (selector, cron schedule, task). Server resolves the selector to concrete hosts at save/update time and pushes a per-host schedule (`JOB_ASSIGN` down). The agent runs each job on its own clock (robfig/cron), so a server outage does not stop scheduled work. Overlap policy (allow/skip/replace), failure policy (no_retry/retry with backoff). Job runs produce a `JobRunResult` (up) that the server records in `job_runs` (lineage) + audit. Assignments persist to disk (agent restart resumes schedules). **Policy-gated (security fix)**: create/update/`RunNow` evaluate the job's steps under the `task.run` action class per host BEFORE persisting (denied → `403 policy_denied`, nothing written); each `JOB_ASSIGN` carries a server-signed `Decision` (run_id = job id, bound to the policy bundle version); the agent re-checks it via the guardrail before **every** cron fire and fails closed (missing/stale/unsigned decision → run reported `denied`, no retry). **Selector edits reconcile assignments**: hosts that fall out of a narrowed selector are unassigned (`JOB_UNASSIGN`) so they stop firing with a stale decision. REST: `GET/POST /api/v1/jobs`, `PUT/DELETE /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/runs`, `POST /api/v1/jobs/:id/run`, `GET /api/v1/jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
 
+### M5 — Observe: fact collectors (complete)
+
+Done (R18–R20, the read side of the observe→act→verify loop):
+- ✅ **Agent collectors** (`internal/agent/factscollect`): **services** (systemd unit state from `ActiveState`, enabled, wants/after deps, restart policy, memory, last exit status — custom + operator-labelled units only), **webservice configs** (HAProxy + Nginx native validation + line/brace-depth topology parse; read-only), **TLS certs** (expiry/`days_remaining`, subject/issuer/serial, SAN, key type, chain check, in-process `crypto/x509` self-signed detection; bounded path scan, deduped).
+- ✅ **Transport**: new gRPC `OBSERVE_FACTS` envelope (kind 27) carrying a per-kind JSON blob; facts never spooled (collection runs off the loop goroutine, re-entrancy-guarded).
+- ✅ **Server ingest**: `internal/server/observe/facts.go` `ParseDocument` (null=absent, flat scalars + typed accessors) merges into a **single `host_facts` JSON document per host** — merge-on-write so concurrent fact streams never clobber each other. Keyed strictly by the authenticated agent id (client-supplied `host_id` ignored for storage).
+- ✅ **Read APIs** (viewer): `GET /api/v1/services?label&state&name&agent_id`, `GET /api/v1/certificates?agent_id&days_remaining_lt`, `GET /api/v1/configs?agent_id&kind`. Host-capped, unknown-expiry certs excluded from the days filter.
+- ✅ **Web UI pages** (M7, v0.5): Services / Certificates / Configs render real data with label/state/expiry filters.
+- ✅ **Tests**: parser unit tests incl. real generated certs (chained / broken-chain / multi-cert), the nginx vhost parser, `ActiveState` mapping; server `host_facts` merge + same-second collision probe; API shape tests.
+- Remaining: **M6 alert engine** (makes this actionable), **MCP read tools** (ship with the R11 server; these REST endpoints are their backing surface), config **drift detection** (R22) + **cross-fact correlation** (R21) rendering.
+
 ### Not started
 
-- M2 Web UI (xterm.js terminal + file browser frontend) — deferred to later V1 phase (backend complete)
+- Live PTY terminal in the web UI (xterm.js) — backend input/resize exist; the interactive terminal frontend is deferred
 - M3 known gaps (from the verification audit, tracked in Next steps): job dispatch E2E, reboot continuation
 - M4: approvals engine, full policy surface, MCP server (R11) + write tools
-- §6 observe layer + MCP read tools
-- M5: observe fact collectors; M6: alert engine; M7: UI pages; M8: installers, cloud-init, Helm, status page
+- M6: alert engine; M7 remaining: cross-links, drift, task actions; M8: installers, cloud-init, Helm, status page
+- MCP read tools (ship with the R11 MCP server; the M5 REST endpoints are their backing surface)
 
 ## Next steps
 
@@ -141,7 +215,7 @@ Done so far:
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
 11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; two known gaps tracked below
-12. **Web UI** — definition complete ([docs/ui-guidelines.md](docs/ui-guidelines.md) v0.4: mockup reconciled against real capability, capability-driven gating, S0–S5 slices). Prerequisites before S0: static asset serving (`go:embed`), `GET /api/v1/capabilities`; before S1: selector preview endpoint, host removal endpoint. See ui-guidelines §14.
+12. ~~**Web UI**~~ ✅ Done (v0.5) — buildless Vue 3 SPA in `internal/api/webui/`, served same-origin via `go:embed`; S0 shell + data pages for M1–M5; capability-gated; UI↔API shape tests + `scripts/ui-smoke.sh` headless render check. Remaining: live PTY (xterm.js), cert→config→service cross-links, config drift, task actions, Active Alerts (M6). See ui-guidelines §13–18.
 
 ### Next (priority order, from the M3 verification audit)
 
@@ -154,8 +228,8 @@ Done so far:
     explicitly defer in the PRD.
 16. **M4 — Governance** (local user auth ✅ done — see below): approvals engine (`require_approval` currently fails closed with
     "not yet available — M4"), full policy surface, MCP server (R11) + write tools.
-17. **Observe layer (§6)** + MCP read tools.
-18. Postgres backend; then **M5 — Distribution & polish** (installers, cloud-init, Helm).
+17. ~~**Observe layer (§6)**~~ ✅ Done (M5) — fact collectors + `host_facts` merge + read APIs + Web UI pages. Remaining: M6 alert engine, MCP read tools (with the R11 server).
+18. Postgres backend; then **M8 — Distribution & polish** (installers, cloud-init, Helm, status page).
 
 ## TLS / transport security (implemented)
 
