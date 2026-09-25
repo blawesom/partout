@@ -49,6 +49,11 @@ type Config struct {
 	ServerURL     string // server host:port (gRPC + REST, single port)
 	Token         string // one-time enrollment token (first boot)
 	FactsInterval int    // facts refresh, seconds
+	// ForceEnroll makes the agent enroll even when a local identity already
+	// exists. Used by embedded mode when the co-located server's database is
+	// fresh (no agents): the persisted identity is stale for this server, so
+	// the agent must (re-)enroll rather than loop on "unknown agent uuid".
+	ForceEnroll bool
 	// ObserveFactsInterval: structured fact upload cadence, seconds (M5, R18–R20).
 	ObserveFactsInterval int
 	// ServiceLabels: comma-separated operator labels marking custom units (M5, R18).

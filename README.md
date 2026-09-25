@@ -3,7 +3,6 @@
 **Remote host management control plane** — one Go binary to discover, execute against,
 configure, patch, and orchestrate work across Linux hosts, with a web UI and an MCP server
 for AI assistants.
-
 | Doc | What it covers | Status |
 |---|---|---|
 | [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions | **v0.5** (observe layer + Web UI shipped) |
@@ -15,12 +14,19 @@ for AI assistants.
 ## Quick start
 
 Five minutes to a working control plane with one managed host. Build once, then run a server
-and an agent. (Prefer a one-process demo? `./partout --mode=embedded` starts the server **and**
-a co-located local agent together — open the UI and it's already connected.)
+and an agent.
 
 ```bash
 go build -o partout ./cmd/partout
 ```
+
+> **Just want a one-process demo?** `./partout --mode=embedded` runs the server **and** a
+> co-located local agent together — the fleet is populated the moment you open the UI:
+> ```bash
+> PARTOUT_MODE=embedded PARTOUT_ADMIN_PASSWORD='change-me-123' ./partout
+> ```
+> Open <http://localhost:8443>, sign in as `admin` / `change-me-123`. No enrollment token or
+> second process needed.
 
 **1. Start the server** (plaintext, on one terminal). `PARTOUT_ADMIN_PASSWORD` bootstraps the
 first-run `admin` user for the **web UI**; `PARTOUT_TOKEN_ADMIN` gives the **CLI** a static
@@ -73,6 +79,30 @@ pages after the first facts upload.
 > The web **UI login form only accepts username/password** (a local user). If you start the
 > server with a static token but **no** `PARTOUT_ADMIN_PASSWORD`, the UI login form has no user
 > to sign in as — set `PARTOUT_ADMIN_PASSWORD` for UI access, and/or a static token for the CLI.
+
+### Demoing to a customer
+
+Read this before showing Partout to someone else.
+
+- **Turn on TLS: add `PARTOUT_TLS=on`.** The default is **plaintext HTTP bound to all
+  interfaces** (`0.0.0.0`), so on a shared/office network the admin login, command output, and
+  the SSE session token are on the wire in cleartext. `PARTOUT_TLS=on` bootstraps a local root
+  CA and serves HTTPS with mTLS on the agent stream — no per-host cert work, no external CA.
+  (The browser will warn once about the self-signed local CA; that's expected.) Alternatively
+  bind to loopback and tunnel.
+- **Start from a clean slate.** For a repeatable demo, use a throwaway dir:
+  `rm -rf /tmp/demo && mkdir -p /tmp/demo && cd /tmp/demo`. A fresh DB re-enrolls the local
+  agent automatically; a *stale* agent data dir against a *wiped* DB is also handled (it
+  re-enrolls), but keeping both fresh is simplest.
+- **Skip the Alerts page.** It is an honest **“M6 · not yet available”** placeholder. Fine to
+  acknowledge, but lead with what works.
+- **Suggested flow:** log in → **Fleet** (hosts + health cards) → **Execute** (pick a selector,
+  run `hostname`, watch live per-host output) → **Audit** (the action is recorded) → the three
+  **Observe** pages (Services, Certificates, Configs — real facts from the host). That walks the
+  observe → act → verify loop end to end.
+- **Don't open devtools during the demo.** Navigating straight to a gated/deep-linked route
+  (e.g. a disabled subsystem) logs a handled 404/503 to the console. The UI degrades gracefully,
+  but the red lines are distracting.
 
 ## Positioning
 

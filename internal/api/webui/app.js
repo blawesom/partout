@@ -70,7 +70,7 @@
         <label class="fld"><span>Username</span><input v-model="loginForm.username" autocomplete="username" autofocus /></label>
         <label class="fld"><span>Password</span><input v-model="loginForm.password" type="password" autocomplete="current-password" /></label>
         <div v-if="loginErr" class="err-box" style="margin-bottom:12px">{{ loginErr }}</div>
-        <button class="btn primary" style="width:100%;justify-content:center" :disabled="loginBusy">
+        <button type="submit" class="btn primary" style="width:100%;justify-content:center" :disabled="loginBusy">
           <span v-if="loginBusy" class="spin"></span> Sign in
         </button>
       </form>
@@ -702,9 +702,12 @@
       parts() { return this.route.split("/").filter(Boolean); },
       page() {
         const p = this.parts;
-        if (p[0] === "host") return "host";
-        if (p[0] === "exec") return "exec";
-        if (p[0] === "session") return "session";
+        // An id-less detail route (e.g. a hand-typed #/host) falls back to its
+        // list page rather than rendering a detail view that would fire doomed
+        // GET /hosts/ requests (404s in the console).
+        if (p[0] === "host") return p[1] ? "host" : "fleet";
+        if (p[0] === "exec") return p[1] ? "exec" : "execute";
+        if (p[0] === "session") return p[1] ? "session" : "sessions";
         if (p[0] === "obs") return "obs-" + (p[1] || "services");
         return p[0] || "fleet";
       },
@@ -889,19 +892,27 @@
       async loadHostDetail() {
         // Overview comes from GET /hosts/{id} (state/uuid/version/timestamps);
         // GET /hosts/{id}/facts only returns {host_id, ts, facts}.
+        this.host = null; this.hostFacts = null; this.hostEol = null;
+        if (!this.p1) return; // id-less route: nothing to load (never GET /hosts/)
         try { this.host = await this.api("/hosts/" + encodeURIComponent(this.p1)); } catch (e) { this.host = null; }
         try { this.hostFacts = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/facts"); } catch (e) { this.hostFacts = null; }
         try { this.hostEol = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/eol"); } catch (e) { this.hostEol = null; }
       },
       async loadExecutions() { try { const d = await this.api("/executions"); this.executions = d.items || []; } catch (e) { this.executions = []; } },
       async loadExecDetail() {
+        this.execDetail = null; this.execOutput = [];
+        if (!this.p1) return; // id-less route: never GET /executions/
         try { this.execDetail = await this.api("/executions/" + encodeURIComponent(this.p1)); } catch (e) { this.execDetail = null; return; }
         try { this.execOutput = (await this.api("/executions/" + encodeURIComponent(this.p1) + "/output")) || []; } catch (e) { this.execOutput = []; }
       },
       outFor(runId) { return this.execOutput.filter(o => o.run_id === runId); },
       async loadAudit() { const q = this.auditKind ? "?kind=" + encodeURIComponent(this.auditKind) : ""; try { const d = await this.api("/audit" + q); this.audit = d.items || []; } catch (e) { this.audit = []; } },
       async loadSessions() { try { const d = await this.api("/sessions"); this.sessions = d.sessions || d.items || []; } catch (e) { this.sessions = []; } },
-      async loadSessionReplay() { try { this.sessionReplay = await this.api("/sessions/" + encodeURIComponent(this.p1) + "/replay"); } catch (e) { this.sessionReplay = null; } },
+      async loadSessionReplay() {
+        this.sessionReplay = null;
+        if (!this.p1) return; // id-less route: never GET /sessions//replay
+        try { this.sessionReplay = await this.api("/sessions/" + encodeURIComponent(this.p1) + "/replay"); } catch (e) { this.sessionReplay = null; }
+      },
       replayText() {
         const fr = this.sessionReplay && this.sessionReplay.frames;
         if (!fr) return (this.sessionReplay ? JSON.stringify(this.sessionReplay) : "");

@@ -495,8 +495,10 @@ func runAgent(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		return fmt.Errorf("agent: identity: %w", err)
 	}
 
-	// One-time enrollment: fresh identity + token provided.
-	if cfg.Token != "" && fresh {
+	// One-time enrollment: fresh identity + token provided. Embedded mode may
+	// force this when the co-located server's DB is fresh but a stale identity
+	// file is still present (see ForceEnroll).
+	if cfg.Token != "" && (fresh || cfg.ForceEnroll) {
 		lg.Printf("agent: enrolling with token %s…", cfg.Token[:10]+"…")
 		factMap := agentfacts.Collector(id, cfg.FactsInterval)
 		res, err := agent.Enroll(ctx, cfg.ServerURL, cfg.Token, id, factMap, agent.EnrollOptions{CAFile: cfg.TLSCAFile})
@@ -586,16 +588,21 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 		agentCfg.TLSCAFile = filepath.Join(filepath.Dir(cfg.DBPath), "tls", "ca.crt")
 	}
 
-	// Determine whether this is a first boot (identity.json doesn't yet exist).
-	// Only then do we need an enrollment token.
+	// Determine whether this is a first boot. The decision is based on the
+	// SERVER's database (any agents registered?), not the agent's identity file:
+	// leftover identity material from a previous, since-wiped database must not
+	// suppress enrollment. Only on a fresh DB do we need an enrollment token.
 	dataDir := agentCfg.DataDir
 	if dataDir == "" {
 		home, _ := os.UserHomeDir()
 		dataDir = filepath.Join(home, ".partout", "agent")
 		agentCfg.DataDir = dataDir
 	}
+	// Best-effort static check first (cheap); the DB check below is
+	// authoritative once the server is up.
 	_, statErr := os.Stat(filepath.Join(dataDir, "identity.json"))
-	fresh := os.IsNotExist(statErr)
+	identityExists := statErr == nil
+	fresh := !identityExists
 
 	var wg sync.WaitGroup
 	serverErr := make(chan error, 1)
@@ -617,13 +624,38 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 		return fmt.Errorf("embedded: server not ready: %w", err)
 	}
 
+	// Authoritative freshness: does the server know of any agent? If the DB is
+	// empty the local agent must (re-)enroll even if an identity file exists.
+	// The enrollment-token endpoint requires an admin credential: prefer the
+	// static RBAC admin token, otherwise log in as the bootstrap admin user
+	// (PARTOUT_ADMIN_PASSWORD, or the generated <db dir>/admin_password.txt) —
+	// without this, embedded mode with only a password 401s and never enrolls.
+	adminTok, admErr := embeddedAdminToken(ctx, base, cfg, agentCfg.TLSCAFile, lg)
+	if admErr == nil {
+		if n, err := serverAgentCount(ctx, base, cfg.Port, adminTok, agentCfg.TLSCAFile); err == nil {
+			if n == 0 {
+				fresh = true
+			} else {
+				fresh = !identityExists
+			}
+		} else if lg != nil {
+			lg.Printf("embedded: agent count unavailable (%v); assuming %s", err, freshLabel(fresh))
+		}
+	} else if lg != nil {
+		lg.Printf("embedded: admin credential unavailable (%v)", admErr)
+	}
+
 	// ---- create enrollment token (only for first boot) ----------------------
 	if fresh {
-		tok, err := createEnrollmentToken(ctx, base, cfg.Port, cfg.AdminToken, agentCfg.TLSCAFile)
+		if admErr != nil {
+			return fmt.Errorf("embedded: admin credential: %w", admErr)
+		}
+		tok, err := createEnrollmentToken(ctx, base, cfg.Port, adminTok, agentCfg.TLSCAFile)
 		if err != nil {
 			return fmt.Errorf("embedded: create enrollment token: %w", err)
 		}
 		agentCfg.Token = tok
+		agentCfg.ForceEnroll = true
 		lg.Printf("embedded: local agent enrolled (token created)")
 	} else {
 		lg.Printf("embedded: local agent already enrolled; skipping enrollment")
@@ -686,6 +718,103 @@ func waitForReady(ctx context.Context, base string, port int, caFile string, lg 
 
 // createEnrollmentToken calls the admin enrollment-token endpoint and returns
 // the plaintext token.  In single-user mode (no admin token) no bearer is sent.
+func freshLabel(fresh bool) string {
+	if fresh {
+		return "first boot"
+	}
+	return "already enrolled"
+}
+
+// embeddedAdminToken returns a bearer token for the embedded agent's
+// server-side calls (agent count, enrollment token). It prefers the static
+// RBAC admin token and otherwise logs in as the bootstrap admin user, whose
+// password is PARTOUT_ADMIN_PASSWORD or, when that was left unset, the
+// generated <db dir>/admin_password.txt written on first run.
+func embeddedAdminToken(ctx context.Context, base string, cfg *config.Config, caFile string, lg *log.Logger) (string, error) {
+	if cfg.AdminToken != "" {
+		return cfg.AdminToken, nil
+	}
+	pw := cfg.AdminPassword
+	if pw == "" {
+		// First run with no password: the server generated one into the DB dir.
+		b, err := os.ReadFile(filepath.Join(filepath.Dir(cfg.DBPath), "admin_password.txt"))
+		if err != nil {
+			return "", fmt.Errorf("no static admin token and no readable admin password file: %w", err)
+		}
+		pw = strings.TrimSpace(string(b))
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	if caFile != "" {
+		if c, err := tlsHTTPClient(caFile); err == nil {
+			client = c
+		}
+	}
+	body, _ := json.Marshal(map[string]string{"username": "admin", "password": pw})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s:%d/api/v1/auth/login", base, cfg.Port), bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("login as admin: server returned %d: %s", resp.StatusCode, b)
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", fmt.Errorf("login as admin: empty token")
+	}
+	if lg != nil {
+		lg.Printf("embedded: authenticated as bootstrap admin for local enrollment")
+	}
+	return out.Token, nil
+}
+
+// serverAgentCount returns how many agents the server has registered (0 on a
+// fresh database). Used to decide whether the embedded agent must enroll.
+func serverAgentCount(ctx context.Context, base string, port int, adminTok, caFile string) (int, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	if caFile != "" {
+		if c, err := tlsHTTPClient(caFile); err == nil {
+			client = c
+		}
+	}
+	url := fmt.Sprintf("%s:%d/api/v1/hosts", base, port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	if adminTok != "" {
+		req.Header.Set("Authorization", "Bearer "+adminTok)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("GET /hosts: server returned %d: %s", resp.StatusCode, b)
+	}
+	var out struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, err
+	}
+	return len(out.Items), nil
+}
+
 func createEnrollmentToken(ctx context.Context, base string, port int, adminToken, caFile string) (string, error) {
 	url := fmt.Sprintf("%s:%d/api/v1/agents/enrollment-tokens", base, port)
 	client := &http.Client{Timeout: 5 * time.Second}

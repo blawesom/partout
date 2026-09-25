@@ -214,6 +214,146 @@ func TestEmbeddedRestart(t *testing.T) {
 	t.Logf("restart reconnected with same agent %s", first)
 }
 
+// ---- embedded: auth + identity edge cases (regression) ----------------------
+
+// runEmbeddedCfg is runEmbeddedOnce with a caller-supplied config, so tests can
+// exercise the password-only / stale-identity paths the static-token helper
+// never covers. Returns the connected host id ("" on failure).
+func runEmbeddedCfg(t *testing.T, cfg *config.Config, lg *log.Logger, wait time.Duration) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runEmbedded(ctx, cfg, lg) }()
+
+	url := "http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/api/v1/hosts"
+	client := &http.Client{Timeout: 2 * time.Second}
+
+	// The embedded server requires auth; use the static token when present,
+	// otherwise log in as the bootstrap admin (password or generated file).
+	adminTok := cfg.AdminToken
+	var hostID string
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		select {
+		case e := <-errCh:
+			t.Fatalf("runEmbedded exited early: %v", e)
+		default:
+		}
+		if adminTok == "" {
+			pw := cfg.AdminPassword
+			if pw == "" {
+				if b, err := os.ReadFile(filepath.Join(filepath.Dir(cfg.DBPath), "admin_password.txt")); err == nil {
+					pw = strings.TrimSpace(string(b))
+				}
+			}
+			if pw != "" {
+				body, _ := json.Marshal(map[string]string{"username": "admin", "password": pw})
+				if r, err := client.Post("http://127.0.0.1:"+strconv.Itoa(cfg.Port)+"/api/v1/auth/login",
+					"application/json", bytes.NewReader(body)); err == nil {
+					var out struct {
+						Token string `json:"token"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&out)
+					r.Body.Close()
+					adminTok = out.Token
+				}
+			}
+		}
+		if adminTok != "" {
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			req.Header.Set("Authorization", "Bearer "+adminTok)
+			if resp, err := client.Do(req); err == nil {
+				var body struct {
+					Items []struct {
+						ID    string `json:"id"`
+						State string `json:"state"`
+					} `json:"items"`
+				}
+				_ = json.NewDecoder(resp.Body).Decode(&body)
+				resp.Body.Close()
+				for _, h := range body.Items {
+					if h.State == "connected" {
+						hostID = h.ID
+					}
+				}
+			}
+		}
+		if hostID != "" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case e := <-errCh:
+		if e != nil && !errors.Is(e, context.Canceled) {
+			t.Fatalf("runEmbedded returned non-canceled error: %v", e)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("runEmbedded did not shut down within 15s")
+	}
+	return hostID
+}
+
+func newEmbeddedCfg(port int, dbPath, dataDir string) *config.Config {
+	return &config.Config{
+		Mode:          "embedded",
+		Port:          port,
+		DBPath:        dbPath,
+		DataDir:       dataDir,
+		FactsInterval: 3600,
+		Elevate:       "none",
+		Root:          "/",
+	}
+}
+
+// TestEmbeddedEnrollWithPasswordOnly is the regression for the enrollment
+// chicken-and-egg: embedded mode with PARTOUT_ADMIN_PASSWORD and NO static
+// token must still enroll its co-located agent. Previously
+// createEnrollmentToken sent no Authorization header → 401 → the agent looped
+// on "unknown agent uuid" and the fleet stayed empty. This escaped CI because
+// every other embedded test set AdminToken.
+func TestEmbeddedEnrollWithPasswordOnly(t *testing.T) {
+	port := freePort(t)
+	tmp := t.TempDir()
+	cfg := newEmbeddedCfg(port, filepath.Join(tmp, "pw.db"), filepath.Join(tmp, "agent"))
+	cfg.AdminPassword = "password-only-1" // no AdminToken
+
+	hostID := runEmbeddedCfg(t, cfg, log.New(io.Discard, "", 0), 30*time.Second)
+	if hostID == "" {
+		t.Fatal("embedded agent did not connect with a password-only server (no static token)")
+	}
+	t.Logf("password-only embedded agent connected as %s", hostID)
+}
+
+// TestEmbeddedStaleIdentityFreshDB is the regression for the demo-reset case:
+// an agent identity persisted from a previous run, but a wiped/replaced
+// database. The agent must re-enroll rather than loop on "unknown agent uuid".
+func TestEmbeddedStaleIdentityFreshDB(t *testing.T) {
+	base := freePort(t)
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "agent") // shared across both runs
+
+	// Run 1 creates the identity and enrolls it into db1.
+	cfg1 := newEmbeddedCfg(base, filepath.Join(tmp, "db1.db"), dataDir)
+	cfg1.AdminPassword = "password-only-1"
+	if id := runEmbeddedCfg(t, cfg1, log.New(io.Discard, "", 0), 30*time.Second); id == "" {
+		t.Fatal("first run did not connect")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "identity.json")); err != nil {
+		t.Fatalf("identity not persisted on first run: %v", err)
+	}
+
+	// Run 2: SAME identity, FRESH database. Must re-enroll and connect.
+	cfg2 := newEmbeddedCfg(base+1, filepath.Join(tmp, "db2.db"), dataDir)
+	cfg2.AdminPassword = "password-only-1"
+	if id := runEmbeddedCfg(t, cfg2, log.New(io.Discard, "", 0), 30*time.Second); id == "" {
+		t.Fatal("agent did not re-enroll against a fresh DB with a stale identity file")
+	}
+}
+
 // ---- host provisioning (REST wiring) ----------------------------------------
 
 // writeFakeFleet writes fake ssh/scp/ssh-keyscan/ssh-keygen binaries to binDir
