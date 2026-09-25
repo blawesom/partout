@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.4 — observe layer: services, configs, TLS certs
+**Status:** Draft v0.5 — observe layer (services, configs, TLS certs) + Web UI shipped
 **Date:** 2025-09-25
 
 ---
@@ -726,6 +726,8 @@ feature paywall (R14). Consequences that follow from "everything free":
 
 - **M0 — Spine:** modes, enrollment, Ed25519 auth, gRPC stream, spool,
   SQLite/Postgres dialect, SSE broker, UI shell. (This is ~80% of the scaffolding.)
+  *UI shell shipped in v0.5: buildless Vue 3 SPA in `internal/api/webui/` (see
+  `docs/ui-guidelines.md`), served same-origin via `go:embed`.*
 - **M1 — First write path:** ad-hoc command execution + streaming output + audit log + policy
   deny-list + RBAC. *Ship the safety floor before anything else mutates.* Host provisioning
   (R17) lands here — it is the first server-initiated write to a host, so it inherits the same
@@ -762,6 +764,10 @@ feature paywall (R14). Consequences that follow from "everything free":
   Cross-fact correlation (R21) and drift detection (R22) rendered in the UI.
   **Exit:** all three pages render from real data; alert count visible on `/fleet`;
   cross-links (cert → config → service) navigable.
+  *v0.5: the three pages (Services, Certificates, Configs) render real M5 data in the UI with
+  label/state/expiry filters. Remaining M7 scope — task actions, cert→config→service cross-links,
+  drift comparison, and the Active Alerts section on `/fleet` — is still open; the Alerts page is a
+  labeled M6 placeholder until the alert engine lands.*
 
 - **M8 — Distribution & polish:** installers (systemd unit, `docker run`, compose),
   cloud-init, Helm chart, status page integration. Independent of the observe layer;

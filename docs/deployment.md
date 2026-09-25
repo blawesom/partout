@@ -1,8 +1,8 @@
 # Partout — Deployment
 
-**Status:** Draft v0.4 — reflects the current implementation (M0–M4 complete,
-M5 in progress). Sections marked *proposed* describe planned work that is not yet
-wired into the binary.
+**Status:** Draft v0.5 — reflects the current implementation (M0–M5 complete, Web UI
+shipped, M6/M7-remainder in progress). Sections marked *proposed* describe planned work
+that is not yet wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
 
@@ -39,9 +39,12 @@ structured JSON via a new `OBSERVE_FACTS` gRPC envelope. Server-side
 R11 MCP server). No alerting yet (alert engine is M6). See `PRD.md` §14 for the
 M5–M8 milestone breakdown.
 
-**Not yet wired:** Web UI, elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
+**Not yet wired:** elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
 `none`/`/`), Postgres backend, the approvals engine + full policy surface, the MCP
-server write tools, alert engine (M6), and UI pages (M7).
+server write tools, and the alert engine (M6). **Web UI is shipped** (v0.5): open the main
+listener in a browser and log in — the fleet, execute, audit, and M1–M5 data pages (including
+Observe · Services/Certificates/Configs) are live. Remaining UI scope: the M6 Alerts page (now a
+labeled placeholder) and M7 cross-links/task-actions.
 
 ---
 
@@ -391,7 +394,8 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
    read the generated password from `<db dir>/admin_password.txt`), and/or set the RBAC
    bearer tokens (`PARTOUT_TOKEN_ADMIN/OPERATOR/VIEWER`) in `/etc/partout/server.env`;
    restart. Verify `GET /api/v1/hosts` without credentials → 401, with a bearer token
-   → 200. (The Web UI is not yet shipped — use `partout ctl` or REST/SSE.)
+   → 200. (The Web UI is shipped — open the main listener in a browser and log in as the admin
+   user; the API and UI share the same auth.)
 3. Mint an enrollment token: `partout ctl enroll-token --server … --token $ADMIN`.
 4. On the first host: install the agent (§3.2) with that token → `GET
    /api/v1/hosts` shows it `connected` with facts within ~10 s.
@@ -402,8 +406,10 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
    `exec.dispatch` audit row.
 7. Back up the DB file **and** `<db dir>/tls/` (CA + keys) **before** onboarding more
    hosts (ops §4.1).
+8. Open the UI: `http://<server>:8443/` (or `https://` with `PARTOUT_TLS=on`) → log in →
+   see the fleet, run a command from **Execute**, and browse Observe · Services/Certificates/Configs.
 
-> *Still to come (M4/M5):* the approvals engine, the Web UI, alert channels, and MCP.
+> *Still to come (M4/M6):* the approvals engine, the alert engine + Alerts UI page, and MCP.
 > Policy deny rules, host provisioning, secrets, and secret-key backup are wired today.
 
 ---

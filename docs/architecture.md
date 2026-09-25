@@ -20,7 +20,7 @@ partout/
 ├── cmd/partout/            # main: mode dispatch, flag/env config, first-run bootstrap
 ├── internal/
 │   ├── server/
-│   │   ├── api/            # REST v1 handlers (mux), authz middleware, RBAC
+│   │   ├── api/            # REST v1 handlers (mux), authz middleware, RBAC; webui/ = embedded SPA
 │   │   ├── sse/            # SSE broker: subscribe, fan-out, per-client buffers
 │   │   ├── mcp/            # MCP server (stdio + Streamable HTTP, OAuth2 PKCE)
 │   │   ├── control/        # dispatcher, selector resolution, approvals
@@ -61,7 +61,6 @@ partout/
 │   ├── sshutil/            # system ssh/scp/ssh-keygen wrapper (provisioning only; §3.5)
 │   ├── cryptoutil/         # ed25519 sign/verify, x25519, hkdf, aead helpers
 │   └── config/             # env parsing (R15), defaults, validation
-├── web/                    # Vue 3 + TS + Pinia + Tailwind + uPlot + xterm.js source
 ├── docs/                   # this directory
 ├── deploy/                 # systemd units, docker, compose, cloud-init, helm chart
 └── test/
@@ -1054,6 +1053,8 @@ error bodies `{code, message, details}`.
 | POST   | `/api/v1/executions/:id/cancel` | operator | Cancel a running execution |
 | GET    | `/api/v1/executions/:id/output` | viewer | Get command output (stdout/stderr) |
 | GET    | `/api/v1/hosts` | viewer | List connected hosts |
+| GET    | `/api/v1/hosts?selector=<expr>` | viewer | **B2**: resolve a selector to its host set (preview before dispatch; empty/bad → 400) |
+| GET    | `/api/v1/capabilities` | viewer | **B1**: per-subsystem booleans for the UI's data-driven gating (ui-guidelines §4) |
 | GET    | `/api/v1/hosts/:id` | viewer | Get host detail (state, tags, roles) |
 | GET    | `/api/v1/hosts/:id/facts` | viewer | Get latest fact set |
 | PUT    | `/api/v1/hosts/:id/facts` | operator | Update facts (agent-side) |
@@ -1237,26 +1238,25 @@ are dropped and re-subscribe (SSE retry) — never block the broker.
 
 ## 11. Frontend
 
-Stack (PRD R12): Vue 3 + TS + Pinia + Tailwind, uPlot for metrics, xterm.js for PTY,
-PWA. Page map = PRD §11. Implementation notes:
+Implemented (v0.5): a buildless Vue 3 single-file SPA in `internal/api/webui/` (index.html,
+app.js, style.css, with the Vue runtime vendored in `lib/` for offline use), embedded via
+`go:embed` and served same-origin on the main listener (`internal/api/static.go` wraps the API
+router: any GET that isn't an API/health route serves the SPA). State and nav live in one
+component; there is no router/pinia/tailwind toolchain, so `go build` needs no Node and the UI
+works offline. Page map = PRD §11. Notes:
 
-- One SSE subscription per page (or one app-wide, filtered) — no polling anywhere.
-- **Execute** page: selector input with live resolution preview (resolves on type, shows the
-  concrete host set before dispatch); per-host live output panes; cancel/timeout controls.
-- **Sessions**: xterm.js over SSE output + `POST /sessions/{id}/input` (PRD §5.2); replay from
-  stored recordings.
-- **Tasks & Playbooks**: step editor emits the JSON task model directly (no YAML in the UI);
-  `when` editor is a form over the constrained grammar.
-- **Audit**: filterable table, full-fidelity expansion for privileged commands (Decision 8).
-- Embedded as `embed.FS`; no separate build server; served on the main listener.
-- **Capability-gated UI**: one capability probe (`GET /api/v1/capabilities`) drives which nav
-  items and controls are enabled; not-yet-built surfaces render disabled with the milestone
-  named, and role-gated controls are visually distinct from not-yet-available ones (see
-  [ui-guidelines §4](ui-guidelines.md)).
-- **Selector preview**: the Execute page resolves and displays the concrete host set before
-  dispatch, via the planned selector filter on `/api/v1/hosts`.
+- One SSE subscription app-wide (`GET /api/v1/events`), filtered per page — no polling anywhere.
+- **Execute** page: selector input with a server-authoritative resolution preview via
+  `GET /api/v1/hosts?selector=` (B2); per-host live output panes; cancel control.
+- **Sessions**: list + replay from stored recordings; live PTY (xterm.js) is deferred.
+- **Audit**: filterable table.
+- **Observe** pages (Services / Certificates / Configs) render the M5 read endpoints; the
+  Alerts page is a labeled **M6** placeholder until the alert engine ships.
+- **Capability-gated UI**: the `GET /api/v1/capabilities` probe (B1) drives which nav items and
+  controls are enabled; not-yet-built surfaces render disabled with the milestone named, and
+  role-gated controls are visually distinct from not-yet-available ones (ui-guidelines §4).
 
-Layout, tokens, component inventory, state vocabulary, and the S0–S5 slicing live in
+Layout, tokens, component inventory, state vocabulary, and the S0–S7 slicing live in
 [ui-guidelines.md](ui-guidelines.md); `docs/ui-design.png` is the north-star mockup.
 
 ---

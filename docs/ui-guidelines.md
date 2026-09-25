@@ -1,15 +1,22 @@
 # Partout — Web UI Definition & Guidelines
 
-**Status:** Draft v0.4 — capacity reconciliation + slices (definition only, **not implementation**)
+**Status:** v0.5 — UI implemented (S0 shell + data pages for M1–M5). This document is the
+definition; `internal/api/webui/` is the build.
 **Companion docs:** `docs/ui-design.png` (north-star mockup), `PRD.md` (§3 principles, §11 Frontend,
 §15.1 decisions), `docs/architecture.md` (§10.1 API, §10.2 SSE, §11 Frontend),
 `docs/deployment.md` (§4 config)
-**Stack:** Vue 3 + TypeScript + Pinia + Tailwind; `xterm.js` (PTY), `uPlot` (metrics, later)
-**Serving:** Vite → `web/dist` → `go:embed`, served on the main listener. One binary, one origin.
+**Stack (implemented):** Vue 3 (single-file SPA, no build step) with the runtime vendored in
+`internal/api/webui/lib/` so a deployed binary works fully offline. No router/pinia/tailwind
+packages — state and nav are in one component; styles are hand-written CSS using the §7 tokens.
+`xterm.js` (PTY) and `uPlot` (metrics) are still deferred.
+**Serving:** `go:embed` of `internal/api/webui/`, served same-origin on the main listener.
+One binary, one origin. (Deviates from the original Vite→`web/dist` plan: the source *is* the
+artifact, so `go build` needs no Node and the UI is offline-capable.)
 
-> **Scope.** This document is *definition and guidelines*: what the UI covers, how it behaves,
-> how it is gated by real capability, and in what order it ships. It contains no code and does
-> not scaffold `web/`. It exists so each slice is small, honest, and verifiable.
+> **Scope.** Definition and guidelines: what the UI covers, how it behaves, how it is gated by
+> real capability, and in what order it ships. The implementation lives in
+> `internal/api/webui/` (index.html, app.js, style.css, lib/) plus the backend prerequisites B1
+> (`/api/v1/capabilities`) and B2 (`/api/v1/hosts?selector=`).
 
 ---
 
@@ -81,10 +88,10 @@ Status legend: **✅ real** · **🟡 shape mismatch** · **🔵 planned** (PRD 
 | Host tabs | overview (none) · updates ✅ · audit ✅ | 🟡 audit filter is global, not per-host | S1–S3 |
 | Fleet Health cards | `GET /api/v1/hosts` → `state` | 🟡 mock's state names are wrong; count is a client roll-up | S1 |
 | `382` hosts | cursor-paginated list, default limit 100 | 🟡 **no summary endpoint** — accepted, fleet is tens (§13) | S1 |
-| `Active Alerts` | `internal/server/observe` is empty; no thresholds, no alert store | ⛔ 🔵 M6 (R25) | S6 |
-| `Services` | new Observe sub-page (R18): service health table with state, labels, restart count, dep tree | ⛔ 🔵 M7 | S7 |
-| `Certificates` | new Observe sub-page (R20): cert inventory with expiry timeline, chain status, SANs | ⛔ 🔵 M7 | S7 |
-| `Configs` | new Observe sub-page (R19): config validity, topology, drift comparison | ⛔ 🔵 M7 | S7 |
+| `Active Alerts` | `internal/server/observe` has no thresholds/alert store yet; UI shows a labeled **M6 not-yet-available** placeholder page | 🔵 M6 (R25) — placeholder shipped | S6 |
+| `Services` | `GET /api/v1/services`; rendered as the Observe · Services page (state, labels, restart, memory) | ✅ (data page; M5 facts) | S7 |
+| `Certificates` | `GET /api/v1/certificates`; Observe · Certificates page (expiry, chain status, key, self-signed) | ✅ (data page; M5 facts) | S7 |
+| `Configs` | `GET /api/v1/configs`; Observe · Configs page (validity, backends/vhosts topology) | ✅ (data page; M5 facts) | S7 |
 | `Dry-Run Diff` terminal | `POST /api/v1/packages/apply {dry_run}` → **`dry_summary` string** | 🟡 no diff text, no per-package records | S3 |
 | `Held · <rule>` chip | policy engine returns matched **rule IDs** | ✅ | S4 |
 | `Update held for approval` banner | same rule IDs; `require_approval` **fails closed today** | ✅ as a *denial* | S4 |
@@ -94,8 +101,8 @@ Status legend: **✅ real** · **🟡 shape mismatch** · **🔵 planned** (PRD 
 | `Live Patch Stream` + `SSE connected` + `live` | single broker `GET /api/v1/events` | 🟡 `stream: …` is a **display label**, not a path | S0/S1 |
 | `CRITICAL CVE` badge | `/hosts/{id}/eol` + `/packages/updates` | 🟡 no fleet-wide "N hosts affected" correlation | S3 |
 | Terminal frame (traffic lights) | — | ✅ pure UI | S3 |
-| Static asset serving | **no `embed.FS`, no `FileServer`, no `web/`** | ⛔ **S0 prerequisite** | S0 |
-| Selector resolution preview | resolution happens *inside* `Dispatch`; no endpoint | ⛔ **backend addition B2** | S1 |
+| Static asset serving | `internal/api/webui/` `go:embed` + SPA fallback (`internal/api/static.go`) | ✅ | S0 |
+| Selector resolution preview | `GET /api/v1/hosts?selector=<sel>` (B2) | ✅ | S1 |
 
 ### Selector grammar caveat
 
@@ -441,6 +448,14 @@ Slices follow **implementation progress**, not the mockup's ambition. Fleet-scal
 **tens of hosts** (≤ ~200). Client-side roll-up and client-side filtering are accepted at this
 scale; revisit if fleet size grows.
 
+**Implementation status (v0.5):** S0 (shell, login, capabilities, SSE) is built. Data pages are
+live for the M1–M5 backend: Fleet, Execute (with B2 selector preview + live per-host output),
+Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, Provision, Users, and the three
+Observe data pages (Services, Certificates, Configs). S4's `Approve & Apply` and S6's Active
+Alerts remain not-yet-available placeholders (M4/M4-approvals, M6). The PTY terminal (xterm.js)
+is not yet in the UI — the Sessions page lists sessions and shows replay, but live PTY input is
+deferred with `xterm.js`.
+
 | Slice | Capability required (all ✅ unless marked) | Mockup elements **enabled** | Mockup elements **greyed + labeled** | Exit criteria |
 |---|---|---|---|---|
 | **S0 — Shell** | asset embedding (**new**), login, `auth/me`, capabilities (**B1**) | sidebar, brand + port badge, user card, breadcrumb, nav, top bar, `SSE connected` / `live` | `Observe · Services`, `Observe · Certificates`, `Observe · Configs`, `Active Alerts`, `Approve & Apply` → *"not yet available (M7/M6/M4)"* | Login → shell renders; nav reflects capabilities; disabled items self-explain |
@@ -518,6 +533,10 @@ tags/labels API (dropped).
 15. **Host tabs:** Overview · Facts · Terminal · Files · Updates · Audit.
 16. **Host-scoped audit** = client-side filter of `GET /audit` until B4.
 17. **Accessibility floor:** WCAG AA, full keyboard operation, `prefers-reduced-motion` honoured, no color-only state.
+18. **Buildless SPA (v0.5):** the UI is a single-file Vue 3 SPA in `internal/api/webui/` with the
+    runtime vendored in `lib/` (offline-capable, no Node in `go build`). This supersedes decision 12's
+    Vite→`web/dist` plan; the source is the artifact. Backend prerequisites B1 (`/capabilities`) and
+    B2 (`/hosts?selector=`) are implemented.
 18. **Brand lockup** is two lines (`Partout` / `Fleet Management`) to fit 270px.
 19. **Host removal** action added to host detail with confirmation (needs B3).
 

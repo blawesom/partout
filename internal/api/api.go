@@ -117,7 +117,16 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// admin user management.
 	handler.RegisterAuth(mux)
 
+	// Capability probe for the UI's data-driven gating (ui-guidelines B1).
+	handler.RegisterCapabilities(mux)
+
 	handler.router = mux
+
+	// Embedded web UI (ui-guidelines S0). Wraps the API mux: any GET that
+	// isn't an API/health route serves the SPA. Installed last so it sees a
+	// fully-populated router.
+	handler.RegisterStatic()
+
 	return handler
 }
 

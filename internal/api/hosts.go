@@ -45,6 +45,28 @@ func (h *Handler) hostEntry(id string) (hostEntry, error) {
 }
 
 func (h *Handler) handleListHosts(w http.ResponseWriter, r *http.Request) {
+	// B2 (ui-guidelines S1): ?selector=<expr> returns the resolved host set
+	// for a preview before dispatch. Resolution is server-authoritative; the
+	// UI renders exactly what this returns. An unparseable selector is a 400
+	// and an empty set is an explicit {count:0}, never a silent no-op.
+	if sel := r.URL.Query().Get("selector"); sel != "" {
+		hosts, err := store.NewResolver(h.st).ResolveSelector(sel)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid selector: "+err.Error(), nil)
+			return
+		}
+		items := make([]map[string]any, 0, len(hosts))
+		for _, hst := range hosts {
+			items = append(items, map[string]any{
+				"id":    hst.ID,
+				"tags":  hst.Tags,
+				"roles": hst.Roles,
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"count": len(items), "items": items})
+		return
+	}
+
 	limit, cursor := pageParams(r, 100)
 
 	agents, err := h.st.HostsPage(limit, cursor)

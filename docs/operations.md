@@ -1,8 +1,8 @@
 # Partout — Operations
 
-**Status:** Draft v0.4 — day-2 runbook for the control plane. Reflects the current
-implementation (M0–M4 complete, M5 in progress) where stated; steps for features that
-ship later are marked *(proposed)*.
+**Status:** Draft v0.5 — day-2 runbook for the control plane. Reflects the current
+implementation (M0–M5 complete, Web UI shipped, M6/M7-remainder in progress) where stated;
+steps for features that ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
 
 Day-2 guide for the Partout control plane: first-time setup, daily operations, backups, upgrades,
@@ -28,11 +28,14 @@ incident response, capacity, compliance, and a go-live checklist.
   `/certificates`, `/configs`). No alerting yet (alert engine is M6).
 - **M6** (planned): alert engine — threshold rules, evaluation, firing/resolved states,
   SSE fan-out. Alert store (`alerts`, `alert_rules` tables).
-- **M7** (planned): UI pages — Services, Certificates, Configs sub-pages.
+- **M7 (partial, v0.5)**: UI pages — the embedded Web UI now ships the Observe
+  Services/Certificates/Configs data pages (plus the M1–M5 control-plane pages); the remaining
+  M7 scope (cross-links, task actions, Active Alerts section) is still open.
 - **M8** (planned): Distribution & polish — installers, cloud-init, Helm.
 > - **M4 in progress**: local user auth (login, sessions, user management) is done; the
 >   approvals engine, full policy surface, and MCP server are still to come.
-> - No Web UI yet: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
+> - **Web UI shipped (v0.5)**: open the main listener in a browser and log in
+>   (`docs/deployment.md` §6 step 8). `partout ctl` / REST / SSE remain available for scripts.
 > - Not wired (planned, see deployment §4.4): `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation
 >   hardcoded `none`), `PARTOUT_SPOOL_*`, `PARTOUT_RETENTION_*` (except
 >   `PARTOUT_SESSION_RETENTION_DAYS`), `PARTOUT_MAX_*`, `PARTOUT_MCP_ENABLED`,
@@ -86,7 +89,7 @@ Step-by-step bring-up, also referenced in deployment §6:
    partout ctl --server … --token $ADMIN …
    ```
 3. **Verify the health endpoint**: `curl -sf http://localhost:8443/healthz` should return 200.
-   *(The Web UI is not yet shipped; use `partout ctl` or REST/SSE.)*
+   Open `http://localhost:8443/` in a browser to reach the Web UI (log in as the admin user).
 4. **Create a baseline policy** *(v0.2 — implemented on tag `v0.2.0`; the engine is a
    default-allow deny-list, and `require_approval` acts as a hard deny until the M4 approvals
    engine)*:
