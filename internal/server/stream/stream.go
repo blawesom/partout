@@ -22,6 +22,7 @@ import (
 	"github.com/blawesom/partout/internal/hsauth"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/store"
+	"github.com/blawesom/partout/internal/server/observe"
 )
 
 // Emitter is the subset of sse.Broker the handler needs.
@@ -79,6 +80,11 @@ type Handler struct {
 	// job run (M3, PRD §5.4). The jobs controller records the job_run row +
 	// audit event.
 	JobRunResultHook func(agentID string, r *pb.JobRunResult)
+
+	// ObserveFactsHook, if set, is called when an agent reports structured
+	// observe facts (M5). It receives the agent ID and the raw JSON blob
+	// (already merged into host_facts).
+	ObserveFactsHook func(agentID string)
 }
 
 // NewHandler builds a stream handler.
@@ -342,6 +348,28 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		jr := msg.GetJobRunResult()
 		if h.JobRunResultHook != nil {
 			h.JobRunResultHook(sess.AgentID, jr)
+		}
+	case msg.GetObserveFacts() != nil:
+		of := msg.GetObserveFacts()
+		// Merge structured facts into host_facts JSON blob (M5).
+		if blob, err := h.st.LatestHostFactsJSON(sess.AgentID); err == nil {
+			merged, err := observe.Ingest(blob, &pb.ObserveFacts{
+				Kind:   of.Kind,
+				Json:   of.Json,
+				HostId: of.HostId,
+			})
+			if err != nil {
+				h.log.Printf("stream: merge observe facts %s: %v", of.Kind, err)
+			} else {
+				if err := h.st.UpsertHostFactsJSON(sess.AgentID, merged); err != nil {
+					h.log.Printf("stream: upsert observe facts %s: %v", of.Kind, err)
+				}
+			}
+		} else {
+			h.log.Printf("stream: get host facts for %s: %v", sess.AgentID, err)
+		}
+		if h.ObserveFactsHook != nil {
+			h.ObserveFactsHook(sess.AgentID)
 		}
 	case msg.GetSessionData() != nil:
 		sd := msg.GetSessionData()

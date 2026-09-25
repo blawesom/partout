@@ -65,6 +65,7 @@ const (
 	EnvelopeKind_JOB_ASSIGN         EnvelopeKind = 24 // down: server assigns a job to an agent
 	EnvelopeKind_JOB_UNASSIGN       EnvelopeKind = 25 // down: server removes a job from an agent
 	EnvelopeKind_JOB_RUN_RESULT     EnvelopeKind = 26 // up: agent reports job run result
+	EnvelopeKind_OBSERVE_FACTS     EnvelopeKind = 27 // up: structured facts (services, configs, certs) (M5)
 	// Handshake (per stream)
 	EnvelopeKind_CHALLENGE  EnvelopeKind = 40 // down: server issues
 	EnvelopeKind_AUTH_PROOF EnvelopeKind = 41 // up: agent replies
@@ -391,6 +392,10 @@ type Envelope struct {
 	Seq     uint64                 `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`                        // per-direction monotonic (ordering / loss)
 	CorrId  string                 `protobuf:"bytes,4,opt,name=corr_id,json=corrId,proto3" json:"corr_id,omitempty"`     // run_id / request correlation
 	TtlUnix int64                  `protobuf:"varint,5,opt,name=ttl_unix,json=ttlUnix,proto3" json:"ttl_unix,omitempty"` // expiry for queued down envelopes
+	// M5: ObserveFacts fields — when Kind == "OBSERVE_FACTS", the
+	// structured fact JSON is in Events and Kind label is in ObserveFactsKind.
+	ObserveFactsKind string              `protobuf:"bytes,6,opt,name=observe_facts_kind,json=observeFactsKind,proto3" json:"observe_facts_kind,omitempty"`
+	Events           []byte              `protobuf:"bytes,7,opt,name=events,proto3" json:"events,omitempty"`
 	// Types that are valid to be assigned to Payload:
 	//
 	//	*Envelope_Heartbeat
@@ -483,6 +488,14 @@ func (x *Envelope) GetCorrId() string {
 	}
 	return ""
 }
+
+func (x *Envelope) GetObserveFactsKind() string {
+	if x != nil {
+		return x.ObserveFactsKind
+	}
+	return ""
+}
+
 
 func (x *Envelope) GetTtlUnix() int64 {
 	if x != nil {
@@ -924,6 +937,21 @@ func (*Envelope_PkgOp) isEnvelope_Payload() {}
 func (*Envelope_Challenge) isEnvelope_Payload() {}
 
 func (*Envelope_AuthProof) isEnvelope_Payload() {}
+
+// GetObserveFacts returns the ObserveFacts payload from an Envelope
+// (M5, R18–R20). When the envelope Kind is "OBSERVE_FACTS", the
+// structured fact JSON is in Events and the kind label is in
+// ObserveFactsKind.
+func (x *Envelope) GetObserveFacts() *ObserveFacts {
+	if x == nil || x.Kind != EnvelopeKind_OBSERVE_FACTS {
+		return nil
+	}
+	return &ObserveFacts{
+		Kind:   x.ObserveFactsKind,
+		Json:   string(x.Events),
+		HostId: x.CorrId,
+	}
+}
 
 // Ack is sent by the receiver of an envelope to confirm delivery (and, for
 // down envelopes, the guardrail re-check outcome).
@@ -4371,4 +4399,37 @@ func file_proto_partout_partout_proto_init() {
 	File_proto_partout_partout_proto = out.File
 	file_proto_partout_partout_proto_goTypes = nil
 	file_proto_partout_partout_proto_depIdxs = nil
+}
+
+// ---- ObserveFacts (M5, R18–R20) -------------------------------------------
+// Structured fact uploads from the agent to the server. The server stores the
+// JSON blob as a key in the host_facts row, alongside the flat FactsBatch.
+// Each observation kind (services, configs, certs) uses the same envelope
+// with a different `kind` label.
+
+type ObserveFacts struct {
+	Kind    string // "services" | "configs" | "certs"
+	Json    string // JSON blob (see architecture §7.2 for schema)
+	HostId  string // agent_id for audit correlation
+}
+
+func (x *ObserveFacts) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ObserveFacts) GetJson() string {
+	if x != nil {
+		return x.Json
+	}
+	return ""
+}
+
+func (x *ObserveFacts) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
 }

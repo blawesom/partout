@@ -361,3 +361,32 @@ func (s *Store) Groups() (map[string]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// UpsertHostFactsJSON stores a structured fact JSON blob for an agent
+// (M5, R18–R20). The blob is stored as-is in the `data` column, alongside
+// the flat FactsBatch. The blob is a JSON object with keys like
+// "services_detailed", "configs", "certificates".
+func (s *Store) UpsertHostFactsJSON(agentID string, blob string) error {
+	if blob == "" {
+		return nil
+	}
+	ts := now()
+	_, err := s.db.Exec(`
+		INSERT INTO host_facts(agent_id, ts, data) VALUES(?,?,?)
+		ON CONFLICT(agent_id, ts) DO UPDATE SET data=excluded.data
+	`, agentID, ts, blob)
+	return err
+}
+
+// LatestHostFactsJSON returns the most recent structured fact JSON blob
+// for an agent (M5). Returns empty string if no facts exist.
+func (s *Store) LatestHostFactsJSON(agentID string) (string, error) {
+	var data string
+	err := s.db.QueryRow(`
+		SELECT data FROM host_facts WHERE agent_id=? ORDER BY ts DESC LIMIT 1
+	`, agentID).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return data, err
+}
