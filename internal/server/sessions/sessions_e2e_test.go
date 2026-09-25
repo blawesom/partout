@@ -104,33 +104,53 @@ func startSessionsServerFull(t *testing.T) (*store.Store, *sessions.Manager, *st
 		t.Fatalf("Send proof: %v", err)
 	}
 
-	// Fake PTY loop.
+	// Fake PTY loop. All stream access (Send/Recv) happens through this
+	// single loop; cleanup signals stop and waits for done before
+	// CloseSend, so the stream is never used concurrently (race-safe).
+	stop := make(chan struct{})
 	done := make(chan struct{})
+	type downMsg struct {
+		env *pb.Envelope
+		err error
+	}
+	down := make(chan downMsg, 1)
+	launchRecv := func() {
+		go func() {
+			env, err := s.Recv()
+			down <- downMsg{env: env, err: err}
+		}()
+	}
+	launchRecv()
 	go func() {
 		defer close(done)
 		for {
-			down, err := s.Recv()
-			if err != nil {
+			select {
+			case <-stop:
 				return
-			}
-			switch {
-			case down.GetSessionOpen() != nil:
-				o := down.GetSessionOpen()
-				_ = s.Send(&pb.Envelope{
-					Kind: pb.EnvelopeKind_SESSION_DATA,
-					Payload: &pb.Envelope_SessionData{SessionData: &pb.SessionData{
-						SessionId: o.SessionId, Seq: 0, Data: []byte("hello pty\n"),
-					}},
-				})
-				// Stay open (no result) until SESSION_CLOSE.
-			case down.GetSessionClose() != nil:
-				c := down.GetSessionClose()
-				_ = s.Send(&pb.Envelope{
-					Kind: pb.EnvelopeKind_SESSION_RESULT,
-					Payload: &pb.Envelope_SessionResult{SessionResult: &pb.SessionResult{
-						SessionId: c.SessionId, ExitCode: 0, State: "succeeded", DurationMs: 1,
-					}},
-				})
+			case m := <-down:
+				if m.err != nil {
+					return
+				}
+				switch {
+				case m.env.GetSessionOpen() != nil:
+					o := m.env.GetSessionOpen()
+					_ = s.Send(&pb.Envelope{
+						Kind: pb.EnvelopeKind_SESSION_DATA,
+						Payload: &pb.Envelope_SessionData{SessionData: &pb.SessionData{
+							SessionId: o.SessionId, Seq: 0, Data: []byte("hello pty\n"),
+						}},
+					})
+					// Stay open (no result) until SESSION_CLOSE.
+				case m.env.GetSessionClose() != nil:
+					c := m.env.GetSessionClose()
+					_ = s.Send(&pb.Envelope{
+						Kind: pb.EnvelopeKind_SESSION_RESULT,
+						Payload: &pb.Envelope_SessionResult{SessionResult: &pb.SessionResult{
+							SessionId: c.SessionId, ExitCode: 0, State: "succeeded", DurationMs: 1,
+						}},
+					})
+				}
+				launchRecv()
 			}
 		}
 	}()
@@ -157,11 +177,12 @@ func startSessionsServerFull(t *testing.T) (*store.Store, *sessions.Manager, *st
 	}
 
 	cleanup := func() {
-		s.CloseSend()
+		close(stop)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
 		}
+		s.CloseSend()
 		cancel()
 		conn.Close()
 		st.Close()
