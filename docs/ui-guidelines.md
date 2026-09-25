@@ -439,6 +439,11 @@ enabled.
 8. **Selector fidelity.** Always show the concrete resolved host set before dispatch.
 9. **Every stream widget names its stream** and shows a live/reconnecting state.
 10. **No dead chrome.** Disabled controls explain why.
+11. **UI↔API shapes are pinned by tests.** The SPA has no compile-time link to the handlers,
+    so `internal/api/ui_shape_test.go` asserts the container keys/fields each page reads, and
+    `scripts/ui-smoke.sh` renders the real SPA in a headless DOM against a live server and
+    asserts real data appears on every page. Add a row to the smoke script when adding a page
+    field — a renamed API key otherwise blanks a page without failing any Go test.
 
 ---
 
@@ -550,3 +555,23 @@ None blocking. Two cosmetic items to confirm during S0 review:
    account menu.
 2. Whether `Monitoring` appears in the sidebar at all before M7, or is omitted and introduced
    with the observe layer (currently: shown, greyed, per the no-dead-chrome rule).
+
+---
+
+## 18. Verifying the UI
+
+```bash
+# 1. Shape contract: the response keys/fields each page reads (runs in CI).
+go test ./internal/api/ -run TestUIShape -v
+
+# 2. End-to-end render: boots an embedded server + agent, seeds data, renders the
+#    real SPA in a headless DOM and asserts real data on every page.
+#    Needs node/npm (installs jsdom itself) and a free port.
+bash scripts/ui-smoke.sh
+```
+
+The smoke script is the guard against the failure mode this layer is prone to: the UI has no
+compile-time link to the API, so a handler rename or a loader reading the wrong response key
+blanks a page silently. It found the `/secrets` `{secrets:[...]}` wrapper, `/files/list`
+requiring `agent_id`, `/hosts/{id}/facts` not carrying the overview fields, and the per-host
+`/packages/updates` requirement.

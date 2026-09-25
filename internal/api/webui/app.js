@@ -43,6 +43,11 @@
     if (["activating", "deactivating", "reloading"].includes(u.state)) return { cls: "info", label: u.state };
     return { cls: "neutral", label: u.state || "inactive" };
   }
+  // EOL state vocabulary: supported|ending_soon|ended|unknown (server EOLState).
+  function eolBadge(e) {
+    const m = { ended: { cls: "bad", label: "end-of-life" }, ending_soon: { cls: "warn", label: "ending soon" }, supported: { cls: "ok", label: "supported" }, unknown: { cls: "neutral", label: "unknown" } };
+    return m[e && e.state] || { cls: "neutral", label: (e && e.state) || "unknown" };
+  }
   function buildQ(params) {
     const q = Object.entries(params).filter(([, v]) => v !== "" && v != null).map(([k, v]) => k + "=" + encodeURIComponent(v)).join("&");
     return q ? "?" + q : "";
@@ -173,11 +178,13 @@
                 <h2>{{ p1 }}</h2>
                 <p class="cap">Host overview</p>
                 <dl class="kv">
-                  <dt>State</dt><dd><span class="badge" :class="agentBadge((hostFacts && hostFacts.state) || 'disconnected').cls">{{ agentBadge((hostFacts && hostFacts.state) || 'disconnected').label }}</span></dd>
-                  <dt>UUID</dt><dd class="mono">{{ hostFacts && hostFacts.uuid }}</dd>
-                  <dt>Version</dt><dd class="mono">{{ (hostFacts && hostFacts.version) || '—' }}</dd>
-                  <dt>First seen</dt><dd>{{ fmtDate(hostFacts && hostFacts.first_seen) }}</dd>
-                  <dt>Last seen</dt><dd>{{ fmtAgo(hostFacts && hostFacts.last_seen) }}</dd>
+                  <dt>State</dt><dd><span class="badge" :class="agentBadge((host && host.state) || 'disconnected').cls">{{ agentBadge((host && host.state) || 'disconnected').label }}</span></dd>
+                  <dt>UUID</dt><dd class="mono">{{ (host && host.uuid) || '—' }}</dd>
+                  <dt>Version</dt><dd class="mono">{{ (host && host.version) || '—' }}</dd>
+                  <dt>First seen</dt><dd>{{ host ? fmtDate(host.first_seen) : '—' }}</dd>
+                  <dt>Last seen</dt><dd>{{ host ? fmtAgo(host.last_seen) : '—' }}</dd>
+                  <dt v-if="host && host.roles && host.roles.length">Roles</dt>
+                  <dd v-if="host && host.roles && host.roles.length"><span class="chip" v-for="r in host.roles" :key="r">{{ r }}</span></dd>
                 </dl>
               </div>
               <div class="card">
@@ -185,10 +192,12 @@
                 <p class="cap">Live from endoflife.date (external data)</p>
                 <template v-if="hostEol && hostEol.distro">
                   <dl class="kv">
-                    <dt>Distro</dt><dd>{{ hostEol.distro }}</dd>
-                    <dt>Cycle</dt><dd class="mono">{{ hostEol.cycle }}</dd>
-                    <dt>EOL</dt><dd>{{ hostEol.eol || (hostEol.eol_date ? fmtDate(hostEol.eol_date) : '—') }}</dd>
-                    <dt>Status</dt><dd><span class="badge" :class="hostEol.eol ? 'bad':'ok'">{{ hostEol.eol ? 'end-of-life' : 'supported' }}</span></dd>
+                    <dt>Distro</dt><dd>{{ hostEol.distro }} <span class="mono muted">{{ hostEol.cycle }}</span></dd>
+                    <dt>Status</dt><dd><span class="badge" :class="eolBadge(hostEol).cls">{{ eolBadge(hostEol).label }}</span></dd>
+                    <dt>EOL date</dt><dd>{{ hostEol.eol_date || '—' }}</dd>
+                    <dt v-if="hostEol.extended_support">Extended support</dt>
+                    <dd v-if="hostEol.extended_support">{{ hostEol.extended_support }}</dd>
+                    <dt>Feed age</dt><dd class="muted">{{ hostEol.cache_age_days }}d</dd>
                   </dl>
                 </template>
                 <p v-else class="muted">No EOL data (external data not wired or distro unknown).</p>
@@ -342,8 +351,7 @@
           <h1 class="page">Files</h1>
           <p class="page-sub">Host file browser (M2).</p>
           <div class="toolbar">
-            <select v-model="fileHost" style="max-width:260px" @change="fileDir='/'">
-              <option value="">All / default host</option>
+            <select :value="fileHost" style="max-width:260px" @change="pickFileHost($event.target.value)">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
             </select>
             <input v-model="fileDir" class="mono" style="flex:1" @keyup.enter="listFiles" />
@@ -352,15 +360,15 @@
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Name</th><th>Size</th><th>Mode</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>Size</th><th>Mode</th><th>Modified</th></tr></thead>
               <tbody>
                 <tr v-for="(f,i) in fileEntries" :key="i">
-                  <td class="mono" :style="{cursor: f.type==='dir'?'pointer':'default'}" @click="openFile(f)">{{ f.type==='dir'?'📁':'📄' }} {{ f.name }}</td>
-                  <td class="mono">{{ f.type==='file' ? fmtBytes(f.size) : '—' }}</td>
+                  <td class="mono" :style="{cursor: f.is_dir?'pointer':'default'}" @click="openFile(f)">{{ f.is_dir ? '📁' : (f.is_symlink ? '🔗' : '📄') }} {{ f.name }}</td>
+                  <td class="mono">{{ f.is_dir ? '—' : fmtBytes(f.size) }}</td>
                   <td class="mono">{{ f.mode || '—' }}</td>
-                  <td></td>
+                  <td class="muted">{{ fmtAgo(f.mtime_unix) }}</td>
                 </tr>
-                <tr v-if="!fileLoading && !fileEntries.length"><td colspan="4"><div class="empty">{{ fileHost ? 'Empty or no access.' : 'Pick a host to browse.' }}</div></td></tr>
+                <tr v-if="!fileLoading && !fileEntries.length"><td colspan="4"><div class="empty">{{ fileHost ? 'Empty or no access.' : 'No hosts available.' }}</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -372,16 +380,18 @@
           <p class="page-sub">Scheduled jobs (M3).</p>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>ID</th><th>Command</th><th>Schedule</th><th>Selector</th><th></th></tr></thead>
+              <thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Schedule</th><th>Selector</th><th>Enabled</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="j in jobs" :key="j.id">
                   <td class="mono">{{ j.id }}</td>
-                  <td class="mono">{{ j.cmd || j.command }}</td>
-                  <td class="mono">{{ j.cron || j.schedule }}</td>
+                  <td>{{ j.name }}</td>
+                  <td class="mono">{{ j.task_id }}<template v-if="j.task_version">@{{ j.task_version }}</template></td>
+                  <td class="mono">{{ j.cron }}</td>
                   <td class="mono">{{ j.selector }}</td>
+                  <td>{{ j.enabled ? 'yes' : 'no' }}</td>
                   <td><button class="btn sm" :disabled="!isOperator" @click="runJob(j)">Run now</button></td>
                 </tr>
-                <tr v-if="!jobs.length"><td colspan="5"><div class="empty">No jobs.</div></td></tr>
+                <tr v-if="!jobs.length"><td colspan="7"><div class="empty">No jobs.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -394,19 +404,23 @@
           <div class="grid cols-2">
             <div class="card">
               <h2>Tasks</h2><p class="cap">Single-step units</p>
-              <table class="tbl"><thead><tr><th>ID</th><th>Command</th></tr></thead>
+              <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Description</th></tr></thead>
                 <tbody>
-                  <tr v-for="t in tasks" :key="t.id"><td class="mono">{{ t.id }}</td><td class="mono">{{ t.cmd || t.command }}</td></tr>
-                  <tr v-if="!tasks.length"><td colspan="2"><div class="empty">No tasks.</div></td></tr>
+                  <tr v-for="t in tasks" :key="t.id"><td class="mono">{{ t.id }}</td><td>{{ t.name }}</td><td class="muted">{{ t.description || '—' }}</td></tr>
+                  <tr v-if="!tasks.length"><td colspan="3"><div class="empty">No tasks.</div></td></tr>
                 </tbody>
               </table>
             </div>
             <div class="card">
               <h2>Playbooks</h2><p class="cap">Sequences of tasks</p>
-              <table class="tbl"><thead><tr><th>ID</th><th>Steps</th></tr></thead>
+              <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Selector</th></tr></thead>
                 <tbody>
-                  <tr v-for="p in playbooks" :key="p.id"><td class="mono">{{ p.id }}</td><td class="mono">{{ (p.steps||p.tasks||[]).length }}</td></tr>
-                  <tr v-if="!playbooks.length"><td colspan="2"><div class="empty">No playbooks.</div></td></tr>
+                  <tr v-for="p in playbooks" :key="p.id">
+                    <td class="mono">{{ p.id }}</td><td>{{ p.name }}</td>
+                    <td class="mono">{{ p.task_id }}<template v-if="p.task_version">@{{ p.task_version }}</template></td>
+                    <td class="mono">{{ p.selector || '—' }}</td>
+                  </tr>
+                  <tr v-if="!playbooks.length"><td colspan="4"><div class="empty">No playbooks.</div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -416,22 +430,28 @@
         <!-- ============ UPDATES ============ -->
         <section v-else-if="page==='updates'">
           <h1 class="page">Updates</h1>
-          <p class="page-sub">Available package updates per host (M3).</p>
+          <p class="page-sub">Available package updates for the selected host (M3).</p>
           <div class="toolbar">
-            <select v-model="fileHost" style="max-width:260px" @change="loadUpdates">
-              <option value="">All hosts</option>
+            <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
             </select>
+            <button class="btn sm" @click="loadUpdates">Refresh</button>
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Host</th><th>Available</th></tr></thead>
+              <thead><tr><th>Package</th><th>Installed</th><th>Available</th><th>Vulns</th></tr></thead>
               <tbody>
-                <tr v-for="u in updates" :key="u.agent_id">
-                  <td class="mono">{{ u.agent_id }}</td>
-                  <td><span class="chip" v-for="p in (u.packages||[])" :key="p">{{ p }}</span><span v-if="!(u.packages||[]).length" class="muted">up to date</span></td>
+                <tr v-for="(u,i) in updates" :key="u.name || i">
+                  <td class="mono">{{ u.name }}</td>
+                  <td class="mono">{{ u.installed || '—' }}</td>
+                  <td class="mono">{{ u.available || '—' }}</td>
+                  <td>
+                    <span v-if="u.is_security" class="badge bad">security</span>
+                    <span v-if="u.vuln_count" class="badge" :class="u.max_severity==='critical'?'bad':(u.max_severity==='high'?'warn':'neutral')">{{ u.vuln_count }} · {{ u.max_severity }}</span>
+                    <span v-if="!u.is_security && !u.vuln_count" class="muted">—</span>
+                  </td>
                 </tr>
-                <tr v-if="!updates.length"><td colspan="2"><div class="empty">No update data.</div></td></tr>
+                <tr v-if="!updates.length"><td colspan="4"><div class="empty">No pending updates (or no host selected).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -462,15 +482,17 @@
           <p class="page-sub">Command policy rules (PRD R7).</p>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>ID</th><th>Effect</th><th>Rule</th><th></th></tr></thead>
+              <thead><tr><th>ID</th><th>Name</th><th>Effect</th><th>Priority</th><th>Match</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="p in policies" :key="p.id">
                   <td class="mono">{{ p.id }}</td>
-                  <td><span class="badge" :class="p.effect==='deny'?'bad':'ok'">{{ p.effect }}</span></td>
-                  <td class="mono small">{{ p.cmd_pattern || p.pattern || JSON.stringify(p) }}</td>
+                  <td>{{ p.name }}</td>
+                  <td><span class="badge" :class="p.effect==='deny'?'bad':(p.effect==='allow'?'ok':'neutral')">{{ p.effect }}</span></td>
+                  <td class="mono">{{ p.priority }}</td>
+                  <td><span class="chip" v-for="(v,k) in matchPairs(p)" :key="k">{{ k }}={{ v }}</span><span v-if="!matchPairs(p).length" class="muted">—</span></td>
                   <td><button class="btn danger sm" :disabled="!isAdmin" @click="deletePolicy(p.id)">Delete</button></td>
                 </tr>
-                <tr v-if="!policies.length"><td colspan="4"><div class="empty">No policies.</div></td></tr>
+                <tr v-if="!policies.length"><td colspan="6"><div class="empty">No policies.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -660,14 +682,14 @@
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
         sseStatus: "disconnected",
         groups: [], scope: null,
-        hosts: [], hostsLoading: false, hostFacts: null, hostEol: null,
+        hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null,
         exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
         audit: [], auditKind: "",
         sessions: [], sessionReplay: null,
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
-        jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
+        updHost: "", jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], provRuns: [], users: [],
         services: [], svcLabel: "", svcState: "",
         certs: [], certDays: "",
@@ -713,7 +735,7 @@
       auditKinds() { return [...new Set(this.audit.map(a => a.kind))]; },
     },
     methods: {
-      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, certBadge, svcBadge,
+      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, certBadge, svcBadge, eolBadge,
       async api(path, opts = {}) {
         const headers = { ...(opts.headers || {}) };
         if (this.token) headers["Authorization"] = "Bearer " + this.token;
@@ -729,6 +751,17 @@
         return data;
       },
       capOn(name) { return this.caps[name] === true; },
+      // matchPairs renders only the non-empty policy match fields (the API
+      // emits zero values for unused predicates).
+      matchPairs(p) {
+        const out = {};
+        for (const [k, v] of Object.entries((p && p.match) || {})) {
+          if (v === null || v === undefined || v === "") continue;
+          if (Array.isArray(v) && !v.length) continue;
+          out[k] = Array.isArray(v) ? v.join(",") : v;
+        }
+        return out;
+      },
       fleetNav() {
         return [
           { key: "fleet", label: "Fleet Management", icon: "▦", cap: "hosts" },
@@ -798,9 +831,17 @@
       startSSE() {
         this.stopSSE();
         this.sseStatus = "reconnecting";
+        let opened = false;
         const es = new EventSource("/api/v1/events");
         this._es = es;
-        es.onopen = () => { this.sseStatus = "connected"; this.loadPageData(); };
+        es.onopen = () => {
+          this.sseStatus = "connected";
+          // Reconcile only on RE-connect: the first open follows the initial
+          // page load (mounted/afterLogin already fetched); reloading here
+          // would double every list request on every page load.
+          if (opened) this.loadPageData();
+          opened = true;
+        };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
         const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
@@ -817,6 +858,12 @@
         else if ((kind === "session.data" || kind === "session.result") && this.page === "session") this.loadSessionReplay();
       },
       async loadPageData() {
+        // Files, Updates, and Jobs need the host list (default host selection,
+        // per-host run target). Load it first if a deep link lands here before
+        // the fleet page ever ran.
+        if (["files", "updates", "jobs"].includes(this.page) && !this.hosts.length) {
+          await this.loadHosts();
+        }
         switch (this.page) {
           case "fleet": await this.loadHosts(); break;
           case "host": await this.loadHostDetail(); break;
@@ -840,6 +887,9 @@
       },
       async loadHosts() { this.hostsLoading = true; try { const d = await this.api("/hosts"); this.hosts = d.items || []; } catch (e) { this.hosts = []; } finally { this.hostsLoading = false; } },
       async loadHostDetail() {
+        // Overview comes from GET /hosts/{id} (state/uuid/version/timestamps);
+        // GET /hosts/{id}/facts only returns {host_id, ts, facts}.
+        try { this.host = await this.api("/hosts/" + encodeURIComponent(this.p1)); } catch (e) { this.host = null; }
         try { this.hostFacts = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/facts"); } catch (e) { this.hostFacts = null; }
         try { this.hostEol = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/eol"); } catch (e) { this.hostEol = null; }
       },
@@ -860,15 +910,25 @@
         return out || "(empty recording)";
       },
       async listFiles() {
+        // /files/list requires agent_id and path (400 otherwise). Keep a host
+        // selected once loaded so the page never fires a doomed request.
+        if (!this.fileHost && this.hosts.length) this.fileHost = this.hosts[0].id;
+        if (!this.fileHost) { this.fileEntries = []; return; }
         this.fileLoading = true;
-        try { const q = "?path=" + encodeURIComponent(this.fileDir || "/") + (this.fileHost ? "&agent_id=" + encodeURIComponent(this.fileHost) : ""); const d = await this.api("/files/list" + q); this.fileEntries = d.items || d.entries || d || []; }
+        try { const q = "?agent_id=" + encodeURIComponent(this.fileHost) + "&path=" + encodeURIComponent(this.fileDir || "/"); const d = await this.api("/files/list" + q); this.fileEntries = d.entries || []; }
         catch (e) { this.fileEntries = []; } finally { this.fileLoading = false; }
       },
       async loadJobs() { try { const d = await this.api("/jobs"); this.jobs = d.items || d || []; } catch (e) { this.jobs = []; } },
       async loadTasks() { try { const d = await this.api("/tasks"); this.tasks = d.items || d || []; } catch (e) { this.tasks = []; } },
       async loadPlaybooks() { try { const d = await this.api("/playbooks"); this.playbooks = d.items || d || []; } catch (e) { this.playbooks = []; } },
-      async loadUpdates() { try { const q = this.fileHost ? "?agent_id=" + encodeURIComponent(this.fileHost) : ""; const d = await this.api("/packages/updates" + q); this.updates = d.items || d || []; } catch (e) { this.updates = []; } },
-      async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.items || d || []; } catch (e) { this.secrets = []; } },
+      async loadUpdates() {
+        // /packages/updates is per-host and REQUIRES agent_id; there is no
+        // fleet-wide endpoint. Default to the first host when none is chosen.
+        if (!this.updHost && this.hosts.length) this.updHost = this.hosts[0].id;
+        if (!this.updHost) { this.updates = []; return; }
+        try { const d = await this.api("/packages/updates?agent_id=" + encodeURIComponent(this.updHost)); this.updates = d.items || d || []; } catch (e) { this.updates = []; }
+      },
+      async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.secrets || d.items || []; } catch (e) { this.secrets = []; } },
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || d || []; } catch (e) { this.provRuns = []; } },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
@@ -889,9 +949,16 @@
         catch (e) { alert("dispatch failed: " + e.message); }
       },
       async cancelExec(id) { try { await this.api("/executions/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.loadExecDetail(); } catch (e) { alert(e.message); } },
-      async runJob(job) { try { await this.api("/jobs/" + encodeURIComponent(job.id) + "/run", { method: "POST", body: {} }); } catch (e) { alert(e.message); } },
-      openFile(f) { if (f.type === "dir") { this.fileDir = joinPath(this.fileDir, f.name); } },
-      fileUp() { this.fileDir = parentPath(this.fileDir); },
+      async runJob(job) {
+        // POST /jobs/{id}/run requires an explicit agent_id.
+        if (!this.hosts.length) { alert("No hosts available to run this job on."); return; }
+        const agent = this.hosts.length === 1 ? this.hosts[0].id : prompt("Run on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
+        if (!agent) return;
+        try { await this.api("/jobs/" + encodeURIComponent(job.id) + "/run", { method: "POST", body: { agent_id: agent } }); } catch (e) { alert(e.message); }
+      },
+      openFile(f) { if (f.is_dir) { this.fileDir = joinPath(this.fileDir, f.name); this.listFiles(); } },
+      fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },
+      pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.listFiles(); },
       async createGroup() {
         const name = prompt("Group name:"); if (!name) return;
         const selector = prompt("Selector (all | host:ag_x | group:db):", "all"); if (!selector) return;
@@ -916,7 +983,6 @@
     watch: {
       page() { this.loadPageData(); },
       p1() { if (["host", "exec", "session"].includes(this.page)) this.loadPageData(); },
-      fileDir() { this.listFiles(); },
     },
   });
 
