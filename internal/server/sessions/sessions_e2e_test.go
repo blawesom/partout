@@ -208,6 +208,22 @@ func TestSessionOpenDataClose(t *testing.T) {
 		t.Fatalf("state=%s, want open", sess.State)
 	}
 
+	// Wait for the agent's recorded data frame to land before closing. The
+	// fake agent replies to SESSION_OPEN with a SESSION_DATA uplink; if we
+	// closed before it was recorded, the close could drop it and the replay
+	// assertion below would flake (previously failed ~1/N under CI load).
+	dataDeadline := time.Now().Add(5 * time.Second)
+	for {
+		recs, _ := sm.Replay(sess.ID)
+		if len(recs) == 1 && string(recs[0].Data) == "hello pty\n" {
+			break
+		}
+		if time.Now().After(dataDeadline) {
+			t.Fatalf("recorded data frame did not arrive (recs=%+v)", recs)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	// Close the session (triggers the fake agent's result).
 	if err := sm.Close(sess.ID); err != nil {
 		t.Fatalf("Close: %v", err)
