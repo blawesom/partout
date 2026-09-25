@@ -1,7 +1,7 @@
 # Partout — Operations
 
-**Status:** Draft v0.3 — day-2 runbook for the control plane. Reflects the current
-implementation (M0–M3 complete, M4 in progress) where stated; steps for features that
+**Status:** Draft v0.4 — day-2 runbook for the control plane. Reflects the current
+implementation (M0–M4 complete, M5 in progress) where stated; steps for features that
 ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
 
@@ -21,7 +21,15 @@ incident response, capacity, compliance, and a go-live checklist.
 > - **v0.2.0 adds the policy deny-list engine** (rule CRUD, dispatch gating, signed decisions,
 >   agent re-check).
 > - **v0.3 adds host provisioning over fleet SSH** (PRD R17) plus the M2/M3 features:
->   files & sessions, secrets, external data, packages, tasks/playbooks, scheduled jobs.
+  files & sessions, secrets, external data, packages, tasks/playbooks, scheduled jobs.
+- **M5 (in progress)**: observe layer — service/config/cert fact collectors upload
+  structured JSON via `OBSERVE_FACTS` gRPC envelope (M5). Server-side `observe/`
+  upserts into `host_facts` JSON. Read-only API endpoints + MCP read tools. No alerting
+  yet (alert engine is M6).
+- **M6** (planned): alert engine — threshold rules, evaluation, firing/resolved states,
+  SSE fan-out. Alert store (`alerts`, `alert_rules` tables).
+- **M7** (planned): UI pages — Services, Certificates, Configs sub-pages.
+- **M8** (planned): Distribution & polish — installers, cloud-init, Helm.
 > - **M4 in progress**: local user auth (login, sessions, user management) is done; the
 >   approvals engine, full policy surface, and MCP server are still to come.
 > - No Web UI yet: use `partout ctl` or REST/SSE (`docs/deployment.md` §4).
@@ -51,6 +59,8 @@ Where everything lives (for backup/restore/troubleshooting):
 | Agent config | `/etc/partout/agent.env` | env vars |
 | Provision runs | DB `provision_runs` + `provision_steps` (v0.3) | per-run state + per-step excerpts; `key_line`/`token_hash` are never serialized over the API; captured in the DB backup |
 | Audit log | DB `audit_events` + optional exported sink | append-only, indefinitely retained (PRD §9) |
+| **Alerts** | DB `alerts` + `alert_rules` (M6) | alert rule definitions, firing/resolved states, severity levels |
+| **Observe facts** | DB `host_facts` (M5) | JSON blob merged with basic facts; keys: `services_detailed`, `configs`, `certificates` |
 | Agents | `systemctl status partout-agent` | logs in `journalctl -u partout-agent` |
 
 ---
@@ -152,7 +162,27 @@ Step-by-step bring-up, also referenced in deployment §6:
   `partout ctl policy list` and a test dispatch (a denied run records `state=denied` with the
   matched rule id(s) and reason).
 
-### 3.4 Secrets management
+### 3.4 Observe layer & alerts (M5–M6, in progress)
+
+- **Fact collection cadence**: service facts refresh every 5 min, config facts every 15 min
+  or on mtime change, cert facts every 1 hour. Configurable via
+  `PARTOUT_OBSERVE_FACTS_INTERVAL` (default 300s; individual collectors may differ).
+- **Config fact validity**: `haproxy -c` and `nginx -t` run on each refresh; a failed
+  validation fires a `config_invalid` alert (M6) and is flagged in the config UI.
+- **Config drift**: the server compares `config_sha256` across hosts in the same group;
+  divergent hosts are flagged. Drift alerts are `info` severity by default.
+- **Certificate expiry tracking**: the server computes `days_remaining` from each cert's
+  `not_after` epoch. Alerts fire when certs approach expiry:
+  - `cert_expiring` (warning): <30 days remaining (default threshold)
+  - `cert_chain_broken` (critical): chain verification failed
+- **Service health**: failed units fire `service_failed` alerts (default: critical if
+  failed >5 min). Restart-loop detection (`service_restarting`) fires if a unit has
+  >10 restarts per hour.
+- **Alert rule CRUD** (M6): `GET/POST/PUT/DELETE /api/v1/alerts/rules` (admin). Rules
+  are server-side only — no agent-side evaluation. Rules have `kind`, `selector`,
+  `thresholds` (JSON), and `severity`. SSE events: `alert.firing`, `alert.resolved`.
+
+### 3.5 Secrets management
 
 - **Secret key backup**: `PARTOUT_SECRET_KEY_FILE` is the single point of truth for the
   encrypted secret store. **No in-place rotation in v1** (PRD: KMS/HSM is post-v1).
@@ -407,6 +437,8 @@ never connects.
 | Command shows `denied_agent` | Agent-side guardrail re-check failed (policy mismatch or rule deny) | Check policy bundle version; review agent logs for the denial reason; fix the rule |
 | No output in the UI for a running command | SSE client disconnected or broker dropped the client | Refresh the page; output chunks are persisted and replayable within the retention window |
 | `result_lost` in the audit | Agent spool overflowed before the result could flush | Increase spool size; investigate root cause of overflow |
+| No observe facts in `GET /services` | Agent hasn't uploaded structured facts yet; check agent logs for `observe` errors; verify `PARTOUT_OBSERVE_FACTS_INTERVAL` is set | Check `journalctl -u partout-agent` for observe collector errors; ensure `OBSERVE_FACTS` envelope is not dropped |
+| Config validation reports invalid but service is running | The collector runs validation on refresh cadence (15 min); a recent config change may not have been picked up yet; or the service is running but would fail on reload | Run `haproxy -c` or `nginx -t` manually on the host; check if the issue is transient (e.g. port conflict) |
 | `version_mismatch` on the host | Server and agent versions are beyond compatibility skew | Upgrade the agent to match the server (or vice versa) |
 | "secret key missing" at startup | `PARTOUT_SECRET_KEY_FILE` or `PARTOUT_SECRET_KEY` not configured | Set the key; the secrets feature is disabled until then |
 | `apply-updates` fails on `ended` host | EOL gate (host is past end-of-support, defaults to require-approval) | Approve manually or remove the EOL gate from the rule |
@@ -482,6 +514,10 @@ Current items first; items marked *(P)* track later milestones (M4/M5).
 - [ ] *(P)* Approvals workflow (M4): require-approval rules, approval queue
 - [ ] *(P)* Alert channels configured: host state (disconnected), approval request
 - [ ] *(P)* Capacity baseline: disk usage recorded; retention set; spool limits appropriate
+- [ ] *(P)* Observe layer (M5): agents upload service/config/cert facts; API endpoints
+  return live data; basic health visible via `partout ctl`
+- [ ] *(P)* Alert engine (M6): at least one alert rule tested (e.g. `cert_expiring` with
+  <30-day threshold); firing and resolving alerts visible via API/SSE
 - [ ] *(P)* Access review process documented (who gets operator/admin, quarterly review)
 - [ ] Operator training: hosts, execute, sessions, jobs, tasks, updates, secrets, policy,
   audit (CLI + REST; the Web UI ships in a later V1 phase)

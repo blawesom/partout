@@ -205,6 +205,43 @@
   .cell-state { display: inline-flex; align-items: center; gap: 7px; }
   .row-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 
+  /* ---- observe layer components (M7, R18-R25) ------------------------ */
+  .obs-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .obs-filter { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-muted);
+                padding: 4px 10px; border-radius: 99px; background: var(--surface-sunken); border: 1px solid var(--border);
+                cursor: pointer; }
+  .obs-filter.is-active { background: var(--brand-subtle); color: var(--brand); border-color: #dbeafe; font-weight: 600; }
+
+  .service-state { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600; }
+  .service-state .ic { width: 13px; height: 13px; }
+  .svc-active { color: var(--healthy); }
+  .svc-failed { color: var(--critical); }
+  .svc-restarting { color: var(--warning); }
+  .svc-dead { color: var(--neutral); }
+  .svc-absent { color: var(--text-faint); }
+
+  .cert-expiry { font-weight: 650; font-size: 13px; }
+  .cert-expiry.crit { color: var(--critical); }
+  .cert-expiry.warn { color: var(--warning); }
+  .cert-expiry.ok { color: var(--healthy); }
+
+  .drift-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600;
+                 color: #b45309; background: var(--warning-subtle); border: 1px solid #fde68a;
+                 padding: 1px 8px; border-radius: 99px; }
+
+  .dep-tree { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); line-height: 1.6; }
+  .dep-tree .dep-req { color: var(--critical); }
+  .dep-tree .dep-want { color: var(--text-faint); }
+
+  .panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .detail-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-card); padding: 16px; }
+  .detail-panel h3 { font-size: 13px; margin: 0 0 10px; color: var(--text-muted); letter-spacing: .02em; }
+  .detail-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 12.5px; }
+  .detail-row .label { color: var(--text-faint); }
+  .detail-row .val { font-family: var(--mono); color: var(--text); }
+  .detail-row .val.warn { color: var(--warning); }
+  .detail-row .val.crit { color: var(--critical); }
+
   /* ---- gate helper: capability + role gating (§4) --------------------- */
   .gate { display: inline-flex; align-items: center; gap: 6px; }
   /* in the sidebar a gate wraps stacked nav items, so it must be a block */
@@ -302,15 +339,19 @@
         </span>
       </span>
 
-      <!-- not in this build (M5) -->
+      <!-- not in this build (M7) — replaced with real Observe section -->
       <span class="gate" data-cap="observe">
         <span class="when-on">
-          <a class="nav-item" href="#"><svg class="ic"><use href="#i-monitor"/></svg>Monitoring</a>
+          <div class="nav-label" style="padding-top:10px">Observe</div>
+          <a class="nav-item" href="#services" data-page="services"><svg class="ic"><use href="#i-monitor"/></svg>Services</a>
+          <a class="nav-item" href="#certs" data-page="certs"><svg class="ic"><use href="#i-lock"/></svg>Certificates</a>
+          <a class="nav-item" href="#configs" data-page="configs"><svg class="ic"><use href="#i-folder"/></svg>Configs</a>
         </span>
         <span class="when-off">
-          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-monitor"/></svg>Monitoring
-            <span class="nav-tail chip chip-na">M5</span>
-          </span>
+          <div class="nav-label" style="padding-top:10px">Observe</div>
+          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-monitor"/></svg>Services<span class="nav-tail chip chip-na">M7</span></span>
+          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-lock"/></svg>Certificates<span class="nav-tail chip chip-na">M7</span></span>
+          <span class="nav-item is-disabled"><svg class="ic"><use href="#i-folder"/></svg>Configs<span class="nav-tail chip chip-na">M7</span></span>
         </span>
       </span>
 
@@ -380,6 +421,51 @@
             <div class="stat-top c-info"><svg class="ic" style="width:14px;height:14px"><use href="#i-clock"/></svg>Pending</div>
             <div class="stat-num">1</div>
           </div>
+        </div>
+      </section>
+
+      <!-- Active Alerts (M6, R25) -->
+      <section class="section" id="alerts-section">
+        <div class="section-head">
+          <h2>Active Alerts</h2>
+          <span class="cap">from <span class="mono">alert.firing</span> / <span class="mono">alert.resolved</span> over SSE</span>
+        </div>
+        <div class="card">
+          <table>
+            <thead>
+              <tr><th>Severity</th><th>Kind</th><th>Host</th><th>Message</th><th>Firing since</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="chip chip-critical">critical</span></td>
+                <td class="mono">service_failed</td>
+                <td class="host">node-12-stg</td>
+                <td>Unit <span class="mono">myapp.service</span> failed for 12 min</td>
+                <td class="dim">12 min ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-warning">warning</span></td>
+                <td class="mono">cert_expiring</td>
+                <td class="host">node-84-prod</td>
+                <td>Cert <span class="mono">CN=app.example.com</span> expires in 14 d</td>
+                <td class="dim">1 h ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-critical">critical</span></td>
+                <td class="mono">config_invalid</td>
+                <td class="host">node-05-stg</td>
+                <td><span class="mono">haproxy -c</span>: validation failed</td>
+                <td class="dim">45 min ago</td>
+              </tr>
+              <tr>
+                <td><span class="chip chip-neutral">info</span></td>
+                <td class="mono">config_drift</td>
+                <td class="host">node-09-stg</td>
+                <td><span class="mono">nginx.conf</span> hash differs from group majority (2/3 hosts)</td>
+                <td class="dim">2 h ago</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -529,6 +615,448 @@
 
     </main>
   </div>
+
+  <!-- ================= OBSERVE: SERVICES PAGE ================= -->
+  <div class="main" id="page-services" hidden>
+    <header class="topbar">
+      <div class="crumbs"><span>Fleet</span><span>/</span><span>Observe</span><span>/</span><b>Services</b></div>
+      <div class="topbar-right">
+        <span class="sse"><span class="pulse" id="sse-dot2"></span><span>SSE connected</span></span>
+        <span class="vsep"></span>
+        <button class="btn btn-secondary" onclick="showPage('fleet')">Fleet</button>
+      </div>
+    </header>
+    <main class="content">
+      <div class="page-head">
+        <h1>Services</h1>
+        <span class="sub">18 custom units across 9 hosts &middot; last refresh 3 min ago</span>
+      </div>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>Fleet Service Health</h2>
+          <span class="cap">from <span class="mono">/api/v1/services</span> &middot; label filter</span>
+        </div>
+
+        <div class="obs-toolbar">
+          <span class="obs-filter is-active">All</span>
+          <span class="obs-filter">webtier</span>
+          <span class="obs-filter">myapp</span>
+          <span class="obs-filter">db</span>
+          <span class="obs-filter">failed</span>
+        </div>
+
+        <div class="card">
+          <table>
+            <thead>
+              <tr>
+                <th>Unit</th><th>State</th><th>Host</th><th>Uptime</th><th>Restarts</th><th>Labels</th><th style="text-align:right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="host">myapp.service</td>
+                <td><span class="service-state svc-failed"><svg class="ic"><use href="#i-x"/></svg>failed</span></td>
+                <td class="dim">node-12-stg</td>
+                <td class="dim">—</td>
+                <td><span class="chip chip-warning">4 / 1h</span></td>
+                <td><span class="chip chip-neutral">myapp</span><span class="chip chip-neutral">staging</span></td>
+                <td><div class="row-actions">
+                  <button class="btn btn-secondary btn-sm">Restart</button>
+                  <button class="btn btn-ghost btn-sm">Detail</button>
+                </div></td>
+              </tr>
+              <tr>
+                <td class="host">nginx.service</td>
+                <td><span class="service-state svc-active"><svg class="ic"><use href="#i-shield"/></svg>active</span></td>
+                <td class="dim">node-84-prod</td>
+                <td class="dim">14 d 6 h</td>
+                <td class="dim">0</td>
+                <td><span class="chip chip-neutral">webtier</span><span class="chip chip-neutral">prod</span></td>
+                <td><div class="row-actions">
+                  <button class="btn btn-ghost btn-sm">Detail</button>
+                </div></td>
+              </tr>
+              <tr>
+                <td class="host">nginx.service</td>
+                <td><span class="service-state svc-restarting"><svg class="ic"><use href="#i-clock"/></svg>restarting</span></td>
+                <td class="dim">node-05-stg</td>
+                <td class="dim">—</td>
+                <td><span class="chip chip-warning">11 / 1h</span></td>
+                <td><span class="chip chip-neutral">webtier</span><span class="chip chip-neutral">staging</span></td>
+                <td><div class="row-actions">
+                  <button class="btn btn-secondary btn-sm">Restart</button>
+                  <button class="btn btn-ghost btn-sm">Detail</button>
+                </div></td>
+              </tr>
+              <tr>
+                <td class="host">postgres.service</td>
+                <td><span class="service-state svc-active"><svg class="ic"><use href="#i-shield"/></svg>active</span></td>
+                <td class="dim">db-01-prod</td>
+                <td class="dim">42 d</td>
+                <td class="dim">0</td>
+                <td><span class="chip chip-neutral">db</span><span class="chip chip-neutral">prod</span></td>
+                <td><div class="row-actions">
+                  <button class="btn btn-ghost btn-sm">Detail</button>
+                </div></td>
+              </tr>
+              <tr>
+                <td class="host">haproxy.service</td>
+                <td><span class="service-state svc-active"><svg class="ic"><use href="#i-shield"/></svg>active</span></td>
+                <td class="dim">node-84-prod</td>
+                <td class="dim">14 d</td>
+                <td class="dim">0</td>
+                <td><span class="chip chip-neutral">webtier</span><span class="chip chip-neutral">prod</span></td>
+                <td><div class="row-actions">
+                  <button class="btn btn-ghost btn-sm">Detail</button>
+                </div></td>
+              </tr>
+              <tr>
+                <td class="host">myapp.service</td>
+                <td><span class="service-state svc-active"><svg class="ic"><use href="#i-shield"/></svg>active</span></td>
+                <td class="dim">node-08-stg</td>
+                <td class="dim">3 h</td>
+                <td class="dim">0</td>
+                <td><span class="chip chip-neutral">myapp</span><span class="chip chip-neutral">staging</span></td>
+                <td><div class="row-actions">
+                  <button class="btn btn-ghost btn-sm">Detail</button>
+                </div></td>
+              </tr>
+              <tr>
+                <td class="host">redis.service</td>
+                <td><span class="service-state svc-dead"><svg class="ic"><use href="#i-x"/></svg>inactive</span></td>
+                <td class="dim">node-07-dev</td>
+                <td class="dim">—</td>
+                <td class="dim">—</td>
+                <td><span class="chip chip-neutral">cache</span><span class="chip chip-neutral">dev</span></td>
+                <td><div class="row-actions">
+                  <span class="chip chip-dashed">host offline</span>
+                </div></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Service detail panel: click a row to expand -->
+        <div class="panel-grid">
+          <div class="detail-panel">
+            <h3>Unit Detail — myapp.service (node-12-stg)</h3>
+            <div class="detail-row"><span class="label">State</span><span class="val crit">failed (auto-restart: on-failure)</span></div>
+            <div class="detail-row"><span class="label">Enabled</span><span class="val">true (WantedBy: multi-user.target)</span></div>
+            <div class="detail-row"><span class="label">Last exit</span><span class="val crit">signal=9 (killed, OOM)</span></div>
+            <div class="detail-row"><span class="label">Memory (current)</span><span class="val">— (not running)</span></div>
+            <div class="detail-row"><span class="label">Restarts (1 h)</span><span class="val warn">4</span></div>
+            <div class="detail-row"><span class="label">Labels</span><span class="val">myapp, staging</span></div>
+            <div style="margin-top:12px">
+              <h3 style="margin-bottom:6px">Dependencies</h3>
+              <div class="dep-tree">
+                <span class="dep-req">required-by:</span> —<br>
+                <span class="dep-want">wanted-by:</span> myapp.target<br>
+                <span class="dep-want">after:</span> network-online.target, postgres.service
+              </div>
+            </div>
+            <div style="margin-top:14px; display:flex; gap:8px">
+              <button class="btn btn-secondary btn-sm">Restart</button>
+              <button class="btn btn-ghost btn-sm">Run task: ensure started</button>
+            </div>
+          </div>
+          <div class="detail-panel">
+            <h3>Unit Detail — nginx.service (node-05-stg)</h3>
+            <div class="detail-row"><span class="label">State</span><span class="val warn">activating (auto-restarting)</span></div>
+            <div class="detail-row"><span class="label">Enabled</span><span class="val">true</span></div>
+            <div class="detail-row"><span class="label">Last exit</span><span class="val warn">status=1 (config error?)</span></div>
+            <div class="detail-row"><span class="label">Restarts (1 h)</span><span class="val warn">11 — restart loop detected</span></div>
+            <div class="detail-row"><span class="label">Config validity</span><span class="val crit">nginx -t: FAILED</span></div>
+            <div class="detail-row"><span class="label">Labels</span><span class="val">webtier, staging</span></div>
+            <div style="margin-top:12px">
+              <h3 style="margin-bottom:6px">Suggested action</h3>
+              <p style="font-size:12.5px; margin:0 0 10px; color:var(--text-muted)">
+                Config invalid on this host. Run playbook <span class="mono">fix-nginx-config</span> or
+                download the config for diff comparison.
+              </p>
+              <button class="btn btn-primary btn-sm">Run task: fix config</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ================= OBSERVE: CERTIFICATES PAGE ================= -->
+  <div class="main" id="page-certs" hidden>
+    <header class="topbar">
+      <div class="crumbs"><span>Fleet</span><span>/</span><span>Observe</span><span>/</span><b>Certificates</b></div>
+      <div class="topbar-right">
+        <span class="sse"><span class="pulse"></span><span>SSE connected</span></span>
+        <span class="vsep"></span>
+        <button class="btn btn-secondary" onclick="showPage('fleet')">Fleet</button>
+      </div>
+    </header>
+    <main class="content">
+      <div class="page-head">
+        <h1>Certificates</h1>
+        <span class="sub">8 certificates across 6 hosts &middot; 1 expiring within 7 days &middot; 1 with broken chain</span>
+      </div>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>Certificate Inventory</h2>
+          <span class="cap">from <span class="mono">/api/v1/certificates</span> &middot; expiry timeline</span>
+        </div>
+
+        <div class="obs-toolbar">
+          <span class="obs-filter is-active">All</span>
+          <span class="obs-filter">Expiring &lt;7d</span>
+          <span class="obs-filter">Expiring &lt;30d</span>
+          <span class="obs-filter">Chain broken</span>
+          <span class="obs-filter">webtier</span>
+          <span class="obs-filter">prod</span>
+        </div>
+
+        <div class="card">
+          <table>
+            <thead>
+              <tr>
+                <th>Subject</th><th>Issuer</th><th>Host</th><th>Days remaining</th><th>Key</th><th>Chain</th><th>SANs</th><th>Labels</th><th>Path</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="host">CN=internal.dev</td>
+                <td class="dim">CN=internal-CA</td>
+                <td class="dim">node-07-dev</td>
+                <td><span class="cert-expiry crit">3 d</span></td>
+                <td class="dim">RSA-2048</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim mono">internal.dev, dev.local</td>
+                <td><span class="chip chip-neutral">dev</span></td>
+                <td class="dim mono">/etc/ssl/internal.dev.pem</td>
+              </tr>
+              <tr>
+                <td class="host">CN=app.example.com</td>
+                <td class="dim">CN=Let's Encrypt X3</td>
+                <td class="dim">node-84-prod</td>
+                <td><span class="cert-expiry warn">14 d</span></td>
+                <td class="dim">ECDSA-P256</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim mono">app.example.com, www.example.com</td>
+                <td><span class="chip chip-neutral">webtier</span><span class="chip chip-neutral">prod</span></td>
+                <td class="dim mono">/etc/ssl/app.example.com/fullchain.pem</td>
+              </tr>
+              <tr>
+                <td class="host">CN=api.staging.io</td>
+                <td class="dim">CN=internal-CA</td>
+                <td class="dim">node-05-stg</td>
+                <td><span class="cert-expiry ok">82 d</span></td>
+                <td class="dim">RSA-2048</td>
+                <td><span class="chip chip-critical">broken</span></td>
+                <td class="dim mono">api.staging.io</td>
+                <td><span class="chip chip-neutral">staging</span></td>
+                <td class="dim mono">/etc/pki/tls/api.staging.io.crt</td>
+              </tr>
+              <tr>
+                <td class="host">CN=db-internal</td>
+                <td class="dim">CN=internal-CA</td>
+                <td class="dim">db-01-prod</td>
+                <td><span class="cert-expiry ok">312 d</span></td>
+                <td class="dim">RSA-2048</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim mono">db-internal.prod.internal</td>
+                <td><span class="chip chip-neutral">db</span><span class="chip chip-neutral">prod</span></td>
+                <td class="dim mono">/etc/ssl/db-internal.pem</td>
+              </tr>
+              <tr>
+                <td class="host">CN=haproxy-lb</td>
+                <td class="dim">CN=Let's Encrypt R3</td>
+                <td class="dim">node-84-prod</td>
+                <td><span class="cert-expiry ok">44 d</span></td>
+                <td class="dim">ECDSA-P256</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim mono">*.example.com</td>
+                <td><span class="chip chip-neutral">webtier</span><span class="chip chip-neutral">prod</span></td>
+                <td class="dim mono">/etc/ssl/haproxy-lb/fullchain.pem</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="panel-grid">
+          <div class="detail-panel">
+            <h3>Cert Detail — CN=app.example.com (node-84-prod)</h3>
+            <div class="detail-row"><span class="label">Expiry</span><span class="val warn">14 days (2025-10-09)</span></div>
+            <div class="detail-row"><span class="label">Key type</span><span class="val">ECDSA P-256</span></div>
+            <div class="detail-row"><span class="label">Chain</span><span class="val">3 certs, valid to Let's Encrypt X3</span></div>
+            <div class="detail-row"><span class="label">OCSP</span><span class="val">good (stapled)</span></div>
+            <div class="detail-row"><span class="label">Self-signed</span><span class="val">no</span></div>
+            <div class="detail-row"><span class="label">Path</span><span class="val mono" style="font-size:11px">/etc/ssl/app.example.com/fullchain.pem</span></div>
+            <div style="margin-top:12px">
+              <h3 style="margin-bottom:6px">Used by</h3>
+              <p style="font-size:12.5px; margin:0; color:var(--text-muted)">
+                nginx vhost <span class="mono">app.example.com:443</span> on node-84-prod (TLS termination)
+              </p>
+            </div>
+          </div>
+          <div class="detail-panel">
+            <h3>Cert Detail — CN=api.staging.io (node-05-stg)</h3>
+            <div class="detail-row"><span class="label">Expiry</span><span class="val">82 days (2026-01-15)</span></div>
+            <div class="detail-row"><span class="label">Chain</span><span class="val crit">BROKEN — missing intermediate CA</span></div>
+            <div class="detail-row"><span class="label">Chain length</span><span class="val warn">2 (expected 3)</span></div>
+            <div class="detail-row"><span class="label">Verification</span><span class="val crit">openssl verify: unable to get local issuer</span></div>
+            <div style="margin-top:12px">
+              <h3 style="margin-bottom:6px">Remediation</h3>
+              <p style="font-size:12.5px; margin:0 0 10px; color:var(--text-muted)">
+                Missing intermediate cert in chain. The <span class="mono">internal-CA</span>
+                cross-signing cert is not in the chain file. Run task: <span class="mono">fix-cert-chain</span>.
+              </p>
+              <button class="btn btn-primary btn-sm">Run task: fix cert chain</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ================= OBSERVE: CONFIGS PAGE ================= -->
+  <div class="main" id="page-configs" hidden>
+    <header class="topbar">
+      <div class="crumbs"><span>Fleet</span><span>/</span><span>Observe</span><span>/</span><b>Configs</b></div>
+      <div class="topbar-right">
+        <span class="sse"><span class="pulse"></span><span>SSE connected</span></span>
+        <span class="vsep"></span>
+        <button class="btn btn-secondary" onclick="showPage('fleet')">Fleet</button>
+      </div>
+    </header>
+    <main class="content">
+      <div class="page-head">
+        <h1>Configs</h1>
+        <span class="sub">6 webservice configs across 5 hosts &middot; 1 invalid &middot; 1 drifted</span>
+      </div>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>Webservice Configs</h2>
+          <span class="cap">from <span class="mono">/api/v1/configs</span> &middot; validity + drift</span>
+        </div>
+
+        <div class="obs-toolbar">
+          <span class="obs-filter is-active">All</span>
+          <span class="obs-filter">haproxy</span>
+          <span class="obs-filter">nginx</span>
+          <span class="obs-filter">Invalid</span>
+          <span class="obs-filter">Drifted</span>
+        </div>
+
+        <div class="card">
+          <table>
+            <thead>
+              <tr>
+                <th>Kind</th><th>Host</th><th>Config file</th><th>Validity</th><th>Version</th><th>Backends</th><th>TLS</th><th>Hash</th><th>Drift</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="host">haproxy</td>
+                <td class="dim">node-84-prod</td>
+                <td class="dim mono">/etc/haproxy/haproxy.cfg</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim">2.8.5</td>
+                <td class="dim">2 backends &middot; 3 servers (3 active)</td>
+                <td class="dim">2 listeners</td>
+                <td class="dim mono">a3f2…c9d1</td>
+                <td class="dim">—</td>
+              </tr>
+              <tr>
+                <td class="host">haproxy</td>
+                <td class="dim">node-05-stg</td>
+                <td class="dim mono">/etc/haproxy/haproxy.cfg</td>
+                <td><span class="chip chip-critical">INVALID</span></td>
+                <td class="dim">2.8.5</td>
+                <td class="dim">2 backends &middot; 3 servers (1 active)</td>
+                <td class="dim">1 listener</td>
+                <td class="dim mono">e7b1…44aa</td>
+                <td><span class="drift-badge">&#9888; drifted</span></td>
+              </tr>
+              <tr>
+                <td class="host">nginx</td>
+                <td class="dim">node-84-prod</td>
+                <td class="dim mono">/etc/nginx/nginx.conf</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim">1.24</td>
+                <td class="dim">2 vhosts</td>
+                <td class="dim">2 (TLS)</td>
+                <td class="dim mono">b8c3…1f2e</td>
+                <td class="dim">—</td>
+              </tr>
+              <tr>
+                <td class="host">nginx</td>
+                <td class="dim">node-05-stg</td>
+                <td class="dim mono">/etc/nginx/nginx.conf</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim">1.24</td>
+                <td class="dim">2 vhosts</td>
+                <td class="dim">1 (TLS)</td>
+                <td class="dim mono">b8c3…9a0f</td>
+                <td><span class="drift-badge">&#9888; drifted (1/3)</span></td>
+              </tr>
+              <tr>
+                <td class="host">nginx</td>
+                <td class="dim">node-08-stg</td>
+                <td class="dim mono">/etc/nginx/nginx.conf</td>
+                <td><span class="chip chip-healthy">valid</span></td>
+                <td class="dim">1.24</td>
+                <td class="dim">2 vhosts</td>
+                <td class="dim">2 (TLS)</td>
+                <td class="dim mono">b8c3…1f2e</td>
+                <td class="dim">—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="panel-grid">
+          <div class="detail-panel">
+            <h3>Haproxy Config — node-05-stg <span class="chip chip-critical" style="margin-left:6px">INVALID</span></h3>
+            <div class="detail-row"><span class="label">Validation</span><span class="val crit">haproxy -c: bind addr in use on line 42</span></div>
+            <div class="detail-row"><span class="label">Version</span><span class="val">2.8.5</span></div>
+            <div class="detail-row"><span class="label">Config hash</span><span class="val mono" style="font-size:11px">e7b1…44aa</span></div>
+            <div style="margin-top:12px">
+              <h3 style="margin-bottom:6px">Topology</h3>
+              <div class="dep-tree">
+                <span class="dep-req">frontend https_lb:</span> :443 → backend webservers<br>
+                <span class="dep-want">backend webservers:</span><br>
+                &nbsp;&nbsp;web1:8080 (up) &nbsp; web2:8080 (down) &nbsp; web3:8080 (down)<br>
+                <span class="dep-req">backend api:</span> → unix:/run/myapp.sock (down)
+              </div>
+            </div>
+            <div style="margin-top:14px; display:flex; gap:8px">
+              <button class="btn btn-secondary btn-sm">Download config</button>
+              <button class="btn btn-ghost btn-sm">Compare to node-84-prod</button>
+            </div>
+          </div>
+          <div class="detail-panel">
+            <h3>Nginx Config — node-05-stg <span class="drift-badge" style="margin-left:6px">&#9888; drifted (1/3)</span></h3>
+            <div class="detail-row"><span class="label">Validation</span><span class="val">nginx -t: OK</span></div>
+            <div class="detail-row"><span class="label">Config hash</span><span class="val mono" style="font-size:11px">b8c3…9a0f</span></div>
+            <div class="detail-row"><span class="label">Group majority</span><span class="val mono" style="font-size:11px">b8c3…1f2e (2/3 hosts)</span></div>
+            <div style="margin-top:12px">
+              <h3 style="margin-bottom:6px">Topology</h3>
+              <div class="dep-tree">
+                <span class="dep-req">server app.example.com:443</span> → root /var/www/app<br>
+                &nbsp;&nbsp;TLS: /etc/ssl/app.example.com/fullchain.pem<br>
+                &nbsp;&nbsp;proxy: unix:/run/myapp.sock<br>
+                <span class="dep-want">server static.example.com:80</span> → root /var/www/static
+              </div>
+            </div>
+            <div style="margin-top:14px; display:flex; gap:8px">
+              <button class="btn btn-secondary btn-sm">Download config</button>
+              <button class="btn btn-primary btn-sm">Push majority config</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
 </div>
 
 <!-- ============ mock-only controls (not part of the design) ============ -->
@@ -554,13 +1082,14 @@
 var CAPS = {
   full: { enroll:1, exec:1, sessions:1, files:1, jobs:1, tasks:1, packages:1,
           secrets:1, policies:1, provision:1, users:1, agent_delete:1,
-          approvals:0, observe:0 },
+          approvals:0, observe:1 },
   core: { enroll:1, exec:1, sessions:0, files:0, jobs:0, tasks:0, packages:0,
           secrets:0, policies:1, provision:1, users:1, agent_delete:0,
           approvals:0, observe:0 }
 };
 var RANK = { viewer:1, operator:2, admin:3 };
 var profile = 'full', role = 'admin';
+var currentPage = 'fleet';
 
 function apply() {
   var caps = CAPS[profile];
@@ -578,6 +1107,40 @@ function apply() {
   });
   document.getElementById('role-badge').textContent = role;
 }
+
+function showPage(page) {
+  currentPage = page;
+  var pages = {
+    fleet: document.querySelector('.main:not([id])') || document.querySelector('.main'),
+    services: document.getElementById('page-services'),
+    certs: document.getElementById('page-certs'),
+    configs: document.getElementById('page-configs')
+  };
+  Object.values(pages).forEach(function (el) {
+    if (el) el.hidden = (el !== pages[page]);
+  });
+  // Update active nav state
+  document.querySelectorAll('[data-page]').forEach(function (a) {
+    a.classList.toggle('is-active', a.dataset.page === page);
+  });
+  // Update fleet nav active state
+  var fleetNav = document.querySelector('.nav-item.is-active:not([data-page])');
+  if (page === 'fleet') {
+    if (fleetNav) fleetNav.classList.add('is-active');
+  } else {
+    if (fleetNav) fleetNav.classList.remove('is-active');
+  }
+}
+
+// Nav click handlers for observe pages
+document.querySelectorAll('[data-page]').forEach(function (a) {
+  a.addEventListener('click', function (e) {
+    e.preventDefault();
+    showPage(a.dataset.page);
+  });
+});
+
+// "Fleet" button in observe topbars: handled via onclick="showPage('fleet')"
 
 document.querySelectorAll('.mockctl [data-profile]').forEach(function (b) {
   b.addEventListener('click', function () {

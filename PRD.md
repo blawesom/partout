@@ -2,8 +2,8 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.3 — all open questions resolved
-**Date:** 2025-09-21
+**Status:** Draft v0.4 — observe layer: services, configs, TLS certs
+**Date:** 2025-09-25
 
 ---
 
@@ -14,9 +14,10 @@ discover, execute against, configure, patch, and orchestrate work across many Li
 from a central server with a web UI and an MCP server for AI assistants.
 
 It embeds a full **read/observe layer** (monitoring: containers, endpoints, heartbeats,
-certificates, resources, alerts) as its own, adds a **write/control path** on top of it, and
-sources facts from **external public data** (OS end-of-support dates, package vulnerability
-feeds) wherever doing so beats embedding stale tables.
+certificates, systemd service health, webservice configurations, resources, alerts) as its
+own, adds a **write/control path** on top of it, and sources facts from **external public data**
+(OS end-of-support dates, package vulnerability feeds) wherever doing so beats embedding
+stale tables.
 
 > **The one-sentence positioning:**
 > Partout answers *"how do I reach every host, run things, and make them converge to a state I
@@ -123,6 +124,14 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R15 | **Config via env vars; label-driven discovery** | Configuration via env vars; label-driven discovery. |
 | R16 | **Install paths** (bare binary + systemd, `docker run`, compose, cloud-init, Helm) | Bare binary + systemd, `docker run`, compose, cloud-init, Helm. |
 | R17 | **Host provisioning** (server installs the agent over the operator's existing fleet SSH) | Preflight → scp binary + unit → start agent → standard enrollment. Credentials used in-memory only; never persisted; Docker-host installs are manual handoff. |
+| R18 | **Service fact collection** (systemd units with full state, deps, health) | Unit name, state (active/inactive/failed/activating/deactivating), sub-state, enablement, dependencies (required-by, wanted-by, after), restart policy, resource usage, custom operator labels |
+| R19 | **Config fact collection** (haproxy, nginx, validation, topology) | Config presence, version, validity (`-c` / `-t`), backends/servers, frontends/vhosts, TLS binding |
+| R20 | **TLS certificate fact collection** (expiry, chain, SAN, OCSP) | Path, subject, issuer, expiry, days-remaining, key-type, SANs, chain validity, OCSP status, custom operator labels |
+| R21 | **Cross-fact correlation** (cert → nginx vhost → haproxy backend → service) | Links configs to services to certs for root-cause analysis |
+| R22 | **Config drift detection** (per-host hash, cross-host comparison, time series) | config_sha256 change-detection over time; alerts on divergence |
+| R23 | **Alert rules over service/config/cert domains** | Thresholds: service failed > N min, restarting in loop, cert expiring in N days, chain broken, OCSP revoked, config invalid, drift detected |
+| R24 | **UI pages: Services, Certificates, Configs** (fleet view, health, custom filter) | Sidebar nav section "Observe" with sub-pages |
+| R25 | **Alert engine** (threshold rules, alert store, SSE fan-out) | M6; the vehicle that makes observe data actionable |
 | C1 | **Remote command execution** (ad-hoc, sessions, scripts) | The core control primitive. |
 | C2 | **File management** (upload/download/edit/perm/checksum) | |
 | C3 | **Targeting model** (groups, tags, roles, selectors) | Groups, tags, roles, selectors. |
@@ -149,8 +158,33 @@ The multi-host model:
   **capability/fact set**: distro+version, init system (systemd/OpenRC), package manager,
   arch, CPU/mem/disk, installed package list hash (change-detection only — the full
   package+version list is fetched on demand by package operations, §5.6), running services
-  (systemd units),
+  (systemd units with full state),
   users/groups (names only), and network interfaces. Facts are refreshed hourly and on change.
+
+  **Service facts (`R18`)**: for each systemd unit, the agent reports name, type, state, sub-state,
+  enabled/disabled, dependencies (required-by, wanted-by, after), restart policy, resource usage
+  (memory-current, cpu-usage), and custom operator-assigned labels. The agent distinguishes
+  *custom* services (labelled by the operator or matching an operator-defined selector from
+  `/etc/systemd/system/*` vs `/lib/systemd/system/*`) from OS-managed ones. Only custom services
+  appear in the service overview (OS units are visible for dependency context but not surfaced
+  in fleet-wide health views by default).
+
+  **Config facts (`R19`)**: for each known webservice (haproxy, nginx, at least initially),
+  the agent reports presence, version, config file path, config validation result (from native
+  `haproxy -c` / `nginx -t`), and topology extracted from the config: backends with server
+  counts and active counts, frontends/listeners, TLS bindings, vhosts with upstream targets.
+  Config facts are read-only observations; they do not modify anything on the host.
+
+  **Certificate facts (`R20`)**: for each TLS certificate found on the host (scanning paths
+  declared in config facts plus a default `/etc/ssl/` and `/etc/pki/tls/` walk), the agent
+  reports subject, issuer, serial, not-before/not-after, days-remaining, key-type, SANs,
+  chain validity (full chain to trusted root), chain length, whether self-signed, OCSP
+  stapling presence and status, and custom operator-assigned labels.
+
+  **Operator labels on units and certs**: operators assign custom labels (`myapp`, `webtier`,
+  `prod`) to systemd units and certificate files via enrollment `--label`, the UI, the API,
+  or MCP tools. Labels are the primary filter in the UI and the primary grouping in alert
+  rules.
 
 **New — targeting model `[C3]`:**
 - Hosts carry **tags** (key=value and key-only) and **roles**, assigned via enrollment `--label`,
@@ -352,8 +386,16 @@ Architecture overview:
 │        │ Targeting · Jobs · Tasks · Playbooks      │ │
 │        └───────────────────────────────────────────┘ │
 │        ┌─────────────── Observe Layer ─────────────┐  │
-│        │ Containers · Endpoints · Heartbeats ·     │  │
-│        │ Certificates · Resources · Alerts         │  │
+│        │ Fact Collectors (agent-side)              │  │
+│        │ ├─ Systemd service facts                  │  │  R18
+│        │ ├─ Webservice config facts                │  │  R19
+│        │ ├─ TLS certificate facts                  │  │  R20
+│        │ ├─ Containers · Endpoints · Heartbeats    │  │
+│        │ └─────────────────────────────────────────┘  │
+│        │                                             │  │
+│        │ Alert Engine (threshold rules)              │  │  R25
+│        │ └─ Rules over services, configs, certs,    │  │
+│        │    drift                                   │  │
 │        └───────────────────────────────────────────┘  │
 │        ┌─────────────── Transport ─────────────────┐  │
 │        │ gRPC bidirectional (events ↑ commands ↓)  │  │
@@ -381,6 +423,20 @@ Key architecture points:
    plane that feeds facts into both monitoring and control decisions.
 4. **SSE broker reuse**: the broker now also fans out live command output, job run transitions,
    and audit events to browsers.
+5. **The observe layer is two-stage: collect → alert.** Fact collectors run on the agent
+   (systemd service state, webservice config topology, TLS cert details), upload as part of
+   the facts stream to the server, which stores them in `host_facts` (JSON, like all facts).
+   The alert engine evaluates threshold rules over stored facts and emits alert events to the
+   SSE broker. This means: (a) operators can browse service/config/cert state *without* having
+   alerts configured, (b) alert rules are server-side only — the agent just uploads facts, (c)
+   config-fact data feeds into control decisions (e.g. an `assert` step can verify `config_valid`
+   is true), and (d) cross-fact correlation (cert → vhost → backend → service) is done on the
+   server, not the agent.
+6. **Write surface for services is the task system.** The existing `service` task step
+   (started/stopped/enabled/disabled) is the *write* side of service management. The new fact
+   collection is the *read* side. Together they close the "observe → act → verify" loop: an
+   alert fires on a failed service, an operator or automation runs a task step to restart it,
+   the fact collector reports back the new state.
 
 ### 6.1 Command flow (end-to-end)
 
@@ -489,10 +545,15 @@ New tables (illustrative):
 - `policies`, `approval_requests`, `approvals`
 - `principals` (users) + `roles`
 - `provision_runs` (per-host provisioning steps + status, linked to `agent_id` once enrolled; see architecture §3.5)
+- **`alerts`** (unified alert store): `alert_id`, `agent_id` (NULL = fleet-wide), `kind` (service_failed, service_restarting, cert_expiring, cert_chain_broken, config_invalid, config_drift, endpoint_down), `host_id` (nullable — fleet-wide alerts), `rule_id` (FK to alert rules), `severity` (info, warning, critical), `message`, `state` (firing, resolved), `started_at`, `resolved_at`. Per-alert dedup key prevents duplicate firing.
+- **`alert_rules`** (threshold rules): `rule_id`, `name`, `kind` (matches alert kinds), `selector` (which hosts to evaluate), `thresholds` (JSON: `{service_failed_minutes: 5, service_restart_rate_per_hour: 10}`, `{cert_days_remaining: 30}`, `{config_invalid: true}`, `{config_drift_tolerance: 0}`), `severity` (default), `enabled` (boolean), `created_by`, `created_at`, `updated_at`.
+- `host_facts` history now includes: `service_facts` (array of unit facts with state, deps, labels), `config_facts` (haproxy/nginx config validation + topology), `cert_facts` (certificate details + expiry + chain) alongside existing facts.
 
 Storage engine rules, single-writer, WAL, and one-migration-version across SQLite/PostgreSQL
 follow R9. Retention (§9) applies to output chunks, session recordings, and job/task runs;
-the audit log and secret versions have their own, longer retention.
+the audit log, alert rules, and secret versions have their own, longer retention. Alert
+states (firing/resolved) are retained indefinitely by default (no auto-purge), with an
+operator-configurable floor.
 
 ---
 
@@ -568,7 +629,13 @@ provision run steps (R17), audit events, and alert events (alert engine).
 - All **read** monitoring tools (containers, endpoints, heartbeats, certificates,
   resources, alerts, updates, security) for the embedded observe layer.
 - Add **read** tools: `list_hosts`, `get_host_facts`, `list_groups`, `list_updates`,
-  `list_jobs`, `list_tasks`, `get_audit`, `list_sessions`, `get_session`.
+  `list_jobs`, `list_tasks`, `get_audit`, `list_sessions`, `get_session`,
+  `list_services` (fleet service health, filterable by label),
+  `get_service_state` (single unit state + deps on a host),
+  `list_certificates` (fleet cert inventory with expiry),
+  `get_cert_detail` (single cert with chain status),
+  `list_configs` (haproxy/nginx config validity + topology per host),
+  `list_alerts` (active + recently resolved alerts).
 - Add **write** tools, each gated by policy/RBAC and producing audit entries:
   `run_command`, `upload_file`, `download_file`, `run_job`, `run_playbook`,
   `apply_updates`, `create_secret` (value write-only), `request_approval`. Interactive PTY
@@ -599,10 +666,23 @@ Stack per R12. New pages:
 - **Secrets** — store, bind, rotate (values never shown).
 - **Policy & Approvals** — rule editor, pending approvals queue.
 - **Audit** — filterable, append-only log.
-- **Observe** — the embedded monitoring dashboard feeding the
-  "observe → act → verify" loop.
+- **Observe — Services** — fleet-wide service health table: custom unit name, state, uptime,
+  restart count, label tags. Click into host detail: full unit properties (type, dependencies,
+  restart policy, resource usage, labels). Filter by state (all/active/failed/dead), by label,
+  by host group. "Service detail" panel shows dependency tree and task actions (restart,
+  reload, stop, disable) via the existing task system.
+- **Observe — Certificates** — fleet cert inventory with expiry timeline: subject, issuer,
+  days-remaining, key-type, SANs, chain status, OCSP. Color-coded by expiry (red <7d, amber
+  <30d, green >30d). Click into detail: full chain verification, OCSP status, path on host.
+  Cross-linked to config facts (which vhost/backend uses this cert).
+- **Observe — Configs** — haproxy/nginx config validity and topology per host: config file path,
+  hash, validity status, version, backends/servers count with active counts, frontends, TLS
+  bindings. Config drift view: same config across hosts compared by hash, flagged when
+  divergent. Task actions: `assert config_valid` as part of playbooks.
 - **Overview** — "fleet control" summary (hosts connected, pending approvals, recent failures)
   alongside monitoring widgets.
+  Fleet Health cards now include an Observe widget showing active alert counts by severity
+  (once the alert engine is built).
 
 ---
 
@@ -653,7 +733,37 @@ feature paywall (R14). Consequences that follow from "everything free":
 - **M2 — Files & sessions:** file browser, transfers, PTY terminal, recording.
 - **M3 — Automation:** jobs, tasks/playbooks, packages, secrets, external data refresh (§6.3).
 - **M4 — Governance:** approvals, full policy, MCP write tools.
-- **M5 — Distribution & polish:** installers, cloud-init, Helm, status page integration.
+- **M5 — Observe: fact collectors (`R18`–`R20`).** The read side of the loop.
+  Agent-side collectors: `factscollect/service.go` (systemd unit state, deps, labels),
+  `factscollect/config.go` (haproxy/nginx validity + topology), `factscollect/cert.go`
+  (expiry, chain, SAN, OCSP). Server: `observe/facts.go` upserts into `host_facts` JSON.
+  New API endpoints: `GET /services`, `GET /certificates`, `GET /configs` (read-only, no
+  alerting). MCP read tools: `list_services`, `get_service_state`, `list_certificates`,
+  `get_cert_detail`, `list_configs`. No UI pages yet — data is browsable via API/CLI only.
+  **Exit:** `GET /api/v1/services?label=myapp` returns live unit state from a connected agent.
+
+- **M6 — Observe: alert engine (`R23`, `R25`).** Makes the data actionable.
+  Server: `observe/alerts.go` (rule store, periodic evaluation, firing/resolved states,
+  dedup), `observe/channels.go` (SSE fan-out). New tables: `alerts`, `alert_rules`.
+  New API endpoints: `GET /alerts`, `CRUD /alerts/rules`. SSE events: `alert.firing`,
+  `alert.resolved`. MCP read tool: `list_alerts`. Alert rule evaluation is server-side only
+  (PRD Decision 16). No UI pages yet — alerts fire over SSE and are visible via API/CLI.
+  **Exit:** a `service_failed` rule fires an alert when a unit enters `failed` state;
+  the alert resolves when the unit recovers.
+
+- **M7 — Observe: UI pages (`R24`).** The human-facing surface.
+  Three pages: Services (fleet table, label filter, dependency tree, task actions),
+  Certificates (expiry timeline, chain status, cross-link to configs), Configs (validity,
+  topology, drift comparison). Seven new components: `ServiceCard`, `ServiceDetailPanel`,
+  `CertCard`, `CertDetailPanel`, `ConfigCard`, `ConfigDetailPanel`, `DriftIndicator`.
+  Active Alerts section on `/fleet` page. All pages gated by `observe` capability boolean.
+  Cross-fact correlation (R21) and drift detection (R22) rendered in the UI.
+  **Exit:** all three pages render from real data; alert count visible on `/fleet`;
+  cross-links (cert → config → service) navigable.
+
+- **M8 — Distribution & polish:** installers (systemd unit, `docker run`, compose),
+  cloud-init, Helm chart, status page integration. Independent of the observe layer;
+  can be interleaved with M5–M7.
 
 ---
 
@@ -711,6 +821,37 @@ feature paywall (R14). Consequences that follow from "everything free":
     per step (architecture §3.5, §12.4). Consequence for the security model: the server box
     (and its service user's access to the fleet keys) is a critical asset — see operations
     doc §1/§4.
+12. **Observe layer — collect first, alert second.** The observe layer is a two-stage pipeline:
+    fact collectors upload data (agent-side → server storage in `host_facts`), and the alert
+    engine evaluates rules over stored data (server-side only). This means operators can browse
+    service/config/cert state without alerts configured. Collectors are lightweight: systemd
+    `list-units --no-pager --no-legend` (fast, no output parsing), `haproxy -c` and `nginx -t`
+    for config validity, `openssl x509` for cert details. No streaming metrics — just periodic
+    fact snapshots (same cadence as other facts: hourly or on change).
+13. **Service visibility — custom units only.** The service overview surfaces only *custom*
+    systemd units (labelled by the operator, or units from `/etc/systemd/system/*` not from
+    `/lib/systemd/system/*`). OS-managed units are visible for dependency context (wanted-by,
+    after) but not in fleet-wide health views. This keeps the overview focused on what the
+    operator owns and cares about. Operators can mark any unit as "observe" via labels.
+14. **Config facts — read-only, validation-driven.** Config facts are observations only: the
+    agent runs native validation (`haproxy -c`, `nginx -t`) and extracts topology from the
+    config file (backends, frontends, vhosts, TLS bindings). No config modification goes
+    through the observe layer — if an operator needs to change a config, they use file
+    management (§5.3) or tasks (§5.5) with a `template` step. Config drift detection is
+    based on sha256 hash comparison across hosts and over time.
+15. **TLS cert facts — path-based discovery, operator labels.** Certificates are discovered
+    by scanning paths declared in config facts (haproxy/nginx TLS binding paths) plus a
+    default walk of `/etc/ssl/` and `/etc/pki/tls/`. Operator labels (`prod`, `webtier`) are
+    assigned to certificate files and used for filtering and alert rule targeting. Chain
+    verification uses the system trust store (`/etc/ssl/certs/ca-certificates.crt` or equivalent
+    per-distro). OCSP stapling is checked from the cert's stapled response, not by making
+    outbound OCSP requests (the agent never initiates outbound network connections beyond the
+    gRPC stream).
+16. **Alert engine — server-side only, no agent thresholds.** All alert rule evaluation
+    happens on the server. The agent uploads facts; the server evaluates threshold rules and
+    emits alert events. This keeps the agent minimal and avoids distributing rule definitions
+    to agents (no policy-bundle-like mechanism needed). Alert rules are CRUD-managed on the
+    server with the same audit trail as other server-side state.
 
 ### 15.2 Open questions
 

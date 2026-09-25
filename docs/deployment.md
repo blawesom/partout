@@ -1,7 +1,7 @@
 # Partout — Deployment
 
-**Status:** Draft v0.3 — reflects the current implementation (M0–M3 complete,
-M4 in progress). Sections marked *proposed* describe planned work that is not yet
+**Status:** Draft v0.4 — reflects the current implementation (M0–M4 complete,
+M5 in progress). Sections marked *proposed* describe planned work that is not yet
 wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
@@ -29,12 +29,18 @@ written into the new agent's `agent.env`. Preflight also probes host→server re
 New env vars: `PARTOUT_SSH_DIR`, `PARTOUT_SERVER_HOST`.
 **What v0.3 also ships (M2–M3, M4 in progress):** offline spool (R5), files &
 sessions (M2), secrets (C7), external data refresh (§6.3), package management (C6),
-tasks/playbooks (C5), scheduled jobs (C4), and local user auth (C9, M4). See
-`README.md` for the full implementation-status table and the remaining M3/M4 gaps.
+tasks/playbooks (C5), scheduled jobs (C4), and local user auth (C9, M4).
+**What v0.4 adds (M5, in progress):** observe layer fact collectors — systemd
+service facts (R18), webservice config facts (R19, `haproxy`/`nginx`), TLS
+certificate facts (R20, expiry/chain/SAN/OCSP). Agent-side collectors upload
+structured JSON via a new `OBSERVE_FACTS` gRPC envelope. Server-side
+`observe/facts.go` upserts into `host_facts` JSON blob. Read-only REST endpoints
+(`/services`, `/certificates`, `/configs`) and MCP read tools. No alerting yet
+(alert engine is M6). See `PRD.md` §14 for the M5–M8 milestone breakdown.
 
 **Not yet wired:** Web UI, elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
-`none`/`/`), Postgres backend, the approvals engine + full policy surface, and the MCP
-server.
+`none`/`/`), Postgres backend, the approvals engine + full policy surface, the MCP
+server write tools, alert engine (M6), and UI pages (M7).
 
 ---
 
@@ -283,7 +289,8 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_TOKEN` / `--token` | *(first boot only)* | one-time enrollment token |
 | `PARTOUT_TLS_CA` / `--ca-file` | *(empty)* | path to the server root CA (PEM); enables HTTPS enrollment + mTLS stream |
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
-| `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | facts refresh seconds (floor 30) |
+| `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
+| `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |
 
 ### 4.3 `partout ctl` — wired
 
@@ -334,6 +341,9 @@ implementation.)
 | `PARTOUT_POLICY_STALE_S` | 172800 | agent job bundle staleness |
 | `PARTOUT_MCP_ENABLED` | true | MCP server |
 | `PARTOUT_LOG_LEVEL` | info | structured log level |
+| `PARTOUT_OBSERVE_FACTS_INTERVAL` | **300** | (M5) seconds between structured fact uploads (services/configs/certs); per-collector cadences in PRD arch §7.2
+| `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`)
+| `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification
 | `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; hardcoded `none`) |
 | `PARTOUT_ROOT` | `/` | agent fs/exec root prefix (containers; hardcoded `/`) |
 | `--label=k=v`, `--version` | — | flags *proposed* in earlier drafts; not wired |

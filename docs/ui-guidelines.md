@@ -47,13 +47,21 @@ What it does **not** settle (do not copy blindly):
 - `FleetConsole` brand — replaced by **Partout Fleet Management**.
 - `LABELS` (Production/Staging/Development) — **removed**; no tag store exists (§3).
 - `Healthy / Degrading / Offline / Pending Approval` — not the data model (§9).
-- `Active Alerts` — no alert engine exists (M5).
+- `Active Alerts` — M6 alert engine; now expanded to full Observe section with Services,
+  Certificates, and Configs pages (see §5 sidebar).
+- `Services` — new Observe sub-page: fleet service health table with state, labels, restart count, dependency tree.
 - `Approve & Apply` as a usable button — approvals engine is M4 (§4).
 - `diff -u …` output — the API returns a summary string, not a diff (§3).
 - Fleet-wide health cards shown inside a *host* page — incoherent; moved to the fleet landing page (§5).
 
 > **Artifact:** the mockup has a watermark (*"until supply is restored"*) across the diff body.
 > It is not UI.
+
+**Runnable mock:** [`docs/mockups/fleet-management.html`](mockups/fleet-management.html) renders this
+shell as a single static file (no build, no network, no framework) with hard-coded sample data.
+Its bottom-right panel simulates `GET /api/v1/capabilities` and the current principal's role, so
+both gating axes (§4) and the state vocabulary (§9) can be reviewed visually. It is a design
+reference, not the application — the real UI is Vue + Tailwind embedded via `go:embed`.
 
 ---
 
@@ -73,7 +81,10 @@ Status legend: **✅ real** · **🟡 shape mismatch** · **🔵 planned** (PRD 
 | Host tabs | overview (none) · updates ✅ · audit ✅ | 🟡 audit filter is global, not per-host | S1–S3 |
 | Fleet Health cards | `GET /api/v1/hosts` → `state` | 🟡 mock's state names are wrong; count is a client roll-up | S1 |
 | `382` hosts | cursor-paginated list, default limit 100 | 🟡 **no summary endpoint** — accepted, fleet is tens (§13) | S1 |
-| `Active Alerts` | `internal/server/observe` is empty; no thresholds, no alert store | ⛔ 🔵 M5 | S5 |
+| `Active Alerts` | `internal/server/observe` is empty; no thresholds, no alert store | ⛔ 🔵 M6 (R25) | S6 |
+| `Services` | new Observe sub-page (R18): service health table with state, labels, restart count, dep tree | ⛔ 🔵 M7 | S7 |
+| `Certificates` | new Observe sub-page (R20): cert inventory with expiry timeline, chain status, SANs | ⛔ 🔵 M7 | S7 |
+| `Configs` | new Observe sub-page (R19): config validity, topology, drift comparison | ⛔ 🔵 M7 | S7 |
 | `Dry-Run Diff` terminal | `POST /api/v1/packages/apply {dry_run}` → **`dry_summary` string** | 🟡 no diff text, no per-package records | S3 |
 | `Held · <rule>` chip | policy engine returns matched **rule IDs** | ✅ | S4 |
 | `Update held for approval` banner | same rule IDs; `require_approval` **fails closed today** | ✅ as a *denial* | S4 |
@@ -101,7 +112,7 @@ Gating must be **data-driven**, not hardcoded milestones. Two signals already ex
 
 1. **Disabled-subsystem responses.** Every subsystem returns HTTP 503 with a stable code when
    it is not wired: `auth`, `tls`, `files`, `sessions`, `secrets`, `packages`, `jobs`, `tasks`,
-   `external_data` (`<name>_disabled`).
+   `external_data`, `provision`, `observe` (`<name>_disabled`).
 2. **A capability probe** (backend addition **B1**): `GET /api/v1/capabilities` →
    `{auth, users, hosts, groups, exec, sessions, files, jobs, tasks, packages, secrets,
    policies, audit, external_data, provision, approvals, observe}` as booleans.
@@ -162,6 +173,11 @@ FLEET
   Provision          (admin)
   Users              (admin)
 
+OBSERVE
+  Services                ← fleet service health, label filter, dependency tree
+  Certificates            ← expiry timeline, chain status, cross-link to configs
+  Configs                 ← haproxy/nginx validity, topology, drift comparison
+
 GROUPS
   <named selector>              ← one row per group; selecting it filters the host list
 ```
@@ -190,6 +206,9 @@ UI labels are presentation names; the PRD/API nouns stay authoritative.
 | Policies | Policy & Approvals | `/policies` |
 | Provision | Provision | `/provision-runs` |
 | Users | (admin) | `/users` |
+| Observe · Services | Observe → Services | `/services`, `/services?agent_id=&name=` |
+| Observe · Certificates | Observe → Certificates | `/certificates`, `/certificates?days_remaining_lt=` |
+| Observe · Configs | Observe → Configs | `/configs`, `/configs?kind=&agent_id=` |
 
 ### Routes
 
@@ -209,6 +228,7 @@ UI labels are presentation names; the PRD/API nouns stay authoritative.
 /secrets                 (values write-only; never displayed)
 /policies
 /provision               /provision/:runId
+/observe                 /observe/services | /observe/certificates | /observe/configs
 /users                   (admin)
 /account
 ```
@@ -294,6 +314,13 @@ Build these once in S0/S1 and reuse at S3–S5; do not re-invent per page.
 | `CronField`, `SelectorField`, `WhenGuardField` | constrained inputs; the UI emits structured models, never free-form YAML |
 | `AvatarStack` | initials chips + overflow count; no photo avatars until a principals endpoint exists |
 | `CodeEditor` | CAS-aware file edit (S2) |
+| `ServiceCard` | unit name + state icon (shield for active, X for failed, clock for restarting) + restart count + label chips; hover/expansion shows deps, enablement, resource usage |
+| `ServiceDetailPanel` | full unit properties: type, restart policy, memory, CPU, dependencies (required-by/wanted-by/after), task action buttons (restart/reload/stop/disable) |
+| `CertCard` | subject + issuer + days-remaining badge (color-coded: red <7d, amber <30d, green >30d) + SANs + chain status icon |
+| `CertDetailPanel` | full cert detail: path, key-type, not-before/after, chain length, self-signed flag, OCSP status, cross-links to configs |
+| `ConfigCard` | kind (haproxy/nginx) + version + validity icon + config hash + backends count + TLS count. Drifted config flagged with amber outline |
+| `ConfigDetailPanel` | topology view: backends/servers with active counts, frontends, vhosts, TLS bindings, cross-links to certs |
+| `DriftIndicator` | amber outline + "drifted: 1 of 3 hosts differ" caption |
 
 ---
 
@@ -352,6 +379,9 @@ tell the operator whether anything executed at all.
 | `provision.start`, `provision.step`, `provision.connected`, `provision.key_confirm` | Provision wizard |
 | `package.action` | Updates |
 | `file.action` | Files |
+| `alert.firing` | Fleet Management alert count, Observe pages, MCP tools |
+| `alert.resolved` | Fleet Management alert count, Observe pages |
+| `facts.upload` | Internal tracking (facts received) |
 
 - **Stream widgets display their identity** (`stream: <label>`) and are always a *filtered view*
   of the single broker, never a per-resource endpoint.
@@ -413,16 +443,18 @@ scale; revisit if fleet size grows.
 
 | Slice | Capability required (all ✅ unless marked) | Mockup elements **enabled** | Mockup elements **greyed + labeled** | Exit criteria |
 |---|---|---|---|---|
-| **S0 — Shell** | asset embedding (**new**), login, `auth/me`, capabilities (**B1**) | sidebar, brand + port badge, user card, breadcrumb, nav, top bar, `SSE connected` / `live` | `Monitoring`, `Active Alerts`, `Approve & Apply` → *"not yet available (M5/M4)"* | Login → shell renders; nav reflects capabilities; disabled items self-explain |
+| **S0 — Shell** | asset embedding (**new**), login, `auth/me`, capabilities (**B1**) | sidebar, brand + port badge, user card, breadcrumb, nav, top bar, `SSE connected` / `live` | `Observe · Services`, `Observe · Certificates`, `Observe · Configs`, `Active Alerts`, `Approve & Apply` → *"not yet available (M7/M6/M4)"* | Login → shell renders; nav reflects capabilities; disabled items self-explain |
 | **S1 — The loop (M1)** | hosts, selector resolve (**B2**), exec, audit, policy | Fleet Management list + **Fleet Health (3 cards)**, Execute w/ selector preview + live per-host output, Audit Log table, GROUPS | `Degrading`/`Pending Approval` cards removed; host tabs other than Overview/Audit → not available | log in → see hosts → run `whoami` via selector → watch live → confirm in audit |
 | **S2 — Host workbench (M2)** | sessions, files, replay | `PTY` action, host tabs Terminal/Files, Sessions, Files | `Active Alerts` greyed | Open a PTY from a host page; upload/download/edit a file; replay a session |
 | **S3 — Patch (M3)** | packages, external data, EOL | host `Updates` tab, `DiffView` rendering **`dry_summary`** in the terminal frame, captioned *"simulated · summary only"*, CVE badge, Updates page | real diff text → *"not yet available"* | Dry-run renders honestly; apply is confirmed and audited |
 | **S4 — Governance (M4)** | approvals engine (**not built**) | `Held · <rule>` chips, hold banner as the **real `require_approval` denial**, Policies page, initials avatar stack | `Approve & Apply` → *"approvals engine (M4)"* until the engine lands | A `require_approval` rule produces a truthful hold; approval flow completes once the engine exists |
-| **S5 — Observe (M5)** | thresholds, alert store, uPlot | `Active Alerts`, `Monitoring`, real health model, metrics | — | Alerts and health render from real data |
+| **S5 — Observe · Facts (M5)** | fact collectors (services, configs, certs), API endpoints B6–B8 | `Services` table, `Certificates` table, `Configs` table — **API/CLI only, no UI page yet** | `Active Alerts` → *"not yet available (M6)"* | `GET /services`, `/certificates`, `/configs` return live data from a connected agent |
+| **S6 — Observe · Alerts (M6)** | alert rules + engine (B9), SSE `alert.firing`/`alert.resolved` | `Active Alerts` section on `/fleet` page (alert count + list) | `Services`/`Cert`/`Configs` pages still API-only until M7 | A `service_failed` alert fires and appears in `/fleet`; resolving the unit clears the alert |
+| **S7 — Observe · Pages (M7)** | all B6–B9 endpoints, `observe` capability boolean | `Services` page (table + detail + task actions), `Certificates` page (expiry timeline + chain), `Configs` page (validity + drift + topology), cross-links (cert → config → service) | — | All three pages render from real data; cross-links navigable; alert count on `/fleet` |
 
 Sequencing rule: the visual vocabulary (`StatCard`, `AlertRow`, `TerminalFrame`,
-`StreamConsole`, `Chip`, `Tabs`, `DiffView`) is built in S0/S1 and reused, so S3–S5 add data
-plumbing rather than new components.
+`StreamConsole`, `Chip`, `Tabs`, `DiffView`) is built in S0/S1 and reused; S5–S7 add
+data plumbing and new components rather than reinventing the shell.
 
 ---
 
@@ -438,6 +470,11 @@ prerequisite for the slice beside it.
 | **B3** | `DELETE /api/v1/agents/{id}` (thin wrapper over `store.DeleteAgent`, audited) | admin | S1 | `store.DeleteAgent` exists but has **no HTTP endpoint**; decommissioned hosts would stay in the fleet forever. Also makes `revoked` reachable |
 | **B4** | `GET /api/v1/audit?agent_id=` filter | viewer | later | host-scoped audit tab; client-side filtering is acceptable until log volume grows |
 | **B5** | Unified-diff / per-package change records from `packages` | viewer | S3+ | the mock's `diff -u` view; today only `dry_summary` (a string) exists |
+| **B6** | `GET /api/v1/services` + `GET /api/v1/services?agent_id=&name=` | viewer | S5 | fleet service health table + per-unit detail with dependency tree |
+| **B7** | `GET /api/v1/certificates` + `GET /api/v1/certificates?days_remaining_lt=` | viewer | S5 | cert inventory with expiry timeline, chain status |
+| **B8** | `GET /api/v1/configs` + per-host config detail | viewer | S5 | config validity, topology, cross-host drift |
+| **B9** | `GET/POST/PUT/DELETE /api/v1/alerts/rules` + `GET /api/v1/alerts` | admin/viewer | S5 | alert rule CRUD + active alert list |
+| **B10** | `observe` capability boolean in `/api/v1/capabilities` | — | S5 | gates all Observe pages |
 
 Also recorded: **no static asset serving exists** (`embed.FS`, `FileServer`, `web/` all absent)
 — S0 must add Vite → `web/dist` → `go:embed` plus a SPA fallback route.
@@ -451,7 +488,8 @@ tags/labels API (dropped).
 
 - **Labels/tags** — dropped; the `host_tags` table has no writers. `tag:`/`role:` selector
   predicates are not surfaced in the UI until a tag store exists.
-- **Active Alerts / Monitoring / Observe dashboard** — M5; `internal/server/observe` is empty.
+- **Active Alerts** — M6 (R25); `internal/server/observe` is empty. Alert rules, evaluation, firing/resolved states.
+- **Observe UI pages (Services, Certificates, Configs)** — M7 (R24); three sub-pages with cross-links and drift comparison. Cross-fact correlation (R21) and drift detection (R22) rendered here.
 - **Approvals engine** — M4; `require_approval` behaves as deny today.
 - **Real diffs** — B5.
 - **Dark theme** — tokens defined, not built.
@@ -491,5 +529,5 @@ None blocking. Two cosmetic items to confirm during S0 review:
 
 1. Port badge format — `[:8443]` monospace chip (as mocked) vs. `server: port` line in the
    account menu.
-2. Whether `Monitoring` appears in the sidebar at all before M5, or is omitted and introduced
+2. Whether `Monitoring` appears in the sidebar at all before M7, or is omitted and introduced
    with the observe layer (currently: shown, greyed, per the no-dead-chrome rule).

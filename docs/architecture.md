@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.3 (implementation-level design)
+**Status:** Draft v0.4 — observe layer: services, configs, TLS certs (implementation-level design)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and
@@ -32,7 +32,13 @@ partout/
 │   │   ├── tasks/          # task/playbook store, versioning
 │   │   ├── pkgmgmt/        # update orchestration, vuln correlation, EOL gating
 │   │   ├── extern/         # external data service (EOL, CVE feeds), cache, refresh
-│   │   ├── observe/        # facts ingestion, containers, endpoints, certs, alerts
+│   │   ├── observe/        # facts ingestion, alert rules, alert engine, containers, endpoints
+│   │   │   ├── facts.go         # server-side facts store (upsert into host_facts JSON)
+│   │   │   ├── service.go       # service fact aggregation, label filtering, health rollup
+│   │   │   ├── config.go        # config fact aggregation, drift detection, cross-host compare
+│   │   │   ├── cert.go          # cert fact aggregation, expiry tracking, chain validation
+│   │   │   ├── alerts.go        # alert rule store, rule evaluation, firing/resolved states
+│   │   │   └── channels.go      # alert channels (SSE fan-out, future: webhook, email)
 │   │   └── web/            # embed.FS of the built UI
 │   ├── agent/
 │   │   ├── stream/         # gRPC client, reconnect/backoff, handshake, flow control
@@ -44,6 +50,10 @@ partout/
 │   │   ├── taskrun/        # step runner, when-evaluator, reboot continuation
 │   │   ├── pkg/            # apt/dnf/apk backends, journals
 │   │   └── facts/          # collectors (os-release, init, pkg hash, units, ifaces…)
+│   │   └── factscollect/   # observe-layer collectors: service/config/cert facts
+│   │       ├── service.go  # systemd unit facts: state, deps, enablement, labels, resources
+│   │       ├── config.go   # haproxy/nginx config facts: validity, topology, backends
+│   │       └── cert.go     # TLS cert facts: expiry, chain, SAN, OCSP, key-type
 │   ├── spool/              # shared spool: mem → disk → drop-oldest (both directions)
 │   ├── store/              # dialect abstraction: sqlite | postgres; migrations
 │   ├── proto/              # .proto + generated code for the stream service
@@ -605,6 +615,16 @@ group:webservers               # a saved group (named selector)
 - **facts** — collectors for os-release/osImage, init system, package manager, arch,
   cpu/mem/disk, installed-package *hash* (change detection), systemd units, users/groups
   (names), interfaces. Refresh hourly + on detected change (PRD §5.1). Feeds `when` guards.
+- **factscollect** — observe-layer fact collectors (`R18`-`R20`). Three sub-collectors:
+  (a) **service**: `systemctl list-units` + `systemctl show` for full unit state, deps,
+  enablement, resource usage, operator labels. Custom units only in output (units from
+  `/etc/systemd/system/*` or labelled by operator). Refresh: 5 min.
+  (b) **config**: `haproxy -c` / `nginx -t` for validity; lightweight regex parsing for
+  topology (backends, frontends, vhosts, TLS bindings). Config sha256 for drift detection.
+  Refresh: 15 min or on file mtime change. (c) **cert**: openssl x509 for subject, issuer,
+  expiry, SANs, chain validity, OCSP status. Discovery from config TLS paths + default
+  cert dirs. Refresh: 1 hour. All three feed into the FactsBatch stream under named JSON
+  keys in `host_facts`.
 - **exec** — non-pty and pty execution; env sanitized (`$HOME`, `$PATH` from a clean base;
   only explicitly declared env passed); cwd defaults to agent home. All fs/exec paths are
   interpreted relative to the **agent root** (`PARTOUT_ROOT`, default `/`; `--root=` flag),
@@ -643,8 +663,9 @@ group:webservers               # a saved group (named selector)
 - **when grammar** (constrained, agent-side, never free-form — PRD Decision 4):
   comparisons over facts (`fact.os == 'debian'`, `host.distro in ['debian','ubuntu']`),
   state predicates (`!file.exists('/x')`, `pkg.installed('nginx')`,
-  `service.running('ssh')`), combined with `and`/`or`. Parsed to a tiny AST; anything else is
-  rejected at task validation time.
+  `service.running('ssh')`, `service.failed('myapp')`, `config.valid('haproxy')`,
+  `cert.expiring('/etc/ssl/app.pem', 30)`), combined with `and`/`or`. Parsed to a tiny
+  AST; anything else is rejected at task validation time.
 - **pkg** — apt/dnf backends (apk in M3.1) selected from os-release `ID` fact (R13);
   `list-updates` runs `apt-get -s upgrade` / `dnf check-update` on the agent and returns
   available upgrades, which the server ranks by CVE severity via `vuln_cache` (PRD §6.3);
@@ -676,16 +697,232 @@ group:webservers               # a saved group (named selector)
 
 ---
 
-## 7. Observe layer (elided)
+## 7. Observe layer
 
-Facts ingestion, containers, endpoints, heartbeats, certificates, resources, and the alert
-engine are defined by PRD §6, R10/R13 and are not re-derived here. The only
-architectural coupling to the control plane:
+This layer collects facts from agents, stores them in the database alongside other host facts,
+and evaluates alert rules over stored facts. It is the bridge between "what's running on
+my hosts" and "something is wrong" — the observe side of the "observe → act → verify" loop.
 
-- **facts feed `when` guards** — the agent's fact cache is the single source for task guards.
-- **EOL state feeds patch gating** — `extern` publishes per-host `supported | ending_soon | ended`
-  from the EOL cache; `pkg` and policy rules may require approval on `ended` hosts (PRD §5.6).
-- **alerts fan out on the same SSE broker** as command output and audit events.
+### 7.1 Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    SERVER: observe/                          │
+│                                                              │
+│  facts.go ───► upsert into host_facts JSON blob             │
+│  (one endpoint per fact kind)                                │
+│       │                                                       │
+│       ▼                                                       │
+│  service.go ──► label filtering, health rollup, dep tree     │
+│  config.go  ──► drift detection, cross-host compare          │
+│  cert.go    ──► expiry tracking, chain validation, SAN list  │
+│       │                                                       │
+│       ▼                                                       │
+│  alerts.go ──► rule evaluation ──► firing/resolved states    │
+│  channels.go ─► SSE fan-out + future webhook/email           │
+└──────────────────┬───────────────────────────────────────────┘
+                   │
+      ┌────────────▼────────────┐    ┌──────────────────────┐
+      │  Agent: factscollect/   │    │  Agent: facts/       │
+      │  service.go             │    │  (existing: os-     │
+      │  config.go              │    │   release, init,    │
+      │  cert.go                │    │   pkg hash, etc.)   │
+      └────────────┬────────────┘    └──────────┬───────────┘
+                   │ FactsBatch up (same       │ FactsBatch up
+                   │  stream, different JSON   │ (same stream)
+                   │  keys in host_facts)      │
+                   ▼                           ▼
+              server/observe/ facts.go ───────► upsert
+              (unified: all fact kinds merge
+               into one JSON blob per host)
+```
+
+Key principle: all fact kinds merge into one `host_facts` JSON blob per host. There are no
+separate tables per fact kind. The schema is: `host_facts(agent_id, facts_json, facts_hash,
+updated_at)`. Fact collectors produce named keys in the JSON:
+
+```json
+{
+  "os": { "id": "ubuntu", "version": "24.04", "osImage": "..." },
+  "resources": { "cpu": 4, "mem_bytes": 8589934592, "disk_bytes": 214748364800 },
+  "packages_hash": "sha256:abc123...",
+  "interfaces": [ { "name": "eth0", "addr": "10.0.1.5" } ],
+  "services": {                    // existing: basic unit list
+    "unit_names": ["sshd","nginx","myapp"]
+  },
+  "services_detailed": {           // R18: full service facts
+    "units": [
+      { "name": "myapp", "state": "active", "sub_state": "running",
+        "enabled": true, "wanted_by": ["multi-user.target"],
+        "after": ["network-online.target"], "restart_policy": "on-failure",
+        "memory_current": 45678901, "last_exit_code": 0,
+        "labels": ["myapp", "webtier"] }
+    ]
+  },
+  "configs": {                     // R19: webservice config facts
+    "haproxy": { "present": true, "version": "2.8.5",
+      "config_file": "/etc/haproxy/haproxy.cfg", "config_sha256": "sha256:def...",
+      "config_valid": true,
+      "backends": [
+        { "name": "webservers", "servers": 3, "active": 3 },
+        { "name": "api", "servers": 2, "active": 1 }
+      ]
+    },
+    "nginx": { "present": true, "version": "1.24",
+      "config_file": "/etc/nginx/nginx.conf", "config_sha256": "sha256:ghi...",
+      "config_valid": true,
+      "vhosts": [
+        { "server_name": "app.example.com", "port": 443, "tls": true,
+          "tls_cert": "/etc/ssl/app/fullchain.pem",
+          "root": "/var/www/app", "upstream": "unix:/run/myapp.sock" }
+      ]
+    }
+  },
+  "certificates": {                // R20: TLS cert facts
+    "items": [
+      { "path": "/etc/ssl/app/fullchain.pem",
+        "subject": "CN=app.example.com",
+        "issuer": "CN=Let's Encrypt Authority X3",
+        "not_after": 1728000000, "days_remaining": 14,
+        "key_type": "ECDSA-P256", "san": ["app.example.com"],
+        "chain_valid": true, "chain_length": 3,
+        "self_signed": false, "ocsp_stapling": true,
+        "ocsp_status": "good",
+        "labels": ["webtier", "prod"] }
+    ]
+  }
+}
+```
+
+### 7.2 Agent-side collectors
+
+**Service collector (`factscollect/service.go`)**:
+- Command: `systemctl list-units --no-pager --no-legend --type=service --state=active,failed,deactivating,activating` for active units.
+- For each unit: `systemctl show <unit>` (key=value format) for properties: State, SubState, ActiveState, UnitFileState (enabled/disabled/masked), Requires, RequiredBy, Wants, WantedBy, After, Before, Restart, MemoryCurrent, CPUSec.
+- Custom labels: read from `PARTOUT_SERVICE_LABELS` env var (`myapp,nginx`) or from operator-assigned labels at enrollment. Units from `/etc/systemd/system/*` (not `/lib/systemd/system/*`) are auto-marked as custom.
+- Output: `services_detailed.units[]` JSON array.
+- Refresh: every 5 minutes (services change less often than resources).
+
+**Config collector (`factscollect/config.go`)**:
+- Commands: `haproxy -c -f /etc/haproxy/haproxy.cfg` (validation), `nginx -t` (validation).
+- Config parsing: lightweight regex/line-based parsing (not full YAML parsing) to extract backends, servers, frontends, vhosts, TLS bindings. This keeps the collector fast and avoids dependency on config-file-format parsers.
+- Topology: for each backend, count total servers and servers marked as "up" (reachable on the host, detected via a lightweight TCP probe to the server address:port within a timeout — optional, can be disabled).
+- Output: `configs.haproxy`, `configs.nginx` objects.
+- Config drift: server compares `config_sha256` across hosts with the same role/group; flag when divergent.
+- Refresh: every 15 minutes or on change (detected by config file mtime — inotify watch).
+
+**Cert collector (`factscollect/cert.go`)**:
+- Discovery: scan paths from config facts (TLS binding paths in haproxy/nginx configs), plus default walks of `/etc/ssl/`, `/etc/ssl/certs/`, `/etc/pki/tls/`. Also respect `PARTOUT_CERT_PATHS` env var for custom paths.
+- For each `.pem`/`.crt`/`.cert` file: `openssl x509 -in <path> -noout -subject -issuer -dates -serial -ext subjectAltName -fingerprint -text` (single command, all info in one parse).
+- Chain validation: `openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt <path>` (system trust store).
+- OCSP: extract stapled response from the cert (not an outbound OCSP request — the agent never initiates outbound connections beyond gRPC). `openssl x509 -in <path> -noout -text | grep -A2 'OCSP'`.
+- Custom labels: same label mechanism as services.
+- Output: `certificates.items[]` JSON array.
+- Refresh: every 1 hour (certs change very rarely).
+
+All collectors run in parallel on the agent. Results are included in the next `FactsBatch`
+upload with the appropriate JSON keys. Upload is part of the regular facts stream, not a
+separate channel.
+
+### 7.3 Server-side fact storage
+
+Facts ingestion (`observe/facts.go`):
+- All fact kinds merge into one JSON blob per host: `host_facts(agent_id, facts_json, facts_hash, updated_at)`.
+- On each upload, the server computes a sha256 of the new facts_json; if it matches the latest facts_hash, the facts are unchanged (skip processing).
+- A change-triggered history row is written when the hash differs (for drift detection and time-series views).
+- Fact data is stored as JSON in a TEXT column; no SQL-level field extraction. The server processes facts in Go code for aggregation and alert evaluation.
+- Retention: latest always kept; history rows retained per PRD §9 (90 days).
+
+### 7.4 Aggregation and cross-fact correlation
+
+**Service aggregation (`observe/service.go`)**:
+- Filter: by operator labels (`myapp`, `webtier`), by state, by host group.
+- Health rollup: per-service, count active/failed/inactive across fleet.
+- Dependency tree: reverse-dep analysis (which services require this one?).
+- API: `GET /api/v1/services?label=myapp&state=failed` returns aggregated view.
+
+**Config drift (`observe/config.go`)**:
+- Hash comparison: group hosts by role/selector, compare `config_sha256` within groups.
+- Flag: hosts whose config hash differs from the group majority are flagged as drifted.
+- API: `GET /api/v1/configs?kind=haproxy&agent_id=` returns per-host config state.
+
+**Cert expiry (`observe/cert.go`)**:
+- Days-remaining calculation from `not_after` epoch.
+- Chain validation summary: valid/broken/self-signed/unknown.
+- Cross-link: cert path in `configs.nginx.vhosts[*].tls_cert` → linked to cert in `certificates.items[*]` → linked to service via haproxy frontend/backend.
+- API: `GET /api/v1/certificates?days_remaining_lt=30` returns near-expiry certs.
+
+### 7.5 Alert engine (`observe/alerts.go`)
+
+**Rule model**:
+
+```json
+{
+  "rule_id": "alert_rule_abc",
+  "name": "prod-web-cert-expires-soon",
+  "kind": "cert_expiring",
+  "selector": "tag:env=prod AND role=web",
+  "thresholds": {
+    "cert_days_remaining": 30
+  },
+  "severity": "warning",
+  "enabled": true
+}
+```
+
+**Alert kinds**:
+
+| Kind | Source fact | Threshold | Default severity |
+|---|---|---|---|
+| `service_failed` | `services_detailed.units[*].state == "failed"` | `service_failed_minutes: 5` | critical |
+| `service_restarting` | Unit in `auto-restarting` sub-state | `service_restart_rate_per_hour: 10` | warning |
+| `service_absent` | Expected custom unit not present | `unit_name: "myapp"` | critical |
+| `cert_expiring` | `certificates.items[*].days_remaining` < threshold | `cert_days_remaining: 30` | warning |
+| `cert_chain_broken` | `certificates.items[*].chain_valid == false` | (boolean) | critical |
+| `config_invalid` | `configs.*.config_valid == false` | (boolean) | critical |
+| `config_drift` | `configs.*.config_sha256` differs from group | `config_drift_tolerance: 0` | info |
+| `endpoint_down` | (future: health endpoint probe) | (TBD) | warning |
+
+**Evaluation flow**:
+
+1. **Periodic ticker** (default: every 2 minutes): server iterates all enabled alert rules.
+2. For each rule, resolve the selector to concrete hosts.
+3. For each host, load the latest `host_facts` blob and evaluate the rule's thresholds against
+   the relevant fact keys.
+4. If a threshold is violated, check the alert store for an existing firing alert for this
+   (rule, host, dedup key) triple.
+5. If no existing firing alert: create a new alert (`state: firing`), emit an `alert.firing` SSE event.
+6. If an existing firing alert exists: update `last_evaluated` timestamp (no duplicate event).
+7. If a threshold is NOT violated but an alert is firing: update alert to `state: resolved`,
+   emit `alert.resolved` SSE event, set `resolved_at`.
+
+**Dedup key**: unique per (rule_id, host_id, threshold_key) to prevent duplicate alerts. For
+`cert_expiring`, the dedup key is the cert file path. For `service_failed`, it's the unit name.
+
+**Performance**: with 500 hosts and 50 rules, evaluation is 500 × 50 = 25k fact lookups per
+tick. Facts are loaded from in-memory cache (DB cache, not hot queries) — each lookup is a
+JSON key traversal in Go, negligible cost. Full evaluation cycle is <1s.
+
+### 7.6 SSE event types
+
+New SSE event kinds for the observe layer:
+
+| Kind | Payload | Consumer |
+|---|---|---|
+| `alert.firing` | `{alert_id, rule_id, kind, host_id, severity, message}` | UI alert banner, MCP tools |
+| `alert.resolved` | `{alert_id, rule_id, kind, host_id}` | UI alert banner |
+| `facts.upload` | `{agent_id, fact_kinds: ["services","configs","certs"], changed: true/false}` | Internal tracking |
+
+### 7.7 Architectural coupling to control plane
+
+1. **Facts feed `when` guards** — the agent's fact cache is the single source for task guards.
+   New predicates: `service.failed("myapp")`, `config.valid("haproxy")`, `cert.expiring("/path/to/cert", 30)`.
+2. **Task `assert` step** can verify facts: `assert: {check: "config_valid", value: true, context: "haproxy"}`.
+3. **Alert rules can require approval** — a `service_failed` alert can trigger a task via
+   MCP tool integration (AI assistant sees the alert, recommends a restart task).
+4. **EOL state feeds patch gating** — `extern` publishes per-host `supported | ending_soon | ended`
+   from the EOL cache; `pkg` and policy rules may require approval on `ended` hosts (PRD §5.6).
+5. **Alerts fan out on the same SSE broker** as command output and audit events.
 
 ---
 
@@ -753,6 +990,8 @@ data set). One dialect abstraction (`internal/store`); no engine-specific querie
 | `policies`, `approval_requests`, `approvals` | control plane |
 | `principals` | local users (v1), roles `viewer|operator|admin`, hash+pepper of password |
 | `provision_runs` | per-run state, host alias, mode (`fresh` or `join`, default `fresh`), per-step rows (kind, ts, bounded output excerpt), linked `agent_id` once enrolled; `key_line`/`token_hash` stored but never serialized; retention 90 d (audit keeps `provision` events) |
+| `alerts` | unified alert store: `alert_id`, `agent_id` (NULL= fleet-wide), `kind` (service_failed, service_restarting, cert_expiring, cert_chain_broken, config_invalid, config_drift), `host_id` (nullable for fleet-wide alerts), `rule_id`, `severity`, `message`, `state` (firing/resolved), `started_at`, `resolved_at`. Dedup key prevents duplicate firing. Retention: indefinitely (no auto-purge). |
+| `alert_rules` | threshold rules: `rule_id`, `name`, `kind`, `selector`, `thresholds` (JSON: `{cert_days_remaining: 30}`, `{service_failed_minutes: 5}`), `severity`, `enabled`, `created_by`, `created_at`, `updated_at`.
 
 ### 9.3 Retention sweeper
 
@@ -870,6 +1109,18 @@ prerequisite for a UI slice and none exist today.
 | GET | `/api/v1/hosts?selector=<sel>` | viewer | Selector **preview** before dispatch. Today resolution only happens inside `Control.Dispatch`, so the UI cannot show the resolved host set first |
 | DELETE | `/api/v1/agents/{id}` | admin | `store.DeleteAgent` exists but has no HTTP route, so a decommissioned host can never leave the fleet; also makes the `revoked` agent state reachable |
 | GET | `/api/v1/audit?agent_id=` | viewer | Per-host audit view; client-side filtering is adequate until log volume grows |
+| GET | `/api/v1/services` | viewer | Fleet service health: aggregated view filtered by label/state/group | R18 |
+| GET | `/api/v1/services?agent_id=&name=` | viewer | Single unit state + deps on a host | R18 |
+| GET | `/api/v1/certificates` | viewer | Fleet cert inventory with expiry, chain status, labels | R20 |
+| GET | `/api/v1/certificates?days_remaining_lt=30` | viewer | Near-expiry certs filter | R20 |
+| GET | `/api/v1/configs` | viewer | Per-host config state: kind (haproxy/nginx), validity, topology, hash | R19 |
+| GET | `/api/v1/configs?kind=haproxy&agent_id=` | viewer | Single host config detail with cross-host drift comparison | R19 |
+| GET | `/api/v1/alerts` | viewer | Active + recently resolved alerts, filterable by kind/severity | R25 |
+| GET | `/api/v1/alerts/:id` | viewer | Single alert detail | R25 |
+| GET | `/api/v1/alerts/rules` | admin | Alert rule list | R25 |
+| POST | `/api/v1/alerts/rules` | admin | Create alert rule | R25 |
+| PUT | `/api/v1/alerts/rules/:id` | admin | Update alert rule | R25 |
+| DELETE | `/api/v1/alerts/rules/:id` | admin | Delete alert rule | R25 |
 
 Also required for S0: **static asset serving** — there is currently no `embed.FS`, no
 `http.FileServer`, and no `web/` directory. Planned shape: Vite → `web/dist` → `go:embed` +

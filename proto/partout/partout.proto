@@ -56,6 +56,9 @@ enum EnvelopeKind {
   JOB_UNASSIGN = 25;        // down: server removes a job from an agent
   JOB_RUN_RESULT = 26;      // up: agent reports job run result
 
+  // Observe layer — structured fact uploads (M5, R18–R20)
+  OBSERVE_FACTS = 27;       // up: structured facts (services, configs, certs)
+
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
   AUTH_PROOF = 41;  // up: agent replies
@@ -85,6 +88,8 @@ message Envelope {
     JobAssignment job_assign = 43; // down: job assignment
     JobRunResult job_run_result = 44; // up: job run result
     JobUnassignment job_unassign = 45; // down: job unassignment
+    // Up: observe facts
+    ObserveFacts observe_facts = 46; // up: structured facts (services, configs, certs)
     // Down
     Command command = 30;
     PolicyBundle policy_bundle = 31;
@@ -365,6 +370,17 @@ message JobRunResult {
   int64 finished_at = 7;
   string trigger = 8;      // cron | manual | resume
   int32 retry_of = 9;      // 0 = first attempt; >0 = retry N
+}
+
+// ---- Observe layer (M5, R18–R20) ---------------------------------------------
+// Structured fact uploads from the agent to the server. The server stores the
+// JSON blob as a key in the host_facts row, alongside the flat FactsBatch.
+// Each observation kind (services, configs, certs) uses the same envelope
+// with a different `kind` label.
+message ObserveFacts {
+  string kind = 1;         // "services" | "configs" | "certs"
+  string json = 2;         // JSON blob (see architecture §7.2 for schema)
+  string host_id = 3;      // agent_id for audit correlation
 }
 
 // FileOpResult is the reply to a FileOp. code 0 = ok; >0 = error code.

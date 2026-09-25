@@ -6,8 +6,8 @@ for AI assistants.
 
 | Doc | What it covers | Status |
 |---|---|---|
-| [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions | v0.3 (decisions locked) |
-| [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, control plane, storage, testing | **Draft v0.3** |
+| [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions | **v0.4** (observe layer: services, configs, TLS certs) |
+| [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, control plane, storage, testing | **Draft v0.4** (observe layer: services, configs, TLS certs) |
 | [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference, recipes | Draft v0.3 |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, incident runbooks, troubleshooting, compliance, go-live | Draft v0.3 |
 | [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: mockup reconciliation, capability gating, IA/tokens/components, slice plan (guidelines, not implementation) | Draft v0.4 |
@@ -18,7 +18,8 @@ for AI assistants.
 > hosts, safely and auditably.
 
 It ships a single binary that embeds the observe layer (containers, endpoints, heartbeats,
-certificates, resources, alerts) and adds the write/control path: executions, files, sessions,
+systemd service health, webservice configs, TLS cert expiry + chain, resources, alerts)
+and adds the write/control path: executions, files, sessions,
 jobs, tasks, packages, secrets, policy, approvals, and a tamper-resilient audit log. Enrollment,
 agent modes, gRPC transport, Ed25519 auth, SQLite/Postgres, SSE, UI stack, and MCP are all
 first-class. No editions — everything is free and self-hosted.
@@ -39,7 +40,7 @@ off and the docs become the implementation contract.
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI (xterm.js) deferred to later V1 phase |
 | **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) ~~scheduled job steps run without a policy decision or agent guardrail~~ ✅ **fixed** — job create/update/RunNow now gated under `task.run`, per-host signed `Decision` in `JOB_ASSIGN`, agent re-checks guardrail before every fire (fail-closed); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
 | **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap); remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
-| **M5 — Distribution & polish** | ⬜ Not started | — |
+| **M5 — Observe: fact collectors** | ⬜ Not started | R18–R20: agent collectors for service/config/cert facts. Server upsert into host_facts JSON. Read-only API endpoints + MCP read tools. |
 
 ### M0 — Spine (complete)
 
@@ -125,7 +126,7 @@ Done so far:
 - M3 known gaps (from the verification audit, tracked in Next steps): job dispatch E2E, reboot continuation
 - M4: approvals engine, full policy surface, MCP server (R11) + write tools
 - §6 observe layer + MCP read tools
-- M5: installers, cloud-init, Helm, status page
+- M5: observe fact collectors; M6: alert engine; M7: UI pages; M8: installers, cloud-init, Helm, status page
 
 ## Next steps
 
