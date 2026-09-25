@@ -25,8 +25,15 @@ type hostDoc struct {
 	doc     *observe.Document
 }
 
+// maxObserveHosts bounds how many hosts one observe query aggregates. The
+// response is a full cross-host inventory; without a cap a viewer token could
+// force an unbounded scan (one DB read + JSON parse per host).
+const maxObserveHosts = 500
+
 // observeDocs loads the latest host_facts document for every host that has
-// the requested structured domain present.
+// the requested structured domain present. Malformed documents are skipped
+// and logged: a single corrupt host must not fail the whole query, but it
+// must not be silent either.
 func (h *Handler) observeDocs(domainKey string) ([]hostDoc, error) {
 	agents, err := h.st.Agents()
 	if err != nil {
@@ -34,13 +41,28 @@ func (h *Handler) observeDocs(domainKey string) ([]hostDoc, error) {
 	}
 	out := make([]hostDoc, 0, len(agents))
 	for _, ag := range agents {
+		if len(out) >= maxObserveHosts {
+			if h.log != nil {
+				h.log.Printf("api: observe %s: host cap %d reached; result truncated", domainKey, maxObserveHosts)
+			}
+			break
+		}
 		blob, err := h.st.LatestHostFactsJSON(ag.ID)
-		if err != nil || blob == "" {
+		if err != nil {
+			if h.log != nil {
+				h.log.Printf("api: observe facts %s: %v", ag.ID, err)
+			}
+			continue
+		}
+		if blob == "" {
 			continue
 		}
 		doc, err := observe.ParseDocument(blob)
 		if err != nil {
-			continue // malformed document: skipped (logged by the store layer on M6)
+			if h.log != nil {
+				h.log.Printf("api: observe facts %s: malformed document: %v", ag.ID, err)
+			}
+			continue
 		}
 		if _, ok := doc.Structured[domainKey]; !ok {
 			continue
@@ -131,8 +153,16 @@ func (h *Handler) handleListCertificates(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		for _, c := range cf.Items {
-			if maxDays > 0 && c.DaysRemaining > maxDays {
-				continue
+			if maxDays > 0 {
+				// An unknown expiry (NotAfter==0 from an unparsed date) has
+				// DaysRemaining 0, which would otherwise pass every
+				// "expires within N days" filter and fire a false alert.
+				if c.NotAfter == 0 {
+					continue
+				}
+				if c.DaysRemaining > maxDays {
+					continue
+				}
 			}
 			items = append(items, certEntry{HostID: hd.agentID, Cert: c})
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -214,6 +215,24 @@ func (s *Store) ConsumeEnrollmentToken(tokenHash string) (bool, error) {
 // plus structured observe facts (M5, R18–R20) as nested objects under
 // services_detailed / configs / certificates. Every upsert merges into the
 // latest document so the two fact streams never clobber each other.
+//
+// Merge correctness: the read-modify-write below is guarded by a per-agent
+// mutex (factMu). The flat fact ticker and the observe fact ticker are
+// independent goroutines on the agent and land on independent server paths,
+// so without this guard a concurrent upsert silently drops one side (last
+// writer wins on the whole document).
+
+// factMu serializes fact-document read-modify-write per agent. A single
+// global mutex is unnecessary: documents never span agents. It is held only
+// for the duration of one read+write pair, which is a local DB round trip.
+var factMu sync.Map // agentID -> *sync.Mutex
+
+func factLock(agentID string) func() {
+	m, _ := factMu.LoadOrStore(agentID, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 // UpsertFacts stores a flat fact snapshot for an agent, merging the scalar
 // keys into the latest host_facts document (structured observe facts are
@@ -222,6 +241,7 @@ func (s *Store) UpsertFacts(f Facts) error {
 	if f.TS == 0 {
 		f.TS = now()
 	}
+	defer factLock(f.AgentID)()
 	doc, err := s.latestFactsDoc(f.AgentID)
 	if err != nil {
 		return err
@@ -276,6 +296,7 @@ func (s *Store) UpsertHostFactsJSON(agentID, blob string) error {
 	if err := json.Unmarshal([]byte(blob), &incoming); err != nil {
 		return fmt.Errorf("parse observe facts: %w", err)
 	}
+	defer factLock(agentID)()
 	doc, err := s.latestFactsDoc(agentID)
 	if err != nil {
 		return err
@@ -323,10 +344,29 @@ func (s *Store) latestFactsDoc(agentID string) (map[string]any, error) {
 
 // writeFactsDoc marshals the document and stores it as a new row (the table
 // is an append-only snapshot log; readers always take the latest ts).
+//
+// The (agent_id, ts) primary key means two writes in the same second would
+// collide and one document would overwrite the other. Bump the timestamp
+// until the row is free so a same-second flat+observe pair both persist.
+// Callers must hold the per-agent fact lock.
 func (s *Store) writeFactsDoc(agentID string, ts int64, doc map[string]any) error {
 	data, err := json.Marshal(doc)
 	if err != nil {
 		return err
+	}
+	// Bounded probe: find a free second for this document. Under the per-agent
+	// lock only a pathological clock could exhaust 64 slots; the ON CONFLICT
+	// below then merges into the existing row rather than failing the write.
+	for attempt := 0; attempt < 64; attempt++ {
+		var exists int
+		err := s.db.QueryRow(`SELECT COUNT(1) FROM host_facts WHERE agent_id=? AND ts=?`, agentID, ts).Scan(&exists)
+		if err != nil {
+			return err
+		}
+		if exists == 0 {
+			break
+		}
+		ts++
 	}
 	_, err = s.db.Exec(`
 		INSERT INTO host_facts(agent_id, ts, data) VALUES(?,?,?)

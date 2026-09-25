@@ -213,6 +213,7 @@ func TestObserveFactsEnv(t *testing.T) {
 		"PARTOUT_OBSERVE_FACTS_INTERVAL", "60",
 		"PARTOUT_SERVICE_LABELS", "myapp,critical",
 		"PARTOUT_CERT_PATHS", "/etc/ssl/myapp",
+		"PARTOUT_CERT_CA", "/etc/ssl/myapp/ca.pem",
 	)
 	c, err := Load()
 	if err != nil {
@@ -226,5 +227,31 @@ func TestObserveFactsEnv(t *testing.T) {
 	}
 	if c.CertPaths != "/etc/ssl/myapp" {
 		t.Errorf("CertPaths = %q, want /etc/ssl/myapp", c.CertPaths)
+	}
+	if c.CertCA != "/etc/ssl/myapp/ca.pem" {
+		t.Errorf("CertCA = %q, want /etc/ssl/myapp/ca.pem", c.CertCA)
+	}
+}
+
+func TestCertCADefaultsEmpty(t *testing.T) {
+	clearPartout(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.CertCA != "" {
+		t.Errorf("CertCA = %q, want empty (resolved at collection time)", c.CertCA)
+	}
+}
+
+func TestObserveFactsIntervalInvalidFallsBack(t *testing.T) {
+	clearPartout(t)
+	setenv(t, "PARTOUT_OBSERVE_FACTS_INTERVAL", "not-a-number")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if c.ObserveFactsInterval != 300 {
+		t.Errorf("ObserveFactsInterval = %d, want default 300 for invalid input", c.ObserveFactsInterval)
 	}
 }

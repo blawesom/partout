@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -579,5 +580,185 @@ func TestObserveFactsIngestion(t *testing.T) {
 
 	if err := streamClient.CloseSend(); err != nil {
 		t.Fatalf("CloseSend: %v", err)
+	}
+}
+
+// handshake performs the Ed25519 challenge-response on an established stream.
+func handshake(t *testing.T, id *identity.Identity, streamClient pb.AgentStream_StreamClient) {
+	t.Helper()
+	env, err := streamClient.Recv()
+	if err != nil {
+		t.Fatalf("Recv challenge: %v", err)
+	}
+	ch := env.GetChallenge()
+	if ch == nil {
+		t.Fatalf("expected CHALLENGE, got %s", env.Kind)
+	}
+	ts := time.Now().Unix()
+	if err := streamClient.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_AUTH_PROOF,
+		Payload: &pb.Envelope_AuthProof{AuthProof: &pb.AuthProof{
+			AgentUuid: id.UUID, Ts: ts, Sig: id.Sign(hsauth.BuildMsg(ch.Nonce, id.UUID, ts)),
+		}},
+	}); err != nil {
+		t.Fatalf("Send proof: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+// TestFactsKeyedBySessionNotClientHostId is the security regression test: an
+// authenticated agent must not be able to write facts under another host's
+// id by setting FactsBatch.HostId / ObserveFacts.HostId.
+func TestFactsKeyedBySessionNotClientHostId(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	attacker, _ := identity.LoadOrGenerate(t.TempDir())
+	victim, _ := identity.LoadOrGenerate(t.TempDir())
+	for _, a := range []struct {
+		id  string
+		idt *identity.Identity
+	}{
+		{"ag_attacker", attacker},
+		{"ag_victim", victim},
+	} {
+		if err := st.UpsertAgent(store.Agent{
+			ID: a.id, UUID: a.idt.UUID,
+			ED25519Pub: base64.StdEncoding.EncodeToString(a.idt.Ed25519Pub),
+			X25519Pub:  base64.StdEncoding.EncodeToString(a.idt.X25519Pub),
+		}); err != nil {
+			t.Fatalf("UpsertAgent: %v", err)
+		}
+	}
+	// Pre-seed the victim's facts.
+	if err := st.UpsertFacts(store.Facts{AgentID: "ag_victim", Data: map[string]string{"host.os": "victim-os"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, conn := startBufServer(t, st)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sc, err := pb.NewAgentStreamClient(conn).Stream(ctx)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	handshake(t, attacker, sc)
+
+	// Attempt to spoof the victim via HostId in both fact paths.
+	if err := sc.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_FACTS_BATCH,
+		Payload: &pb.Envelope_Facts{Facts: &pb.FactsBatch{
+			HostId: "ag_victim",
+			Full:   true,
+			Facts:  map[string]string{"host.os": "pwned"},
+		}},
+	}); err != nil {
+		t.Fatalf("Send facts: %v", err)
+	}
+	if err := sc.Send(&pb.Envelope{
+		Kind: pb.EnvelopeKind_OBSERVE_FACTS,
+		Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
+			Kind:   "services",
+			HostId: "ag_victim",
+			Json:   `{"services_detailed":{"units":[{"name":"pwned"}]}}`,
+		}},
+	}); err != nil {
+		t.Fatalf("Send observe facts: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	// The victim's document must be untouched.
+	vblob, err := st.LatestHostFactsJSON("ag_victim")
+	if err != nil {
+		t.Fatalf("LatestHostFactsJSON(victim): %v", err)
+	}
+	if strings.Contains(vblob, "pwned") {
+		t.Errorf("attacker wrote into the victim's facts: %s", vblob)
+	}
+	vflat, err := st.LatestFacts("ag_victim")
+	if err != nil {
+		t.Fatalf("LatestFacts(victim): %v", err)
+	}
+	if vflat.Data["host.os"] != "victim-os" {
+		t.Errorf("victim facts overwritten: %v", vflat.Data)
+	}
+
+	// The facts landed on the authenticated agent instead.
+	ablob, err := st.LatestHostFactsJSON("ag_attacker")
+	if err != nil {
+		t.Fatalf("LatestHostFactsJSON(attacker): %v", err)
+	}
+	if !strings.Contains(ablob, "pwned") {
+		t.Errorf("attacker's own facts missing: %s", ablob)
+	}
+}
+
+// TestObserveFactsHookFires verifies the ingestion hook is invoked per domain
+// envelope (M6 will hang evaluation off it).
+func TestObserveFactsHookFires(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	id, _ := identity.LoadOrGenerate(t.TempDir())
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_hook", UUID: id.UUID,
+		ED25519Pub: base64.StdEncoding.EncodeToString(id.Ed25519Pub),
+		X25519Pub:  base64.StdEncoding.EncodeToString(id.X25519Pub),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h, conn := startBufServer(t, st)
+	var mu sync.Mutex
+	var got []string
+	h.ObserveFactsHook = func(agentID string) {
+		mu.Lock()
+		got = append(got, agentID)
+		mu.Unlock()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sc, err := pb.NewAgentStreamClient(conn).Stream(ctx)
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	handshake(t, id, sc)
+
+	for _, kind := range []string{"services", "configs", "certs"} {
+		if err := sc.Send(&pb.Envelope{
+			Kind: pb.EnvelopeKind_OBSERVE_FACTS,
+			Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
+				Kind: kind, HostId: id.UUID, Json: `{"services_detailed":{"units":[]}}`,
+			}},
+		}); err != nil {
+			t.Fatalf("Send %s: %v", kind, err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hook fired %d times, want 3", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, a := range got {
+		if a != "ag_hook" {
+			t.Errorf("hook agent = %q, want ag_hook", a)
+		}
 	}
 }

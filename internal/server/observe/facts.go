@@ -9,7 +9,10 @@
 
 package observe
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // Domain keys inside the host_facts JSON document.
 const (
@@ -29,32 +32,43 @@ type Document struct {
 
 // ParseDocument splits a host_facts JSON document into its flat (string)
 // and structured (object) parts.
+//
+// Classification: a JSON string becomes a flat fact; a JSON null is treated
+// as absent (it carries no information and must not make a domain look
+// present); every other JSON value (object/array/number/bool) is preserved
+// verbatim as a structured value. Non-object structured values are kept so
+// they can be inspected, but the typed accessors reject them.
 func ParseDocument(blob string) (*Document, error) {
 	doc := &Document{Flat: make(map[string]string), Structured: make(map[string]json.RawMessage)}
 	if blob == "" {
 		return doc, nil
 	}
-	var raw map[string]any
+	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(blob), &raw); err != nil {
 		return nil, err
 	}
 	for k, v := range raw {
-		if s, ok := v.(string); ok {
+		trimmed := bytes.TrimSpace(v)
+		if len(trimmed) == 0 || string(trimmed) == "null" {
+			continue // absent
+		}
+		if trimmed[0] == '"' {
+			var s string
+			if err := json.Unmarshal(trimmed, &s); err != nil {
+				return nil, err
+			}
 			doc.Flat[k] = s
 			continue
 		}
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil, err
-		}
-		doc.Structured[k] = b
+		doc.Structured[k] = append(json.RawMessage(nil), trimmed...)
 	}
 	return doc, nil
 }
 
-// Services returns the services domain (R18), or nil when absent.
+// Services returns the services domain (R18), or nil when absent or not a
+// JSON object.
 func (d *Document) Services() *ServiceFacts {
-	b, ok := d.Structured[KeyServices]
+	b, ok := d.domain(KeyServices)
 	if !ok {
 		return nil
 	}
@@ -65,9 +79,10 @@ func (d *Document) Services() *ServiceFacts {
 	return &f
 }
 
-// Configs returns the configs domain (R19), or nil when absent.
+// Configs returns the configs domain (R19), or nil when absent or not a
+// JSON object.
 func (d *Document) Configs() *ConfigFacts {
-	b, ok := d.Structured[KeyConfigs]
+	b, ok := d.domain(KeyConfigs)
 	if !ok {
 		return nil
 	}
@@ -78,9 +93,10 @@ func (d *Document) Configs() *ConfigFacts {
 	return &f
 }
 
-// Certificates returns the certs domain (R20), or nil when absent.
+// Certificates returns the certs domain (R20), or nil when absent or not a
+// JSON object.
 func (d *Document) Certificates() *CertFacts {
-	b, ok := d.Structured[KeyCerts]
+	b, ok := d.domain(KeyCerts)
 	if !ok {
 		return nil
 	}
@@ -89,6 +105,20 @@ func (d *Document) Certificates() *CertFacts {
 		return nil
 	}
 	return &f
+}
+
+// domain fetches a structured value and reports whether it is a JSON object
+// (the only shape the typed accessors accept).
+func (d *Document) domain(key string) (json.RawMessage, bool) {
+	b, ok := d.Structured[key]
+	if !ok {
+		return nil, false
+	}
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, false
+	}
+	return b, true
 }
 
 // ServiceFacts carries systemd unit facts for the server to aggregate and
@@ -177,11 +207,12 @@ type CertFact struct {
 	Subject       string   `json:"subject"`
 	Issuer        string   `json:"issuer"`
 	Serial        string   `json:"serial"`
-	NotBefore     int64    `json:"not_before"` // epoch
-	NotAfter      int64    `json:"not_after"`  // epoch
+	NotBefore     int64    `json:"not_before"` // epoch; 0 = unknown
+	NotAfter      int64    `json:"not_after"`  // epoch; 0 = unknown
 	DaysRemaining int64    `json:"days_remaining"`
 	KeyType       string   `json:"key_type"`
 	SANs          []string `json:"san"`
+	ChainChecked  bool     `json:"chain_checked"`
 	ChainValid    bool     `json:"chain_valid"`
 	ChainLength   int      `json:"chain_length"`
 	SelfSigned    bool     `json:"self_signed"`

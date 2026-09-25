@@ -363,6 +363,44 @@ func (a *Agent) launchObserveFacts(ctx context.Context) {
 	}()
 }
 
+// observeEnvelopes builds the OBSERVE_FACTS envelopes for one collection
+// result: one envelope per non-empty domain, never an envelope for an empty
+// domain. Pure so the wire shape is unit-testable without a live stream.
+func observeEnvelopes(agentUUID string, f *factscollect.Facts) []*pb.Envelope {
+	if f == nil {
+		return nil
+	}
+	var out []*pb.Envelope
+	for _, s := range []struct {
+		kind string
+		blob *factscollect.Facts
+	}{
+		{string(factscollect.KindServices), &factscollect.Facts{ServicesDetailed: f.ServicesDetailed}},
+		{string(factscollect.KindConfigs), &factscollect.Facts{Configs: f.Configs}},
+		{string(factscollect.KindCerts), &factscollect.Facts{Certificates: f.Certificates}},
+	} {
+		if s.blob.ServicesDetailed == nil && s.blob.Configs == nil && s.blob.Certificates == nil {
+			continue // empty domain: nothing to upload
+		}
+		data, err := json.Marshal(s.blob)
+		if err != nil {
+			continue
+		}
+		out = append(out, &pb.Envelope{
+			Kind: pb.EnvelopeKind_OBSERVE_FACTS,
+			Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
+				Kind: s.kind,
+				Json: string(data),
+				// HostId carries the agent UUID for diagnostics only: the server
+				// keys facts by the authenticated session, not by this field
+				// (proto ObserveFacts doc).
+				HostId: agentUUID,
+			}},
+		})
+	}
+	return out
+}
+
 // sendObserveFacts collects structured facts and uploads one OBSERVE_FACTS
 // envelope per non-empty domain (services, configs, certs). Collection runs
 // in a goroutine (systemctl probes can block for seconds); send failures
@@ -372,6 +410,7 @@ func (a *Agent) sendObserveFacts(ctx context.Context) {
 	cfg := &factscollect.Config{
 		ServiceLabels:        a.cfg.ServiceLabels,
 		CertPaths:            a.cfg.CertPaths,
+		CAPath:               a.cfg.CertCA,
 		ObserveFactsInterval: a.cfg.ObserveFactsInterval,
 	}
 	ch := make(chan *factscollect.Facts, 1)
@@ -380,33 +419,8 @@ func (a *Agent) sendObserveFacts(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	case f := <-ch:
-		if f == nil {
-			return // nothing to upload on this host
-		}
-		for _, s := range []struct {
-			kind string
-			blob *factscollect.Facts
-		}{
-			{string(factscollect.KindServices), &factscollect.Facts{ServicesDetailed: f.ServicesDetailed}},
-			{string(factscollect.KindConfigs), &factscollect.Facts{Configs: f.Configs}},
-			{string(factscollect.KindCerts), &factscollect.Facts{Certificates: f.Certificates}},
-		} {
-			if s.blob.ServicesDetailed == nil && s.blob.Configs == nil && s.blob.Certificates == nil {
-				continue
-			}
-			data, err := json.Marshal(s.blob)
-			if err != nil {
-				a.log.Printf("agent: marshal observe facts %s: %v", s.kind, err)
-				continue
-			}
-			a.sendUpEnvelopeNoSpool(&pb.Envelope{
-				Kind: pb.EnvelopeKind_OBSERVE_FACTS,
-				Payload: &pb.Envelope_ObserveFacts{ObserveFacts: &pb.ObserveFacts{
-					Kind:   s.kind,
-					Json:   string(data),
-					HostId: a.id.UUID,
-				}},
-			})
+		for _, env := range observeEnvelopes(a.id.UUID, f) {
+			a.sendUpEnvelopeNoSpool(env)
 		}
 	}
 }

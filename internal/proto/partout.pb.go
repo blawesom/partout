@@ -2736,15 +2736,20 @@ func (x *JobRunResult) GetRetryOf() int32 {
 }
 
 // ---- Observe layer (M5, R18–R20) ---------------------------------------------
-// Structured fact uploads from the agent to the server. The server stores the
-// JSON blob as a key in the host_facts row, alongside the flat FactsBatch.
-// Each observation kind (services, configs, certs) uses the same envelope
-// with a different `kind` label.
+// Structured fact uploads from the agent to the server. The server merges the
+// JSON blob into the host's host_facts document, alongside the flat
+// FactsBatch. Each observation kind (services, configs, certs) uses the same
+// envelope with a different `kind` label.
+//
+// Storage is keyed by the *authenticated session* (the agent row resolved
+// from the handshake), never by `host_id`: the field is agent-supplied and is
+// kept for logs/diagnostics only. Sending the agent UUID here is expected
+// (the UUID is not the storage key).
 type ObserveFacts struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`                   // "services" | "configs" | "certs"
 	Json          string                 `protobuf:"bytes,2,opt,name=json,proto3" json:"json,omitempty"`                   // JSON blob (see architecture §7.2 for schema)
-	HostId        string                 `protobuf:"bytes,3,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"` // agent_id for audit correlation
+	HostId        string                 `protobuf:"bytes,3,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"` // agent UUID; diagnostics only (server ignores for storage)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

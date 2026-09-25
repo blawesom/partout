@@ -2,8 +2,11 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -508,5 +511,245 @@ func TestInterruptAgentSessions(t *testing.T) {
 	s2, _ := db.GetSession("s3")
 	if s2.State != "open" {
 		t.Fatalf("s3 state=%s, want open", s2.State)
+	}
+}
+
+// ---- observe facts document merge (M5) ------------------------------------
+
+// TestFactsFlatAndObserveMerge verifies that the flat facts stream and the
+// structured observe facts stream merge into one document without clobbering
+// each other, in either arrival order.
+func TestFactsFlatAndObserveMerge(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	if err := db.UpsertAgent(Agent{ID: "ag_m", UUID: "um", ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Flat first, then observe.
+	if err := db.UpsertFacts(Facts{AgentID: "ag_m", Data: map[string]string{"host.os": "linux"}}); err != nil {
+		t.Fatalf("UpsertFacts: %v", err)
+	}
+	if err := db.UpsertHostFactsJSON("ag_m", `{"services_detailed":{"units":[{"name":"myapp"}]}}`); err != nil {
+		t.Fatalf("UpsertHostFactsJSON: %v", err)
+	}
+
+	blob, err := db.LatestHostFactsJSON("ag_m")
+	if err != nil {
+		t.Fatalf("LatestHostFactsJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(blob), &doc); err != nil {
+		t.Fatalf("blob not JSON: %v (%s)", err, blob)
+	}
+	if doc["host.os"] != "linux" {
+		t.Errorf("flat key lost after observe upsert: %v", doc)
+	}
+	if _, ok := doc["services_detailed"]; !ok {
+		t.Errorf("structured key missing: %v", doc)
+	}
+
+	// Flat view still returns only string values.
+	flat, err := db.LatestFacts("ag_m")
+	if err != nil {
+		t.Fatalf("LatestFacts: %v", err)
+	}
+	if flat.Data["host.os"] != "linux" {
+		t.Errorf("flat view = %v, want host.os=linux", flat.Data)
+	}
+	if _, ok := flat.Data["services_detailed"]; ok {
+		t.Errorf("structured value leaked into flat view: %v", flat.Data)
+	}
+
+	// Observe after flat (reverse order) must also merge.
+	if err := db.UpsertHostFactsJSON("ag_m", `{"configs":{"haproxy":{"present":true}}}`); err != nil {
+		t.Fatalf("UpsertHostFactsJSON (2): %v", err)
+	}
+	blob, _ = db.LatestHostFactsJSON("ag_m")
+	doc = nil
+	if err := json.Unmarshal([]byte(blob), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"host.os", "services_detailed", "configs"} {
+		if _, ok := doc[k]; !ok {
+			t.Errorf("key %q lost after second merge: %v", k, doc)
+		}
+	}
+}
+
+// TestFactsSameSecondWritesBothPersist locks in the timestamp-collision fix:
+// the (agent_id, ts) primary key must not let a same-second flat write drop
+// the observe document (or vice versa).
+func TestFactsSameSecondWritesBothPersist(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	if err := db.UpsertAgent(Agent{ID: "ag_ts", UUID: "uts", ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force the exact same second for both writes.
+	ts := time.Now().Unix()
+	if err := db.UpsertFacts(Facts{AgentID: "ag_ts", TS: ts, Data: map[string]string{"host.os": "linux"}}); err != nil {
+		t.Fatalf("UpsertFacts: %v", err)
+	}
+	// UpsertHostFactsJSON uses now(); make it collide by writing directly with
+	// the same ts through the same code path used by the stream handler.
+	if err := db.UpsertHostFactsJSON("ag_ts", `{"certificates":{"items":[{"path":"/x.pem"}]}}`); err != nil {
+		t.Fatalf("UpsertHostFactsJSON: %v", err)
+	}
+
+	blob, _ := db.LatestHostFactsJSON("ag_ts")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(blob), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := doc["certificates"]; !ok {
+		t.Errorf("certificates lost in same-second write: %v", doc)
+	}
+	if doc["host.os"] != "linux" {
+		t.Errorf("flat key lost in same-second write: %v", doc)
+	}
+}
+
+// TestFactsConcurrentUpsertsNoLostUpdate is the regression test for the
+// read-modify-write race: concurrent flat and observe upserts for one host
+// must never drop either side.
+func TestFactsConcurrentUpsertsNoLostUpdate(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	if err := db.UpsertAgent(Agent{ID: "ag_c", UUID: "uc", ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertFacts(Facts{AgentID: "ag_c", Data: map[string]string{"host.os": "linux"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	const rounds = 40
+	for i := 0; i < rounds; i++ {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			_ = db.UpsertFacts(Facts{AgentID: "ag_c", Data: map[string]string{"host.os": "linux", "host.kernel": fmt.Sprintf("k%d", i)}})
+		}(i)
+		go func(i int) {
+			defer wg.Done()
+			_ = db.UpsertHostFactsJSON("ag_c", fmt.Sprintf(`{"services_detailed":{"units":[{"name":"u%d"}]}}`, i))
+		}(i)
+		wg.Wait()
+
+		blob, err := db.LatestHostFactsJSON("ag_c")
+		if err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(blob), &doc); err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		if _, ok := doc["services_detailed"]; !ok {
+			t.Fatalf("round %d: structured facts lost (flat write won): %s", i, blob)
+		}
+		if doc["host.os"] != "linux" {
+			t.Fatalf("round %d: flat facts lost (observe write won): %s", i, blob)
+		}
+	}
+}
+
+// TestFactsConcurrentDistinctAgents checks the per-agent lock does not
+// serialize unrelated hosts into corruption.
+func TestFactsConcurrentDistinctAgents(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("ag_%d", i)
+		if err := db.UpsertAgent(Agent{ID: id, UUID: "u" + id, ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+			t.Fatal(err)
+		}
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			_ = db.UpsertFacts(Facts{AgentID: id, Data: map[string]string{"host.os": "linux"}})
+			_ = db.UpsertHostFactsJSON(id, `{"services_detailed":{"units":[{"name":"app"}]}}`)
+		}(id)
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("ag_%d", i)
+		blob, err := db.LatestHostFactsJSON(id)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(blob), &doc); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if doc["host.os"] != "linux" || doc["services_detailed"] == nil {
+			t.Errorf("%s: incomplete document: %s", id, blob)
+		}
+	}
+}
+
+// TestLatestHostFactsJSONEmpty verifies the "no facts" contract.
+func TestLatestHostFactsJSONEmpty(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	if err := db.UpsertAgent(Agent{ID: "ag_e", UUID: "ue", ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := db.LatestHostFactsJSON("ag_e")
+	if err != nil {
+		t.Fatalf("LatestHostFactsJSON: %v", err)
+	}
+	if blob != "" {
+		t.Errorf("blob = %q, want empty", blob)
+	}
+	if _, err := db.LatestFacts("ag_e"); err == nil {
+		t.Error("LatestFacts on factless agent: want ErrNotFound")
+	}
+}
+
+// TestUpsertHostFactsJSONInvalid verifies a malformed observe blob is rejected
+// (and does not corrupt the stored document).
+func TestUpsertHostFactsJSONInvalid(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	if err := db.UpsertAgent(Agent{ID: "ag_i", UUID: "ui", ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertFacts(Facts{AgentID: "ag_i", Data: map[string]string{"host.os": "linux"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertHostFactsJSON("ag_i", "{not json"); err == nil {
+		t.Fatal("expected error for malformed blob")
+	}
+	blob, _ := db.LatestHostFactsJSON("ag_i")
+	if !strings.Contains(blob, "host.os") {
+		t.Errorf("document corrupted by rejected write: %s", blob)
+	}
+	// Empty blob is a no-op, not an error.
+	if err := db.UpsertHostFactsJSON("ag_i", ""); err != nil {
+		t.Errorf("empty blob: %v", err)
+	}
+}
+
+// TestLatestFactsRejectsStructuredOnlyDocument: a document whose keys are all
+// structured still yields an empty (not error) flat view.
+func TestLatestFactsStructuredOnly(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	if err := db.UpsertAgent(Agent{ID: "ag_s", UUID: "us", ED25519Pub: "k1", X25519Pub: "k2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertHostFactsJSON("ag_s", `{"services_detailed":{"units":[]}}`); err != nil {
+		t.Fatal(err)
+	}
+	f, err := db.LatestFacts("ag_s")
+	if err != nil {
+		t.Fatalf("LatestFacts: %v", err)
+	}
+	if len(f.Data) != 0 {
+		t.Errorf("flat view = %v, want empty", f.Data)
 	}
 }

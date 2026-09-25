@@ -617,14 +617,15 @@ group:webservers               # a saved group (named selector)
   (names), interfaces. Refresh hourly + on detected change (PRD §5.1). Feeds `when` guards.
 - **factscollect** — observe-layer fact collectors (`R18`-`R20`). Three sub-collectors:
   (a) **service**: `systemctl list-units` + `systemctl show` for full unit state, deps,
-  enablement, resource usage, operator labels. Custom units only in output (units from
-  `/etc/systemd/system/*` or labelled by operator). Refresh: 5 min.
-  (b) **config**: `haproxy -c` / `nginx -t` for validity; lightweight regex parsing for
-  topology (backends, frontends, vhosts, TLS bindings). Config sha256 for drift detection.
+  enablement, resource usage, operator labels. Custom units only in output (a unit file or
+  drop-in under `/etc/systemd/system`, `/run/systemd/system`, or the XDG user tree, or
+  labelled by the operator). Refresh: 5 min.
+  (b) **config**: `haproxy -c` / `nginx -t` for validity; line-based topology parsing
+  (backends, frontends, vhosts, TLS bindings). Config sha256 for drift detection.
   Refresh: 15 min or on file mtime change. (c) **cert**: openssl x509 for subject, issuer,
-  expiry, SANs, chain validity, OCSP status. Discovery from config TLS paths + default
-  cert dirs. Refresh: 1 hour. All three feed into the FactsBatch stream under named JSON
-  keys in `host_facts`.
+  expiry, SANs, chain status, key type. Discovery from config TLS paths + default cert
+  dirs, bounded per collection. Refresh: 1 hour. All three feed into the FactsBatch stream
+  under named JSON keys in `host_facts`.
 - **exec** — non-pty and pty execution; env sanitized (`$HOME`, `$PATH` from a clean base;
   only explicitly declared env passed); cwd defaults to agent home. All fs/exec paths are
   interpreted relative to the **agent root** (`PARTOUT_ROOT`, default `/`; `--root=` flag),
@@ -741,8 +742,17 @@ Key principle: all fact kinds merge into one `host_facts` JSON document per host
 separate tables per fact kind. The table is `host_facts(agent_id, ts, data)` (an
 append-only snapshot log; readers take the latest ts), and `data` holds both the flat
 scalar fact keys (`host.*`, `partout.*`, `runtime.*`) and the structured observe fact
-objects below. Every upsert merges into the latest document, so the flat facts stream
-and the observe facts stream never clobber each other. Fact collectors produce named keys in the JSON:
+objects below. Every upsert merges into the latest document under a per-agent lock, so
+the flat facts stream and the observe facts stream never clobber each other; a second
+write within the same second bumps `ts` so the `(agent_id, ts)` key cannot drop a
+document.
+
+**Ingestion identity.** `agent_id` is always the *authenticated session's* agent row,
+resolved from the Ed25519 handshake — never a value from the envelope. `FactsBatch.HostId`
+and `ObserveFacts.host_id` are agent-supplied and are ignored for storage (a client-
+supplied key would let one enrolled agent overwrite another host's facts).
+
+Fact collectors produce named keys in the JSON:
 
 ```json
 {
@@ -757,8 +767,10 @@ and the observe facts stream never clobber each other. Fact collectors produce n
     "units": [
       { "name": "myapp", "state": "active", "sub_state": "running",
         "enabled": true, "wanted_by": ["multi-user.target"],
-        "after": ["network-online.target"], "restart_policy": "on-failure",
-        "memory_current": 45678901, "last_exit_code": 0,
+        "required_by": [], "after": ["network-online.target"],
+        "restart_policy": "on-failure",
+        "memory_current": 45678901, "cpu_usage_sec": "12.345",
+        "last_exit_code": 0, "last_exit_status": "0",
         "labels": ["myapp", "webtier"] }
     ]
   },
@@ -787,38 +799,56 @@ and the observe facts stream never clobber each other. Fact collectors produce n
         "subject": "CN=app.example.com",
         "issuer": "CN=Let's Encrypt Authority X3",
         "not_after": 1728000000, "days_remaining": 14,
-        "key_type": "ECDSA-P256", "san": ["app.example.com"],
-        "chain_valid": true, "chain_length": 3,
-        "self_signed": false, "ocsp_stapling": true,
-        "ocsp_status": "good",
+        "key_type": "ECDSA-P-256", "san": ["app.example.com"],
+        "chain_checked": true, "chain_valid": true, "chain_length": 3,
+        "self_signed": false, "ocsp_stapling": false,
+        "ocsp_status": "unknown",
         "labels": ["webtier", "prod"] }
     ]
   }
 }
 ```
 
+Fact-collection notes (M5):
+
+- `not_after` / `not_before` are epoch seconds; **0 means unknown** (the date did not
+  parse). `days_remaining` is derived and is only meaningful when `not_after != 0`.
+  Filters and alert rules must treat `not_after == 0` as unknown, not as expired.
+- `chain_checked` reports whether chain verification actually ran (a trust bundle was
+  found). `chain_valid == false` with `chain_checked == false` means *not verified*,
+  not *broken* — `cert_chain_broken` rules must require `chain_checked`.
+- `ocsp_status` is `unknown` unless real stapling evidence is available; the presence
+  of an OCSP extension on a certificate says nothing about the serving host's stapling.
+- Collectors bound their work: subprocess calls carry timeouts, cert discovery is capped
+  (`maxCertFiles`, 1 MiB per file, symlinks not followed), so a large CA store cannot
+  stall the observe cadence.
+
 ### 7.2 Agent-side collectors
 
 **Service collector (`factscollect/service.go`)**:
-- Command: `systemctl list-units --no-pager --no-legend --type=service --state=active,failed,deactivating,activating` for active units.
-- For each unit: `systemctl show <unit>` (key=value format) for properties: State, SubState, ActiveState, UnitFileState (enabled/disabled/masked), Requires, RequiredBy, Wants, WantedBy, After, Before, Restart, MemoryCurrent, CPUSec.
-- Custom labels: read from `PARTOUT_SERVICE_LABELS` env var (`myapp,nginx`) or from operator-assigned labels at enrollment. Units from `/etc/systemd/system/*` (not `/lib/systemd/system/*`) are auto-marked as custom.
+- Command: `systemctl list-units --no-pager --no-legend --type=service --state=active,failed,activating,deactivating,auto-restarting` for active units.
+- For each unit: `systemctl show <unit>` (key=value format) for properties: Type, State, SubState, ActiveState, UnitFileState (enabled/disabled/masked), Requires, RequiredBy, Wants, WantedBy, After, Before, Restart, MemoryCurrent, CPUSec, ExecMainStatus.
+- `last_exit_code` comes from `ExecMainStatus` only — `RestartForceExitStatus` is the configured restart-trigger list, not an observed status. Dependency lists (`After`, `WantedBy`, `RequiredBy`) are space-separated by systemd.
+- Custom labels: read from `PARTOUT_SERVICE_LABELS` (`myapp,nginx`) or from operator-assigned labels at enrollment. A unit is custom when it matches a label or has a unit file/drop-in under an operator-managed directory.
 - Output: `services_detailed.units[]` JSON array.
 - Refresh: every 5 minutes (services change less often than resources).
 
 **Config collector (`factscollect/config.go`)**:
 - Commands: `haproxy -c -f /etc/haproxy/haproxy.cfg` (validation), `nginx -t` (validation).
-- Config parsing: lightweight regex/line-based parsing (not full YAML parsing) to extract backends, servers, frontends, vhosts, TLS bindings. This keeps the collector fast and avoids dependency on config-file-format parsers.
+- Config parsing: line-based scanning with brace-depth tracking (not a full config parser) to extract backends, servers, frontends, vhosts, TLS bindings. Nested blocks (`location`, `if`) are kept inside their `server`/`backend` block; `include`d files are not followed, so the topology is best-effort. This keeps the collector fast and dependency-free.
 - Topology: for each backend, count total servers and servers marked as "up" (reachable on the host, detected via a lightweight TCP probe to the server address:port within a timeout — optional, can be disabled).
 - Output: `configs.haproxy`, `configs.nginx` objects.
 - Config drift: server compares `config_sha256` across hosts with the same role/group; flag when divergent.
 - Refresh: every 15 minutes or on change (detected by config file mtime — inotify watch).
 
 **Cert collector (`factscollect/cert.go`)**:
-- Discovery: scan paths from config facts (TLS binding paths in haproxy/nginx configs), plus default walks of `/etc/ssl/`, `/etc/ssl/certs/`, `/etc/pki/tls/`. Also respect `PARTOUT_CERT_PATHS` env var for custom paths.
+- Discovery: scan paths from config facts (TLS binding paths in haproxy/nginx configs), plus default walks of `/etc/ssl/`, `/etc/pki/tls/`. Also respect `PARTOUT_CERT_PATHS` for custom paths.
+- Bounded: at most `maxCertFiles` (512) files per collection, files >1 MiB skipped, symlinks not followed, per-subprocess timeout. A large CA store must not stall the observe cadence.
 - For each `.pem`/`.crt`/`.cert` file: `openssl x509 -in <path> -noout -subject -issuer -dates -serial -ext subjectAltName -fingerprint -text` (single command, all info in one parse).
-- Chain validation: `openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt <path>` (system trust store).
-- OCSP: extract stapled response from the cert (not an outbound OCSP request — the agent never initiates outbound connections beyond gRPC). `openssl x509 -in <path> -noout -text | grep -A2 'OCSP'`.
+- Key type is read from the public-key block (`RSA-4096`, `ECDSA-P-256`, `Ed25519`), never hardcoded.
+- Chain validation: `openssl verify -CAfile <bundle> <path>` where `<bundle>` is `PARTOUT_CERT_CA` or the first existing standard bundle (`ca-certificates.crt`, `ca-bundle.crt`, `cert.pem`). When no bundle exists, verification is skipped and reported as `chain_checked: false` — never as a broken chain.
+- Dates: a parse failure leaves `not_after` 0 (= unknown). Filters and alert rules must exclude unknown expiry rather than treat it as expired.
+- OCSP: the extension's presence says nothing about the serving host's stapling, so `ocsp_status` is reported as `unknown` unless real stapling evidence is available. No outbound OCSP requests — the agent never initiates outbound connections beyond gRPC.
 - Custom labels: same label mechanism as services.
 - Output: `certificates.items[]` JSON array.
 - Refresh: every 1 hour (certs change very rarely).
@@ -880,8 +910,8 @@ Facts ingestion (`observe/facts.go`):
 | `service_failed` | `services_detailed.units[*].state == "failed"` | `service_failed_minutes: 5` | critical |
 | `service_restarting` | Unit in `auto-restarting` sub-state | `service_restart_rate_per_hour: 10` | warning |
 | `service_absent` | Expected custom unit not present | `unit_name: "myapp"` | critical |
-| `cert_expiring` | `certificates.items[*].days_remaining` < threshold | `cert_days_remaining: 30` | warning |
-| `cert_chain_broken` | `certificates.items[*].chain_valid == false` | (boolean) | critical |
+| `cert_expiring` | `certificates.items[*].not_after != 0 && days_remaining` < threshold | `cert_days_remaining: 30` | warning |
+| `cert_chain_broken` | `certificates.items[*].chain_checked == true && chain_valid == false` | (boolean) | critical |
 | `config_invalid` | `configs.*.config_valid == false` | (boolean) | critical |
 | `config_drift` | `configs.*.config_sha256` differs from group | `config_drift_tolerance: 0` | info |
 | `endpoint_down` | (future: health endpoint probe) | (TBD) | warning |
@@ -1092,6 +1122,9 @@ error bodies `{code, message, details}`.
 | POST   | `/api/v1/files/perm` | operator | `{agent_id, path, mode, owner, group}` (M2) |
 | POST   | `/api/v1/sessions` | operator | `{agent_id, cmd, args, cols, rows, record}` → open PTY (M2) |
 | POST   | `/api/v1/sessions/:id/input` | operator | `{data_b64}` terminal input (M2) |
+| GET    | `/api/v1/services` | viewer | Fleet service health from `services_detailed`; filters `label`, `state`, `name`, `agent_id` (M5) | R18 |
+| GET    | `/api/v1/certificates` | viewer | Fleet cert inventory from `certificates`; filters `agent_id`, `days_remaining_lt` (unknown-expiry certs excluded) (M5) | R20 |
+| GET    | `/api/v1/configs` | viewer | Per-host config state from `configs`; filters `agent_id`, `kind=haproxy\|nginx` (M5) | R19 |
 | POST   | `/api/v1/sessions/:id/resize` | operator | `{cols, rows}` (M2) |
 | POST   | `/api/v1/sessions/:id/close` | operator | End session (SIGHUP→SIGKILL, M2) |
 | GET    | `/api/v1/sessions` | viewer | Recent sessions (M2) |
@@ -1113,11 +1146,6 @@ prerequisite for a UI slice and none exist today.
 | DELETE | `/api/v1/agents/{id}` | admin | `store.DeleteAgent` exists but has no HTTP route, so a decommissioned host can never leave the fleet; also makes the `revoked` agent state reachable |
 | GET | `/api/v1/audit?agent_id=` | viewer | Per-host audit view; client-side filtering is adequate until log volume grows |
 | GET | `/api/v1/services` | viewer | Fleet service health: aggregated view filtered by label/state/group | R18 |
-| GET | `/api/v1/services?agent_id=&name=` | viewer | Single unit state + deps on a host | R18 |
-| GET | `/api/v1/certificates` | viewer | Fleet cert inventory with expiry, chain status, labels | R20 |
-| GET | `/api/v1/certificates?days_remaining_lt=30` | viewer | Near-expiry certs filter | R20 |
-| GET | `/api/v1/configs` | viewer | Per-host config state: kind (haproxy/nginx), validity, topology, hash | R19 |
-| GET | `/api/v1/configs?kind=haproxy&agent_id=` | viewer | Single host config detail with cross-host drift comparison | R19 |
 | GET | `/api/v1/alerts` | viewer | Active + recently resolved alerts, filterable by kind/severity | R25 |
 | GET | `/api/v1/alerts/:id` | viewer | Single alert detail | R25 |
 | GET | `/api/v1/alerts/rules` | admin | Alert rule list | R25 |

@@ -344,6 +344,7 @@ implementation.)
 | `PARTOUT_LOG_LEVEL` | info | structured log level |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` | **300** | (M5) seconds between structured fact uploads (services/configs/certs); per-collector cadences in PRD arch §7.2
 | `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`)
+| `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
 | `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification
 | `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; hardcoded `none`) |
 | `PARTOUT_ROOT` | `/` | agent fs/exec root prefix (containers; hardcoded `/`) |

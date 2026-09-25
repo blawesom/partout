@@ -56,6 +56,9 @@ type Config struct {
 	// CertPaths: comma-separated TLS cert discovery paths, in addition to the
 	// defaults /etc/ssl and /etc/pki/tls (M5, R20).
 	CertPaths string
+	// CertCA: trust bundle used to verify certificate chains (M5, R20).
+	// Empty = resolve from the standard system locations.
+	CertCA string
 	// TLSCAFile: path to the server root CA (PEM); enables HTTPS
 	// enrollment + mTLS stream.
 	TLSCAFile string
@@ -94,6 +97,7 @@ func Load() (*Config, error) {
 		ObserveFactsInterval: envInt("PARTOUT_OBSERVE_FACTS_INTERVAL", 300),
 		ServiceLabels:        os.Getenv("PARTOUT_SERVICE_LABELS"),
 		CertPaths:            os.Getenv("PARTOUT_CERT_PATHS"),
+		CertCA:               os.Getenv("PARTOUT_CERT_CA"),
 		TLSCAFile:            os.Getenv("PARTOUT_TLS_CA"),
 	}
 	if err := c.Validate(); err != nil {

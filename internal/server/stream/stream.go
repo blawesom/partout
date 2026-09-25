@@ -271,11 +271,12 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		h.st.MarkSeen(sess.AgentID)
 	case msg.GetFacts() != nil:
 		f := msg.GetFacts()
-		if f.HostId == "" {
-			f.HostId = sess.AgentID
-		}
-		if err := h.st.UpsertFacts(store.Facts{AgentID: f.HostId, TS: time.Now().Unix(), Data: f.Facts}); err != nil {
-			h.log.Printf("stream: upsert facts %s: %v", f.HostId, err)
+		// Key strictly by the authenticated session: FactsBatch.HostId is
+		// agent-supplied and must not be trusted as a storage key, or an
+		// enrolled agent could overwrite another host's facts. The field is
+		// kept for wire compatibility and ignored here.
+		if err := h.st.UpsertFacts(store.Facts{AgentID: sess.AgentID, TS: time.Now().Unix(), Data: f.Facts}); err != nil {
+			h.log.Printf("stream: upsert facts %s: %v", sess.AgentID, err)
 		}
 	case msg.GetOutput() != nil:
 		o := msg.GetOutput()
@@ -351,7 +352,8 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 	case msg.GetObserveFacts() != nil:
 		of := msg.GetObserveFacts()
 		// Merge structured facts into the host_facts JSON document (M5,
-		// R18–R20); the store preserves the flat fact keys.
+		// R18–R20); the store preserves the flat fact keys. Keyed by the
+		// authenticated session, never by the agent-supplied HostId.
 		if err := h.st.UpsertHostFactsJSON(sess.AgentID, of.Json); err != nil {
 			h.log.Printf("stream: upsert observe facts %s: %v", of.Kind, err)
 		}
