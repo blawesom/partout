@@ -92,6 +92,9 @@ echo "==> seeding data"
 AG=$(curl -s "$B/hosts" -H "$H" | python3 -c 'import sys,json;print(json.load(sys.stdin)["items"][0]["id"])')
 seed POST /groups  '{"name":"web","selector":"all"}' >/dev/null
 seed POST /policies '{"name":"deny-rm","effect":"deny","priority":10,"match":{"command_regex":"^rm"}}' >/dev/null
+seed POST /policies '{"name":"needs-approval","effect":"require_approval","priority":20,"match":{"command_regex":"needsapproval"}}' >/dev/null
+# Park a command on an approval request so the Approvals page has a live row.
+seed POST /executions '{"selector":"all","cmd":"echo","args":["needsapproval"],"timeout_s":10}' >/dev/null
 seed POST /users   '{"username":"alice","password":"alicepass123","role":"operator"}' >/dev/null
 seed POST /secrets '{"name":"dbpass","value":"s3cr3t","selector":"all"}' >/dev/null
 TID=$(seed POST /tasks '{"name":"check disk","description":"df -h","steps":[{"cmd":"df"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')

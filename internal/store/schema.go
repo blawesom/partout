@@ -110,6 +110,28 @@ CREATE TABLE IF NOT EXISTS policies (
 );
 CREATE INDEX IF NOT EXISTS idx_policies_effect ON policies(effect);
 
+-- Approval requests (M4, PRD §5.8): a policy require_approval match parks
+-- the exact payload here; an admin approves/denies; approvals are scoped to
+-- the exact payload (not a blanket allow) and audit-logged.
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id            TEXT PRIMARY KEY,
+  action_class  TEXT NOT NULL,              -- exec | pkg.apply | file.write | ...
+  payload_json  TEXT NOT NULL,              -- exact action payload (scoped approval)
+  agent_id      TEXT NOT NULL,
+  execution_id  TEXT,                       -- command executions (nullable)
+  run_id        TEXT,                       -- created run row (nullable)
+  actor         TEXT NOT NULL,              -- requesting principal
+  actor_role    TEXT NOT NULL,
+  matched_rules TEXT,                       -- rule IDs that required approval
+  state         TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','approved','denied','expired')),
+  created_unix  INTEGER NOT NULL,
+  expires_unix  INTEGER NOT NULL,
+  decided_unix  INTEGER,
+  decided_by    TEXT,
+  decision_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_state ON approval_requests(state);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -381,4 +403,4 @@ CREATE TABLE IF NOT EXISTS principals (
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 10
+const currentSchemaVersion = 11

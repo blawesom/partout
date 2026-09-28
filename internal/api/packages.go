@@ -9,6 +9,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/blawesom/partout/internal/server/packages"
@@ -118,6 +119,15 @@ func (h *Handler) pkgApply(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err := h.pkgs.Apply(r.Context(), body.AgentID, h.pkgActor(r), body.Packages, body.DryRun)
 	if err != nil {
+		var apprErr *packages.ApprovalRequiredError
+		if errors.As(err, &apprErr) {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"state":       "approval_required",
+				"approval_id": apprErr.ApprovalID,
+				"message":     "apply parked on an approval request; an admin must approve it",
+			})
+			return
+		}
 		h.pkgErr(w, err)
 		return
 	}

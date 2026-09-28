@@ -306,18 +306,20 @@ func canonicalRulesJSON(rules []Rule) string {
 //	runID \x00 versionBe64 \x00 effect \x00 sortedRuleIDs|... \x00 actorRole
 //
 // Returns the raw signature bytes.
-func SignDecision(priv ed25519.PrivateKey, runID string, bundleVersion uint64, effect string, matchedRules []string, actorRole string) []byte {
-	return ed25519.Sign(priv, decisionPayload(runID, bundleVersion, effect, matchedRules, actorRole))
+func SignDecision(priv ed25519.PrivateKey, runID string, bundleVersion uint64, effect string, matchedRules []string, actorRole, approvalID string) []byte {
+	return ed25519.Sign(priv, decisionPayload(runID, bundleVersion, effect, matchedRules, actorRole, approvalID))
 }
 
 // VerifyDecision checks a Decision's signature against the given public key.
-func VerifyDecision(pub ed25519.PublicKey, runID string, bundleVersion uint64, effect string, matchedRules []string, actorRole string, sig []byte) bool {
-	return ed25519.Verify(pub, decisionPayload(runID, bundleVersion, effect, matchedRules, actorRole), sig)
+func VerifyDecision(pub ed25519.PublicKey, runID string, bundleVersion uint64, effect string, matchedRules []string, actorRole, approvalID string, sig []byte) bool {
+	return ed25519.Verify(pub, decisionPayload(runID, bundleVersion, effect, matchedRules, actorRole, approvalID), sig)
 }
 
 // decisionPayload builds the canonical byte string that is signed/verified.
-func decisionPayload(runID string, bundleVersion uint64, effect string, matchedRules []string, actorRole string) []byte {
-	payload := make([]byte, 0, len(runID)+8+1+len(effect)+1+len(actorRole))
+// approvalID (empty when not approval-authorized) is covered by the signature
+// so a decision cannot be grafted with a foreign approval reference.
+func decisionPayload(runID string, bundleVersion uint64, effect string, matchedRules []string, actorRole, approvalID string) []byte {
+	payload := make([]byte, 0, len(runID)+8+1+len(effect)+1+len(actorRole)+len(approvalID))
 	payload = append(payload, []byte(runID)...)
 	payload = append(payload, '\x00')
 	payload = append(payload, uint64Bytes(bundleVersion)...)
@@ -332,6 +334,8 @@ func decisionPayload(runID string, bundleVersion uint64, effect string, matchedR
 	}
 	payload = append(payload, '\x00')
 	payload = append(payload, []byte(actorRole)...)
+	payload = append(payload, '\x00')
+	payload = append(payload, []byte(approvalID)...)
 	return payload
 }
 

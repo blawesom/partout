@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 )
 
 // ---- Executions -----------------------------------------------------------
@@ -134,16 +135,34 @@ func (s *Store) CreateExecutionRun(r ExecutionRun) error {
 	return err
 }
 
+// GetExecutionRun returns one run by ID (nil when absent).
+func (s *Store) GetExecutionRun(id string) (*ExecutionRun, error) {
+	row := s.db.QueryRow(`
+		SELECT id, execution_id, agent_id, state, exit_code, duration_ms, created, updated
+		FROM execution_runs WHERE id=?`, id)
+	var r ExecutionRun
+	if err := row.Scan(&r.ID, &r.ExecutionID, &r.AgentID, &r.State,
+		&r.ExitCode, &r.DurationMS, &r.Created, &r.Updated); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: get execution run: %w", err)
+	}
+	return &r, nil
+}
+
 // UpdateRunState sets a run's state, exit code, and duration.
 func (s *Store) UpdateRunState(id, state string, exitCode int32, durationMS int64) error {
 	// Guarded (architecture §3.3): a run in a terminal state other than
 	// "interrupted" is not overwritten by a (possibly stale) update; "interrupted"
-	// runs may be re-finalized by a replayed result after a disconnect. A
-	// duplicate update with the same state is a no-op.
+	// runs may be re-finalized by a replayed result after a disconnect.
+	// "awaiting_approval" is a parked (non-terminal) state that may be
+	// finalized by approval dispatch / denial / expiry (M4).
+	// A duplicate update with the same state is a no-op.
 	_, err := s.db.Exec(`
 		UPDATE execution_runs
 		SET state=?, exit_code=?, duration_ms=?, updated=?
-		WHERE id=? AND (state IN ('queued','delivered','running','interrupted') OR state=?)
+		WHERE id=? AND (state IN ('queued','delivered','running','interrupted','awaiting_approval') OR state=?)
 	`, state, exitCode, durationMS, now(), id, state)
 	return err
 }

@@ -137,7 +137,7 @@ func (s *Store) PromoteRunToRunning(id string) error {
 func (s *Store) CancelNonTerminalRuns(executionID string) (int64, error) {
 	res, err := s.db.Exec(`
 		UPDATE execution_runs SET state='cancelled', updated=?
-		WHERE execution_id=? AND state IN ('queued','delivered','running')
+		WHERE execution_id=? AND state IN ('queued','delivered','running','awaiting_approval')
 	`, now(), executionID)
 	if err != nil {
 		return 0, err

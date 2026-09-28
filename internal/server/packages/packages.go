@@ -16,6 +16,7 @@ import (
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
@@ -29,6 +30,9 @@ type Controller struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity
+	// approvals is the M4 approvals engine; nil → require_approval fails
+	// closed (deny) rather than silently allowing.
+	approvals *approvals.Controller
 	// extdata provides OSV CVE correlation for list-updates (PRD §6.3).
 	// Nil → no correlation (updates returned unranked).
 	extdata *externaldata.Refresher
@@ -37,6 +41,19 @@ type Controller struct {
 	// listTimeout bounds list-updates (shorter; no mutation).
 	listTimeout time.Duration
 }
+
+// ApprovalRequiredError is returned when a package apply is parked on an
+// approval request (M4). The API layer maps it to 202 with the request id.
+type ApprovalRequiredError struct {
+	ApprovalID string
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	return "packages: approval required (" + e.ApprovalID + ")"
+}
+
+// SetApprovals installs the approvals engine (M4).
+func (c *Controller) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
 
 // New builds a Controller.
 func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *Controller {
@@ -181,6 +198,12 @@ func (c *Controller) Apply(ctx context.Context, agentID string, actor Actor, fil
 		}
 	}
 
+	return c.dispatchApply(ctx, agentID, op, actor, opName)
+}
+
+// dispatchApply records + dispatches a policy-gated apply op and waits for
+// the result. Shared by direct Apply and approval re-dispatch (M4).
+func (c *Controller) dispatchApply(ctx context.Context, agentID string, op *pb.PkgOp, actor Actor, opName string) (*store.PkgAction, error) {
 	// Record the action as "running".
 	actionID := store.NewPkgActionID()
 	action := &store.PkgAction{
@@ -228,6 +251,29 @@ func (c *Controller) Apply(ctx context.Context, agentID string, actor Actor, fil
 	return action, nil
 }
 
+// DispatchApprovedApply re-dispatches a package apply that was parked on an
+// approval (M4). Registered as the approvals controller's "pkg.apply"
+// dispatcher; the decision is already signed (EffectAllow + approval id).
+func (c *Controller) DispatchApprovedApply(req *store.ApprovalRequest, dec *pb.Decision) (*store.PkgAction, error) {
+	var p struct {
+		Packages []string `json:"packages"`
+		DryRun   bool     `json:"dry_run"`
+	}
+	if err := json.Unmarshal([]byte(req.PayloadJSON), &p); err != nil {
+		return nil, fmt.Errorf("packages: approval %s: bad payload: %w", req.ID, err)
+	}
+	op := &pb.PkgOp{
+		OpId: id.New("pko"), Kind: pb.PkgOpKind_PKG_APPLY,
+		Packages: p.Packages, DryRun: p.DryRun,
+		Decision: dec,
+	}
+	actor := Actor{Principal: req.DecidedBy, Role: "admin"}
+	if actor.Principal == "" {
+		actor = Actor{Principal: req.Actor, Role: req.ActorRole}
+	}
+	return c.dispatchApply(context.Background(), req.AgentID, op, actor, "apply")
+}
+
 // GetAction fetches a stored package action.
 func (c *Controller) GetAction(id string) (*store.PkgAction, error) {
 	return c.st.GetPkgAction(id)
@@ -253,8 +299,10 @@ func (c *Controller) doSend(ctx context.Context, agentID string, op *pb.PkgOp, t
 }
 
 // policyGate evaluates policy for a package apply op and attaches a signed
-// Decision (like files.policyGate). A deny is audited and returned as an
-// error.
+// Decision (like files.policyGate). A hard deny is audited and returned as
+// an error. A require_approval match (M4) parks the op on an approval
+// request and returns *ApprovalRequiredError; without the approvals engine
+// wired it fails closed as a deny.
 func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opName string) error {
 	class, ok := policy.PkgOpClass(op.Kind)
 	if !ok {
@@ -274,15 +322,35 @@ func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opNam
 		return fmt.Errorf("packages: load policies: %w", err)
 	}
 	decision := policy.Evaluate(rules, action)
-	if decision.Effect != policy.EffectAllow {
+	if decision.Effect == policy.EffectDeny {
 		c.audit(agentID, opName, op.OpId, actor, "denied", 0, decision.Reason)
 		return fmt.Errorf("packages: %s denied by policy: %s", opName, decision.Reason)
+	}
+	if decision.Effect == policy.EffectRequireApproval {
+		if c.approvals == nil {
+			// Fail closed: no approvals engine in this build.
+			c.audit(agentID, opName, op.OpId, actor, "denied", 0, "approval required but the approvals engine is unavailable")
+			return fmt.Errorf("packages: %s requires approval but the approvals engine is unavailable", opName)
+		}
+		apReq, err := c.approvals.NewRequest(approvals.NewRequestParams{
+			ActionClass:  policy.ActionPkgApply,
+			AgentID:      agentID,
+			Actor:        actor.Principal,
+			ActorRole:    actor.Role,
+			MatchedRules: decision.MatchedRules,
+			Payload:      map[string]any{"packages": op.Packages, "dry_run": false},
+		})
+		if err != nil {
+			return fmt.Errorf("packages: %s: create approval request: %w", opName, err)
+		}
+		c.audit(agentID, opName, op.OpId, actor, "approval_required", 0, apReq.ID)
+		return &ApprovalRequiredError{ApprovalID: apReq.ID}
 	}
 	// Sign the decision (agent guardrail verifies; arch §5.3).
 	if c.ident != nil {
 		version, _ := c.st.PolicyBundleVersion()
 		sig := policy.SignDecision(c.ident.Priv, op.OpId, version,
-			decision.Effect, decision.MatchedRules, actor.Role)
+			decision.Effect, decision.MatchedRules, actor.Role, "")
 		op.Decision = &pb.Decision{
 			RunId:         op.OpId,
 			BundleVersion: version,

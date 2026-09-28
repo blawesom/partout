@@ -39,7 +39,9 @@ import (
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
+	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/approvals"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
@@ -228,6 +230,21 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	apiH.Control().SetIdentity(ident)
 	h.SetServerPubKey(ident.PubB64())
 
+	// M4: approvals engine (PRD §5.8). require_approval policy matches park
+	// the action (exec + pkg.apply surfaces); admin approval signs a fresh
+	// EffectAllow decision carrying the approval id and re-dispatches the
+	// stored payload. Requests expire after PARTOUT_APPROVAL_TTL_S (1 h).
+	apr := approvals.New(st, h, sseB, lg)
+	apr.SetIdentity(ident)
+	apiH.Control().SetApprovals(apr)
+	apr.OnExecExpired = func(execID string) {
+		if err := apiH.Control().FinalizeExecution(execID); err != nil {
+			lg.Printf("approvals: finalize expired exec %s: %v", execID, err)
+		}
+	}
+	apr.RegisterDispatcher(policy.ActionExec, apiH.Control().DispatchApprovedCommand)
+	apiH.SetApprovals(apr)
+
 	// M2: files + sessions (PRD §5.3, §5.2.2). Both sign Decisions with the
 	// same server identity (agent-side guardrail re-check).
 	fc := files.New(st, h, sseB, lg)
@@ -235,6 +252,11 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	apiH.SetFiles(fc)
 	pkgC := packages.New(st, h, sseB, lg)
 	pkgC.SetIdentity(ident)
+	pkgC.SetApprovals(apr)
+	apr.RegisterDispatcher(policy.ActionPkgApply, func(req *store.ApprovalRequest, dec *pb.Decision) error {
+		_, err := pkgC.DispatchApprovedApply(req, dec)
+		return err
+	})
 	apiH.SetPkgs(pkgC)
 	taskC := tasks.New(st, h, sseB, lg)
 	taskC.SetIdentity(ident)

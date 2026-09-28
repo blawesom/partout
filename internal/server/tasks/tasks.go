@@ -94,7 +94,7 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 		if decision.Effect == policy.EffectAllow {
 			version, _ := c.st.PolicyBundleVersion()
 			sig := policy.SignDecision(c.ident.Priv, runID, version,
-				decision.Effect, decision.MatchedRules, actor.Role)
+				decision.Effect, decision.MatchedRules, actor.Role, "")
 			pbDecision = &pb.Decision{
 				RunId:         runID,
 				BundleVersion: version,

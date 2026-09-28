@@ -40,7 +40,7 @@ func testGuard(t *testing.T, v uint64, priv ed25519.PrivateKey) *guardrail.Guard
 
 // signedDecision signs an allow decision bound to runID + bundle version v.
 func signedDecision(priv ed25519.PrivateKey, runID string, v uint64) *pb.Decision {
-	sig := policy.SignDecision(priv, runID, v, policy.EffectAllow, nil, "admin")
+	sig := policy.SignDecision(priv, runID, v, policy.EffectAllow, nil, "admin", "")
 	return &pb.Decision{
 		RunId: runID, BundleVersion: v, Effect: policy.EffectAllow,
 		Sig: sig, ActorRole: "admin",

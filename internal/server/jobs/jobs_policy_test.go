@@ -205,7 +205,7 @@ func TestJobCreateAllowedCarriesSignedDecision(t *testing.T) {
 			t.Fatalf("decision bundle_version=%d, want %d", d.GetBundleVersion(), ver)
 		}
 		if !policy.VerifyDecision(identPub, d.GetRunId(), d.GetBundleVersion(),
-			d.GetEffect(), d.GetMatchedRules(), d.GetActorRole(), d.GetSig()) {
+			d.GetEffect(), d.GetMatchedRules(), d.GetActorRole(), d.GetApprovalId(), d.GetSig()) {
 			t.Fatal("decision signature invalid")
 		}
 	case <-time.After(3 * time.Second):
@@ -375,7 +375,7 @@ func TestJobRunNowAllowedDispatchesSignedDecision(t *testing.T) {
 		}
 		identPub := harness.ctrlPub()
 		if !policy.VerifyDecision(identPub, d.GetRunId(), d.GetBundleVersion(),
-			d.GetEffect(), d.GetMatchedRules(), d.GetActorRole(), d.GetSig()) {
+			d.GetEffect(), d.GetMatchedRules(), d.GetActorRole(), d.GetApprovalId(), d.GetSig()) {
 			t.Fatal("decision signature invalid")
 		}
 	case <-time.After(3 * time.Second):

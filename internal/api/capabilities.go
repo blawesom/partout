@@ -49,11 +49,12 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// M5 observe read path (R18–R20) — wired in this build.
 		"observe": true,
 
-		// M6 alert engine and M4 approvals — not built yet. The UI renders
-		// these as "not yet available (M6/M4)" placeholders, and the probe
-		// must say so honestly rather than let the UI guess.
+		// M6 alert engine — not built yet. The UI renders it as a
+		// "not yet available (M6)" placeholder, and the probe must say so
+		// honestly rather than let the UI guess.
+		// M4 approvals — wired when the approvals controller is installed.
 		"alerts":    false,
-		"approvals": false,
+		"approvals": h.approvals != nil,
 	}
 	writeJSON(w, http.StatusOK, caps)
 }

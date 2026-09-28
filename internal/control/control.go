@@ -17,6 +17,7 @@ import (
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -29,6 +30,10 @@ type Control struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity // signs policy Decisions; nil = unsigned (tests)
+
+	// approvals is the M4 approvals engine; nil → require_approval fails
+	// closed (deny) rather than silently allowing.
+	approvals *approvals.Controller
 
 	// finMu serializes execution-aggregate finalization. The result hook and
 	// the disconnect hook can both finalize the same execution concurrently
@@ -53,6 +58,11 @@ func New(st *store.Store, h *stream.Handler, sse *sse.Broker, lg *log.Logger) *C
 // to Command envelopes are signed with it so agents can verify them
 // (architecture §5.3). Must be called before dispatching.
 func (c *Control) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
+
+// SetApprovals installs the approvals engine (M4). require_approval policy
+// matches park the run as awaiting_approval and create a request; approval
+// re-dispatches via DispatchApprovedCommand.
+func (c *Control) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
 
 // BroadcastPolicyBundle pushes the current policy bundle to every connected
 // agent.  Called by the policy API after a rule is created or deleted.
@@ -79,10 +89,11 @@ type DispatchResult struct {
 
 // RunRef is one dispatched run.
 type RunRef struct {
-	RunID     string `json:"run_id"`
-	AgentID   string `json:"agent_id"`
-	Delivered bool   `json:"delivered"`
-	State     string `json:"state"` // queued|delivered|not_delivered|denied
+	RunID      string `json:"run_id"`
+	AgentID    string `json:"agent_id"`
+	Delivered  bool   `json:"delivered"`
+	State      string `json:"state"`                 // queued|delivered|not_delivered|denied|awaiting_approval
+	ApprovalID string `json:"approval_id,omitempty"` // set when the run is parked on an approval
 }
 
 // Dispatch resolves the selector, creates an execution + a run per host, and
@@ -156,18 +167,16 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			continue
 		}
 
-		// Deny / require_approval → fail closed (no envelope is sent).
-		// require_approval is denied in v1: the approvals engine is M4.
-		if decision.Effect != policy.EffectAllow {
-			kind := "policy.deny"
-			if decision.Effect == policy.EffectRequireApproval {
-				kind = "policy.require_approval"
-			}
+		// Deny → fail closed. require_approval → park the run on an
+		// approval request (M4); without the approvals engine wired it
+		// fails closed as a deny.
+		switch decision.Effect {
+		case policy.EffectDeny:
 			if err := c.st.UpdateRunState(runID, "denied", -1, 0); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err))
 				continue
 			}
-			c.audit(kind, req.CreatedBy, map[string]string{
+			c.audit("policy.deny", req.CreatedBy, map[string]string{
 				"execution_id": execID,
 				"run_id":       runID,
 				"agent_id":     host.ID,
@@ -176,6 +185,56 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			})
 			res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "denied"})
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: denied (%s)", host.ID, decision.Reason))
+			continue
+		case policy.EffectRequireApproval:
+			if c.approvals == nil {
+				// Fail closed: no approvals engine in this build.
+				if err := c.st.UpdateRunState(runID, "denied", -1, 0); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err))
+					continue
+				}
+				c.audit("policy.require_approval", req.CreatedBy, map[string]string{
+					"execution_id": execID,
+					"run_id":       runID,
+					"agent_id":     host.ID,
+					"cmd":          req.Cmd,
+					"rules":        strings.Join(decision.MatchedRules, ","),
+				})
+				res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "denied"})
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: approval required but the approvals engine is unavailable", host.ID))
+				continue
+			}
+			apReq, err := c.approvals.NewRequest(approvals.NewRequestParams{
+				ActionClass:  policy.ActionExec,
+				AgentID:      host.ID,
+				ExecutionID:  execID,
+				RunID:        runID,
+				Actor:        req.CreatedBy,
+				ActorRole:    req.ActorRole,
+				MatchedRules: decision.MatchedRules,
+				Payload:      map[string]any{"cmd": req.Cmd, "args": req.Args, "env": req.Env, "timeout_s": req.TimeoutS},
+			})
+			if err != nil {
+				// Request creation failed: fail closed, never dispatch.
+				c.st.UpdateRunState(runID, "denied", -1, 0)
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err))
+				continue
+			}
+			if err := c.st.UpdateRunState(runID, "awaiting_approval", -1, 0); err != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err))
+				continue
+			}
+			c.audit("policy.require_approval", req.CreatedBy, map[string]string{
+				"execution_id": execID,
+				"run_id":       runID,
+				"agent_id":     host.ID,
+				"cmd":          req.Cmd,
+				"rules":        strings.Join(decision.MatchedRules, ","),
+				"approval_id":  apReq.ID,
+			})
+			res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "awaiting_approval", ApprovalID: apReq.ID})
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: approval required (%s)", host.ID, apReq.ID))
+			allTerminal = false
 			continue
 		}
 
@@ -225,6 +284,46 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 	}
 
 	return res, nil
+}
+
+// DispatchApprovedCommand re-dispatches a command whose run was parked on an
+// approval (M4). It is registered as the approvals controller's "exec"
+// dispatcher: the decision is already signed (EffectAllow + approval id),
+// the agent's guardrail accepts it via the approval short-circuit.
+func (c *Control) DispatchApprovedCommand(req *store.ApprovalRequest, dec *pb.Decision) error {
+	var p struct {
+		Cmd      string            `json:"cmd"`
+		Args     []string          `json:"args"`
+		Env      map[string]string `json:"env"`
+		TimeoutS int32             `json:"timeout_s"`
+	}
+	if err := json.Unmarshal([]byte(req.PayloadJSON), &p); err != nil {
+		return fmt.Errorf("control: approval %s: bad payload: %w", req.ID, err)
+	}
+	cmd := &pb.Command{
+		RunId:       req.RunID,
+		ExecutionId: req.ExecutionID,
+		Cmd:         p.Cmd,
+		Args:        p.Args,
+		Env:         p.Env,
+		TimeoutS:    p.TimeoutS,
+		Decision:    dec,
+	}
+	if err := c.h.SendCommand(req.AgentID, cmd); err != nil {
+		if req.RunID != "" {
+			_ = c.st.UpdateRunState(req.RunID, "not_delivered", -1, 0)
+		}
+		return fmt.Errorf("control: approval %s: dispatch: %w", req.ID, err)
+	}
+	if req.RunID != "" {
+		_ = c.st.UpdateRunState(req.RunID, "delivered", -1, 0)
+	}
+	c.audit("approval.dispatch", "", map[string]string{
+		"approval_id": req.ID,
+		"run_id":      req.RunID,
+		"agent_id":    req.AgentID,
+	})
+	return nil
 }
 
 // CancelResult reports the outcome of a cancel request.
@@ -409,7 +508,7 @@ func (c *Control) signDecision(runID string, bundleVersion uint64, d policy.Deci
 		ActorRole:     actorRole,
 	}
 	if c.ident != nil {
-		dm.Sig = policy.SignDecision(c.ident.Priv, runID, bundleVersion, d.Effect, d.MatchedRules, actorRole)
+		dm.Sig = policy.SignDecision(c.ident.Priv, runID, bundleVersion, d.Effect, d.MatchedRules, actorRole, "")
 	}
 	return dm
 }

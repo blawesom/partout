@@ -23,7 +23,8 @@ partout/
 │   │   ├── api/            # REST v1 handlers (mux), authz middleware, RBAC; webui/ = embedded SPA
 │   │   ├── sse/            # SSE broker: subscribe, fan-out, per-client buffers
 │   │   ├── mcp/            # MCP server (stdio + Streamable HTTP, OAuth2 PKCE)
-│   │   ├── control/        # dispatcher, selector resolution, approvals
+│   │   ├── control/        # dispatcher, selector resolution
+│   │   ├── approvals/      # approval requests: park/approve/deny/expiry, re-dispatch (M4)
 │   │   ├── provision/      # host bootstrap: preflight, install, update runs (PRD R17)
 │   │   ├── policy/         # rule model, evaluator, decision signing, bundle builder
 │   │   ├── secrets/        # store (HKDF), bindings, materialization envelopes
@@ -419,7 +420,11 @@ POST /api/v1/executions {selector, cmd, …}
  1. authn (principal) + RBAC role check (viewer denied)
  2. resolve selector → concrete host set (deterministic; empty → 400, never silent)
  3. policy evaluate (per host, per action) → allow | deny | require_approval
- 4. if require_approval: create approval_request; dispatch waits (or queues with TTL)
+ 4. if require_approval: create approval_request, park the run (state=awaiting_approval;
+    packages return 202 approval_required); on admin approval the server signs a fresh
+    EffectAllow decision carrying the approval_id and re-dispatches the stored payload
+    (exec + pkg.apply surfaces; other surfaces fail closed as deny until their approval
+    paths land)
  5. audit write: execution + N runs (state=queued)
  6. enqueue CommandEnvelope per host (ordered per agent queue)
  7. agent ack → runs → delivered → … → results → SSE broadcast → alerts if policy says
@@ -429,7 +434,9 @@ POST /api/v1/executions {selector, cmd, …}
 
 **Implemented in v0.2** (M1): rules in `policies` (SQLite, versioned bundle), REST CRUD at
 `/api/v1/policies`, `partout ctl policy list|create|delete`, dispatch gating in
-`internal/control` (per-host evaluation, fail-closed on `deny`/`require_approval`),
+`internal/control` (per-host evaluation, fail-closed on `deny`; `require_approval` parks the
+action on an approval request for exec + pkg.apply — M4, §5.4 — and fails closed as deny on
+the other surfaces),
 signed decisions on `Command` envelopes, bundle push on connect + on change, agent
 re-check in `internal/agent/guardrail` (architecture §5.3).
 
@@ -456,8 +463,9 @@ Rule (one declarative object, stored in `policies`):
   any file op) or a specific class. File ops set `Action.Path` + `CommandLine = "kind path"`
   so `command_regex` can gate on path. A session open is an `exec` action (`cmd args`).
 - **v1 default: default-allow** (deny-list model): an action with no matching rule is
-  allowed. `require_approval` is accepted as an effect but evaluated as `deny` until the
-  approvals engine lands (M4).
+  allowed. `require_approval` is a first-class effect (M4): it parks the action on an
+  approval request for exec + pkg.apply, and fails closed as deny on the surfaces without
+  an approval path yet.
 - **Structured refusal**: every deny carries the matched rule id(s) + reason in the API
   response, the run/session record (`state=denied`), and the audit log (`policy.deny`).
   Write file ops additionally attach a signed `Decision` to the `FileOp` envelope so the
@@ -468,15 +476,20 @@ Rule (one declarative object, stored in `policies`):
 **Implemented in v0.2** (M1), with the noted exceptions below.
 
 - On dispatch, the server signs a compact `Decision{run_id, bundle_version, effect,
-  matched_rules, actor_role}` with the server's Ed25519 key (`server_identity.key` under the
-  server data dir; public key distributed in every policy bundle — `server_pubkey`).
+  matched_rules, actor_role, approval_id}` with the server's Ed25519 key
+  (`server_identity.key` under the server data dir; public key distributed in every policy
+  bundle — `server_pubkey`). `approval_id` (empty for non-approval decisions) is covered by
+  the signature, so a decision cannot be grafted with a foreign approval reference.
 - The server pushes a versioned, content-hashed **policy bundle** to each agent **on connect
   and on every policy change** (create/delete broadcasts to all connected sessions).
 - **Agent re-check (defense in depth, PRD R/C8)**: before executing any envelope, the agent
   verifies (a) decision signature, (b) `bundle_version` equals its cached bundle, and (c)
   re-evaluates the rule set over the local action (the bundle carries the agent's own
   `host_tags`/`host_roles`/`agent_id`; the decision carries `actor_role`). Any mismatch →
-  **deny**, emit `ACK_DENIED_AGENT` with the reason. **M2 (D1)**: write file ops (upload,
+  **deny**, emit `ACK_DENIED_AGENT` with the reason. **M4**: a decision with a non-empty
+  `approval_id` is an approved action — the signed decision is the authority (the cached
+  bundle may still carry the `require_approval` rule), but a **local hard deny still wins**.
+  **M2 (D1)**: write file ops (upload,
   edit, perm) attach the same signed `Decision` to the `FileOp` envelope and go through
   `guardrail.RecheckFile` before execution; read ops (stat/list/download) carry no decision
   and skip the re-check (they are policy-bypass by design). Session opens reuse the exec
@@ -488,12 +501,25 @@ Rule (one declarative object, stored in `policies`):
   deny (the reason is logged and visible in the run output); bundle staleness (48 h) applies
   to scheduled jobs, which land with M4.
 
-### 5.4 Approvals
+### 5.4 Approvals (implemented, M4)
 
-- `approval_requests` carry the exact payload (selector snapshot, command, elevation) and its
-  hash; approvers (role `admin`, or `operator` where policy assigns) act via UI/API/MCP.
-- Approval records are linked into the execution's audit row (approver principal + timestamp).
-- Expiry: un-acted requests expire (default 1 h **(proposed)**) and the run ends `approval_expired`.
+- `approval_requests` carry the **exact payload** of the parked action (exec: cmd/args/env/
+  timeout; pkg.apply: package list), the agent, the requesting principal + role, the
+  matched rule ids, and a TTL (`PARTOUT_APPROVAL_TTL_S`, default 1 h). Approvals are scoped
+  to the payload, not a blanket allow.
+- **Park**: a `require_approval` match keeps the action from reaching the agent — exec runs
+  go `state=awaiting_approval` (the execution stays non-terminal), package apply returns
+  `202 {approval_required, approval_id}` with no op dispatched. Surfaces without an
+  approval path (files/sessions/tasks/jobs/secrets) fail closed as deny.
+- **Decide** (role `admin` only): `POST /api/v1/approvals/{id}/approve|deny` (+ reason).
+  Approve signs a fresh `EffectAllow` decision carrying the approval id and re-dispatches
+  the stored payload through the surface's registered dispatcher (control / packages).
+  A cancelled/finalized run can no longer be approved.
+- **Expiry**: un-acted requests expire (lazy, on list/read); an expired request can never
+  be retroactively honored, and the parked exec run is finalized `failed` (the execution
+  re-finalized). Approve/deny/expiry are audit-logged (`approval.*`) and SSE-broadcast.
+- **Guardrail**: see §5.3 — the approved decision passes the agent re-check; a local hard
+  deny still wins.
 
 ### 5.5 Secrets
 
@@ -1402,8 +1428,8 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A3 | Output chunk size | 64 KiB |
 | A4 | Stream backoff | 1 s → 60 s cap, jittered |
 | A5 | Dispatch TTL (offline agents) | 15 min |
-| A6 | Policy default | **v1 (M1)**: default-allow (deny-list) for exec. Default-deny writes deferred to M2/M3 with the action-class taxonomy; `require_approval` acts as deny until M4. |
-| A7 | Approval TTL | 1 h |
+| A6 | Policy default | **v1 (M1)**: default-allow (deny-list) for exec. Default-deny writes deferred to M2/M3 with the action-class taxonomy; `require_approval` shipped in M4 (exec + pkg.apply park on approval requests; other surfaces fail closed as deny). |
+| A7 | Approval TTL | **Implemented (M4)**: 1 h default, `PARTOUT_APPROVAL_TTL_S`; expired requests can never be retroactively honored (lazy expiry finalizes parked exec runs). |
 | A8 | Policy bundle staleness (agent jobs) | 48 h |
 | A9 | Reboot continuation marker validity | 10 min |
 | A10 | Agent default `--elevate` | `none` |

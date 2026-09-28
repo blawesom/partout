@@ -307,7 +307,7 @@ func (c *Controller) signDecision(opID string, d policy.Decision, actorRole stri
 	version, _ := c.st.PolicyBundleVersion()
 	sig := []byte(nil)
 	if c.ident != nil {
-		sig = policy.SignDecision(c.ident.Priv, opID, version, d.Effect, d.MatchedRules, actorRole)
+		sig = policy.SignDecision(c.ident.Priv, opID, version, d.Effect, d.MatchedRules, actorRole, "")
 	}
 	return &pb.Decision{
 		RunId:         opID,

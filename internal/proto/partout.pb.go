@@ -3128,8 +3128,9 @@ type Decision struct {
 	BundleVersion uint64                 `protobuf:"varint,2,opt,name=bundle_version,json=bundleVersion,proto3" json:"bundle_version,omitempty"`
 	Effect        string                 `protobuf:"bytes,3,opt,name=effect,proto3" json:"effect,omitempty"` // "allow" | "deny" | "require_approval"
 	MatchedRules  []string               `protobuf:"bytes,4,rep,name=matched_rules,json=matchedRules,proto3" json:"matched_rules,omitempty"`
-	Sig           []byte                 `protobuf:"bytes,5,opt,name=sig,proto3" json:"sig,omitempty"`                              // server Ed25519 signature (agent verifies)
-	ActorRole     string                 `protobuf:"bytes,6,opt,name=actor_role,json=actorRole,proto3" json:"actor_role,omitempty"` // requester RBAC role (for agent re-eval)
+	Sig           []byte                 `protobuf:"bytes,5,opt,name=sig,proto3" json:"sig,omitempty"`                                 // server Ed25519 signature (agent verifies)
+	ActorRole     string                 `protobuf:"bytes,6,opt,name=actor_role,json=actorRole,proto3" json:"actor_role,omitempty"`    // requester RBAC role (for agent re-eval)
+	ApprovalId    string                 `protobuf:"bytes,7,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"` // non-empty when a human approval authorized this (M4)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3202,6 +3203,13 @@ func (x *Decision) GetSig() []byte {
 func (x *Decision) GetActorRole() string {
 	if x != nil {
 		return x.ActorRole
+	}
+	return ""
+}
+
+func (x *Decision) GetApprovalId() string {
+	if x != nil {
+		return x.ApprovalId
 	}
 	return ""
 }
@@ -4143,7 +4151,7 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\x04size\x18\x04 \x01(\x03R\x04size\x12\x1d\n" +
 	"\n" +
 	"mtime_unix\x18\x05 \x01(\x03R\tmtimeUnix\x12\x12\n" +
-	"\x04mode\x18\x06 \x01(\tR\x04mode\"\xb6\x01\n" +
+	"\x04mode\x18\x06 \x01(\tR\x04mode\"\xd7\x01\n" +
 	"\bDecision\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12%\n" +
 	"\x0ebundle_version\x18\x02 \x01(\x04R\rbundleVersion\x12\x16\n" +
@@ -4151,7 +4159,9 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\rmatched_rules\x18\x04 \x03(\tR\fmatchedRules\x12\x10\n" +
 	"\x03sig\x18\x05 \x01(\fR\x03sig\x12\x1d\n" +
 	"\n" +
-	"actor_role\x18\x06 \x01(\tR\tactorRole\"\xe4\x02\n" +
+	"actor_role\x18\x06 \x01(\tR\tactorRole\x12\x1f\n" +
+	"\vapproval_id\x18\a \x01(\tR\n" +
+	"approvalId\"\xe4\x02\n" +
 	"\aCommand\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x10\n" +

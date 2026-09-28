@@ -1,7 +1,7 @@
 # Partout — Deployment
 
-**Status:** Draft v0.5 — reflects the current implementation (M0–M5 complete, Web UI
-shipped, M6/M7-remainder in progress). Sections marked *proposed* describe planned work
+**Status:** Draft v0.6 — reflects the current implementation (M0–M5 complete, Web UI
+shipped, M4 approvals engine shipped, M6/M7-remainder in progress). Sections marked *proposed* describe planned work
 that is not yet wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
@@ -38,10 +38,22 @@ structured JSON via a new `OBSERVE_FACTS` gRPC envelope. Server-side
 (`/services`, `/certificates`, `/configs`) serve the data (MCP read tools ship with the
 R11 MCP server). No alerting yet (alert engine is M6). See `PRD.md` §14 for the
 M5–M8 milestone breakdown.
+**What v0.6 adds (M4: approvals engine, PRD §5.8):** a `require_approval` policy
+match now **parks the action** instead of failing closed — exec runs go
+`awaiting_approval`, package apply returns `202 {approval_required, approval_id}` — and
+creates an `approval_requests` row carrying the exact payload, actor, matched rules, and
+a TTL (`PARTOUT_APPROVAL_TTL_S`, default 1 h). Admins act via `GET/POST
+/api/v1/approvals[/{id}[/approve|deny]]`; approve signs a fresh `EffectAllow` decision
+whose signature covers the approval id and re-dispatches the stored payload (the agent
+guardrail honors approved decisions; a local hard deny still wins). Expired requests
+can never be retroactively honored. Surfaces without an approval path (files/sessions/
+tasks/jobs/secrets) still fail closed as deny, as does any build without the approvals
+engine wired. New env var: `PARTOUT_APPROVAL_TTL_S`.
 
 **Not yet wired:** elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
-`none`/`/`), Postgres backend, the approvals engine + full policy surface, the MCP
-server write tools, and the alert engine (M6). **Web UI is shipped** (v0.5): open the main
+`none`/`/`), Postgres backend, approvals on the remaining surfaces (files/sessions/
+tasks/jobs/secrets), the MCP server + write tools (R11), and the alert engine (M6).
+**Web UI is shipped** (v0.5): open the main
 listener in a browser and log in — the fleet, execute, audit, and M1–M5 data pages (including
 Observe · Services/Certificates/Configs) are live. Remaining UI scope: the M6 Alerts page (now a
 labeled placeholder) and M7 cross-links/task-actions.
@@ -277,6 +289,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_ADMIN_PASSWORD` / `--admin-password` | *(empty)* | first-run admin-user bootstrap password (M4); otherwise a random password is generated into `<db dir>/admin_password.txt` (0600). Prefer the env var — a flag value is visible in `ps` |
 | `PARTOUT_SECRET_KEY_FILE` / `PARTOUT_SECRET_KEY` | *(empty)* | secrets master key (PRD §5.7): key file (mode `0600`) or env var; per-secret keys derived via HKDF. No key → the secrets feature is disabled at startup |
 | `PARTOUT_SESSION_RETENTION_DAYS` | **30** | retention sweeper window for session recordings (PRD §9) |
+| `PARTOUT_APPROVAL_TTL_S` | **3600** | (M4) approval-request TTL in seconds (PRD §5.8): a `require_approval`-parked action expires and is finalized `failed` if un-acted within this window; expired requests can never be retroactively honored |
 | `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` | **false** | air-gap switch: disables all external data fetching, EOL + CVE (PRD §6.3) |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for future output blobs — external data cache is in-DB (`eol_cache`/`vuln_cache`) |
 | `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules |

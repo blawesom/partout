@@ -433,6 +433,7 @@ message Decision {
   repeated string matched_rules = 4;
   bytes sig = 5;             // server Ed25519 signature (agent verifies)
   string actor_role = 6;     // requester RBAC role (for agent re-eval)
+  string approval_id = 7;    // non-empty when a human approval authorized this (M4)
 }
 
 message Command {

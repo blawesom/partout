@@ -156,8 +156,15 @@ Step-by-step bring-up, also referenced in deployment §6:
 - Rules are declarative; the server evaluates them **before dispatch** *(v0.2)*, and the agent
   re-checks agent-side *(v0.2 — signature + bundle version + local re-eval; any mismatch →
   deny, `ACK_DENIED_AGENT`)* (architecture §5.3, defense in depth).
-- **Approvals** *(M4 — not yet)*: will be scoped to the exact payload hash — a modified command
-  needs a new request. Until then `require_approval` rules deny.
+- **Approvals** *(M4 — shipped)*: scoped to the **exact payload** — a modified command needs a
+  new request. A `require_approval` match parks the action (exec runs `awaiting_approval`;
+  package apply → `202 {approval_required, approval_id}`); an **admin** acts via
+  `GET/POST /api/v1/approvals[/{id}[/approve|deny]]` (list = viewer, decide = admin).
+  Approve signs a fresh `EffectAllow` decision carrying the approval id and re-dispatches the
+  stored payload; the agent guardrail honors it (a local hard deny still wins). Requests
+  expire after `PARTOUT_APPROVAL_TTL_S` (default 1 h) and can never be retroactively
+  honored — the parked run finalizes `failed`. Surfaces without an approval path
+  (files/sessions/tasks/jobs/secrets) still fail closed as deny.
 - **Editing a rule** *(v0.2)*: create/delete a rule; the server pushes a fresh bundle to all
   connected agents immediately (no reconnect needed). Bundles are versioned + content-hashed,
   and the agent's cached bundle persists under `<data dir>/agent/`.
@@ -452,6 +459,8 @@ never connects.
 | `apply-updates` fails on `ended` host | EOL gate (host is past end-of-support, defaults to require-approval) | Approve manually or remove the EOL gate from the rule |
 | Policy stale → jobs fail closed | Agent hasn't received a fresh bundle in >48 h (A8), server unreachable | Restore server; agents will fetch the bundle on reconnect |
 | A rebooted host's task run stays `rebooting` (never resumes) | The `resume-after-reboot` marker (`<data dir>/resume/<run_id>.json`) is only processed after the first policy bundle loads post-boot; a stale marker (host never actually rebooted, or reboot command lacked permission) is discarded and the run reported `failed` | Check agent logs for `resume:` lines; verify the agent user can reboot (root/sudo/polkit); confirm the marker file exists until processed, then check `job_runs`/`task_runs` for the final `trigger: resume` report |
+| Run shows `awaiting_approval` and never dispatches | A `require_approval` rule matched; an admin must approve (or the request expired after `PARTOUT_APPROVAL_TTL_S`, default 1 h → run finalizes `failed`) | `GET /api/v1/approvals?state=pending`, then `POST /api/v1/approvals/{id}/approve` (admin token). An already-decided/expired request returns 409 — re-run the action for a fresh request |
+| Approve returns 409 `not_pending` | The request was already approved/denied/expired, or its parked run was cancelled/finalized meanwhile | Re-list requests; if the run was cancelled, re-dispatch the action |
 | Empty selector → no hosts affected | No hosts match the selector predicates | Check the live resolution preview in the UI before dispatch |
 | Output too large → UI hangs | Command producing >16 MB output (PARTOUT_MAX_OUTPUT_MB) | Reduce output or increase the limit |
 

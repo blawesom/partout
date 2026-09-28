@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+
+	"github.com/blawesom/partout/internal/certutil"
+	"github.com/blawesom/partout/internal/server/approvals"
+	"github.com/blawesom/partout/internal/sse"
 )
 
 // This file locks the response shapes the embedded web UI reads (the API has no
@@ -158,6 +162,53 @@ func TestUIShape_PerHostEndpointsFailClosed(t *testing.T) {
 }
 
 // ---- helpers ----
+
+// TestUIShape_ApprovalsFields: GET /approvals → {approvals:[{id,action_class,
+// agent_id,actor,actor_role,matched_rules,state,created_unix,expires_unix,
+// decided_by,decision_reason}]}. The UI (Approvals page, M4) dereferences
+// these; a handler-side rename silently blanks the page.
+func TestUIShape_ApprovalsFields(t *testing.T) {
+	apiH, streamH, srv := startAPITest(t)
+
+	// Wire the approvals controller (the shared fixture leaves it at 503).
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	apr := approvals.New(apiH.Store(), streamH, sse.New(), nil)
+	apr.SetIdentity(ident)
+	apiH.SetApprovals(apr)
+	if _, err := apr.NewRequest(approvals.NewRequestParams{
+		ActionClass: "exec", AgentID: "ag_api",
+		Actor: "alice", ActorRole: "operator",
+		MatchedRules: []string{"r1"}, Payload: map[string]any{"cmd": "rm"},
+	}); err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+
+	code, b := apiReq(t, "GET", srv.URL+"/api/v1/approvals", "", "")
+	if code == http.StatusServiceUnavailable {
+		t.Skipf("GET /approvals not wired in this fixture: %s", truncate(b, 60))
+	}
+	if code != http.StatusOK {
+		t.Fatalf("GET /approvals = %d (%s)", code, truncate(b, 120))
+	}
+	var body struct {
+		Approvals []map[string]any `json:"approvals"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Approvals) == 0 {
+		t.Fatal("expected at least one approval request")
+	}
+	for _, k := range []string{"id", "action_class", "agent_id", "actor", "actor_role",
+		"matched_rules", "state", "created_unix", "expires_unix", "decided_by", "decision_reason"} {
+		if _, ok := body.Approvals[0][k]; !ok {
+			t.Errorf("approval missing %q (UI reads it); got %v", k, keysOf(body.Approvals[0]))
+		}
+	}
+}
 
 func keysOf(m map[string]any) []string {
 	out := make([]string, 0, len(m))

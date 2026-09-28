@@ -52,7 +52,7 @@ func TestRecheckEmptyRulesAllow(t *testing.T) {
 	pub, priv := testServerKey(t)
 	g := NewGuard("ag_test", t.TempDir())
 	g.OnBundle(bundleWith(nil, pub))
-	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow, nil, "admin")
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow, nil, "admin", "")
 	cmd := &pb.Command{RunId: "r1", Cmd: "ls", Args: []string{"-la"}}
 	cmd.Decision = &pb.Decision{
 		RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow,
@@ -69,7 +69,7 @@ func TestRecheckVersionMismatch(t *testing.T) {
 	pub, priv := testServerKey(t)
 	g := NewGuard("ag_test", t.TempDir())
 	g.OnBundle(bundleWith(nil, pub))
-	sig := policy.SignDecision(priv, "r1", 6, policy.EffectAllow, nil, "admin")
+	sig := policy.SignDecision(priv, "r1", 6, policy.EffectAllow, nil, "admin", "")
 	cmd := &pb.Command{RunId: "r1", Cmd: "ls"}
 	cmd.Decision = &pb.Decision{
 		RunId: "r1", BundleVersion: 6, Effect: policy.EffectAllow,
@@ -105,7 +105,7 @@ func TestRecheckBadSignature(t *testing.T) {
 	_, otherPriv := testServerKey(t)
 	g := NewGuard("ag_test", t.TempDir())
 	g.OnBundle(bundleWith(nil, pub))
-	sig := policy.SignDecision(otherPriv, "r1", 7, policy.EffectAllow, nil, "admin")
+	sig := policy.SignDecision(otherPriv, "r1", 7, policy.EffectAllow, nil, "admin", "")
 	cmd := &pb.Command{RunId: "r1", Cmd: "ls"}
 	cmd.Decision = &pb.Decision{
 		RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow,
@@ -135,7 +135,7 @@ func TestRecheckLocalDenyOverrides(t *testing.T) {
 	g := NewGuard("ag_test", t.TempDir())
 	g.OnBundle(bundleWith(rules, pub))
 	// Server signed allow (pretending it didn't match the deny rule).
-	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow, nil, "admin")
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow, nil, "admin", "")
 	cmd := &pb.Command{RunId: "r1", Cmd: "rm", Args: []string{"-rf", "/"}}
 	cmd.Decision = &pb.Decision{
 		RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow,
@@ -164,7 +164,7 @@ func TestRecheckHostTagScoped(t *testing.T) {
 	}}
 	g := NewGuard("ag_test", t.TempDir())
 	g.OnBundle(bundleWith(rules, pub))
-	sig := policy.SignDecision(priv, "r2", 7, policy.EffectAllow, nil, "admin")
+	sig := policy.SignDecision(priv, "r2", 7, policy.EffectAllow, nil, "admin", "")
 	cmd := &pb.Command{RunId: "r2", Cmd: "deploy"}
 	cmd.Decision = &pb.Decision{
 		RunId: "r2", BundleVersion: 7, Effect: policy.EffectAllow,
@@ -211,5 +211,105 @@ func TestPersistAndLoad(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Fatalf("missing %s: %v", f, err)
 		}
+	}
+}
+
+// M4: an approved decision (EffectAllow + approval_id, signed) passes even
+// when the local bundle still carries the require_approval rule that parked
+// the action — the signed decision is the authority.
+func TestRecheckApprovedDecisionPassesRequireApproval(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID:       "approval-rm",
+		Effect:   policy.EffectRequireApproval,
+		Priority: 1,
+		Match:    policy.Match{CommandRegex: `rm\s+-rf`},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWith(rules, pub))
+
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow,
+		[]string{"approval-rm"}, "operator", "apr_1")
+	cmd := &pb.Command{RunId: "r1", Cmd: "rm", Args: []string{"-rf", "/tmp/junk"}}
+	cmd.Decision = &pb.Decision{
+		RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow,
+		MatchedRules: []string{"approval-rm"}, ActorRole: "operator",
+		ApprovalId: "apr_1", Sig: sig,
+	}
+	ok, reason := g.Recheck(cmd)
+	if !ok {
+		t.Fatalf("approved decision should pass; reason: %s", reason)
+	}
+}
+
+// M4: a forged approval id (signature covers the approval ref) is rejected.
+func TestRecheckApprovedDecisionBadSignature(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "approval-rm", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{CommandRegex: `rm\s+-rf`},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWith(rules, pub))
+
+	// Sign for approval apr_1, then graft a foreign approval id apr_2.
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow,
+		[]string{"approval-rm"}, "operator", "apr_1")
+	cmd := &pb.Command{RunId: "r1", Cmd: "rm", Args: []string{"-rf", "/"}}
+	cmd.Decision = &pb.Decision{
+		RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow,
+		MatchedRules: []string{"approval-rm"}, ActorRole: "operator",
+		ApprovalId: "apr_2", Sig: sig,
+	}
+	if ok, _ := g.Recheck(cmd); ok {
+		t.Fatal("forged approval ref must be rejected")
+	}
+}
+
+// M4: an approval does NOT override a local hard deny.
+func TestRecheckApprovedDecisionHardDenyWins(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "hard-deny-rm", Effect: policy.EffectDeny, Priority: 1,
+		Match: policy.Match{CommandRegex: `rm\s+-rf`},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWith(rules, pub))
+
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow,
+		[]string{"hard-deny-rm"}, "admin", "apr_1")
+	cmd := &pb.Command{RunId: "r1", Cmd: "rm", Args: []string{"-rf", "/"}}
+	cmd.Decision = &pb.Decision{
+		RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow,
+		MatchedRules: []string{"hard-deny-rm"}, ActorRole: "admin",
+		ApprovalId: "apr_1", Sig: sig,
+	}
+	if ok, reason := g.Recheck(cmd); ok {
+		t.Fatal("hard deny must win over an approval")
+	} else if reason == "" {
+		t.Fatal("expected a deny reason")
+	}
+}
+
+// M4: an approved decision with a non-allow effect is rejected.
+func TestRecheckApprovedDecisionWrongEffect(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "approval-rm", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{CommandRegex: `rm\s+-rf`},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWith(rules, pub))
+
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectDeny,
+		[]string{"approval-rm"}, "admin", "apr_1")
+	cmd := &pb.Command{RunId: "r1", Cmd: "rm", Args: []string{"-rf", "/"}}
+	cmd.Decision = &pb.Decision{
+		RunId: "r1", BundleVersion: 7, Effect: policy.EffectDeny,
+		MatchedRules: []string{"approval-rm"}, ActorRole: "admin",
+		ApprovalId: "apr_1", Sig: sig,
+	}
+	if ok, _ := g.Recheck(cmd); ok {
+		t.Fatal("deny-effect decision must not pass")
 	}
 }

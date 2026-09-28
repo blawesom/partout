@@ -91,10 +91,27 @@ func (g *Guard) OnBundle(b *pb.PolicyBundle) {
 	g.persist()
 }
 
+// approvalCheck handles an approval-authorized decision (M4): the server
+// signed an explicit allow after a human approved the exact payload
+// (audit-logged server-side). The local bundle may still carry the
+// require_approval rule — the signed decision is the authority. A local
+// hard DENY still wins (cannot happen within the same bundle version,
+// since the server evaluated the same rules at approval time — belt and
+// braces).
+func (g *Guard) approvalCheck(d *pb.Decision, action policy.Action) (bool, string) {
+	if d.Effect != policy.EffectAllow {
+		return false, fmt.Sprintf("guardrail: approval decision effect is %s, want allow", d.Effect)
+	}
+	if dec := policy.Evaluate(g.rules, action); dec.Effect == policy.EffectDeny {
+		return false, "guardrail: local recheck says deny (approval does not override a hard deny)"
+	}
+	return true, ""
+}
+
 // Recheck verifies a command's Decision against the cached bundle and rule
-// set (architecture §5.3).  Returns (allow, reason).  Fails closed:
+// set (architecture §5.3). Returns (allow, reason). Fails closed:
 // no bundle received → deny; no decision → deny; signature invalid → deny;
-// local evaluation disagrees → deny.  An empty rule set is a valid
+// local evaluation disagrees → deny. An empty rule set is a valid
 // default-allow state (the policy is a deny-list).
 func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 	if !g.loaded.Load() {
@@ -112,7 +129,7 @@ func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 	// (a) verify the decision signature (when the server public key is known).
 	if len(g.serverPub) > 0 {
 		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
 			return false, "guardrail: decision signature invalid"
 		}
 	}
@@ -126,6 +143,9 @@ func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 		Cmd:         cmd.Cmd,
 		Args:        cmd.Args,
 		CommandLine: commandLine(cmd.Cmd, cmd.Args),
+	}
+	if d.ApprovalId != "" {
+		return g.approvalCheck(d, action)
 	}
 	dec := policy.Evaluate(g.rules, action)
 	if dec.Effect != policy.EffectAllow {
@@ -161,7 +181,7 @@ func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 	}
 	if len(g.serverPub) > 0 {
 		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
 			return false, "guardrail: decision signature invalid"
 		}
 	}
@@ -174,6 +194,9 @@ func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 	action.HostTags = g.hostTags
 	action.HostRoles = g.hostRoles
 	action.ActorRole = d.ActorRole
+	if d.ApprovalId != "" {
+		return g.approvalCheck(d, action)
+	}
 	dec := policy.Evaluate(g.rules, action)
 	if dec.Effect != policy.EffectAllow {
 		return false, fmt.Sprintf("guardrail: local recheck says %s (%s)",
@@ -202,7 +225,7 @@ func (g *Guard) RecheckPkg(op *pb.PkgOp) (bool, string) {
 	}
 	if len(g.serverPub) > 0 {
 		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
 			return false, "guardrail: decision signature invalid"
 		}
 	}
@@ -215,6 +238,9 @@ func (g *Guard) RecheckPkg(op *pb.PkgOp) (bool, string) {
 	action.HostTags = g.hostTags
 	action.HostRoles = g.hostRoles
 	action.ActorRole = d.ActorRole
+	if d.ApprovalId != "" {
+		return g.approvalCheck(d, action)
+	}
 	dec := policy.Evaluate(g.rules, action)
 	if dec.Effect != policy.EffectAllow {
 		return false, fmt.Sprintf("guardrail: local recheck says %s (%s)",
@@ -243,7 +269,7 @@ func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
 	}
 	if len(g.serverPub) > 0 {
 		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.Sig) {
+			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
 			return false, "guardrail: decision signature invalid"
 		}
 	}
@@ -253,6 +279,9 @@ func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
 		HostRoles:   g.hostRoles,
 		ActorRole:   d.ActorRole,
 		ActionClass: policy.ActionTaskRun,
+	}
+	if d.ApprovalId != "" {
+		return g.approvalCheck(d, action)
 	}
 	dec := policy.Evaluate(g.rules, action)
 	if dec.Effect != policy.EffectAllow {

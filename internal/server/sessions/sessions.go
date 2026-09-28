@@ -138,7 +138,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.Session, er
 			Effect:        decision.Effect,
 			MatchedRules:  decision.MatchedRules,
 			Sig: policy.SignDecision(m.ident.Priv, sess.ID, version,
-				decision.Effect, decision.MatchedRules, req.Role),
+				decision.Effect, decision.MatchedRules, req.Role, ""),
 			ActorRole: req.Role,
 		}
 	}

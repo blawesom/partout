@@ -385,7 +385,7 @@ func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Act
 	}
 	version, _ := c.st.PolicyBundleVersion()
 	sig := policy.SignDecision(c.ident.Priv, runID, version,
-		decision.Effect, decision.MatchedRules, actorRole)
+		decision.Effect, decision.MatchedRules, actorRole, "")
 	return &pb.Decision{
 		RunId:         runID,
 		BundleVersion: version,

@@ -25,7 +25,7 @@ import (
 
 // --- helpers ---------------------------------------------------------------
 
-func newBufconnTest(t *testing.T) (*store.Store, *packages.Controller, *grpc.ClientConn, func()) {
+func newBufconnTest(t *testing.T) (*store.Store, *packages.Controller, *stream.Handler, *grpc.ClientConn, func()) {
 	t.Helper()
 	st, err := store.New("sqlite::memory:")
 	if err != nil {
@@ -187,7 +187,7 @@ func newBufconnTest(t *testing.T) (*store.Store, *packages.Controller, *grpc.Cli
 		conn.Close()
 		st.Close()
 	}
-	return st, pc, conn, cleanup
+	return st, pc, h, conn, cleanup
 }
 
 var pkgActor = packages.Actor{Principal: "local", Role: "admin"}
@@ -195,7 +195,7 @@ var pkgActor = packages.Actor{Principal: "local", Role: "admin"}
 // --- tests -----------------------------------------------------------------
 
 func TestListUpdates(t *testing.T) {
-	st, pc, _, cleanup := newBufconnTest(t)
+	st, pc, _, _, cleanup := newBufconnTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -236,7 +236,7 @@ func TestListUpdates(t *testing.T) {
 }
 
 func TestApplyDryRun(t *testing.T) {
-	st, pc, _, cleanup := newBufconnTest(t)
+	st, pc, _, _, cleanup := newBufconnTest(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -271,7 +271,7 @@ func TestApplyDryRun(t *testing.T) {
 }
 
 func TestApplyReal(t *testing.T) {
-	_, pc, _, cleanup := newBufconnTest(t)
+	_, pc, _, _, cleanup := newBufconnTest(t)
 	defer cleanup()
 	ctx := context.Background()
 

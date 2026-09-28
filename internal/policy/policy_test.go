@@ -188,33 +188,33 @@ func TestBuildBundleEmpty(t *testing.T) {
 func TestSignVerify(t *testing.T) {
 	pub, priv := keypair()
 	runID := "run_test"
-	sig := SignDecision(priv, runID, 42, EffectDeny, []string{"r1", "r2"}, "")
+	sig := SignDecision(priv, runID, 42, EffectDeny, []string{"r1", "r2"}, "", "")
 	if len(sig) != 64 {
 		t.Fatalf("sig len = %d, want 64", len(sig))
 	}
-	if !VerifyDecision(pub, runID, 42, EffectDeny, []string{"r1", "r2"}, "", sig) {
+	if !VerifyDecision(pub, runID, 42, EffectDeny, []string{"r1", "r2"}, "", "", sig) {
 		t.Fatal("VerifyDecision failed for valid sig")
 	}
 }
 
 func TestSignVerifyTampered(t *testing.T) {
 	pub, priv := keypair()
-	sig := SignDecision(priv, "run_a", 10, EffectAllow, nil, "")
-	if VerifyDecision(pub, "run_b", 10, EffectAllow, nil, "", sig) {
+	sig := SignDecision(priv, "run_a", 10, EffectAllow, nil, "", "")
+	if VerifyDecision(pub, "run_b", 10, EffectAllow, nil, "", "", sig) {
 		t.Error("sig verified with different runID")
 	}
-	if VerifyDecision(pub, "run_a", 99, EffectAllow, nil, "", sig) {
+	if VerifyDecision(pub, "run_a", 99, EffectAllow, nil, "", "", sig) {
 		t.Error("sig verified with different version")
 	}
-	if VerifyDecision(pub, "run_a", 10, EffectDeny, nil, "", sig) {
+	if VerifyDecision(pub, "run_a", 10, EffectDeny, nil, "", "", sig) {
 		t.Error("sig verified with different effect")
 	}
 }
 
 func TestSignVerifyNoMatchedRules(t *testing.T) {
 	pub, priv := keypair()
-	sig := SignDecision(priv, "run_x", 1, EffectAllow, nil, "")
-	if !VerifyDecision(pub, "run_x", 1, EffectAllow, nil, "", sig) {
+	sig := SignDecision(priv, "run_x", 1, EffectAllow, nil, "", "")
+	if !VerifyDecision(pub, "run_x", 1, EffectAllow, nil, "", "", sig) {
 		t.Fatal("sig failed for nil matched rules")
 	}
 }
@@ -222,8 +222,8 @@ func TestSignVerifyNoMatchedRules(t *testing.T) {
 func TestSignVerifyEmptyRuleList(t *testing.T) {
 	_, priv := keypair()
 	// Both nil → must produce identical payloads.
-	sig1 := SignDecision(priv, "r", 1, EffectAllow, nil, "")
-	sig2 := SignDecision(priv, "r", 1, EffectAllow, []string{}, "")
+	sig1 := SignDecision(priv, "r", 1, EffectAllow, nil, "", "")
+	sig2 := SignDecision(priv, "r", 1, EffectAllow, []string{}, "", "")
 	if string(sig1) != string(sig2) {
 		t.Fatal("nil vs empty []string produce different sigs")
 	}

@@ -131,9 +131,9 @@ off and the docs become the implementation contract.
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI: files browser + sessions list/replay built; live PTY (xterm.js) terminal deferred to a later V1 phase |
 | **M3 — Automation** | ✅ Complete | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). Former gaps all closed: (a) ~~scheduled job steps without policy~~ ✅ gated under `task.run` with per-host signed `Decision` + agent guardrail re-check (fail-closed); (b) **reboot continuation** ✅ — `reboot` step persists a resume marker, reboots, and resumes after boot (PRD §5.5); (c) job dispatch E2E ✅ — live bufconn test drives `JOB_ASSIGN` → real agent scheduler → `JOB_RUN_RESULT` → `job_runs` row |
-| **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap) + **SSE stream auth-gated ✅**; remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
+| **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap) + **SSE stream auth-gated ✅** + **approvals engine ✅** (`require_approval` parks the action on an approval request; admin approve/deny via API + Web UI Approvals page + CLI; approval re-dispatch with a signature-bound `EffectAllow` decision; agent guardrail honors approved decisions, hard deny still wins; exec + pkg.apply surfaces). Remaining: approvals on the remaining surfaces (files/sessions/tasks/jobs/secrets), MCP server (R11) + write tools |
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
-| **M7 — Observe: Web UI pages** | ✅ Built (v0.5) | S0 shell + data pages for M1–M5 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, Provision, Users, Services, Certificates, Configs). Remaining: cert→config→service cross-links, config drift, task actions, live PTY; Alerts page is a labeled M6 placeholder. |
+| **M7 — Observe: Web UI pages** | ✅ Built (v0.5) | S0 shell + data pages for M1–M5 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, Provision, Users, Services, Certificates, Configs). Remaining: cert→config→service cross-links, config drift, task actions, live PTY; Alerts page is a labeled M6 placeholder. |
 
 ### M0 — Spine (complete)
 
@@ -226,10 +226,22 @@ Done (R18–R20, the read side of the observe→act→verify loop):
 - ✅ **Tests**: parser unit tests incl. real generated certs (chained / broken-chain / multi-cert), the nginx vhost parser, `ActiveState` mapping; server `host_facts` merge + same-second collision probe; API shape tests.
 - Remaining: **M6 alert engine** (makes this actionable), **MCP read tools** (ship with the R11 server; these REST endpoints are their backing surface), config **drift detection** (R22) + **cross-fact correlation** (R21) rendering.
 
+### M4 — Approvals engine (shipped)
+
+Done (PRD §5.8 — the approval path of the guardrail system):
+- ✅ **Approval requests** (`internal/server/approvals` + `approval_requests` table, schema v11): a `require_approval` policy match parks the action — exec runs go `awaiting_approval`, package applies return `202 {approval_required}` — and create a request carrying the **exact payload** (approvals are scoped to the payload, not a blanket allow), actor, matched rules, and a TTL (`PARTOUT_APPROVAL_TTL_S`, default 1 h). Other surfaces (files/sessions/tasks/jobs/secrets) still fail closed on `require_approval`.
+- ✅ **Approve/deny** (`GET/POST /api/v1/approvals[/{id}[/approve|deny]]`): list/get = viewer; approve/deny = admin only. Approve signs a **fresh `EffectAllow` decision carrying the approval id** — the id is part of the signed payload, so a decision cannot be grafted with a foreign approval reference — and re-dispatches the stored payload through the surface's registered dispatcher. Deny records the reason. Expired requests can never be retroactively honored (lazy expiry finalizes parked exec runs `failed` and re-finalizes the execution).
+- ✅ **Agent guardrail** (`internal/agent/guardrail`): a decision with a non-empty `approval_id` passes when locally signed-valid (the local bundle may still carry the `require_approval` rule — the signed decision is the authority); a **local hard deny still wins** (belt and braces). Forged approval ids / wrong-effect approvals are rejected.
+- ✅ **Safety rails**: without the approvals engine wired, `require_approval` fails closed as a deny; a cancelled/finalized run can no longer be approved; parked runs are cancellable with the execution; every transition is audit-logged (`approval.requested/approved/denied/expired` + surface audit) and SSE-broadcast (`approval.*` events).
+- ✅ **Surfaces**: exec (parked runs) + pkg.apply (`202 {approval_required}`). Other surfaces (files/sessions/tasks/jobs/secrets) still fail closed on `require_approval` until their approval paths land.
+- ✅ **Web UI** (M4, v0.6): an **Approvals** page (capability-gated on `approvals`) — state filter (pending/approved/denied/expired), exact-payload request table with matched-rule chips, Approve (confirm) / Deny (reason prompt) for admins, SSE-refreshed on `approval.*` events; admin-only buttons for non-admins. Covered by the `scripts/ui-smoke.sh` headless harness (seeds a parked request, asserts the row renders) and a `TestUIShape_ApprovalsFields` UI↔API shape test.
+- ✅ **CLI**: `partout ctl approvals list|get|approve|deny`.
+- ✅ **Tests**: store CRUD/expiry, controller approve/deny/expiry/no-dispatcher, guardrail approved/forged/hard-deny decisions, control E2E (park → no wire traffic → approve → signed re-dispatch), packages E2E (park → no op dispatched → approve → action completes), API RBAC + error paths, UI shape + headless render.
+
 ### Not started
 
 - Live PTY terminal in the web UI (xterm.js) — backend input/resize exist; the interactive terminal frontend is deferred
-- M4: approvals engine, full policy surface, MCP server (R11) + write tools
+- M4: approvals on the remaining surfaces, MCP server (R11) + write tools
 - M6: alert engine; M7 remaining: cross-links, drift, task actions; M8: installers, cloud-init, Helm, status page
 - MCP read tools (ship with the R11 MCP server; the M5 REST endpoints are their backing surface)
 
@@ -253,8 +265,7 @@ Done (R18–R20, the read side of the observe→act→verify loop):
 13. ~~**Enforce policy on scheduled job steps** (security, M3/§5.4+§5.5)~~ ✅ Done — job create/update/RunNow gated under `task.run`; per-host signed `Decision` in `JOB_ASSIGN`; agent guardrail re-check before every fire (fail-closed). **Upgrade note:** after upgrading, re-save each job (or delete + recreate) so the server re-issues signed decisions; until then, fires fail closed with state `denied`.
 14. ~~**E2E test the job dispatch path**~~ ✅ Done — `internal/server/jobs/jobs_dispatch_e2e_test.go`: `JOB_ASSIGN` over a live bufconn stream → real agent-side scheduler (real task executor + real policy guardrail) fires → `JOB_RUN_RESULT` over the wire → `job_runs` row + assignment state; selector edits re-push and unassign over the wire.
 15. ~~**Reboot continuation**~~ ✅ Done (PRD §5.5) — the `reboot` step persists a `resume-after-reboot` marker (`<data>/resume/<run_id>.json`), reboots the host, and after boot the agent verifies the reboot happened (uptime check), re-checks the signed decision (fail-closed), runs the remaining steps, and reports `trigger: resume`. Stale markers (host never rebooted) fail the run and are discarded. `PARTOUT_REBOOT_FLUSH_S` (default 5 s) is the pre-reboot report-flush grace.
-16. **M4 — Governance** (local user auth ✅ done — see below): approvals engine (`require_approval` currently fails closed with
-    "not yet available — M4"), full policy surface, MCP server (R11) + write tools.
+16. **M4 — Governance** (local user auth ✅ done — see below; **approvals engine ✅ done** — see the M4 section above): remaining = approvals on the remaining surfaces (files/sessions/tasks/jobs/secrets), MCP server (R11) + write tools.
 17. ~~**Observe layer (§6)**~~ ✅ Done (M5) — fact collectors + `host_facts` merge + read APIs + Web UI pages. Remaining: M6 alert engine, MCP read tools (with the R11 server).
 18. Postgres backend; then **M8 — Distribution & polish** (installers, cloud-init, Helm, status page).
 
@@ -316,9 +327,10 @@ See `deploy/systemd/` for the systemd units and env templates.
 ## Policy deny-list (implemented, v0.2.0)
 
 Declarative deny rules gate every dispatch. v1 is a **deny-list**: the default is *allow*
-(a rule set with no match is allowed); a matching `deny` (or `require_approval`, which acts
-as deny until the M4 approvals engine) blocks the command **server-side, before any envelope
-reaches the agent**.
+(a rule set with no match is allowed); a matching `deny` blocks the command **server-side,
+before any envelope reaches the agent**; a matching `require_approval` (M4) parks the action
+on an approval request (exec + pkg.apply surfaces — see the M4 section) and fails closed
+as a deny on the other surfaces.
 
 ```bash
 # Block any command containing 'secret' on all hosts
@@ -353,12 +365,14 @@ partout ctl policy delete pol_<id>
    first bundle; persists across agent restarts.
 4. **Bundle delivery** — the server pushes a versioned, content-hashed bundle to each agent
    **on connect and on every policy change** (create/delete broadcasts to all connected).
+   Every decision now also carries an optional `approval_id` (M4) covered by the signature.
 
-**Audit:** `policy.create`, `policy.delete`, `policy.deny` (with matched rule id(s)).
-**RBAC:** list = viewer; create/delete = admin.
+**Audit:** `policy.create`, `policy.delete`, `policy.deny`, `policy.require_approval` (with matched rule id(s) and, when parked, the approval request id), `approval.*` (request/approve/deny/expiry), `approval.dispatch`.
+**RBAC:** list = viewer; create/delete = admin; approvals approve/deny = admin (see the M4 section).
 **Deviations from the proposed design** (tracked in architecture §15): default-allow in v1
 (default-deny writes deferred to M2/M3 with the action-class taxonomy); `require_approval`
-evaluates as deny until M4; `requires_elevation` match field not wired (elevation is
+shipped for exec + pkg.apply in M4 (other surfaces fail closed); `requires_elevation`
+match field not wired (elevation is
 `none` in v1).
 
 ## Local user auth (implemented, M4)

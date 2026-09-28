@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.5 — observe layer (services, configs, TLS certs) + Web UI shipped
+**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + approvals engine (M4, exec + pkg.apply) shipped
 **Date:** 2025-09-25
 
 ---
@@ -741,6 +741,13 @@ feature paywall (R14). Consequences that follow from "everything free":
   real agent-side scheduler + guardrail → `JOB_RUN_RESULT` → `job_runs` row, plus selector
   re-push/unassign reconciliation).*
 - **M4 — Governance:** approvals, full policy, MCP write tools.
+  *In progress: the approvals engine is shipped (PRD §5.8 — `require_approval` parks the
+  action on an `approval_requests` row carrying the exact payload + TTL;
+  admin approve/deny via API; approve signs a fresh `EffectAllow` decision whose signature
+  covers the approval id and re-dispatches the stored payload; agent guardrail honors
+  approved decisions while a local hard deny still wins; expiry can never be retroactively
+  honored). Shipped surfaces: exec + pkg.apply; other surfaces fail closed as deny. Remaining:
+  approvals UI page, approvals on the remaining surfaces, MCP server (R11) + write tools.*
 - **M5 — Observe: fact collectors (`R18`–`R20`).** The read side of the loop.
   Agent-side collectors: `factscollect/service.go` (systemd unit state, deps, labels),
   `factscollect/config.go` (haproxy/nginx validity + topology), `factscollect/cert.go`

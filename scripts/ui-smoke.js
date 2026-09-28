@@ -100,6 +100,13 @@ async function main() {
   check("policies: name", rowsWithText(d, "deny-rm") > 0, "policy name missing");
   check("policies: match chip", rowsWithText(d, "command_regex") > 0, "match not rendered");
 
+  await visit("#/approvals");
+  check("approvals: page renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Approvals"));
+  check("approvals: pending request row", rowsWithText(d, "apr_") > 0, "no approval row");
+  check("approvals: agent on the row", rowsWithText(d, "ag_") > 0, "agent missing");
+  check("approvals: approve button (admin)", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Approve")), "no Approve button");
+  check("approvals: pending badge", !!d.querySelector(".badge.warn") && d.querySelector(".badge.warn").textContent.includes("pending"), "no pending badge");
+
   await visit("#/users");
   check("users: admin + alice", rowsWithText(d, "admin") > 0 && rowsWithText(d, "alice") > 0, "users missing");
 

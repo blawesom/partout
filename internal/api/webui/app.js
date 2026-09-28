@@ -498,6 +498,47 @@
           </div>
         </section>
 
+        <!-- ============ APPROVALS ============ -->
+        <section v-else-if="page==='approvals'">
+          <h1 class="page">Approvals</h1>
+          <p class="page-sub">Actions parked by <span class="mono">require_approval</span> policy rules — scoped to the exact payload (M4, PRD §5.8). Deciding requires the admin role.</p>
+          <div class="card">
+            <div class="toolbar" style="margin-bottom:8px">
+              <label class="lbl">State</label>
+              <select v-model="apprState" @change="loadApprovals">
+                <option value="pending">pending</option>
+                <option value="approved">approved</option>
+                <option value="denied">denied</option>
+                <option value="expired">expired</option>
+                <option value="">all</option>
+              </select>
+              <button class="btn sm" @click="loadApprovals">Refresh</button>
+              <span v-if="apprMsg" style="color:var(--bad,#b00)">{{ apprMsg }}</span>
+            </div>
+            <table class="tbl">
+              <thead><tr><th>ID</th><th>Class</th><th>Agent</th><th>Actor</th><th>Matched rules</th><th>Created</th><th>Expires</th><th>State</th><th>Decision</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="a in approvals" :key="a.id">
+                  <td class="mono">{{ a.id }}</td>
+                  <td class="mono">{{ a.action_class }}</td>
+                  <td class="mono">{{ a.agent_id }}</td>
+                  <td>{{ a.actor || "—" }} <span class="muted" v-if="a.actor_role">({{ a.actor_role }})</span></td>
+                  <td><span class="chip" v-for="r in (a.matched_rules||'').split(',').filter(Boolean)" :key="r">{{ r }}</span><span v-if="!(a.matched_rules||'')" class="muted">—</span></td>
+                  <td>{{ fmtAgo(a.created_unix) }}</td>
+                  <td>{{ fmtDate(a.expires_unix) }}</td>
+                  <td><span class="badge" :class="a.state==='approved'?'ok':(a.state==='pending'?'warn':'neutral')">{{ a.state }}</span></td>
+                  <td class="muted">{{ a.decided_by ? a.decided_by + (a.decision_reason ? ' — ' + a.decision_reason : '') : '—' }}</td>
+                  <td v-if="a.state==='pending' && isAdmin" style="white-space:nowrap">
+                    <button class="btn ok sm" :disabled="apprBusy===a.id" @click="decideApproval(a.id,'approve')">Approve</button>
+                    <button class="btn danger sm" :disabled="apprBusy===a.id" @click="decideApproval(a.id,'deny')">Deny</button>
+                  </td>
+                </tr>
+                <tr v-if="!approvals.length"><td colspan="10"><div class="empty">No approval requests{{ apprState ? ' (' + apprState + ')' : '' }}.</div></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- ============ PROVISION ============ -->
         <section v-else-if="page==='provision'">
           <h1 class="page">Provision</h1>
@@ -691,6 +732,7 @@
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
         updHost: "", jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], provRuns: [], users: [],
+        approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         services: [], svcLabel: "", svcState: "",
         certs: [], certDays: "",
         configs: [], cfgKind: "",
@@ -777,6 +819,7 @@
           { key: "updates", label: "Updates", icon: "⇪", cap: "packages" },
           { key: "secrets", label: "Secrets", icon: "🔒", cap: "secrets" },
           { key: "policies", label: "Policies", icon: "§", cap: "policies" },
+          { key: "approvals", label: "Approvals", icon: "☑", cap: "approvals" },
           { key: "provision", label: "Provision", icon: "➕", cap: "provision", admin: true },
           { key: "users", label: "Users", icon: "👤", cap: "users", admin: true },
         ];
@@ -846,7 +889,7 @@
           opened = true;
         };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
-        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action"];
+        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
@@ -859,6 +902,7 @@
         else if (kind === "package.action" && this.page === "updates") this.loadUpdates();
         else if (kind === "file.action" && this.page === "files") this.listFiles();
         else if ((kind === "session.data" || kind === "session.result") && this.page === "session") this.loadSessionReplay();
+        else if ((kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") && this.page === "approvals") this.loadApprovals();
       },
       async loadPageData() {
         // Files, Updates, and Jobs need the host list (default host selection,
@@ -881,6 +925,7 @@
           case "updates": await this.loadUpdates(); break;
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
+          case "approvals": await this.loadApprovals(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
           case "obs-services": await this.loadServices(); break;
@@ -943,6 +988,25 @@
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || d || []; } catch (e) { this.provRuns = []; } },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
+      async loadApprovals() { this.apprMsg = ""; const q = this.apprState ? "?state=" + encodeURIComponent(this.apprState) : ""; try { const d = await this.api("/approvals" + q); this.approvals = d.approvals || []; } catch (e) { this.approvals = []; } },
+      async decideApproval(id, verb) {
+        // Approve is a write to a host: confirm; deny takes an optional reason.
+        if (verb === "approve") {
+          if (!confirm("Approve " + id + "? The exact stored payload will be dispatched to the agent.")) return;
+        } else {
+          const r = prompt("Deny reason for " + id + " (optional):", "");
+          if (r === null) return;
+          this._denyReason = r.trim();
+        }
+        this.apprBusy = id; this.apprMsg = "";
+        try {
+          const body = verb === "deny" && this._denyReason ? { reason: this._denyReason } : {};
+          await this.api("/approvals/" + encodeURIComponent(id) + "/" + verb, { method: "POST", body });
+          this.loadApprovals();
+        } catch (e) {
+          this.apprMsg = (verb === "approve" ? "Approve" : "Deny") + " failed: " + e.message;
+        } finally { this.apprBusy = ""; }
+      },
       async loadServices() { try { const d = await this.api("/services" + buildQ({ label: this.svcLabel, state: this.svcState })); this.services = d.items || []; } catch (e) { this.services = []; } },
       async loadCerts() { try { const d = await this.api("/certificates" + buildQ({ days_remaining_lt: this.certDays })); this.certs = d.items || []; } catch (e) { this.certs = []; } },
       async loadConfigs() { try { const d = await this.api("/configs" + buildQ({ kind: this.cfgKind })); this.configs = d.items || []; } catch (e) { this.configs = []; } },

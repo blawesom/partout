@@ -49,6 +49,7 @@ commands:
   exec EXEC_ID             show execution detail + output
   audit [--kind K] [--actor A] [--limit N]   show audit log
   policy <list|create|delete>                manage policy deny rules
+  approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
   provision <new|list|get|key|cancel>        host provisioning (admin)
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
   files stat  --agent A --path P             show file metadata
@@ -128,6 +129,8 @@ commands:
 		c.cmdAudit(rest)
 	case "policy":
 		c.cmdPolicy(rest)
+	case "approvals":
+		c.cmdApprovals(rest)
 	case "provision":
 		c.cmdProvision(rest)
 	case "ca":
@@ -496,6 +499,96 @@ func (c *ctl) policyDelete(id string) {
 		fatal(err)
 	}
 	fmt.Printf("policy %s deleted\n", res["deleted"])
+}
+
+// ---- approvals (M4, PRD §5.8) -------------------------------------------------
+
+func (c *ctl) cmdApprovals(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl approvals <list|get|approve|deny>")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		c.approvalsList(rest)
+	case "get":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl approvals get REQUEST_ID")
+			os.Exit(2)
+		}
+		c.approvalGet(rest[0])
+	case "approve":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl approvals approve REQUEST_ID")
+			os.Exit(2)
+		}
+		c.approvalDecide(rest[0], "approve", "")
+	case "deny":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl approvals deny REQUEST_ID [REASON]")
+			os.Exit(2)
+		}
+		reason := ""
+		if len(rest) > 1 {
+			reason = strings.Join(rest[1:], " ")
+		}
+		c.approvalDecide(rest[0], "deny", reason)
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown approvals command %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) approvalsList(args []string) {
+	fs := flag.NewFlagSet("approvals list", flag.ExitOnError)
+	state := fs.String("state", "", "filter by state (pending|approved|denied|expired)")
+	fs.Parse(args)
+	path := "/api/v1/approvals"
+	if *state != "" {
+		path += "?state=" + url.QueryEscape(*state)
+	}
+	var page struct {
+		Approvals []map[string]any `json:"approvals"`
+	}
+	if err := c.do("GET", path, nil, &page); err != nil {
+		fatal(err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tCLASS\tAGENT\tSTATE\tACTOR\tEXPIRES\t")
+	for _, a := range page.Approvals {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t\n",
+			strval(a["id"]), strval(a["action_class"]), strval(a["agent_id"]),
+			strval(a["state"]), strval(a["actor"]),
+			unixTime(int64(num(a["expires_unix"]))))
+	}
+	w.Flush()
+	fmt.Printf("\n%d request(s)\n", len(page.Approvals))
+}
+
+func (c *ctl) approvalGet(id string) {
+	var one map[string]any
+	if err := c.do("GET", "/api/v1/approvals/"+id, nil, &one); err != nil {
+		fatal(err)
+	}
+	b, _ := json.MarshalIndent(one, "", "  ")
+	fmt.Println(string(b))
+}
+
+func (c *ctl) approvalDecide(id, verb, reason string) {
+	body := map[string]string{}
+	if reason != "" {
+		body["reason"] = reason
+	}
+	var res map[string]any
+	if err := c.do("POST", "/api/v1/approvals/"+id+"/"+verb, body, &res); err != nil {
+		fatal(err)
+	}
+	if verb == "approve" {
+		fmt.Printf("approval %s approved\n", id)
+	} else {
+		fmt.Printf("approval %s denied\n", id)
+	}
 }
 
 // ---- provision -----------------------------------------------------------

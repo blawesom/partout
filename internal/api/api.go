@@ -9,6 +9,7 @@ import (
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
+	serverapprovals "github.com/blawesom/partout/internal/server/approvals"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
@@ -32,6 +33,7 @@ type Handler struct {
 	pkgs        *packages.Controller
 	tasks       *tasks.Controller
 	jobs        *jobs.Controller
+	approvals   *serverapprovals.Controller
 	sess        *sessions.Manager
 	secretsMgr  *serversecrets.Manager
 	extdata     *externaldata.Refresher
@@ -109,6 +111,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// M3: scheduled jobs (PRD §5.4).
 	handler.RegisterJobs(mux)
+
+	// M4: approvals engine (PRD §5.8). Routes 503 until SetApprovals.
+	handler.RegisterApprovals(mux)
 
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
