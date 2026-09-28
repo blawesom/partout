@@ -451,6 +451,25 @@ func sseSubscriptions(src string) []string {
 	return out
 }
 
+// TestUIShape_ToastSystem asserts the global toast notification infrastructure
+// is present in the UI and that no blocking alert() boxes remain (they were
+// replaced by the toast system for consistent error/success feedback).
+func TestUIShape_ToastSystem(t *testing.T) {
+	appJS, err := os.ReadFile(filepath.Join(repoRoot(t), "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	s := string(appJS)
+	for _, want := range []string{"notify(kind, msg", ".toasts", "dismissToast"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("app.js missing toast infrastructure %q", want)
+		}
+	}
+	if n := strings.Count(s, "alert("); n != 0 {
+		t.Errorf("app.js still has %d alert() call(s); use the toast system instead", n)
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

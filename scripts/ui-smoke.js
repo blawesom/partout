@@ -50,6 +50,21 @@ async function main() {
   check("shell mounted", !!d.querySelector(".shell"), "no .shell; body=" + d.body.innerHTML.length);
   check("logged in as admin", (d.querySelector(".uname") || {}).textContent === "admin");
 
+  // Global toast system: drive notify() and assert a toast renders.
+  const inst = w.__partout;
+  check("toasts: container renders", !!d.querySelector(".toasts"), "no .toasts container");
+  if (inst && typeof inst.notify === "function") {
+    const tid = inst.notify("ok", "smoke-toast-ok");
+    await sleep(120);
+    const t = [...d.querySelectorAll(".toast")].find((x) => x.textContent.includes("smoke-toast-ok"));
+    check("toasts: notify() renders a toast", !!t && !!t.classList.contains("ok"), "no ok toast");
+    inst.dismissToast(tid);
+    await sleep(120);
+    check("toasts: dismiss removes it", ![...d.querySelectorAll(".toast")].some((x) => x.textContent.includes("smoke-toast-ok")));
+  } else {
+    check("toasts: notify() available", false, "app instance not exposed");
+  }
+
   await visit("#/fleet");
   check("fleet: host row", rowsWithText(d, "ag_") > 0);
   check("fleet: group scope rendered", !!d.querySelector(".nav-scope"));

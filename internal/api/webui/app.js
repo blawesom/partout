@@ -67,6 +67,13 @@
   class ApiError extends Error { constructor(status, message, code, data) { super(message); this.status = status; this.code = code; this.data = data; } }
 
   const TEMPLATE = `
+  <!-- ============ TOASTS ============ -->
+  <div class="toasts" aria-live="polite">
+    <div v-for="t in toasts" :key="t.id" class="toast" :class="t.kind">
+      <span class="toast-msg">{{ t.msg }}</span>
+      <button class="toast-x" @click="dismissToast(t.id)" aria-label="dismiss">×</button>
+    </div>
+  </div>
   <!-- ============ LOGIN ============ -->
   <div v-if="!loggedIn" class="login-wrap">
     <div class="login-card">
@@ -1104,6 +1111,7 @@
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
         pw: { current: "", next: "" }, pwMsg: "", pwErr: "",
+        toasts: [],
       };
     },
     computed: {
@@ -1160,18 +1168,35 @@
     },
     methods: {
       fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, pkgActionBadge, provBadge, provStepBadge, certBadge, svcBadge, eolBadge,
+      // Global toast notifications (consistent success/error feedback across
+      // every page). kind: ok|err|info. ttl ms (default 4000).
+      notify(kind, msg, ttl = 4000) {
+        const id = Date.now() + "-" + Math.random().toString(36).slice(2, 7);
+        this.toasts.push({ id, kind, msg });
+        setTimeout(() => this.dismissToast(id), ttl);
+        return id;
+      },
+      dismissToast(id) { this.toasts = this.toasts.filter(t => t.id !== id); },
       async api(path, opts = {}) {
         const headers = { ...(opts.headers || {}) };
         if (this.token) headers["Authorization"] = "Bearer " + this.token;
         if (opts.body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+        const method = opts.method || (opts.body !== undefined ? "POST" : "GET");
         const res = await fetch("/api/v1" + path, {
-          method: opts.method || (opts.body !== undefined ? "POST" : "GET"),
-          headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+          method, headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
         });
         if (res.status === 401) { this.signOut(); throw new ApiError(401, "unauthorized"); }
         if (res.status === 503) { this.refreshCaps(); throw new ApiError(503, "disabled"); }
         let data = null; try { data = await res.json(); } catch (e) { }
-        if (!res.ok) throw new ApiError(res.status, (data && data.message) || String(res.status), data && data.code, data);
+        if (!res.ok) {
+          const msg = (data && data.message) || String(res.status);
+          // Global feedback for write actions (POST/PUT/DELETE). GET loads are
+          // usually transient/polling and reset their own state, so they stay
+          // quiet unless the caller opts in with opts.toast.
+          const isWrite = method !== "GET";
+          if ((isWrite && !opts.silent) || opts.toast) this.notify("err", msg + (data && data.code ? " (" + data.code + ")" : ""));
+          throw new ApiError(res.status, msg, data && data.code, data);
+        }
         return data;
       },
       capOn(name) { return this.caps[name] === true; },
@@ -1252,6 +1277,7 @@
         try {
           await this.api("/auth/password", { method: "POST", body: { current: this.pw.current, new: this.pw.next } });
           this.pwMsg = "Password updated."; this.pw.current = ""; this.pw.next = "";
+          this.notify("ok", "password updated");
         } catch (e) { this.pwErr = e.message; }
       },
       startSSE() {
@@ -1379,7 +1405,7 @@
       },
       async closeSession() {
         if (!confirm("Close this session? The PTY receives SIGHUP.")) return;
-        try { await this.api("/sessions/" + encodeURIComponent(this.p1) + "/close", { method: "POST" }); } catch (e) { alert(e.message); }
+        try { await this.api("/sessions/" + encodeURIComponent(this.p1) + "/close", { method: "POST" }); this.notify("ok", "session closed"); } catch (e) { /* toast shown by api() */ }
         this.loadSessionReplay();
       },
       mountTerminal(s) {
@@ -1468,6 +1494,7 @@
         try {
           const d = await this.api("/provision-runs", { method: "POST", body: { host: this.provHost, mode: this.provMode } });
           this.provMsg = "Provisioning run " + (d.id || "") + " started on " + this.provHost + " (state " + (d.state || "") + ").";
+          this.notify("ok", "provision run started");
           this.provHost = "";
           this.loadProvRuns();
         } catch (e) { this.provMsg = "Provision failed: " + e.message; } finally { this.provBusy = false; }
@@ -1480,13 +1507,13 @@
         } else {
           if (!confirm("Deny the host key for " + (run ? run.host : id) + "? The run will be cancelled.")) return;
         }
-        try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/key", { method: "POST", body: { action } }); this.loadProvRuns(); }
-        catch (e) { alert(e.message); }
+        try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/key", { method: "POST", body: { action } }); this.notify("ok", "host key " + action + "d"); this.loadProvRuns(); }
+        catch (e) { /* toast shown by api() */ }
       },
       async cancelProvRun(id) {
         if (!confirm("Cancel provision run " + id + "?")) return;
-        try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.loadProvRuns(); }
-        catch (e) { alert(e.message); }
+        try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.notify("ok", "provision run cancelled"); this.loadProvRuns(); }
+        catch (e) { /* toast shown by api() */ }
       },
       // --- packages: apply + actions (M3) ---
       async loadPkgActions() { try { const d = await this.api("/packages/actions"); this.pkgActions = d.items || d || []; } catch (e) { this.pkgActions = []; } },
@@ -1534,12 +1561,13 @@
           else await this.api("/jobs", { body });
           this.jobForm = null;
           this.loadJobs();
+          this.notify("ok", "job \"" + f.name + "\" saved");
         } catch (e) { this.jobErr = e.code === "policy_denied" ? "Policy denied: " + e.message : e.message; } finally { this.jobBusy = false; }
       },
       async deleteJob(j) {
         if (!confirm("Delete job " + j.name + " (" + j.id + ")? Its scheduled fires stop immediately.")) return;
-        try { await this.api("/jobs/" + encodeURIComponent(j.id), { method: "DELETE" }); this.loadJobs(); }
-        catch (e) { alert(e.message); }
+        try { await this.api("/jobs/" + encodeURIComponent(j.id), { method: "DELETE" }); this.notify("ok", "job \"" + j.name + "\" deleted"); this.loadJobs(); }
+        catch (e) { /* toast shown by api() */ }
       },
       async showJobRuns(id) {
         if (this.jobRunsDetail && this.jobRunsDetail.job_id === id) { this.jobRunsDetail = null; return; }
@@ -1594,6 +1622,7 @@
           else await this.api("/alerts/rules", { body });
           this.ruleForm = null;
           this.loadRules();
+          this.notify("ok", "rule \"" + f.name + "\" saved");
         } catch (e) { this.ruleErr = e.message; } finally { this.ruleBusy = ""; }
       },
       async toggleRule(r) {
@@ -1605,12 +1634,12 @@
       },
       async deleteRule(id) {
         if (!confirm("Delete alert rule " + id + "? Firing alerts from it are left as-is.")) return;
-        try { await this.api("/alerts/rules/" + encodeURIComponent(id), { method: "DELETE" }); this.loadRules(); }
-        catch (e) { alert(e.message); }
+        try { await this.api("/alerts/rules/" + encodeURIComponent(id), { method: "DELETE" }); this.notify("ok", "rule deleted"); this.loadRules(); }
+        catch (e) { /* toast shown by api() */ }
       },
       // --- task actions (M7): run task / playbook + run inspection ---
       async runTask(t) {
-        if (!this.hosts.length) { alert("No hosts available to run this task on."); return; }
+        if (!this.hosts.length) { this.notify("info", "No hosts available to run this task on."); return; }
         const agent = this.hosts.length === 1 ? this.hosts[0].id
           : prompt("Run task " + t.name + " on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
         if (!agent) return;
@@ -1727,13 +1756,13 @@
         const body = { selector: this.exSel, cmd: this.exCmd };
         if (args.length) body.args = args;
         if (this.exTimeout) body.timeout_s = this.exTimeout;
-        try { const d = await this.api("/executions", { body }); const id = d.execution_id || d.id; this.exCmd = ""; this.preview = null; if (id) this.go("exec/" + id); }
-        catch (e) { alert("dispatch failed: " + e.message); }
+        try { const d = await this.api("/executions", { body }); const id = d.execution_id || d.id; this.exCmd = ""; this.preview = null; if (id) { this.notify("ok", "command dispatched"); this.go("exec/" + id); } }
+        catch (e) { /* toast shown by api() */ }
       },
-      async cancelExec(id) { try { await this.api("/executions/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.loadExecDetail(); } catch (e) { alert(e.message); } },
+      async cancelExec(id) { try { await this.api("/executions/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.notify("ok", "execution cancelled"); this.loadExecDetail(); } catch (e) { /* toast shown by api() */ } },
       async runJob(job) {
         // POST /jobs/{id}/run requires an explicit agent_id.
-        if (!this.hosts.length) { alert("No hosts available to run this job on."); return; }
+        if (!this.hosts.length) { this.notify("info", "No hosts available to run this job on."); return; }
         const agent = this.hosts.length === 1 ? this.hosts[0].id : prompt("Run on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
         if (!agent) return;
         this.jobRunBusy = job.id; this.jobErr = "";
@@ -1748,16 +1777,17 @@
       async createGroup() {
         const name = prompt("Group name:"); if (!name) return;
         const selector = prompt("Selector (all | host:ag_x | group:db):", "all"); if (!selector) return;
-        try { await this.api("/groups", { body: { name, selector } }); this.loadGroups(); } catch (e) { alert(e.message); }
+        try { await this.api("/groups", { body: { name, selector } }); this.notify("ok", "group \"" + name + "\" created"); this.loadGroups(); } catch (e) { /* toast shown by api() */ }
       },
-      async deleteSecret(n) { if (confirm("Delete secret '" + n + "'?")) { try { await this.api("/secrets/" + encodeURIComponent(n), { method: "DELETE" }); this.loadSecrets(); } catch (e) { alert(e.message); } } },
-      async deletePolicy(id) { if (confirm("Delete policy " + id + "?")) { try { await this.api("/policies/" + encodeURIComponent(id), { method: "DELETE" }); this.loadPolicies(); } catch (e) { alert(e.message); } } },
-      async deleteUser(n) { if (confirm("Delete user '" + n + "'?")) { try { await this.api("/users/" + encodeURIComponent(n), { method: "DELETE" }); this.loadUsers(); } catch (e) { alert(e.message); } } },
+      async deleteSecret(n) { if (confirm("Delete secret '" + n + "'?")) { try { await this.api("/secrets/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "secret deleted"); this.loadSecrets(); } catch (e) { /* toast shown by api() */ } } },
+      async deletePolicy(id) { if (confirm("Delete policy " + id + "?")) { try { await this.api("/policies/" + encodeURIComponent(id), { method: "DELETE" }); this.notify("ok", "policy deleted"); this.loadPolicies(); } catch (e) { /* toast shown by api() */ } } },
+      async deleteUser(n) { if (confirm("Delete user '" + n + "'?")) { try { await this.api("/users/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "user deleted"); this.loadUsers(); } catch (e) { /* toast shown by api() */ } } },
     },
     created() {
       window.addEventListener("hashchange", () => { this.route = (location.hash || "#/fleet").replace(/^#\/?/, ""); });
     },
     mounted() {
+      if (typeof window !== "undefined") window.__partout = this; // test hook: component instance
       if (this.token) {
         Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups()]).then(() => {
           if (!this.me) { this.signOut(); return; }
@@ -1784,5 +1814,7 @@
   });
 
   app.config.errorHandler = (err) => { console.error("partout ui:", err); };
+  // Test hook: expose the app so the headless smoke harness can drive it.
+  if (typeof window !== "undefined") window.__partout = app;
   app.mount("#app");
 })();
