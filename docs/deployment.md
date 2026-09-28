@@ -1,7 +1,7 @@
 # Partout — Deployment
 
-**Status:** Draft v0.6 — reflects the current implementation (M0–M5 complete, Web UI
-shipped, M4 approvals engine + MCP server shipped, M6/M7-remainder in progress). Sections marked *proposed* describe planned work
+**Status:** Draft v0.6 — reflects the current implementation (M0–M6 complete, Web UI
+shipped, M4 approvals engine + MCP server + OAuth2 shipped, M7-remainder in progress). Sections marked *proposed* describe planned work
 that is not yet wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
@@ -64,7 +64,7 @@ valid as a bearer on REST + MCP. No new server env vars; the stdio mode takes
 `--server` + `--token` (+ `--ca-file` for TLS). Browser-login grant + refresh
 tokens are post-v1 (A20).
 
-**What v0.6 also adds (M6: alert engine, PRD R23/R25):** server-side threshold
+**What v0.6.5 adds (M6: alert engine, PRD R23/R25):** server-side threshold
 rules over the observe facts — `service_failed` (delay window
 `service_failed_minutes`), `cert_expiring` (`cert_days_remaining`),
 `config_invalid` (selector + severity per rule; CRUD on
@@ -301,7 +301,7 @@ self-managed machine, dev environment, CI e2e rig. Data under `PARTOUT_DB_PATH`
 `partout --mode=mcp --server host:port --token T [--ca-file ca.crt]` — runs the
 **MCP server over stdio** against a remote server, for MCP clients (Claude Code /
 Cursor / CI) that launch the process. It is a JSON-RPC 2.0 (2025-06-18) tool
-surface (25 tools: fleet/observe reads + governed writes); the `--token` is the
+surface (26 tools: fleet/observe reads + governed writes); the `--token` is the
 **caller's** credential — a static RBAC token, a local-user session token from
 `partout ctl auth login`, or an OAuth2 (PKCE) access token (§3.10) — and is
 forwarded with every tool call, so RBAC, policy

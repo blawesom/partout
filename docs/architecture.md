@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.5 — observe layer: services, configs, TLS certs + embedded Web UI (implementation-level design)
+**Status:** Draft v0.6 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine (implementation-level design)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and
@@ -1192,10 +1192,11 @@ prerequisite for a UI slice and none exist today.
 | GET | `/api/v1/audit?agent_id=` | viewer | Per-host audit view; client-side filtering is adequate until log volume grows |
 | GET | `/api/v1/alerts` | viewer | Active + recently resolved alerts, filterable by kind/severity | R25 |
 | GET | `/api/v1/alerts/:id` | viewer | Single alert detail | R25 |
-| GET | `/api/v1/alerts/rules` | admin | Alert rule list | R25 |
-| POST | `/api/v1/alerts/rules` | admin | Create alert rule | R25 |
-| PUT | `/api/v1/alerts/rules/:id` | admin | Update alert rule | R25 |
-| DELETE | `/api/v1/alerts/rules/:id` | admin | Delete alert rule | R25 |
+| GET | `/api/v1/alerts/rules` | viewer | Alert rule list | R25 |
+| GET | `/api/v1/alerts/rules/:id` | viewer | Single alert rule | R25 |
+| POST | `/api/v1/alerts/rules` | operator | Create alert rule | R25 |
+| PUT | `/api/v1/alerts/rules/:id` | operator | Update alert rule | R25 |
+| DELETE | `/api/v1/alerts/rules/:id` | operator | Delete alert rule | R25 |
 
 Also required for S0: **static asset serving** — there is currently no `embed.FS`, no
 `http.FileServer`, and no `web/` directory. Planned shape: Vite → `web/dist` → `go:embed` +
@@ -1276,9 +1277,10 @@ are dropped and re-subscribe (SSE retry) — never block the broker.
   line-delimited) is a plain REST client against the server. So RBAC, the
   policy gate, and audit are the control plane's — the MCP layer never
   bypasses or duplicates them.
-- **Read tools** (17): `list_hosts`, `get_host`, `get_host_facts`, `list_groups`,
+- **Read tools** (18): `list_hosts`, `get_host`, `get_host_facts`, `list_groups`,
   `list_executions`, `get_execution`, `get_execution_output`, `get_audit`,
-  `list_policies`, `list_jobs`, `list_tasks`, `list_approvals`, `list_updates`,
+  `list_policies`, `list_jobs`, `list_tasks`, `list_approvals`, `list_alerts`
+  (M6; state/severity filters), `list_updates`,
   `list_services`, `list_certificates`, `list_configs`, `download_file`
   (base64 content).
 - **Write tools** (8): `run_command`, `cancel_execution`, `run_job`,

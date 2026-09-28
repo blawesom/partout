@@ -1,7 +1,7 @@
 # Partout — Web UI Definition & Guidelines
 
-**Status:** v0.5 — UI implemented (S0 shell + data pages for M1–M5). This document is the
-definition; `internal/api/webui/` is the build.
+**Status:** v0.6 — UI implemented (S0 shell + data pages for M1–M6, incl. live Alerts list). This document is the
+definition; `internal/api/webui/` is the build. (The slice table below is the original plan; ✅ marks what has since shipped.)
 **Companion docs:** `docs/ui-design.png` (north-star mockup), `PRD.md` (§3 principles, §11 Frontend,
 §15.1 decisions), `docs/architecture.md` (§10.1 API, §10.2 SSE, §11 Frontend),
 `docs/deployment.md` (§4 config)
@@ -468,9 +468,9 @@ deferred with `xterm.js`.
 | **S1 — The loop (M1)** | hosts, selector resolve (**B2**), exec, audit, policy | Fleet Management list + **Fleet Health (3 cards)**, Execute w/ selector preview + live per-host output, Audit Log table, GROUPS | `Degrading`/`Pending Approval` cards removed; host tabs other than Overview/Audit → not available | log in → see hosts → run `whoami` via selector → watch live → confirm in audit |
 | **S2 — Host workbench (M2)** | sessions, files, replay | `PTY` action, host tabs Terminal/Files, Sessions, Files | `Active Alerts` greyed | Open a PTY from a host page; upload/download/edit a file; replay a session |
 | **S3 — Patch (M3)** | packages, external data, EOL | host `Updates` tab, `DiffView` rendering **`dry_summary`** in the terminal frame, captioned *"simulated · summary only"*, CVE badge, Updates page | real diff text → *"not yet available"* | Dry-run renders honestly; apply is confirmed and audited |
-| **S4 — Governance (M4)** | approvals engine (**not built**) | `Held · <rule>` chips, hold banner as the **real `require_approval` denial**, Policies page, initials avatar stack | `Approve & Apply` → *"approvals engine (M4)"* until the engine lands | A `require_approval` rule produces a truthful hold; approval flow completes once the engine exists |
-| **S5 — Observe · Facts (M5)** | fact collectors (services, configs, certs), API endpoints B6–B8 | `Services` table, `Certificates` table, `Configs` table — **API/CLI only, no UI page yet** | `Active Alerts` → *"not yet available (M6)"* | `GET /services`, `/certificates`, `/configs` return live data from a connected agent |
-| **S6 — Observe · Alerts (M6)** | alert rules + engine (B9), SSE `alert.firing`/`alert.resolved` | `Active Alerts` section on `/fleet` page (alert count + list) | `Services`/`Cert`/`Configs` pages still API-only until M7 | A `service_failed` alert fires and appears in `/fleet`; resolving the unit clears the alert |
+| **S4 — Governance (M4)** | approvals engine (**✅ shipped v0.6**) | `Held · <rule>` chips, hold banner as the **real `require_approval` denial**, Policies page, initials avatar stack, **Approvals page** (list/decide) | `Approve & Apply` (mockup flow replaced by the Approvals page) | A `require_approval` rule parks the action; admin approve/deny on the Approvals page re-dispatches with a signed decision |
+| **S5 — Observe · Facts (M5)** | fact collectors (services, configs, certs), API endpoints B6–B8 | `Services` table, `Certificates` table, `Configs` table — **✅ pages shipped v0.5** | `Active Alerts` (live since **v0.6.5** — see S6) | `GET /services`, `/certificates`, `/certificates`, `/configs` return live data from a connected agent |
+| **S6 — Observe · Alerts (M6)** | alert rules + engine (B9) ✅ shipped v0.6.5, SSE `alert.firing`/`alert.resolved` ✅ | **Alerts page** (firing-now count + firing/recently-resolved table, SSE-refreshed) ✅ | rule-management UI (stays S7/M7); `Active Alerts` on `/fleet` | A `service_failed` alert fires and appears on the Alerts page; resolving the unit resolves the alert |
 | **S7 — Observe · Pages (M7)** | all B6–B9 endpoints, `observe` capability boolean | `Services` page (table + detail + task actions), `Certificates` page (expiry timeline + chain), `Configs` page (validity + drift + topology), cross-links (cert → config → service) | — | All three pages render from real data; cross-links navigable; alert count on `/fleet` |
 
 Sequencing rule: the visual vocabulary (`StatCard`, `AlertRow`, `TerminalFrame`,

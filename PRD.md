@@ -791,8 +791,8 @@ feature paywall (R14). Consequences that follow from "everything free":
   cross-links (cert → config → service) navigable.
   *v0.5: the three pages (Services, Certificates, Configs) render real M5 data in the UI with
   label/state/expiry filters. Remaining M7 scope — task actions, cert→config→service cross-links,
-  drift comparison, and the Active Alerts section on `/fleet` — is still open; the Alerts page is a
-  labeled M6 placeholder until the alert engine lands.*
+  drift comparison, and the Active Alerts section on `/fleet` — is still open; the Alerts page
+  is live since v0.6.5 (firing/recently-resolved list; rule management stays M7).*
 
 - **M8 — Distribution & polish:** installers (systemd unit, `docker run`, compose),
   cloud-init, Helm chart, status page integration. Independent of the observe layer;
