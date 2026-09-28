@@ -457,13 +457,16 @@ scale; revisit if fleet size grows.
 **Implementation status (v0.7):** S0 (shell, login, capabilities, SSE) is built. Data pages are
 live for the M1–M7 backend: Fleet, Execute (with B2 selector preview + live per-host output),
 Audit, Sessions (with **live xterm.js PTY** — open/attach, input over REST, output over SSE,
-close→replay), Files, Jobs, Tasks (with **task/playbook run actions** + run inspection),
-Updates, Secrets, Policies, Approvals, MCP, Provision, Users, and the four Observe pages
-(Services, Certificates, Configs, Alerts) — the **Alerts page now includes the full rule-
-management UI** (create/edit/enable/disable/delete all rule kinds), **cert→config→service
-cross-links** are navigable, and **config drift (R22)** is surfaced as the `config_drift`
-alert rule. All slices S0–S7 are built; the only remaining mockup element is `Active Alerts`
-as a standalone `/fleet` card (the Alerts page already shows firing-now count).
+close→replay), Files, Jobs (**create/edit/delete + run history**), Tasks (with **task/playbook
+run actions** + run inspection), Updates (**package apply / dry-run + action history**), Secrets,
+Policies, Approvals, MCP, Provision (**start a run, confirm/deny the host key, cancel, live
+step detail over SSE**), Users, and the four Observe pages (Services, Certificates, Configs,
+Alerts) — the **Alerts page now includes the full rule-management UI** (create/edit/enable/
+disable/delete all rule kinds), **cert→config→service cross-links** are navigable, and **config
+drift (R22)** is surfaced as the `config_drift` alert rule. All slices S0–S7 are built; the only
+remaining mockup element is `Active Alerts` as a standalone `/fleet` card (the Alerts page already
+shows firing-now count). Write actions (jobs, packages, provision, alert rules) are exercised
+end-to-end against the real server by `scripts/writes-e2e.py`.
 
 | Slice | Capability required (all ✅ unless marked) | Mockup elements **enabled** | Mockup elements **greyed + labeled** | Exit criteria |
 |---|---|---|---|---|
@@ -572,6 +575,14 @@ go test ./internal/api/ -run TestUIShape -v
 #    real SPA in a headless DOM and asserts real data on every page.
 #    Needs node/npm (installs jsdom itself) and a free port.
 bash scripts/ui-smoke.sh
+
+# 3. Browser write-path E2E: real Chromium drives the SPA through the write
+#    surfaces (create a job, package DRY-RUN apply, start+cancel a provision run).
+#    Needs `playwright` + a chromium install. Never performs a real package apply.
+python3 scripts/writes-e2e.py
+
+# 4. Live PTY round-trip E2E (open a terminal, type, verify the echo, replay).
+python3 scripts/pty-e2e.py
 ```
 
 The smoke script is the guard against the failure mode this layer is prone to: the UI has no

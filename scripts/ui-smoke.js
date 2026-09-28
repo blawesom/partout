@@ -84,6 +84,8 @@ async function main() {
   await visit("#/jobs");
   check("jobs: job name", rowsWithText(d, "nightly df") > 0, "no job row");
   check("jobs: task column", rowsWithText(d, "task_task_") > 0, "task column empty");
+  check("jobs: new job button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("New job")), "no New job button");
+  check("jobs: edit/runs/delete actions", [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Edit") && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Runs") && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Delete"), "job actions missing");
 
   await visit("#/tasks");
   check("tasks: name", rowsWithText(d, "check disk") > 0, "task name missing");
@@ -94,6 +96,8 @@ async function main() {
 
   await visit("#/updates", 1800);
   check("updates renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Updates"));
+  check("updates: apply button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Apply")), "no Apply button");
+  check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
 
   await visit("#/secrets");
   check("secrets: row rendered", rowsWithText(d, "dbpass") > 0, "secret not rendered");
@@ -119,6 +123,11 @@ async function main() {
 
   await visit("#/users");
   check("users: admin + alice", rowsWithText(d, "admin") > 0 && rowsWithText(d, "alice") > 0, "users missing");
+
+  await visit("#/provision");
+  check("provision: new-run card", d.body.textContent.includes("New run"), "new-run card missing");
+  check("provision: seeded run row", rowsWithText(d, "nobody@127.0.0.1") > 0, "run row missing");
+  check("provision: fingerprint column", d.body.textContent.includes("Key fingerprint"), "fingerprint column missing");
 
   await visit("#/obs-services", 1600);
   check("observe services: real unit",

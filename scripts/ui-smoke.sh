@@ -102,6 +102,9 @@ seed POST /jobs "{\"name\":\"nightly df\",\"cron\":\"0 3 * * *\",\"task_id\":\"$
 # Alert rules (M6.1/M7 kinds) so the Alerts page renders real rule rows.
 seed POST /alerts/rules '{"name":"web restart loop","kind":"service_restarting","selector":"all","severity":"warning","thresholds":{"service_restart_rate_per_hour":10}}' >/dev/null
 seed POST /alerts/rules '{"name":"config divergence","kind":"config_drift","selector":"all","severity":"info","thresholds":{"config_drift_tolerance":0},"enabled":false}' >/dev/null
+# A provisioning run against an unreachable host: fails fast at connect,
+# leaving a real row (with key material absent) for the Provision page.
+seed POST /provision-runs '{"host":"nobody@127.0.0.1","mode":"fresh"}' >/dev/null
 echo "    host=$AG task=$TID"
 
 echo "==> installing jsdom (if needed)"

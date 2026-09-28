@@ -9,7 +9,7 @@ for AI assistants.
 | [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, control plane, storage, testing | **Draft v0.6** (M4 + M6 reflected) |
 | [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference, recipes | v0.6 (M4 + M6 reflected) |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, incident runbooks, troubleshooting, compliance, go-live | v0.6 (M4 + M6 reflected) |
-| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: mockup reconciliation, capability gating, IA/tokens/components, slice plan | v0.7 (S0 shell + M1–M7 data pages built, incl. rule-management UI, cross-links, live PTY) |
+| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: mockup reconciliation, capability gating, IA/tokens/components, slice plan | v0.7 (S0 shell + M1–M7 data pages built, incl. rule-management UI, cross-links, live PTY, and write actions for jobs/packages/provision) |
 
 ## Quick start
 
@@ -133,7 +133,7 @@ off and the docs become the implementation contract.
 | **M4 — Governance** | ✅ **Done** | **Local user auth ✅** + **SSE stream auth-gated ✅** + **approvals engine ✅** on every policy-gated surface (exec, pkg.apply, files, sessions, tasks, jobs) + **MCP server ✅** (R11: stdio + Streamable HTTP + **OAuth2 (PKCE)**, 25 read/write tools) |
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
-| **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**. |
+| **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
 
 ### M0 — Spine (complete)
 
@@ -246,6 +246,7 @@ Done (ui-guidelines S7 — the last open M7 slice; all remainders closed in v0.7
 - ✅ **Config drift (R22)**: rendered as the `config_drift` alert rule (above) — cross-host `config_sha256` vs the fleet majority, per-host divergence alert, tolerance-thresholded.
 - ✅ **Task actions**: the **Tasks & Playbooks** page gains per-task **Run…** (host prompt, policy-gated, parks on approvals with a notice) and per-playbook **Run** (fan-out with per-host outcome summary), plus a **Recent task runs** table with expandable per-step state/detail (ok/changed/failed/skipped/rebooting), SSE-refreshed on `task.run`.
 - ✅ **Live PTY terminal (xterm.js)**: the **Sessions** page gains *Open terminal* (host + command, operator-gated, record-on) and the session page renders a live xterm.js terminal when the session is `open` — input via `POST /sessions/{id}/input` (base64), output via the `session.data` SSE stream (pre-mount chunks are buffered and replayed on attach), resize via `POST /sessions/{id}/resize`, close via `POST /sessions/{id}/close`. Closed sessions fall back to the recorded replay. Vendored offline in `internal/api/webui/lib/` (no CDN). Verified end-to-end against a real embedded server in a headless browser (`scripts/pty-e2e.py`: mount → type command → output round-trips → close → replay).
+- ✅ **Write actions** (previously read-only surfaces are now drivable from the browser): the **Provision** page can **start a run** (host + mode, admin-gated), **confirm/deny the host key** at the `key_confirm` security gate (fingerprint shown), **cancel** a run, and shows live **step detail** (SSE-refreshed on `provision.*`); the **Updates** page can **apply packages** (package list, **dry-run** toggle, operator-gated, parks on approvals, shows the action history with expandable `dry_summary`); the **Jobs** page can **create/edit/delete** jobs (task + cron + selector + enabled form, `policy_denied` surfaced) and inspect **run history**. All three are exercised end-to-end against a real embedded server in a headless browser by `scripts/writes-e2e.py` (job create, package **dry-run** apply, provision start).
 - ✅ **Services page** now shows the `NRestarts` counter (feeds the `service_restarting` rule).
 
 ### M4 — Governance: approvals + MCP (shipped)
@@ -291,7 +292,7 @@ Done (PRD §5.8 — the approval path of the guardrail system):
 17. ~~**Observe layer (§6)**~~ ✅ Done (M5) — fact collectors + `host_facts` merge + read APIs + Web UI pages.
 17a. ~~**M6 — Alert engine**~~ ✅ Done (v0.6.5) — see the M6 section above (rules, evaluation, dedup, SSE, API/CLI/MCP, live Alerts page).
 17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit (30 s min window, counter-reset folding); fires ≥ `service_restart_rate_per_hour` (default 10), resolves below.
-17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js). See the M7 section above.
+17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js), and write actions (jobs CRUD, package apply/dry-run, provision start/key-confirm/cancel). See the M7 section above.
 18. Postgres backend; then **M8 — Distribution & polish** (installers, cloud-init, Helm, status page).
 
 ## TLS / transport security (implemented)

@@ -45,6 +45,12 @@
     if (["activating", "deactivating", "reloading"].includes(u.state)) return { cls: "info", label: u.state };
     return { cls: "neutral", label: u.state || "inactive" };
   }
+  function pkgActionBadge(s) { return ({ succeeded: "ok", ok: "ok", dry_run: "neutral", dry: "neutral", running: "info", failed: "bad", denied: "outline-bad", approval_required: "warn" })[s] || "neutral"; }
+  function provBadge(s) {
+    const m = { enrolled: { cls: "ok", label: "enrolled" }, completed: { cls: "ok", label: "completed" }, failed: { cls: "bad", label: "failed" }, cancelled: { cls: "neutral", label: "cancelled" }, handoff: { cls: "neutral", label: "handoff" }, key_confirm: { cls: "warn", label: "key confirm" } };
+    return m[s] || { cls: "info", label: s || "running" };
+  }
+  function provStepBadge(s) { return ({ ok: "ok", done: "ok", succeeded: "ok", running: "info", failed: "bad", skipped: "neutral", cancelled: "neutral", pending: "neutral" })[s] || "neutral"; }
   // EOL state vocabulary: supported|ending_soon|ended|unknown (server EOLState).
   function eolBadge(e) {
     const m = { ended: { cls: "bad", label: "end-of-life" }, ending_soon: { cls: "warn", label: "ending soon" }, supported: { cls: "ok", label: "supported" }, unknown: { cls: "neutral", label: "unknown" } };
@@ -403,8 +409,13 @@
         <!-- ============ JOBS ============ -->
         <section v-else-if="page==='jobs'">
           <h1 class="page">Jobs</h1>
-          <p class="page-sub">Scheduled jobs (M3).</p>
+          <p class="page-sub">Scheduled jobs (M3). Create/update are policy-gated: the task's steps are evaluated under <span class="mono">task.run</span> per host before saving (a deny → 403, nothing written).</p>
           <div class="card">
+            <div class="head">
+              <h2>Jobs</h2>
+              <div class="spacer"></div>
+              <button class="btn primary sm" :disabled="!isOperator" @click="newJobForm()">+ New job</button>
+            </div>
             <table class="tbl">
               <thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Schedule</th><th>Selector</th><th>Enabled</th><th></th></tr></thead>
               <tbody>
@@ -415,11 +426,62 @@
                   <td class="mono">{{ j.cron }}</td>
                   <td class="mono">{{ j.selector }}</td>
                   <td>{{ j.enabled ? 'yes' : 'no' }}</td>
-                  <td><button class="btn sm" :disabled="!isOperator" @click="runJob(j)">Run now</button></td>
+                  <td style="white-space:nowrap">
+                    <button class="btn sm" :disabled="!isOperator" @click="runJob(j)">Run now</button>
+                    <button class="btn sm" :disabled="!isOperator" @click="editJob(j)">Edit</button>
+                    <button class="btn sm" :disabled="!isOperator" @click="showJobRuns(j.id)">Runs</button>
+                    <button class="btn danger sm" :disabled="!isOperator" @click="deleteJob(j)">Delete</button>
+                  </td>
                 </tr>
                 <tr v-if="!jobs.length"><td colspan="7"><div class="empty">No jobs.</div></td></tr>
               </tbody>
             </table>
+
+            <div v-if="jobForm" class="card" style="background:var(--brand-subtle);margin-top:12px">
+              <h2>{{ jobForm.id ? 'Edit job' : 'New job' }}</h2>
+              <div class="grid cols-2">
+                <label class="fld"><span>Name</span><input v-model="jobForm.name" /></label>
+                <label class="fld"><span>Task</span>
+                  <select v-model="jobForm.task_id">
+                    <option value="" v-if="!tasks.length">no tasks (create one on the Tasks page)</option>
+                    <option v-for="t in tasks" :key="t.id" :value="t.id">{{ t.name }} ({{ t.id }})</option>
+                  </select>
+                </label>
+                <label class="fld"><span>Cron</span><input v-model="jobForm.cron" class="mono" placeholder="0 3 * * *" /></label>
+                <label class="fld"><span>Selector</span><input v-model="jobForm.selector" class="mono" placeholder="all | role:db | host:ag_x" /></label>
+              </div>
+              <div class="toolbar" style="margin-top:10px">
+                <label class="lbl" style="margin:0"><input type="checkbox" v-model="jobForm.enabled" /> enabled</label>
+                <div class="spacer"></div>
+                <button class="btn sm" @click="jobForm=null">Cancel</button>
+                <button class="btn primary sm" :disabled="!jobForm.name || !jobForm.cron || !jobForm.task_id || !jobForm.selector || !!jobBusy" @click="saveJob()">
+                  <span v-if="jobBusy" class="spin"></span>{{ jobForm.id ? 'Save' : 'Create' }}
+                </button>
+              </div>
+              <div v-if="jobErr" class="err-box" style="margin-top:8px">{{ jobErr }}</div>
+            </div>
+
+            <template v-if="jobRunsDetail">
+              <div class="toolbar" style="margin-top:12px">
+                <span class="muted mono small">runs for {{ jobRunsDetail.job_id }}</span>
+                <div class="spacer"></div>
+                <button class="btn sm" @click="jobRunsDetail=null">Close</button>
+              </div>
+              <table class="tbl" style="margin-top:8px">
+                <thead><tr><th>ID</th><th>Host</th><th>State</th><th>Trigger</th><th>Scheduled</th><th>Error</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in jobRunsDetail.runs" :key="r.id">
+                    <td class="mono">{{ r.id }}</td>
+                    <td class="mono">{{ r.agent_id }}</td>
+                    <td><span class="badge" :class="runBadge(r.state)">{{ r.state }}</span></td>
+                    <td class="mono">{{ r.trigger || '—' }}</td>
+                    <td class="muted">{{ r.scheduled_at ? new Date(r.scheduled_at*1000).toLocaleString() : '—' }}</td>
+                    <td class="muted small" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">{{ r.error || '' }}</td>
+                  </tr>
+                  <tr v-if="!(jobRunsDetail.runs||[]).length"><td colspan="6" class="muted">No runs yet.</td></tr>
+                </tbody>
+              </table>
+            </template>
           </div>
         </section>
 
@@ -497,13 +559,20 @@
         <!-- ============ UPDATES ============ -->
         <section v-else-if="page==='updates'">
           <h1 class="page">Updates</h1>
-          <p class="page-sub">Available package updates for the selected host (M3).</p>
+          <p class="page-sub">Package updates for the selected host (M3). Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
           <div class="toolbar">
             <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
             </select>
             <button class="btn sm" @click="loadUpdates">Refresh</button>
+            <div class="spacer"></div>
+            <input v-model="pkgSel" class="mono" placeholder="packages (comma-separated, blank = all)" style="flex:1;max-width:340px" />
+            <label class="lbl" style="margin:0;display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="pkgDryRun" /> dry run</label>
+            <button class="btn primary sm" :disabled="!isOperator || !updHost || !!pkgBusy" @click="applyUpdates">
+              <span v-if="pkgBusy" class="spin"></span> Apply
+            </button>
           </div>
+          <div v-if="pkgMsg" class="info-box" style="margin-bottom:12px">{{ pkgMsg }}</div>
           <div class="card">
             <table class="tbl">
               <thead><tr><th>Package</th><th>Installed</th><th>Available</th><th>Vulns</th></tr></thead>
@@ -521,6 +590,25 @@
                 <tr v-if="!updates.length"><td colspan="4"><div class="empty">No pending updates (or no host selected).</div></td></tr>
               </tbody>
             </table>
+          </div>
+          <div class="card" style="margin-top:12px">
+            <div class="head"><h2>Package actions</h2><div class="spacer"></div><button class="btn sm" @click="loadPkgActions">Refresh</button></div>
+            <table class="tbl">
+              <thead><tr><th>ID</th><th>Host</th><th>Kind</th><th>Status</th><th>Applied</th><th>When</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="a in pkgActions" :key="a.id" class="click" @click="showPkgAction(a.id)">
+                  <td class="mono">{{ a.id }}</td>
+                  <td class="mono">{{ a.agent_id }}</td>
+                  <td class="mono">{{ a.kind }}</td>
+                  <td><span class="badge" :class="pkgActionBadge(a.status)">{{ a.status }}</span></td>
+                  <td class="mono">{{ a.applied_count || '—' }}</td>
+                  <td class="muted">{{ fmtAgo(a.created) }}</td>
+                  <td class="muted small">{{ pkgActionDetail && pkgActionDetail.id===a.id ? 'hide ▴' : 'summary ▸' }}</td>
+                </tr>
+                <tr v-if="!pkgActions.length"><td colspan="7"><div class="empty">No package actions.</div></td></tr>
+              </tbody>
+            </table>
+            <div v-if="pkgActionDetail" class="console" style="margin-top:8px;max-height:220px;white-space:pre-wrap">{{ pkgActionDetail.dry_summary || pkgActionDetail.error || '(no summary)' }}</div>
           </div>
         </section>
 
@@ -648,18 +736,60 @@
         <!-- ============ PROVISION ============ -->
         <section v-else-if="page==='provision'">
           <h1 class="page">Provision</h1>
-          <p class="page-sub">Server-initiated host onboarding (R17, admin).</p>
+          <p class="page-sub">Server-initiated host onboarding over the operator's fleet SSH (R17, admin). A new host key pauses the run at <span class="mono">key_confirm</span> until an admin confirms the fingerprint (no silent TOFU).</p>
+          <div class="card" style="margin-bottom:12px">
+            <div class="head"><h2>New run</h2><p class="cap">Uses the operator's existing <span class="mono">~/.ssh</span>; no credentials are created or persisted.</p></div>
+            <div class="toolbar">
+              <input v-model="provHost" class="mono" placeholder="user@host" style="max-width:240px" />
+              <select v-model="provMode"><option value="fresh">fresh</option><option value="join">join</option></select>
+              <button class="btn primary sm" :disabled="!isAdmin || !provHost" @click="createProvRun()">Start provisioning</button>
+              <span v-if="!isAdmin" class="muted small">requires admin role</span>
+            </div>
+            <div v-if="provMsg" class="info-box" style="margin-top:8px">{{ provMsg }}</div>
+          </div>
           <div class="card">
+            <div class="head"><h2>Runs</h2><div class="spacer"></div><button class="btn sm" @click="loadProvRuns">Refresh</button></div>
             <table class="tbl">
-              <thead><tr><th>ID</th><th>Host</th><th>Mode</th><th>State</th></tr></thead>
+              <thead><tr><th>ID</th><th>Host</th><th>Mode</th><th>State</th><th>Key fingerprint</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="r in provRuns" :key="r.id">
-                  <td class="mono">{{ r.id }}</td><td class="mono">{{ r.host }}</td>
-                  <td class="mono">{{ r.mode }}</td><td><span class="badge neutral">{{ r.state }}</span></td>
+                <tr v-for="r in provRuns" :key="r.id" class="click" @click="showProvRun(r.id)">
+                  <td class="mono">{{ r.id }}</td>
+                  <td class="mono">{{ r.host }}</td>
+                  <td class="mono">{{ r.mode }}</td>
+                  <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span></td>
+                  <td class="mono small">{{ r.fingerprint || '—' }}</td>
+                  <td style="white-space:nowrap">
+                    <template v-if="r.state==='key_confirm' && isAdmin">
+                      <button class="btn ok sm" @click.stop="decideProvKey(r.id,'confirm')">Confirm key</button>
+                      <button class="btn danger sm" @click.stop="decideProvKey(r.id,'deny')">Deny</button>
+                    </template>
+                    <button v-else-if="!provTerminal(r.state) && isAdmin" class="btn danger sm" @click.stop="cancelProvRun(r.id)">Cancel</button>
+                    <span v-else class="muted small">{{ provDetail && provDetail.run && provDetail.run.id===r.id ? 'hide ▴' : 'steps ▸' }}</span>
+                  </td>
                 </tr>
-                <tr v-if="!provRuns.length"><td colspan="4"><div class="empty">No provision runs.</div></td></tr>
+                <tr v-if="!provRuns.length"><td colspan="6"><div class="empty">No provision runs.</div></td></tr>
               </tbody>
             </table>
+            <template v-if="provDetail">
+              <div class="toolbar" style="margin-top:8px">
+                <span class="muted mono small">run {{ provDetail.run.id }} · {{ provDetail.run.host }} · {{ provDetail.run.state }}</span>
+                <span class="err-box" style="margin:0" v-if="provDetail.run.error">{{ provDetail.run.error }}</span>
+                <span class="muted mono small" v-if="provDetail.run.agent_id">agent {{ provDetail.run.agent_id }}</span>
+                <div class="spacer"></div>
+                <button class="btn sm" @click="provDetail=null">Close</button>
+              </div>
+              <table class="tbl" style="margin-top:8px">
+                <thead><tr><th>#</th><th>Step</th><th>State</th><th>Output excerpt</th></tr></thead>
+                <tbody>
+                  <tr v-for="s in provDetail.steps" :key="s.seq">
+                    <td class="mono">{{ s.seq }}</td><td class="mono">{{ s.name }}</td>
+                    <td><span class="badge" :class="provStepBadge(s.state)">{{ s.state }}</span></td>
+                    <td class="mono small" style="max-width:440px;overflow:hidden;text-overflow:ellipsis">{{ s.stderr_excerpt || s.stdout_excerpt || '—' }}</td>
+                  </tr>
+                  <tr v-if="!(provDetail.steps||[]).length"><td colspan="4" class="muted">No steps recorded yet.</td></tr>
+                </tbody>
+              </table>
+            </template>
           </div>
         </section>
 
@@ -960,8 +1090,12 @@
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
-        updHost: "", jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
-        secrets: [], policies: [], provRuns: [], users: [],
+        updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: "", jobErr: "", jobRunsDetail: null,
+        pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
+        tasks: [], playbooks: [], updates: [],
+        secrets: [], policies: [], users: [],
+        provHost: "", provMode: "fresh", provMsg: "", provDetail: null,
+        provRuns: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
@@ -1025,7 +1159,7 @@
       auditKinds() { return [...new Set(this.audit.map(a => a.kind))]; },
     },
     methods: {
-      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, certBadge, svcBadge, eolBadge,
+      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, pkgActionBadge, provBadge, provStepBadge, certBadge, svcBadge, eolBadge,
       async api(path, opts = {}) {
         const headers = { ...(opts.headers || {}) };
         if (this.token) headers["Authorization"] = "Bearer " + this.token;
@@ -1135,7 +1269,7 @@
           opened = true;
         };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
-        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved"];
+        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved", "provision.requested", "provision.start", "provision.step", "provision.key.confirmed", "provision.key.denied", "provision.connected", "provision.completed"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
@@ -1143,9 +1277,10 @@
         if (kind === "host.state") this.loadHosts();
         else if (kind === "execution.state") { if (this.page === "execute") this.loadExecutions(); if (this.page === "exec") this.loadExecDetail(); }
         else if (kind === "audit.event" && this.page === "audit") this.loadAudit();
-        else if (kind === "job.run" && this.page === "jobs") this.loadJobs();
+        else if (kind === "job.run" && this.page === "jobs") { this.loadJobs(); if (this.jobRunsDetail) this.loadJobRuns(this.jobRunsDetail.job_id); }
         else if (kind === "task.run" && this.page === "tasks") { this.loadTasks(); this.loadPlaybooks(); this.loadTaskRuns(); }
-        else if (kind === "package.action" && this.page === "updates") this.loadUpdates();
+        else if (kind === "package.action" && this.page === "updates") { this.loadUpdates(); this.loadPkgActions(); }
+        else if (kind.startsWith("provision.") && this.page === "provision") { this.loadProvRuns(); if (this.provDetail) this.loadProvDetail(this.provDetail.run.id); }
         else if (kind === "file.action" && this.page === "files") this.listFiles();
         else if (kind === "session.data") { if (this.page === "session") this._onSessionData(p); }
         else if (kind === "session.opened") { if (this.page === "session") this.loadSessionReplay(); }
@@ -1159,6 +1294,10 @@
               this.loadSessionReplay();
             }
           }
+        }
+        else if (kind === "session.interrupted") {
+          if (this.page === "session") { this._destroyTerm(); this.loadSessionReplay(); }
+          else if (this.page === "sessions") this.loadSessions();
         }
         else if ((kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") && this.page === "approvals") this.loadApprovals();
         else if ((kind === "alert.firing" || kind === "alert.resolved") && this.page === "obs-alerts") this.loadAlerts();
@@ -1181,7 +1320,7 @@
           case "files": await this.listFiles(); break;
           case "jobs": await this.loadJobs(); break;
           case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
-          case "updates": await this.loadUpdates(); break;
+          case "updates": await this.loadUpdates(); this.loadPkgActions(); break;
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
@@ -1314,7 +1453,102 @@
       },
       async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.secrets || d.items || []; } catch (e) { this.secrets = []; } },
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },
-      async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || d || []; } catch (e) { this.provRuns = []; } },
+      async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || []; } catch (e) { this.provRuns = []; } },
+      provTerminal(state) { return ["enrolled", "completed", "failed", "cancelled", "handoff"].includes(state); },
+      async showProvRun(id) {
+        if (this.provDetail && this.provDetail.run && this.provDetail.run.id === id) { this.provDetail = null; return; }
+        await this.loadProvDetail(id);
+      },
+      async loadProvDetail(id) {
+        try { this.provDetail = await this.api("/provision-runs/" + encodeURIComponent(id)); }
+        catch (e) { this.provDetail = null; }
+      },
+      async createProvRun() {
+        this.provMsg = "";
+        try {
+          const d = await this.api("/provision-runs", { method: "POST", body: { host: this.provHost, mode: this.provMode } });
+          this.provMsg = "Provisioning run " + (d.id || "") + " started on " + this.provHost + " (state " + (d.state || "") + ").";
+          this.provHost = "";
+          this.loadProvRuns();
+        } catch (e) { this.provMsg = "Provision failed: " + e.message; }
+      },
+      async decideProvKey(id, action) {
+        const run = this.provRuns.find(r => r.id === id);
+        const fp = (run && run.fingerprint) || "";
+        if (action === "confirm") {
+          if (!confirm("Confirm host key for " + (run ? run.host : id) + "?\n\nFingerprint:\n" + fp + "\n\nThe run will resume and install the agent.")) return;
+        } else {
+          if (!confirm("Deny the host key for " + (run ? run.host : id) + "? The run will be cancelled.")) return;
+        }
+        try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/key", { method: "POST", body: { action } }); this.loadProvRuns(); }
+        catch (e) { alert(e.message); }
+      },
+      async cancelProvRun(id) {
+        if (!confirm("Cancel provision run " + id + "?")) return;
+        try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.loadProvRuns(); }
+        catch (e) { alert(e.message); }
+      },
+      // --- packages: apply + actions (M3) ---
+      async loadPkgActions() { try { const d = await this.api("/packages/actions"); this.pkgActions = d.items || d || []; } catch (e) { this.pkgActions = []; } },
+      async showPkgAction(id) {
+        if (this.pkgActionDetail && this.pkgActionDetail.id === id) { this.pkgActionDetail = null; return; }
+        try { this.pkgActionDetail = await this.api("/packages/actions/" + encodeURIComponent(id)); }
+        catch (e) { this.pkgActionDetail = null; }
+      },
+      async applyUpdates() {
+        if (!this.updHost) return;
+        const pkgs = this.pkgSel.split(/,\s*/).map(s => s.trim()).filter(Boolean);
+        const scope = pkgs.length ? pkgs.join(", ") : "ALL pending updates";
+        const verb = this.pkgDryRun ? "Dry-run" : "Apply";
+        if (!confirm(verb + " " + scope + " on " + this.updHost + "?" + (this.pkgDryRun ? "\n(Dry run only — no packages are installed.)" : "\nA dry-run is always executed first; the action is policy-gated (pkg.apply)."))) return;
+        this.pkgBusy = true; this.pkgMsg = "";
+        try {
+          const d = await this.api("/packages/apply", { method: "POST", body: { agent_id: this.updHost, packages: pkgs, dry_run: this.pkgDryRun } });
+          if (d.state === "approval_required") {
+            this.pkgMsg = "Apply parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page).";
+          } else {
+            this.pkgMsg = (this.pkgDryRun ? "Dry run " : "Apply ") + "dispatched (action " + (d.id || "") + ", status " + (d.status || "") + ").";
+          }
+          this.loadPkgActions();
+        } catch (e) { this.pkgMsg = "Apply failed: " + e.message; } finally { this.pkgBusy = false; }
+      },
+      // --- jobs: CRUD (M3) ---
+      async newJobForm() {
+        this.jobErr = "";
+        this.jobForm = { id: "", name: "", task_id: "", cron: "", selector: "all", enabled: true };
+        if (!this.tasks.length) await this.loadTasks();
+        if (this.tasks.length === 1) this.jobForm.task_id = this.tasks[0].id;
+      },
+      editJob(j) {
+        this.jobErr = "";
+        this.jobForm = { id: j.id, name: j.name, task_id: j.task_id, cron: j.cron, selector: j.selector, enabled: j.enabled };
+        if (!this.tasks.length) this.loadTasks();
+      },
+      async saveJob() {
+        const f = this.jobForm;
+        if (!f || !f.name || !f.cron || !f.task_id || !f.selector) return;
+        this.jobBusy = true; this.jobErr = "";
+        const body = { name: f.name, task_id: f.task_id, task_version: 0, cron: f.cron, selector: f.selector, enabled: f.enabled };
+        try {
+          if (f.id) await this.api("/jobs/" + encodeURIComponent(f.id), { method: "PUT", body });
+          else await this.api("/jobs", { body });
+          this.jobForm = null;
+          this.loadJobs();
+        } catch (e) { this.jobErr = e.code === "policy_denied" ? "Policy denied: " + e.message : e.message; } finally { this.jobBusy = ""; }
+      },
+      async deleteJob(j) {
+        if (!confirm("Delete job " + j.name + " (" + j.id + ")? Its scheduled fires stop immediately.")) return;
+        try { await this.api("/jobs/" + encodeURIComponent(j.id), { method: "DELETE" }); this.loadJobs(); }
+        catch (e) { alert(e.message); }
+      },
+      async showJobRuns(id) {
+        if (this.jobRunsDetail && this.jobRunsDetail.job_id === id) { this.jobRunsDetail = null; return; }
+        await this.loadJobRuns(id);
+      },
+      async loadJobRuns(id) {
+        try { const d = await this.api("/jobs/" + encodeURIComponent(id) + "/runs"); this.jobRunsDetail = { job_id: id, runs: d.items || d || [] }; }
+        catch (e) { this.jobRunsDetail = null; }
+      },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
       async loadAlerts() { try { const d = await this.api("/alerts"); this.alerts = d.alerts || []; } catch (e) { this.alerts = []; } },
       async loadRules() { try { const d = await this.api("/alerts/rules"); this.rules = d.rules || []; } catch (e) { this.rules = []; } },
