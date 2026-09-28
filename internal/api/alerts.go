@@ -34,9 +34,11 @@ func (h *Handler) RegisterAlerts(mux *http.ServeMux) {
 }
 
 var validRuleKinds = map[string]bool{
-	observe.KindServiceFailed: true,
-	observe.KindCertExpiring:  true,
-	observe.KindConfigInvalid: true,
+	observe.KindServiceFailed:     true,
+	observe.KindServiceRestarting: true,
+	observe.KindCertExpiring:      true,
+	observe.KindConfigInvalid:     true,
+	observe.KindConfigDrift:       true,
 }
 
 var validSeverities = map[string]bool{"info": true, "warning": true, "critical": true}
@@ -134,7 +136,7 @@ func (b *ruleBody) validate() error {
 		return errors.New("name is required")
 	}
 	if !validRuleKinds[b.Kind] {
-		return errors.New("kind must be one of: service_failed, cert_expiring, config_invalid")
+		return errors.New("kind must be one of: service_failed, service_restarting, cert_expiring, config_invalid, config_drift")
 	}
 	if b.Selector == "" {
 		b.Selector = "all"

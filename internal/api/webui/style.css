@@ -300,3 +300,7 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
+
+/* Live PTY terminal (xterm.js host). */
+.term-host { height: 480px; background: #0f172a; border-radius: var(--radius-ctrl); padding: 6px; overflow: hidden; }
+.term-host .xterm, .term-host .xterm-viewport, .term-host .xterm-screen { font-family: var(--mono); }

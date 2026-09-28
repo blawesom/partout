@@ -99,6 +99,9 @@ seed POST /users   '{"username":"alice","password":"alicepass123","role":"operat
 seed POST /secrets '{"name":"dbpass","value":"s3cr3t","selector":"all"}' >/dev/null
 TID=$(seed POST /tasks '{"name":"check disk","description":"df -h","steps":[{"cmd":"df"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 seed POST /jobs "{\"name\":\"nightly df\",\"cron\":\"0 3 * * *\",\"task_id\":\"$TID\",\"selector\":\"all\"}" >/dev/null
+# Alert rules (M6.1/M7 kinds) so the Alerts page renders real rule rows.
+seed POST /alerts/rules '{"name":"web restart loop","kind":"service_restarting","selector":"all","severity":"warning","thresholds":{"service_restart_rate_per_hour":10}}' >/dev/null
+seed POST /alerts/rules '{"name":"config divergence","kind":"config_drift","selector":"all","severity":"info","thresholds":{"config_drift_tolerance":0},"enabled":false}' >/dev/null
 echo "    host=$AG task=$TID"
 
 echo "==> installing jsdom (if needed)"

@@ -13,7 +13,7 @@ import (
 type AlertRule struct {
 	ID         string
 	Name       string
-	Kind       string // service_failed | cert_expiring | config_invalid
+	Kind       string // service_failed | service_restarting | cert_expiring | config_invalid | config_drift
 	Selector   string
 	Thresholds string // JSON
 	Severity   string

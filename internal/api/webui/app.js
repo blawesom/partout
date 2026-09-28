@@ -30,6 +30,8 @@
   function agentBadge(s) { return ({ connected: { cls: "ok", label: "connected" }, disconnected: { cls: "bad", label: "disconnected" }, pending: { cls: "info", label: "pending" } })[s] || { cls: "neutral", label: s || "unknown" }; }
   function execBadge(s) { return ({ pending: "neutral", running: "info", succeeded: "ok", failed: "bad", partial: "warn", cancelled: "neutral" })[s] || "neutral"; }
   function runBadge(s) { return ({ queued: "neutral", delivered: "neutral", running: "info", succeeded: "ok", failed: "bad", timed_out: "warn", cancelled: "neutral", interrupted: "neutral", not_delivered: "outline-warn", denied: "outline-bad" })[s] || "neutral"; }
+  function taskRunBadge(s) { return ({ ok: "ok", changed: "ok", running: "info", rebooting: "info", failed: "bad", skipped: "neutral", denied: "outline-bad", awaiting_approval: "warn" })[s] || "neutral"; }
+  function stepBadge(s) { return ({ ok: "ok", changed: "ok", failed: "bad", skipped: "neutral", rebooting: "info" })[s] || "neutral"; }
   function certBadge(c) {
     if (!c.not_after) return { cls: "neutral", label: "unknown" };
     if (c.days_remaining < 0) return { cls: "bad", label: "expired" };
@@ -317,6 +319,20 @@
         <section v-else-if="page==='sessions'">
           <h1 class="page">Sessions</h1>
           <p class="page-sub">PTY terminal sessions and recordings (M2).</p>
+          <div class="card" style="margin-bottom:12px">
+            <div class="head"><h2>Open terminal</h2><p class="cap">Live PTY (xterm.js): input via REST, output via SSE.</p></div>
+            <div class="toolbar">
+              <select v-model="ptyHost" style="max-width:200px">
+                <option value="">host…</option>
+                <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+              </select>
+              <input v-model="ptyCmd" class="mono" placeholder="bash" style="max-width:160px" />
+              <button class="btn primary sm" :disabled="!isOperator || !ptyHost || !ptyCmd || ptyBusy" @click="openSession">
+                <span v-if="ptyBusy" class="spin"></span> Open terminal
+              </button>
+              <span v-if="ptyErr" class="err-box" style="margin:0">{{ ptyErr }}</span>
+            </div>
+          </div>
           <div class="card">
             <table class="tbl">
               <thead><tr><th>ID</th><th>Host</th><th>Command</th><th>State</th><th></th></tr></thead>
@@ -326,7 +342,7 @@
                   <td class="mono">{{ s.agent_id || s.host_id }}</td>
                   <td class="mono">{{ (s.cmd || (s.args && s.args.join(' '))) || 'shell' }}</td>
                   <td><span class="badge neutral">{{ s.state || '—' }}</span></td>
-                  <td><button class="btn sm" @click="go('session/'+(s.id||s.session_id))">Replay</button></td>
+                  <td><button class="btn sm" @click="go('session/'+(s.id||s.session_id))">{{ (s.id||s.session_id)===p1 ? 'Open' : (s.state==='open' ? 'Attach' : 'Replay') }}</button></td>
                 </tr>
                 <tr v-if="!sessions.length"><td colspan="5"><div class="empty">No sessions.</div></td></tr>
               </tbody>
@@ -334,10 +350,20 @@
           </div>
         </section>
 
-        <!-- ============ SESSION REPLAY ============ -->
+        <!-- ============ SESSION (live terminal + replay) ============ -->
         <section v-else-if="page==='session'">
           <h1 class="page">Session <span class="mono muted">{{ p1 }}</span></h1>
-          <div class="card" v-if="sessionReplay">
+          <div class="card" v-if="sessionLive && sessionLive.state==='open'">
+            <div class="toolbar" style="margin-bottom:8px">
+              <span class="badge info">live</span>
+              <span class="mono small">{{ sessionLive.cmd }}<template v-if="sessionLive.args && sessionLive.args.length"> {{ sessionLive.args.join(' ') }}</template></span>
+              <span class="muted mono small">on {{ sessionLive.agent_id }}</span>
+              <div class="spacer"></div>
+              <button class="btn danger sm" :disabled="!isOperator" @click="closeSession">Close session</button>
+            </div>
+            <div ref="termEl" class="term-host"></div>
+          </div>
+          <div class="card" v-else-if="sessionReplay">
             <div class="console">
               <div class="hd"><span class="lights"><i></i><i></i><i></i></span> stream: session/{{ p1 }} (replay)</div>
               {{ replayText() }}
@@ -400,30 +426,71 @@
         <!-- ============ TASKS ============ -->
         <section v-else-if="page==='tasks'">
           <h1 class="page">Tasks &amp; Playbooks</h1>
-          <p class="page-sub">Multi-step automation (M3).</p>
+          <p class="page-sub">Multi-step automation (M3). Runs are policy-gated (task.run) and can park on approvals.</p>
+          <div v-if="taskMsg" class="info-box" style="margin-bottom:12px">{{ taskMsg }}</div>
           <div class="grid cols-2">
             <div class="card">
-              <h2>Tasks</h2><p class="cap">Single-step units</p>
-              <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Description</th></tr></thead>
+              <h2>Tasks</h2><p class="cap">Versioned step lists</p>
+              <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Description</th><th></th></tr></thead>
                 <tbody>
-                  <tr v-for="t in tasks" :key="t.id"><td class="mono">{{ t.id }}</td><td>{{ t.name }}</td><td class="muted">{{ t.description || '—' }}</td></tr>
-                  <tr v-if="!tasks.length"><td colspan="3"><div class="empty">No tasks.</div></td></tr>
+                  <tr v-for="t in tasks" :key="t.id">
+                    <td class="mono">{{ t.id }}</td><td>{{ t.name }}</td><td class="muted">{{ t.description || '—' }}</td>
+                    <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runTask(t)">Run…</button></td>
+                  </tr>
+                  <tr v-if="!tasks.length"><td colspan="4"><div class="empty">No tasks.</div></td></tr>
                 </tbody>
               </table>
             </div>
             <div class="card">
-              <h2>Playbooks</h2><p class="cap">Sequences of tasks</p>
-              <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Selector</th></tr></thead>
+              <h2>Playbooks</h2><p class="cap">Task + selector, fan-out run</p>
+              <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Selector</th><th></th></tr></thead>
                 <tbody>
                   <tr v-for="p in playbooks" :key="p.id">
                     <td class="mono">{{ p.id }}</td><td>{{ p.name }}</td>
                     <td class="mono">{{ p.task_id }}<template v-if="p.task_version">@{{ p.task_version }}</template></td>
                     <td class="mono">{{ p.selector || '—' }}</td>
+                    <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runPlaybook(p)">Run</button></td>
                   </tr>
-                  <tr v-if="!playbooks.length"><td colspan="4"><div class="empty">No playbooks.</div></td></tr>
+                  <tr v-if="!playbooks.length"><td colspan="5"><div class="empty">No playbooks.</div></td></tr>
                 </tbody>
               </table>
             </div>
+          </div>
+          <div class="card" style="margin-top:12px">
+            <div class="head"><h2>Recent task runs</h2><div class="spacer"></div><button class="btn sm" @click="loadTaskRuns">Refresh</button></div>
+            <table class="tbl">
+              <thead><tr><th>ID</th><th>Task</th><th>Host</th><th>State</th><th>Started</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="r in taskRuns" :key="r.id" class="click" @click="showTaskRun(r.id)">
+                  <td class="mono">{{ r.id }}</td>
+                  <td class="mono">{{ r.task_id }}<template v-if="r.task_version">@{{ r.task_version }}</template></td>
+                  <td class="mono">{{ r.agent_id }}</td>
+                  <td><span class="badge" :class="taskRunBadge(r.state)">{{ r.state }}</span></td>
+                  <td class="muted">{{ r.started ? new Date(r.started*1000).toLocaleString() : '—' }}</td>
+                  <td class="muted small">{{ taskRunDetail && taskRunDetail.id===r.id ? 'hide ▴' : 'steps ▸' }}</td>
+                </tr>
+                <tr v-if="!taskRuns.length"><td colspan="6"><div class="empty">No task runs.</div></td></tr>
+              </tbody>
+            </table>
+            <template v-if="taskRunDetail">
+              <div class="toolbar" style="margin-top:8px">
+                <span class="muted mono small">run {{ taskRunDetail.id }} · {{ taskRunDetail.agent_id }}</span>
+                <span class="muted small" v-if="taskRunDetail.error">{{ taskRunDetail.error }}</span>
+                <div class="spacer"></div>
+                <button class="btn sm" @click="taskRunDetail=null">Close</button>
+              </div>
+              <table class="tbl" v-if="(taskRunDetail.steps||[]).length" style="margin-top:8px">
+                <thead><tr><th>#</th><th>Kind</th><th>Step</th><th>State</th><th>Detail</th></tr></thead>
+                <tbody>
+                  <tr v-for="s in taskRunDetail.steps" :key="s.index">
+                    <td class="mono">{{ s.index }}</td><td class="mono">{{ s.kind }}</td>
+                    <td class="mono">{{ s.name || '—' }}</td>
+                    <td><span class="badge" :class="stepBadge(s.state)">{{ s.state }}</span></td>
+                    <td class="mono small" style="max-width:380px;overflow:hidden;text-overflow:ellipsis">{{ s.detail || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
           </div>
         </section>
 
@@ -620,7 +687,12 @@
           <h1 class="page">Services</h1>
           <p class="page-sub">Fleet service health from agent-collected facts (M5, R18).</p>
           <div class="toolbar">
-            <input v-model="svcLabel" placeholder="filter by label" @keyup.enter="loadServices" style="max-width:200px" />
+            <select :value="svcHost" @change="svcHost=$event.target.value; loadServices()" style="max-width:180px">
+              <option value="">all hosts</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+            </select>
+            <input v-model="svcName" placeholder="unit name" class="mono" @keyup.enter="loadServices" style="max-width:150px" />
+            <input v-model="svcLabel" placeholder="filter by label" @keyup.enter="loadServices" style="max-width:150px" />
             <select v-model="svcState" @change="loadServices">
               <option value="">any state</option><option value="active">active</option>
               <option value="failed">failed</option><option value="inactive">inactive</option>
@@ -629,7 +701,7 @@
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Unit</th><th>Host</th><th>State</th><th>Enabled</th><th>Restart</th><th>Memory</th><th>Labels</th></tr></thead>
+              <thead><tr><th>Unit</th><th>Host</th><th>State</th><th>Enabled</th><th>Restart</th><th>Restarts</th><th>Memory</th><th>Labels</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="(row,i) in services" :key="i">
                   <td class="mono">{{ row.unit.name }}</td>
@@ -637,10 +709,12 @@
                   <td><span class="badge" :class="svcBadge(row.unit).cls">{{ svcBadge(row.unit).label }}</span></td>
                   <td>{{ row.unit.enabled ? 'yes' : 'no' }}</td>
                   <td class="mono">{{ row.unit.restart_policy || '—' }}</td>
+                  <td class="mono">{{ row.unit.n_restarts || '—' }}</td>
                   <td class="mono">{{ row.unit.memory_current ? fmtBytes(row.unit.memory_current) : '—' }}</td>
                   <td><span class="chip" v-for="l in (row.unit.labels||[])" :key="l">{{ l }}</span></td>
+                  <td><a v-if="unitCfgLink(row)" @click.prevent="go(unitCfgLink(row))" :title="row.unit.name + ' config'">⚙ config</a><span v-else class="muted">—</span></td>
                 </tr>
-                <tr v-if="!services.length"><td colspan="7"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
+                <tr v-if="!services.length"><td colspan="9"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -651,6 +725,11 @@
           <h1 class="page">Certificates</h1>
           <p class="page-sub">TLS certificate inventory (M5, R20).</p>
           <div class="toolbar">
+            <select :value="certHost" @change="certHost=$event.target.value; loadCerts()" style="max-width:180px">
+              <option value="">all hosts</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+            </select>
+            <input v-model="certQ" placeholder="subject / path" class="mono" @keyup.enter="loadCerts" style="max-width:220px" />
             <label class="fld" style="margin:0;display:flex;align-items:center;gap:8px">
               <span style="margin:0">expires within</span>
               <input type="number" v-model="certDays" min="0" style="width:90px" @keyup.enter="loadCerts" placeholder="days" />
@@ -659,7 +738,7 @@
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Subject</th><th>Host</th><th>Expires</th><th>Chain</th><th>Key</th><th>Self-signed</th></tr></thead>
+              <thead><tr><th>Subject</th><th>Host</th><th>Expires</th><th>Chain</th><th>Key</th><th>Self-signed</th><th>Used by</th></tr></thead>
               <tbody>
                 <tr v-for="(row,i) in certs" :key="i">
                   <td><div class="mono small">{{ row.cert.subject || row.cert.path }}</div></td>
@@ -668,8 +747,12 @@
                   <td><span class="badge" :class="!row.cert.chain_checked?'neutral':(row.cert.chain_valid?'ok':'bad')">{{ !row.cert.chain_checked?'unchecked':(row.cert.chain_valid?'valid':'broken') }}</span></td>
                   <td class="mono">{{ row.cert.key_type || '—' }}</td>
                   <td>{{ row.cert.self_signed ? 'yes' : 'no' }}</td>
+                  <td>
+                    <a v-for="u in certUsedBy(row)" :key="u.kind+u.label" @click.prevent="go('obs/configs?host='+row.host_id+'&kind='+u.kind)" style="display:inline-block">{{ u.kind }}·{{ u.label }}</a>
+                    <span v-if="!certUsedBy(row).length" class="muted">—</span>
+                  </td>
                 </tr>
-                <tr v-if="!certs.length"><td colspan="6"><div class="empty">No certificate facts.</div></td></tr>
+                <tr v-if="!certs.length"><td colspan="7"><div class="empty">No certificate facts.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -680,6 +763,10 @@
           <h1 class="page">Configs</h1>
           <p class="page-sub">HAProxy / Nginx validity &amp; topology (M5, R19).</p>
           <div class="toolbar">
+            <select :value="cfgHost" @change="cfgHost=$event.target.value; loadConfigs()" style="max-width:180px">
+              <option value="">all hosts</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+            </select>
             <select v-model="cfgKind" @change="loadConfigs">
               <option value="">any kind</option><option value="haproxy">haproxy</option><option value="nginx">nginx</option>
             </select>
@@ -689,6 +776,7 @@
             <div class="head">
               <h2>{{ c.kind }} <span class="muted mono small" v-if="c.haproxy || c.nginx">· {{ (c.haproxy||c.nginx).version }}</span></h2>
               <span class="badge" :class="((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'ok':'bad'">{{ ((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'valid':'invalid' }}</span>
+              <a @click.prevent="go('obs/services?host='+c.host_id+'&name='+c.kind)" :title="c.kind + ' service'" style="font-size:12px">◈ {{ c.kind }} service</a>
               <div class="spacer"></div>
               <span class="muted mono small">{{ c.host_id }}</span>
             </div>
@@ -698,6 +786,16 @@
                 <thead><tr><th>Backend</th><th>Servers</th></tr></thead>
                 <tbody><tr v-for="b in c.haproxy.backends" :key="b.name"><td class="mono">{{ b.name }}</td><td class="mono">{{ b.servers || '—' }}</td></tr></tbody>
               </table>
+              <table class="tbl" v-if="(c.haproxy.listeners||[]).length">
+                <thead><tr><th>Port</th><th>Mode</th><th>TLS cert</th></tr></thead>
+                <tbody><tr v-for="l in c.haproxy.listeners" :key="l.port">
+                  <td class="mono">{{ l.port }}</td><td class="mono">{{ l.mode }}</td>
+                  <td>
+                    <a v-if="l.tls" class="mono small" @click.prevent="go('obs/certs?host='+c.host_id+'&q='+encodeURIComponent(l.tls))">{{ l.tls }}</a>
+                    <span v-else class="muted">—</span>
+                  </td>
+                </tr></tbody>
+              </table>
             </template>
             <template v-if="c.nginx">
               <p class="cap">{{ (c.nginx.vhosts||[]).length }} vhosts</p>
@@ -705,7 +803,12 @@
                 <thead><tr><th>Server</th><th>Listen</th><th>TLS</th><th>Cert</th><th>Upstream</th></tr></thead>
                 <tbody><tr v-for="v in c.nginx.vhosts" :key="v.server_name">
                   <td class="mono">{{ v.server_name }}</td><td class="mono">{{ v.port }}</td>
-                  <td>{{ v.tls?'yes':'no' }}</td><td class="mono small">{{ v.tls_cert||'—' }}</td><td class="mono small">{{ v.upstream||'—' }}</td>
+                  <td>{{ v.tls?'yes':'no' }}</td>
+                  <td class="mono small">
+                    <a v-if="v.tls_cert" @click.prevent="go('obs/certs?host='+c.host_id+'&q='+encodeURIComponent(v.tls_cert))">{{ v.tls_cert }}</a>
+                    <span v-else>—</span>
+                  </td>
+                  <td class="mono small">{{ v.upstream||'—' }}</td>
                 </tr></tbody>
               </table>
             </template>
@@ -713,30 +816,99 @@
           <div class="card" v-if="!configs.length"><div class="empty">No config facts (haproxy/nginx must be installed).</div></div>
         </section>
 
-        <!-- ============ OBSERVE · ALERTS (M6 engine live; full page M7) ============ -->
+        <!-- ============ OBSERVE · ALERTS (M6 engine; rule-management UI M7) ============ -->
         <section v-else-if="page==='obs-alerts'">
           <h1 class="page">Alerts</h1>
           <p class="page-sub">Threshold rules, firing/resolved state, SSE fan-out (R23, R25).</p>
-          <div v-if="caps.alerts" class="card">
-            <div class="row" style="margin-bottom:8px">
-              <strong>Firing now: {{ alerts.filter(a=>a.state==='firing').length }}</strong>
-              <button class="btn sm" @click="loadAlerts">Refresh</button>
+          <div v-if="caps.alerts">
+            <div class="card">
+              <div class="row" style="margin-bottom:8px">
+                <strong>Firing now: {{ alerts.filter(a=>a.state==='firing').length }}</strong>
+                <button class="btn sm" @click="loadAlerts">Refresh</button>
+              </div>
+              <table class="tbl" v-if="alerts.length">
+                <thead><tr><th>Severity</th><th>Kind</th><th>Host</th><th>Message</th><th>State</th><th>Started</th></tr></thead>
+                <tbody>
+                  <tr v-for="a in alerts" :key="a.id">
+                    <td><span class="tag" :class="a.severity">{{ a.severity }}</span></td>
+                    <td>{{ a.kind }}</td>
+                    <td class="mono">{{ a.agent_id || '—' }}</td>
+                    <td>{{ a.message }}</td>
+                    <td><span class="badge" :class="a.state==='firing'?'warn':'ok'">{{ a.state }}</span></td>
+                    <td>{{ a.started_at ? new Date(a.started_at*1000).toLocaleString() : '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else class="muted">No alerts (firing or recently resolved).</p>
             </div>
-            <table v-if="alerts.length">
-              <thead><tr><th>Severity</th><th>Kind</th><th>Host</th><th>Message</th><th>Started</th></tr></thead>
-              <tbody>
-                <tr v-for="a in alerts" :key="a.id">
-                  <td><span class="tag" :class="a.severity">{{ a.severity }}</span></td>
-                  <td>{{ a.kind }}</td>
-                  <td class="mono">{{ a.agent_id || '—' }}</td>
-                  <td>{{ a.message }}</td>
-                  <td>{{ a.started_at ? new Date(a.started_at*1000).toLocaleString() : '—' }}</td>
-                </tr>
-              </tbody>
-            </table>
-            <p v-else class="muted">No alerts (firing or recently resolved).</p>
-            <p class="muted" style="margin-top:8px">Rule management UI lands in M7; rules are managed via
-            <span class="mono">/api/v1/alerts/rules</span> or <span class="mono">partout ctl alerts rules</span>.</p>
+
+            <div class="card" style="margin-top:12px">
+              <div class="head">
+                <h2>Rules</h2>
+                <p class="cap">Evaluated every tick over observed facts; one alert per (rule, host, subject).</p>
+                <div class="spacer"></div>
+                <button class="btn primary sm" :disabled="!isOperator" @click="newRuleForm()">+ New rule</button>
+              </div>
+              <div v-if="ruleErr" class="err-box" style="margin-bottom:8px">{{ ruleErr }}</div>
+              <table class="tbl">
+                <thead><tr><th>Name</th><th>Kind</th><th>Selector</th><th>Threshold</th><th>Severity</th><th>Enabled</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-for="r in rules" :key="r.id">
+                    <td>{{ r.name }}</td>
+                    <td><span class="chip brand">{{ r.kind }}</span></td>
+                    <td class="mono">{{ r.selector }}</td>
+                    <td class="mono small">{{ thresholdsLabel(r) }}</td>
+                    <td>{{ r.severity }}</td>
+                    <td>{{ r.enabled ? 'yes' : 'no' }}</td>
+                    <td style="white-space:nowrap">
+                      <button class="btn sm" :disabled="!isOperator || ruleBusy===r.id" @click="toggleRule(r)">{{ r.enabled ? 'Disable' : 'Enable' }}</button>
+                      <button class="btn sm" :disabled="!isOperator" @click="editRule(r)">Edit</button>
+                      <button class="btn danger sm" :disabled="!isOperator" @click="deleteRule(r.id)">Delete</button>
+                    </td>
+                  </tr>
+                  <tr v-if="!rules.length"><td colspan="7"><div class="empty">No alert rules.</div></td></tr>
+                </tbody>
+              </table>
+
+              <div v-if="ruleForm" class="card" style="background:var(--brand-subtle);margin-top:12px">
+                <h2>{{ ruleForm.id ? 'Edit rule' : 'New rule' }}</h2>
+                <div class="grid cols-2">
+                  <label class="fld"><span>Name</span><input v-model="ruleForm.name" placeholder="db ssh down" /></label>
+                  <label class="fld"><span>Kind</span>
+                    <select v-model="ruleForm.kind">
+                      <option value="service_failed">service_failed — unit stuck in failed state</option>
+                      <option value="service_restarting">service_restarting — restart rate over NRestarts (M6.1)</option>
+                      <option value="cert_expiring">cert_expiring — certificate expiry window</option>
+                      <option value="config_invalid">config_invalid — haproxy/nginx native validation</option>
+                      <option value="config_drift">config_drift — cross-host config hash divergence (R22)</option>
+                    </select>
+                  </label>
+                  <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
+                  <label class="fld"><span>Severity</span>
+                    <select v-model="ruleForm.severity">
+                      <option>info</option><option>warning</option><option>critical</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="fld" v-if="ruleForm.kind==='service_failed'" style="max-width:240px"><span>Failed for (minutes)</span>
+                  <input type="number" v-model.number="ruleForm.thresh" min="0" /></label>
+                <label class="fld" v-if="ruleForm.kind==='service_restarting'" style="max-width:240px"><span>Restart rate (per hour)</span>
+                  <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
+                <label class="fld" v-if="ruleForm.kind==='cert_expiring'" style="max-width:240px"><span>Expires within (days)</span>
+                  <input type="number" v-model.number="ruleForm.thresh" min="0" /></label>
+                <label class="fld" v-if="ruleForm.kind==='config_drift'" style="max-width:240px"><span>Tolerance (extra distinct hashes)</span>
+                  <input type="number" v-model.number="ruleForm.thresh" min="0" /></label>
+                <p class="cap" v-if="ruleForm.kind==='config_invalid'" style="margin:8px 0 0">No threshold — fires whenever a haproxy/nginx config fails native validation.</p>
+                <div class="toolbar" style="margin-top:10px">
+                  <label class="lbl" style="margin:0"><input type="checkbox" v-model="ruleForm.enabled" /> enabled</label>
+                  <div class="spacer"></div>
+                  <button class="btn sm" @click="ruleForm=null">Cancel</button>
+                  <button class="btn primary sm" :disabled="!ruleForm.name || !!ruleBusy" @click="saveRule()">
+                    <span v-if="ruleBusy" class="spin"></span>{{ ruleForm.id ? 'Save' : 'Create' }}
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
           <div v-else class="notavail">
             <span class="tag">M6 · not yet available</span>
@@ -785,22 +957,36 @@
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
         audit: [], auditKind: "",
-        sessions: [], sessionReplay: null,
+        sessions: [], sessionReplay: null, sessionLive: null,
+        ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
         updHost: "", jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], provRuns: [], users: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
-        alerts: [],
+        alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
+        taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
         mcpInfo: null,
-        services: [], svcLabel: "", svcState: "",
-        certs: [], certDays: "",
-        configs: [], cfgKind: "",
+        services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "",
+        certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
+        configs: [], cfgKind: "", cfgHost: "",
         pw: { current: "", next: "" }, pwMsg: "", pwErr: "",
       };
     },
     computed: {
       loggedIn() { return !!this.token; },
-      parts() { return this.route.split("/").filter(Boolean); },
+      parts() { return this.route.split("?")[0].split("/").filter(Boolean); },
+      // Query string of the current hash route (cross-link params: host/name/q/kind).
+      routeQuery() {
+        const i = this.route.indexOf("?");
+        if (i < 0) return {};
+        const out = {};
+        for (const kv of this.route.slice(i + 1).split("&")) {
+          if (!kv) continue;
+          const [k, v] = kv.split("=");
+          try { out[decodeURIComponent(k)] = decodeURIComponent(v || ""); } catch (e) { }
+        }
+        return out;
+      },
       page() {
         const p = this.parts;
         // An id-less detail route (e.g. a hand-typed #/host) falls back to its
@@ -839,7 +1025,7 @@
       auditKinds() { return [...new Set(this.audit.map(a => a.kind))]; },
     },
     methods: {
-      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, certBadge, svcBadge, eolBadge,
+      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, certBadge, svcBadge, eolBadge,
       async api(path, opts = {}) {
         const headers = { ...(opts.headers || {}) };
         if (this.token) headers["Authorization"] = "Bearer " + this.token;
@@ -953,23 +1139,35 @@
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
-      onSSEEvent(kind) {
+      onSSEEvent(kind, p) {
         if (kind === "host.state") this.loadHosts();
         else if (kind === "execution.state") { if (this.page === "execute") this.loadExecutions(); if (this.page === "exec") this.loadExecDetail(); }
         else if (kind === "audit.event" && this.page === "audit") this.loadAudit();
         else if (kind === "job.run" && this.page === "jobs") this.loadJobs();
-        else if (kind === "task.run" && this.page === "tasks") { this.loadTasks(); this.loadPlaybooks(); }
+        else if (kind === "task.run" && this.page === "tasks") { this.loadTasks(); this.loadPlaybooks(); this.loadTaskRuns(); }
         else if (kind === "package.action" && this.page === "updates") this.loadUpdates();
         else if (kind === "file.action" && this.page === "files") this.listFiles();
-        else if ((kind === "session.data" || kind === "session.result") && this.page === "session") this.loadSessionReplay();
+        else if (kind === "session.data") { if (this.page === "session") this._onSessionData(p); }
+        else if (kind === "session.opened") { if (this.page === "session") this.loadSessionReplay(); }
+        else if (kind === "session.result") {
+          if (this.page === "session") {
+            if (p && this._term && p.session_id === this.p1) {
+              this._termFinalize(p);
+              setTimeout(() => { if (this.page === "session") { this._destroyTerm(); this.loadSessionReplay(); } }, 1500);
+            } else {
+              this._destroyTerm();
+              this.loadSessionReplay();
+            }
+          }
+        }
         else if ((kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") && this.page === "approvals") this.loadApprovals();
         else if ((kind === "alert.firing" || kind === "alert.resolved") && this.page === "obs-alerts") this.loadAlerts();
       },
       async loadPageData() {
-        // Files, Updates, and Jobs need the host list (default host selection,
-        // per-host run target). Load it first if a deep link lands here before
-        // the fleet page ever ran.
-        if (["files", "updates", "jobs"].includes(this.page) && !this.hosts.length) {
+        // Files, Updates, Jobs and the Observe pages need the host list (default
+        // host selection, per-host run target, host filter dropdowns). Load it
+        // first if a deep link lands here before the fleet page ever ran.
+        if (["files", "updates", "jobs", "sessions", "obs-services", "obs-certs", "obs-configs"].includes(this.page) && !this.hosts.length) {
           await this.loadHosts();
         }
         switch (this.page) {
@@ -982,18 +1180,18 @@
           case "session": await this.loadSessionReplay(); break;
           case "files": await this.listFiles(); break;
           case "jobs": await this.loadJobs(); break;
-          case "tasks": await this.loadTasks(); await this.loadPlaybooks(); break;
+          case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
           case "updates": await this.loadUpdates(); break;
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
-          case "obs-alerts": await this.loadAlerts(); break;
+          case "obs-alerts": await this.loadAlerts(); this.loadRules(); break;
           case "mcp": await this.loadMcp(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
-          case "obs-services": await this.loadServices(); break;
-          case "obs-certs": await this.loadCerts(); break;
-          case "obs-configs": await this.loadConfigs(); break;
+          case "obs-services": this.syncObserveQuery(); await this.loadServices(); break;
+          case "obs-certs": this.syncObserveQuery(); await this.loadCerts(); break;
+          case "obs-configs": this.syncObserveQuery(); await this.loadConfigs(); break;
         }
       },
       async loadHosts() { this.hostsLoading = true; try { const d = await this.api("/hosts"); this.hosts = d.items || []; } catch (e) { this.hosts = []; } finally { this.hostsLoading = false; } },
@@ -1018,9 +1216,76 @@
       async loadSessions() { try { const d = await this.api("/sessions"); this.sessions = d.sessions || d.items || []; } catch (e) { this.sessions = []; } },
       async loadSessionReplay() {
         this.sessionReplay = null;
+        this.sessionLive = null;
+        this._destroyTerm();
         if (!this.p1) return; // id-less route: never GET /sessions//replay
+        // Live session → xterm.js terminal; otherwise the recorded replay.
+        try {
+          const s = await this.api("/sessions/" + encodeURIComponent(this.p1));
+          this.sessionLive = s;
+          if (s.state === "open") { this.$nextTick(() => this.mountTerminal(s)); return; }
+        } catch (e) { this.sessionLive = null; }
         try { this.sessionReplay = await this.api("/sessions/" + encodeURIComponent(this.p1) + "/replay"); } catch (e) { this.sessionReplay = null; }
       },
+      // --- live PTY (xterm.js; M7) ---
+      async openSession() {
+        this.ptyBusy = true; this.ptyErr = "";
+        try {
+          const s = await this.api("/sessions", { method: "POST", body: { agent_id: this.ptyHost, cmd: this.ptyCmd, cols: 80, rows: 24, record: true } });
+          if (s.state === "approval_required") { this.ptyErr = "Session open parked on approval " + (s.approval_id || "") + " — approve it on the Approvals page."; return; }
+          const id = s.session_id || s.id;
+          if (id) this.go("session/" + id);
+          else this.ptyErr = "no session id in response";
+        } catch (e) { this.ptyErr = e.message; } finally { this.ptyBusy = false; }
+      },
+      async closeSession() {
+        if (!confirm("Close this session? The PTY receives SIGHUP.")) return;
+        try { await this.api("/sessions/" + encodeURIComponent(this.p1) + "/close", { method: "POST" }); } catch (e) { alert(e.message); }
+        this.loadSessionReplay();
+      },
+      mountTerminal(s) {
+        const el = this.$refs.termEl;
+        if (!el || typeof window.Terminal === "undefined") { this.ptyErr = "terminal not available"; return; }
+        this._destroyTerm();
+        const term = new window.Terminal({
+          cursorBlink: true, fontSize: 13, scrollback: 5000,
+          fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+          theme: { background: "#0f172a", foreground: "#e2e8f0" },
+          cols: s.cols || 80, rows: s.rows || 24,
+        });
+        term.open(el);
+        this._term = term;
+        window.__partoutTerm = term; // debug/test hook (read terminal buffer headlessly)
+        term.onData((d) => this._sendInput(d));
+        term.onResize(({ cols, rows }) => {
+          this.api("/sessions/" + encodeURIComponent(this.p1) + "/resize", { method: "POST", body: { cols, rows } }).catch(() => {});
+        });
+        // Replay chunks that arrived before the terminal mounted (the initial
+        // shell prompt usually precedes the mount).
+        const key = s.session_id || s.id || this.p1;
+        if (this._liveBuf && this._liveBuf[key]) {
+          try { term.write(atob(this._liveBuf[key])); } catch (e) { }
+          delete this._liveBuf[key];
+        }
+        term.focus();
+      },
+      _sendInput(d) {
+        if (!this._term) return;
+        const b64 = btoa(unescape(encodeURIComponent(d))); // unicode-safe
+        this.api("/sessions/" + encodeURIComponent(this.p1) + "/input", { method: "POST", body: { data_b64: b64 } }).catch(() => {});
+      },
+      _onSessionData(p) {
+        if (!p || p.session_id !== this.p1) return;
+        if (this._term) { try { if (p.data) this._term.write(atob(p.data)); } catch (e) { } return; }
+        // Terminal not mounted yet: buffer recent output (bounded) for catch-up.
+        this._liveBuf = this._liveBuf || {};
+        this._liveBuf[this.p1] = (this._liveBuf[this.p1] || "") + (p.data || "");
+        if (this._liveBuf[this.p1].length > 512 * 1024) this._liveBuf[this.p1] = this._liveBuf[this.p1].slice(-256 * 1024);
+      },
+      _termFinalize(p) {
+        try { this._term.write("\r\n\x1b[90m[session ended" + (p.exit_code != null ? " (exit " + p.exit_code + ")" : "") + "]\x1b[0m\r\n"); } catch (e) { }
+      },
+      _destroyTerm() { if (this._term) { try { this._term.dispose(); } catch (e) { } this._term = null; } },
       replayText() {
         const fr = this.sessionReplay && this.sessionReplay.frames;
         if (!fr) return (this.sessionReplay ? JSON.stringify(this.sessionReplay) : "");
@@ -1052,6 +1317,96 @@
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || d || []; } catch (e) { this.provRuns = []; } },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
       async loadAlerts() { try { const d = await this.api("/alerts"); this.alerts = d.alerts || []; } catch (e) { this.alerts = []; } },
+      async loadRules() { try { const d = await this.api("/alerts/rules"); this.rules = d.rules || []; } catch (e) { this.rules = []; } },
+      // --- alert rule management (M7) ---
+      thresholdsLabel(r) {
+        const t = (r.thresholds && typeof r.thresholds === "object") ? r.thresholds : {};
+        const out = [];
+        for (const [k, v] of Object.entries(t)) out.push(k + "=" + v);
+        return out.length ? out.join(" ") : "—";
+      },
+      ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0 })[kind] || 0; },
+      newRuleForm() {
+        this.ruleErr = "";
+        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, enabled: true };
+      },
+      editRule(r) {
+        this.ruleErr = "";
+        const t = (r.thresholds && typeof r.thresholds === "object") ? r.thresholds : {};
+        const key = ({ service_failed: "service_failed_minutes", service_restarting: "service_restart_rate_per_hour", cert_expiring: "cert_days_remaining", config_drift: "config_drift_tolerance" })[r.kind];
+        this.ruleForm = {
+          id: r.id, name: r.name, kind: r.kind, selector: r.selector,
+          severity: r.severity, enabled: r.enabled,
+          thresh: (key && t[key] != null) ? t[key] : this.ruleDefaultThresh(r.kind),
+        };
+      },
+      thresholdsFor(kind) {
+        const v = this.ruleForm.thresh;
+        switch (kind) {
+          case "service_failed": return { service_failed_minutes: v };
+          case "service_restarting": return { service_restart_rate_per_hour: v };
+          case "cert_expiring": return { cert_days_remaining: v };
+          case "config_drift": return { config_drift_tolerance: v };
+          default: return {};
+        }
+      },
+      async saveRule() {
+        const f = this.ruleForm;
+        if (!f || !f.name) return;
+        this.ruleBusy = f.id || "new"; this.ruleErr = "";
+        const body = { name: f.name, kind: f.kind, selector: f.selector || "all", severity: f.severity, enabled: f.enabled, thresholds: this.thresholdsFor(f.kind) };
+        try {
+          if (f.id) await this.api("/alerts/rules/" + encodeURIComponent(f.id), { method: "PUT", body });
+          else await this.api("/alerts/rules", { body });
+          this.ruleForm = null;
+          this.loadRules();
+        } catch (e) { this.ruleErr = e.message; } finally { this.ruleBusy = ""; }
+      },
+      async toggleRule(r) {
+        this.ruleBusy = r.id; this.ruleErr = "";
+        try {
+          await this.api("/alerts/rules/" + encodeURIComponent(r.id), { method: "PUT", body: { name: r.name, kind: r.kind, selector: r.selector, severity: r.severity, enabled: !r.enabled, thresholds: r.thresholds || {} } });
+          this.loadRules();
+        } catch (e) { this.ruleErr = e.message; } finally { this.ruleBusy = ""; }
+      },
+      async deleteRule(id) {
+        if (!confirm("Delete alert rule " + id + "? Firing alerts from it are left as-is.")) return;
+        try { await this.api("/alerts/rules/" + encodeURIComponent(id), { method: "DELETE" }); this.loadRules(); }
+        catch (e) { alert(e.message); }
+      },
+      // --- task actions (M7): run task / playbook + run inspection ---
+      async runTask(t) {
+        if (!this.hosts.length) { alert("No hosts available to run this task on."); return; }
+        const agent = this.hosts.length === 1 ? this.hosts[0].id
+          : prompt("Run task " + t.name + " on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
+        if (!agent) return;
+        this.taskBusy = t.id; this.taskMsg = "";
+        try {
+          const d = await this.api("/tasks/" + encodeURIComponent(t.id) + "/run", { method: "POST", body: { agent_id: agent } });
+          if (d.state === "approval_required") {
+            this.taskMsg = "Task run parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page).";
+          } else {
+            this.taskMsg = "Task " + t.name + " started on " + agent + " (run " + (d.run_id || "") + ", state " + (d.state || "") + ").";
+          }
+          this.loadTaskRuns();
+        } catch (e) { this.taskMsg = "Task run failed: " + e.message; } finally { this.taskBusy = ""; }
+      },
+      async runPlaybook(p) {
+        this.taskBusy = p.id; this.taskMsg = "";
+        try {
+          const d = await this.api("/playbooks/" + encodeURIComponent(p.id) + "/run", { method: "POST", body: {} });
+          const runs = (d.runs || []).map(r => r.agent_id + "=" + r.state).join(", ");
+          const errs = (d.errors || []).join("; ");
+          this.taskMsg = "Playbook " + p.name + ": " + (runs || "no matching hosts") + (errs ? " · errors: " + errs : "");
+          this.loadTaskRuns();
+        } catch (e) { this.taskMsg = "Playbook run failed: " + e.message; } finally { this.taskBusy = ""; }
+      },
+      async loadTaskRuns() { try { const d = await this.api("/tasks/runs"); this.taskRuns = d.items || d || []; } catch (e) { this.taskRuns = []; } },
+      async showTaskRun(id) {
+        if (this.taskRunDetail && this.taskRunDetail.id === id) { this.taskRunDetail = null; return; }
+        try { this.taskRunDetail = await this.api("/tasks/runs/" + encodeURIComponent(id)); }
+        catch (e) { this.taskRunDetail = null; }
+      },
       async loadApprovals() { this.apprMsg = ""; const q = this.apprState ? "?state=" + encodeURIComponent(this.apprState) : ""; try { const d = await this.api("/approvals" + q); this.approvals = d.approvals || []; } catch (e) { this.approvals = []; } },
       async loadMcp() { try { this.mcpInfo = await this.api("/mcp/info"); } catch (e) { this.mcpInfo = null; } },
       protocolHost() { return location.protocol + '//' + location.host; },
@@ -1080,9 +1435,54 @@
           this.apprMsg = (verb === "approve" ? "Approve" : "Deny") + " failed: " + e.message;
         } finally { this.apprBusy = ""; }
       },
-      async loadServices() { try { const d = await this.api("/services" + buildQ({ label: this.svcLabel, state: this.svcState })); this.services = d.items || []; } catch (e) { this.services = []; } },
-      async loadCerts() { try { const d = await this.api("/certificates" + buildQ({ days_remaining_lt: this.certDays })); this.certs = d.items || []; } catch (e) { this.certs = []; } },
-      async loadConfigs() { try { const d = await this.api("/configs" + buildQ({ kind: this.cfgKind })); this.configs = d.items || []; } catch (e) { this.configs = []; } },
+      // --- observe pages: filters + cross-links (M7) ---
+      // Prefill page filters from the hash-route query (cross-link targets
+      // like obs/certs?host=ag_x&q=/etc/ssl/app.pem).
+      syncObserveQuery() {
+        const q = this.routeQuery;
+        if (this.page === "obs-services") {
+          if (q.host) this.svcHost = q.host;
+          if (q.name) this.svcName = q.name;
+        } else if (this.page === "obs-certs") {
+          if (q.host) this.certHost = q.host;
+          if (q.q) this.certQ = q.q;
+        } else if (this.page === "obs-configs") {
+          if (q.host) this.cfgHost = q.host;
+          if (q.kind) this.cfgKind = q.kind;
+        }
+      },
+      // A haproxy/nginx unit links to its config on the same host.
+      unitCfgLink(row) {
+        const n = row.unit.name;
+        return (n === "haproxy" || n === "nginx") ? "obs/configs?host=" + row.host_id + "&kind=" + n : "";
+      },
+      // Configs referencing this cert's path (listeners' TLS / vhost ssl_certificate).
+      certUsedBy(row) {
+        const out = [];
+        const path = row.cert.path;
+        if (!path) return out;
+        for (const c of this.certsConfigs) {
+          if (c.host_id !== row.host_id) continue;
+          if (c.haproxy) for (const l of (c.haproxy.listeners || [])) if (l.tls === path) out.push({ kind: "haproxy", label: ":" + l.port });
+          if (c.nginx) for (const v of (c.nginx.vhosts || [])) if (v.tls_cert === path) out.push({ kind: "nginx", label: v.server_name || "vhost" });
+        }
+        return out;
+      },
+      async loadServices() { try { const d = await this.api("/services" + buildQ({ label: this.svcLabel, state: this.svcState, name: this.svcName, agent_id: this.svcHost })); this.services = d.items || []; } catch (e) { this.services = []; } },
+      async loadCerts() {
+        try {
+          const d = await this.api("/certificates" + buildQ({ agent_id: this.certHost, days_remaining_lt: this.certDays }));
+          let items = d.items || [];
+          if (this.certQ) {
+            const q = this.certQ.toLowerCase();
+            items = items.filter(r => ((r.cert.subject || "").toLowerCase().includes(q) || (r.cert.path || "").toLowerCase().includes(q)));
+          }
+          this.certs = items;
+        } catch (e) { this.certs = []; }
+        // Unfiltered config inventory for the "Used by" cross-links.
+        try { const d = await this.api("/configs"); this.certsConfigs = d.items || []; } catch (e) { this.certsConfigs = []; }
+      },
+      async loadConfigs() { try { const d = await this.api("/configs" + buildQ({ agent_id: this.cfgHost, kind: this.cfgKind })); this.configs = d.items || []; } catch (e) { this.configs = []; } },
       async previewSelector() {
         this.previewLoading = true; this.preview = null;
         try { this.preview = await this.api("/hosts?selector=" + encodeURIComponent(this.exSel)); }
@@ -1129,8 +1529,19 @@
     },
     beforeUnmount() { this.stopSSE(); },
     watch: {
-      page() { this.loadPageData(); },
+      page() { if (this.page !== "session") this._destroyTerm(); this.loadPageData(); },
       p1() { if (["host", "exec", "session"].includes(this.page)) this.loadPageData(); },
+      // Same-page query change (cross-link, e.g. obs/certs → obs/certs?host=x):
+      // the page/p1 watchers don't fire, so re-sync filters and reload.
+      route(nv, ov) {
+        const pageOf = (s) => {
+          const p = String(s || "").split("?")[0].split("/").filter(Boolean);
+          return p[0] === "obs" ? "obs-" + (p[1] || "services") : (p[0] || "fleet");
+        };
+        const np = pageOf(nv), op = pageOf(ov);
+        if (np !== op || !np.startsWith("obs-")) return;
+        this.loadPageData();
+      },
     },
   });
 

@@ -113,6 +113,7 @@ type UnitFact struct {
 	RestartPolicy  string   `json:"restart_policy,omitempty"`
 	MemoryCurrent  uint64   `json:"memory_current,omitempty"`
 	CPUUsageSec    string   `json:"cpu_usage_sec,omitempty"`
+	NRestarts      int64    `json:"n_restarts,omitempty"`
 	LastExitCode   int      `json:"last_exit_code,omitempty"`
 	LastExitStatus string   `json:"last_exit_status,omitempty"`
 	Labels         []string `json:"labels,omitempty"`
@@ -200,7 +201,7 @@ func isUnitName(s string) bool {
 // unitDetail runs systemctl show for a unit and parses the key=value output.
 func unitDetail(name string) UnitFact {
 	out, err := runOutput(systemctlTimeout, "systemctl", "show", name,
-		"--property=Type,State,SubState,ActiveState,UnitFileState,Requires,RequiredBy,Wants,WantedBy,After,Before,Restart,MemoryCurrent,CPUSec,ExecMainStatus,RestartForceExitStatus")
+		"--property=Type,State,SubState,ActiveState,UnitFileState,Requires,RequiredBy,Wants,WantedBy,After,Before,Restart,MemoryCurrent,CPUSec,NRestarts,ExecMainStatus,RestartForceExitStatus")
 	if err != nil {
 		return UnitFact{Name: name}
 	}
@@ -245,6 +246,13 @@ func parseUnitShow(name, out string) UnitFact {
 			}
 		case "CPUSec":
 			f.CPUUsageSec = v
+		case "NRestarts":
+			// systemd's restart counter for the unit's main process since the
+			// unit was (re)started; feeds the service_restarting alert rule
+			// (M6.1) as a rate computed server-side across ticks.
+			if n, err := parseUint64(v); err == nil {
+				f.NRestarts = int64(n)
+			}
 		case "ExecMainStatus":
 			// The unit's last exit status. Empty for units that have never
 			// run; "[not set]" is not emitted for this property, but guard

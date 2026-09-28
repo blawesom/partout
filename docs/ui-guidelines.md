@@ -454,13 +454,16 @@ Slices follow **implementation progress**, not the mockup's ambition. Fleet-scal
 **tens of hosts** (≤ ~200). Client-side roll-up and client-side filtering are accepted at this
 scale; revisit if fleet size grows.
 
-**Implementation status (v0.5):** S0 (shell, login, capabilities, SSE) is built. Data pages are
-live for the M1–M5 backend: Fleet, Execute (with B2 selector preview + live per-host output),
-Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, Provision, Users, and the three
-Observe data pages (Services, Certificates, Configs). S4's `Approve & Apply` and S6's Active
-Alerts remain not-yet-available placeholders (M4/M4-approvals, M6). The PTY terminal (xterm.js)
-is not yet in the UI — the Sessions page lists sessions and shows replay, but live PTY input is
-deferred with `xterm.js`.
+**Implementation status (v0.7):** S0 (shell, login, capabilities, SSE) is built. Data pages are
+live for the M1–M7 backend: Fleet, Execute (with B2 selector preview + live per-host output),
+Audit, Sessions (with **live xterm.js PTY** — open/attach, input over REST, output over SSE,
+close→replay), Files, Jobs, Tasks (with **task/playbook run actions** + run inspection),
+Updates, Secrets, Policies, Approvals, MCP, Provision, Users, and the four Observe pages
+(Services, Certificates, Configs, Alerts) — the **Alerts page now includes the full rule-
+management UI** (create/edit/enable/disable/delete all rule kinds), **cert→config→service
+cross-links** are navigable, and **config drift (R22)** is surfaced as the `config_drift`
+alert rule. All slices S0–S7 are built; the only remaining mockup element is `Active Alerts`
+as a standalone `/fleet` card (the Alerts page already shows firing-now count).
 
 | Slice | Capability required (all ✅ unless marked) | Mockup elements **enabled** | Mockup elements **greyed + labeled** | Exit criteria |
 |---|---|---|---|---|
@@ -470,8 +473,8 @@ deferred with `xterm.js`.
 | **S3 — Patch (M3)** | packages, external data, EOL | host `Updates` tab, `DiffView` rendering **`dry_summary`** in the terminal frame, captioned *"simulated · summary only"*, CVE badge, Updates page | real diff text → *"not yet available"* | Dry-run renders honestly; apply is confirmed and audited |
 | **S4 — Governance (M4)** | approvals engine (**✅ shipped v0.6**) | `Held · <rule>` chips, hold banner as the **real `require_approval` denial**, Policies page, initials avatar stack, **Approvals page** (list/decide) | `Approve & Apply` (mockup flow replaced by the Approvals page) | A `require_approval` rule parks the action; admin approve/deny on the Approvals page re-dispatches with a signed decision |
 | **S5 — Observe · Facts (M5)** | fact collectors (services, configs, certs), API endpoints B6–B8 | `Services` table, `Certificates` table, `Configs` table — **✅ pages shipped v0.5** | `Active Alerts` (live since **v0.6.5** — see S6) | `GET /services`, `/certificates`, `/certificates`, `/configs` return live data from a connected agent |
-| **S6 — Observe · Alerts (M6)** | alert rules + engine (B9) ✅ shipped v0.6.5, SSE `alert.firing`/`alert.resolved` ✅ | **Alerts page** (firing-now count + firing/recently-resolved table, SSE-refreshed) ✅ | rule-management UI (stays S7/M7); `Active Alerts` on `/fleet` | A `service_failed` alert fires and appears on the Alerts page; resolving the unit resolves the alert |
-| **S7 — Observe · Pages (M7)** | all B6–B9 endpoints, `observe` capability boolean | `Services` page (table + detail + task actions), `Certificates` page (expiry timeline + chain), `Configs` page (validity + drift + topology), cross-links (cert → config → service) | — | All three pages render from real data; cross-links navigable; alert count on `/fleet` |
+| **S6 — Observe · Alerts (M6)** | alert rules + engine (B9) ✅ shipped v0.6.5, SSE `alert.firing`/`alert.resolved` ✅ | **Alerts page** (firing-now count + firing/recently-resolved table, SSE-refreshed) ✅ + **rule-management UI** ✅ (shipped S7/v0.7) | `Active Alerts` on `/fleet` | A `service_failed` alert fires and appears on the Alerts page; resolving the unit resolves the alert; rules CRUD from the browser |
+| **S7 — Observe · Pages (M7)** | all B6–B9 endpoints, `observe` capability boolean | `Services` page (table + detail + cross-links + `NRestarts`), `Certificates` page (expiry + chain + **Used-by** cross-links), `Configs` page (validity + **drift** + topology + cross-links), **live PTY**, **task actions**, **alert rule-management** | — | All pages render from real data; cross-links navigable; rule CRUD from the browser; live PTY round-trips (verified by `scripts/pty-e2e.py`) |
 
 Sequencing rule: the visual vocabulary (`StatCard`, `AlertRow`, `TerminalFrame`,
 `StreamConsole`, `Chip`, `Tabs`, `DiffView`) is built in S0/S1 and reused; S5–S7 add
@@ -510,7 +513,7 @@ tags/labels API (dropped).
 - **Labels/tags** — dropped; the `host_tags` table has no writers. `tag:`/`role:` selector
   predicates are not surfaced in the UI until a tag store exists.
 - **Active Alerts** — M6 (R25); `internal/server/observe` is empty. Alert rules, evaluation, firing/resolved states.
-- **Observe UI pages (Services, Certificates, Configs)** — M7 (R24); three sub-pages with cross-links and drift comparison. Cross-fact correlation (R21) and drift detection (R22) rendered here.
+- **Cross-fact correlation (R21)** — cert→config→service cross-links are rendered (S7); full automated correlation analytics remain deferred.
 - **Approvals engine** — M4; `require_approval` behaves as deny today.
 - **Real diffs** — B5.
 - **Dark theme** — tokens defined, not built.

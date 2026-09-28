@@ -101,6 +101,35 @@ func TestAlertsRulesCRUD(t *testing.T) {
 	}
 }
 
+// TestAlertsRuleKinds: all five rule kinds are accepted by the API (M6.1 + M7
+// added service_restarting and config_drift); unknown kinds stay 400.
+func TestAlertsRuleKinds(t *testing.T) {
+	_, _, srv := startAPITest(t)
+	defer srv.Close()
+	for _, kind := range []string{"service_failed", "service_restarting", "cert_expiring", "config_invalid", "config_drift"} {
+		resp, err := http.Post(srv.URL+"/api/v1/alerts/rules", "application/json",
+			strings.NewReader(`{"name":"k","kind":"`+kind+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("kind %s: %d, want 201", kind, resp.StatusCode)
+		}
+	}
+	resp, err := http.Post(srv.URL+"/api/v1/alerts/rules", "application/json",
+		strings.NewReader(`{"name":"k","kind":"endpoint_down"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown kind: %d, want 400", resp.StatusCode)
+	}
+}
+
 // TestAlertsE2EFiresAndResolvesViaSSE: seed a failing service fact, tick the
 // engine, verify the alert is listed and SSE emitted alert.firing; then
 // recovery → alert.resolved.

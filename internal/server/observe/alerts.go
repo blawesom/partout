@@ -8,8 +8,10 @@ package observe
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,12 +23,13 @@ import (
 // DefaultTick is the evaluation cadence (PARTOUT_ALERT_TICK_S).
 const DefaultTick = 30 * time.Second
 
-// Supported rule kinds (M6). service_restarting is M6.1 (needs a restart
-// counter fact the agent doesn't collect yet).
+// Supported rule kinds (M6 + M6.1).
 const (
-	KindServiceFailed = "service_failed"
-	KindCertExpiring  = "cert_expiring"
-	KindConfigInvalid = "config_invalid"
+	KindServiceFailed     = "service_failed"
+	KindServiceRestarting = "service_restarting" // M6.1 (NRestarts rate)
+	KindCertExpiring      = "cert_expiring"
+	KindConfigInvalid     = "config_invalid"
+	KindConfigDrift       = "config_drift" // M7: cross-host hash divergence
 )
 
 // Controller evaluates alert rules on a tick.
@@ -40,8 +43,21 @@ type Controller struct {
 	wg   sync.WaitGroup
 
 	mu          sync.Mutex
-	firstFailed map[string]time.Time // "agentID|unit" -> first time observed failed
+	firstFailed map[string]time.Time   // "agentID|unit" -> first time observed failed
+	restartSamp map[string]restartSamp // "agentID|unit" -> last (count, time) sample
+	now         func() time.Time       // injectable clock (tests)
 }
+
+// restartSamp is one sample of a unit's systemd NRestarts counter, used to
+// compute the restart rate over the window since the previous sample.
+type restartSamp struct {
+	count int64
+	at    time.Time
+}
+
+// minRateWindow bounds how short the sample window may be before a restart
+// rate is computed (avoids divide-by-near-zero on back-to-back ticks).
+const minRateWindow = 30 * time.Second
 
 // New builds the controller. tick <= 0 → DefaultTick.
 func New(st *store.Store, sseB *sse.Broker, lg *log.Logger, tick time.Duration) *Controller {
@@ -52,6 +68,8 @@ func New(st *store.Store, sseB *sse.Broker, lg *log.Logger, tick time.Duration) 
 		st: st, sse: sseB, log: lg, tick: tick,
 		stop:        make(chan struct{}),
 		firstFailed: make(map[string]time.Time),
+		restartSamp: make(map[string]restartSamp),
+		now:         time.Now,
 	}
 }
 
@@ -130,7 +148,12 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 	res.Hosts = len(docs)
 
 	resolver := store.NewResolver(c.st)
-	now := time.Now()
+	now := c.now()
+
+	// Restart rates are a property of the host facts, not of any rule: sample
+	// once per tick (advancing each counter once) so multiple service_restarting
+	// rules all see the same window instead of the first rule consuming it.
+	restartRates := c.sampleRestartRates(docs, now)
 
 	for _, r := range enabled {
 		hosts, err := c.resolveHosts(resolver, r.Selector)
@@ -144,12 +167,19 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 		case KindServiceFailed:
 			res.Fired += c.evalServiceFailed(r, hosts, docs, now)
 			res.Resolved += c.resolveServiceFailed(r, hosts, docs)
+		case KindServiceRestarting:
+			res.Fired += c.fireRestarting(r, hosts, restartRates)
+			res.Resolved += c.resolveByDedupDiff(r, hosts, c.hotRestartKeys(r, hosts, restartRates))
 		case KindCertExpiring:
 			res.Fired += c.evalCertExpiring(r, hosts, docs)
 			res.Resolved += c.resolveByDedupDiff(r, hosts, c.certConditionKeys(r, docs))
 		case KindConfigInvalid:
 			res.Fired += c.evalConfigInvalid(r, hosts, docs)
 			res.Resolved += c.resolveByDedupDiff(r, hosts, c.configConditionKeys(r, docs))
+		case KindConfigDrift:
+			hits := c.driftHits(r, hosts, docs)
+			res.Fired += c.fireDrift(r, hits)
+			res.Resolved += c.resolveByDedupDiff(r, hosts, c.driftConditionKeys(r, hits))
 		default:
 			if c.log != nil {
 				c.log.Printf("observe/alerts: rule %s: unsupported kind %q (skipped)", r.ID, r.Kind)
@@ -348,6 +378,201 @@ func (c *Controller) evalConfigInvalid(r *store.AlertRule, hosts []string, docs 
 		}
 	}
 	return fired
+}
+
+// --- service_restarting (M6.1: restart rate over the NRestarts counter) ---
+
+func (c *Controller) restartRateThresh(r *store.AlertRule) float64 {
+	return float64(thresholdInt(r, "service_restart_rate_per_hour", 10))
+}
+
+// sampleRestartRates advances the per-unit restart-counter samples for every
+// host with service facts and returns the restart rate (restarts/hour) for
+// every unit with a usable window. First sighting of a unit only establishes
+// a baseline (no rate); the sample advances once the window since the
+// previous sample reaches minRateWindow. A counter reset (NRestarts dropped
+// — the unit was stopped/restarted) folds into the new count. The engine's
+// in-memory baseline is lost on a server restart; the first post-restart
+// tick re-baselines silently.
+//
+// Returns map "agentID|unit" -> rate.
+func (c *Controller) sampleRestartRates(docs map[string]*Document, now time.Time) map[string]float64 {
+	out := make(map[string]float64)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for agID, doc := range docs {
+		sf := doc.Services()
+		if sf == nil {
+			continue
+		}
+		for _, u := range sf.Units {
+			key := agID + "|" + u.Name
+			prev, ok := c.restartSamp[key]
+			if !ok {
+				c.restartSamp[key] = restartSamp{count: u.NRestarts, at: now}
+				continue
+			}
+			elapsed := now.Sub(prev.at)
+			if elapsed < minRateWindow {
+				continue // keep the baseline; the window widens over ticks
+			}
+			delta := u.NRestarts - prev.count
+			if delta < 0 {
+				delta = u.NRestarts // counter reset (unit stop/restart)
+			}
+			out[key] = float64(delta) / elapsed.Hours()
+			c.restartSamp[key] = restartSamp{count: u.NRestarts, at: now}
+		}
+	}
+	return out
+}
+
+// fireRestarting fires one alert per unit whose restart rate meets the
+// rule's threshold (dedup subject = unit, like service_failed). Only units
+// on the rule's selector hosts fire.
+func (c *Controller) fireRestarting(r *store.AlertRule, hosts []string, rates map[string]float64) int {
+	hostSet := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		hostSet[h] = true
+	}
+	thresh := c.restartRateThresh(r)
+	fired := 0
+	for key, rate := range rates {
+		if rate < thresh {
+			continue
+		}
+		parts := strings.SplitN(key, "|", 2)
+		agID, unit := parts[0], parts[1]
+		if !hostSet[agID] {
+			continue
+		}
+		if c.fire(r, agID, r.ID+"|"+key,
+			fmt.Sprintf("unit %s restarting on host (%.0f restarts/hour, threshold %.0f/hour)", unit, rate, thresh)) {
+			fired++
+		}
+	}
+	return fired
+}
+
+// hotRestartKeys returns the dedup keys of the rule's hosts' units currently
+// over threshold — the condition set for resolveByDedupDiff (a sub-threshold
+// tick resolves).
+func (c *Controller) hotRestartKeys(r *store.AlertRule, hosts []string, rates map[string]float64) map[string]struct{} {
+	hostSet := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		hostSet[h] = true
+	}
+	thresh := c.restartRateThresh(r)
+	out := make(map[string]struct{})
+	for key, rate := range rates {
+		if rate < thresh {
+			continue
+		}
+		if !hostSet[strings.SplitN(key, "|", 2)[0]] {
+			continue
+		}
+		out[r.ID+"|"+key] = struct{}{}
+	}
+	return out
+}
+
+// --- config_drift (M7, R22: cross-host config hash divergence) ---
+
+// driftHit is one host whose config hash diverges from the fleet majority.
+type driftHit struct {
+	agID, kind, sha, majority string
+}
+
+// driftHits reports, per kind (haproxy/nginx), the hosts on the rule's
+// selector whose config_sha256 differs from the majority hash. The majority
+// is the most frequent non-empty hash (ties break lexicographically for
+// determinism). Divergence is only flagged when the number of distinct
+// hashes exceeds 1 + config_drift_tolerance (default 0 = any divergence).
+func (c *Controller) driftHits(r *store.AlertRule, hosts []string, docs map[string]*Document) []driftHit {
+	hostSet := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		hostSet[h] = true
+	}
+	tol := int(thresholdInt(r, "config_drift_tolerance", 0))
+	// perKind[kind][host] = sha; count[kind][sha] = hosts with that sha
+	perKind := make(map[string]map[string]string)
+	count := make(map[string]map[string]int)
+	for agID, doc := range docs {
+		if !hostSet[agID] {
+			continue
+		}
+		cf := doc.Configs()
+		if cf == nil {
+			continue
+		}
+		if cf.HAProxy != nil && cf.HAProxy.Present && cf.HAProxy.ConfigSHA256 != "" {
+			addDriftHash(perKind, count, "haproxy", agID, cf.HAProxy.ConfigSHA256)
+		}
+		if cf.Nginx != nil && cf.Nginx.Present && cf.Nginx.ConfigSHA256 != "" {
+			addDriftHash(perKind, count, "nginx", agID, cf.Nginx.ConfigSHA256)
+		}
+	}
+	var hits []driftHit
+	for kind, perHost := range perKind {
+		if len(count[kind]) <= 1+tol {
+			continue // no divergence beyond tolerance
+		}
+		majority := majorityHash(count[kind])
+		for agID, sha := range perHost {
+			if sha != majority {
+				hits = append(hits, driftHit{agID: agID, kind: kind, sha: sha, majority: majority})
+			}
+		}
+	}
+	return hits
+}
+
+func addDriftHash(perKind map[string]map[string]string, count map[string]map[string]int, kind, agID, sha string) {
+	if perKind[kind] == nil {
+		perKind[kind] = make(map[string]string)
+		count[kind] = make(map[string]int)
+	}
+	perKind[kind][agID] = sha
+	count[kind][sha]++
+}
+
+// majorityHash: most frequent; ties break on the lexicographically smallest
+// hash (deterministic across ticks).
+func majorityHash(byHash map[string]int) string {
+	best := ""
+	for h, n := range byHash {
+		if best == "" || n > byHash[best] || (n == byHash[best] && h < best) {
+			best = h
+		}
+	}
+	return best
+}
+
+func (c *Controller) fireDrift(r *store.AlertRule, hits []driftHit) int {
+	fired := 0
+	for _, h := range hits {
+		if c.fire(r, h.agID, r.ID+"|"+h.agID+"|"+h.kind+"|"+h.sha,
+			fmt.Sprintf("%s config diverges from fleet majority on %s (sha256 %s… vs %s…)",
+				h.kind, h.agID, shortHash(h.sha), shortHash(h.majority))) {
+			fired++
+		}
+	}
+	return fired
+}
+
+func (c *Controller) driftConditionKeys(r *store.AlertRule, hits []driftHit) map[string]struct{} {
+	out := make(map[string]struct{}, len(hits))
+	for _, h := range hits {
+		out[r.ID+"|"+h.agID+"|"+h.kind+"|"+h.sha] = struct{}{}
+	}
+	return out
+}
+
+func shortHash(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 // --- shared fire/resolve ---

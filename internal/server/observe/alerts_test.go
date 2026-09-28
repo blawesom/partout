@@ -3,6 +3,7 @@ package observe
 
 import (
 	"log"
+	"strconv"
 	"testing"
 	"time"
 
@@ -254,5 +255,181 @@ func TestMissingFactsFailSoft(t *testing.T) {
 	res, _ = c.EvaluateOnce()
 	if res.Fired != 0 || res.Resolved != 0 {
 		t.Fatalf("no-change tick: %+v, want 0/0", res)
+	}
+}
+
+// restartFacts builds a services document for one unit with a given
+// NRestarts counter value.
+func restartFacts(count int) string {
+	return `{"services_detailed":{"units":[{"name":"crashy","state":"active","sub_state":"running","n_restarts":` +
+		strconv.Itoa(count) + `}]}}`
+}
+
+// TestServiceRestartingFireResolve (M6.1): baseline → crash loop fires at
+// ≥ threshold → dedup → stability resolves → counter reset folds in.
+func TestServiceRestartingFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	makeRule(t, st, KindServiceRestarting, "all", `{"service_restart_rate_per_hour":10}`, "warning", true)
+
+	// Tick 1: baseline sample only — no rate yet, nothing fires.
+	seedHost(t, st, "ag_1", restartFacts(100))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 || res.Resolved != 0 {
+		t.Fatalf("baseline tick: %+v, want 0/0", res)
+	}
+
+	// Tick 2: 10 min later, 10 more restarts = 60/hour ≥ 10 → fires.
+	now = now.Add(10 * time.Minute)
+	seedHost(t, st, "ag_1", restartFacts(110))
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("crash tick: %+v, want 1 fired", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 || alerts[0].Kind != KindServiceRestarting {
+		t.Fatalf("firing alerts: %+v", alerts)
+	}
+
+	// Tick 3: still crashing (60/hour) → dedup, no new row.
+	now = now.Add(10 * time.Minute)
+	seedHost(t, st, "ag_1", restartFacts(120))
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 || res.Resolved != 0 {
+		t.Fatalf("dedup tick: %+v, want 0/0", res)
+	}
+
+	// Tick 4: stable (0 new restarts) → rate below threshold → resolves.
+	now = now.Add(10 * time.Minute)
+	seedHost(t, st, "ag_1", restartFacts(120))
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 || res.Resolved != 1 {
+		t.Fatalf("stable tick: %+v, want 1 resolved", res)
+	}
+
+	// Counter reset: systemd resets NRestarts when the unit is (re)started.
+	// 120 → 10 is a drop; the engine must fold it (delta = 10, not -110)
+	// and re-fire at a high folded rate.
+	now = now.Add(10 * time.Minute)
+	seedHost(t, st, "ag_1", restartFacts(10))
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("reset tick: %+v, want 1 fired (folded delta)", res)
+	}
+}
+
+// TestServiceRestartingMultipleRules: two service_restarting rules on the
+// same unit both see the same per-tick rate (sampling once per tick, not
+// per rule — the first rule must not consume the window).
+func TestServiceRestartingMultipleRules(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	ruA := &store.AlertRule{ID: "rule_a", Name: "a", Kind: KindServiceRestarting, Selector: "all",
+		Thresholds: `{"service_restart_rate_per_hour":10}`, Severity: "warning", Enabled: true}
+	ruB := &store.AlertRule{ID: "rule_b", Name: "b", Kind: KindServiceRestarting, Selector: "all",
+		Thresholds: `{"service_restart_rate_per_hour":10}`, Severity: "info", Enabled: true}
+	for _, ru := range []*store.AlertRule{ruA, ruB} {
+		if err := st.CreateAlertRule(ru); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seedHost(t, st, "ag_1", restartFacts(100))
+	c.EvaluateOnce() // baseline
+
+	now = now.Add(10 * time.Minute)
+	seedHost(t, st, "ag_1", restartFacts(110))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 2 {
+		t.Fatalf("two-rule tick: %+v, want 2 fired (one per rule)", res)
+	}
+}
+
+// TestServiceRestartingSlowRate: 2 restarts in 30 minutes = 4/hour, below
+// the 10/hour threshold — never fires.
+func TestServiceRestartingSlowRate(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	makeRule(t, st, KindServiceRestarting, "all", `{"service_restart_rate_per_hour":10}`, "warning", true)
+
+	seedHost(t, st, "ag_1", restartFacts(0))
+	c.EvaluateOnce() // baseline
+
+	now = now.Add(30 * time.Minute)
+	seedHost(t, st, "ag_1", restartFacts(2))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("slow restart tick: %+v, want 0 fired (4/h < 10/h)", res)
+	}
+}
+
+// TestConfigDriftFireResolve (M7/R22): identical configs → no alert; one
+// host diverges → alert on the minority host; it converges → resolved.
+func TestConfigDriftFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	cfg := func(sha string) string {
+		return `{"configs":{"haproxy":{"present":true,"config_valid":true,"config_file":"/etc/haproxy/haproxy.cfg","config_sha256":"` + sha + `"}}}`
+	}
+	seedHost(t, st, "ag_1", cfg("aaaa"))
+	seedHost(t, st, "ag_2", cfg("aaaa"))
+	makeRule(t, st, KindConfigDrift, "all", `{"config_drift_tolerance":0}`, "info", true)
+
+	// Consistent fleet: no divergence.
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("consistent tick: %+v, want 0 fired", res)
+	}
+
+	// ag_2 diverges: the minority host gets the alert.
+	seedHost(t, st, "ag_2", cfg("bbbb"))
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("drift tick: %+v, want 1 fired", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 || alerts[0].AgentID != "ag_2" {
+		t.Fatalf("drift alerts: %+v, want ag_2 flagged", alerts)
+	}
+
+	// Re-evaluate the same state: no churn.
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 || res.Resolved != 0 {
+		t.Fatalf("drift dedup tick: %+v, want 0/0", res)
+	}
+
+	// Converged: resolves.
+	seedHost(t, st, "ag_2", cfg("aaaa"))
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 || res.Resolved != 1 {
+		t.Fatalf("converge tick: %+v, want 1 resolved", res)
+	}
+}
+
+// TestConfigDriftTolerance: with tolerance 1, two distinct hashes (each on
+// one host) do not fire; three distinct hashes do.
+func TestConfigDriftTolerance(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	cfg := func(sha string) string {
+		return `{"configs":{"nginx":{"present":true,"config_valid":true,"config_file":"/etc/nginx/nginx.conf","config_sha256":"` + sha + `"}}}`
+	}
+	seedHost(t, st, "ag_1", cfg("h1"))
+	seedHost(t, st, "ag_2", cfg("h2"))
+	makeRule(t, st, KindConfigDrift, "all", `{"config_drift_tolerance":1}`, "info", true)
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("tolerance tick: %+v, want 0 fired (2 distinct ≤ 1+1)", res)
+	}
+
+	seedHost(t, st, "ag_3", cfg("h3")) // 3 distinct > 1+1
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 2 {
+		t.Fatalf("third-hash tick: %+v, want 2 fired (the two non-majority hosts)", res)
 	}
 }

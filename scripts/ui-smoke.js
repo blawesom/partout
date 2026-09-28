@@ -89,6 +89,8 @@ async function main() {
   check("tasks: name", rowsWithText(d, "check disk") > 0, "task name missing");
   check("tasks: description", rowsWithText(d, "df -h") > 0, "task description missing");
   check("tasks: playbooks card", d.body.textContent.includes("Playbooks"));
+  check("tasks: run action", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Run")), "no Run button");
+  check("tasks: recent runs card", d.body.textContent.includes("Recent task runs"), "runs card missing");
 
   await visit("#/updates", 1800);
   check("updates renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Updates"));
@@ -122,14 +124,26 @@ async function main() {
   check("observe services: real unit",
     [...d.querySelectorAll("table.tbl tr")].some((tr) => /\.service|acme-serve|ssh|snap/.test(tr.textContent)),
     "no service rows");
+  check("observe services: restarts column", d.body.textContent.includes("Restarts"), "no Restarts column");
   await visit("#/obs-certs", 1600);
   check("observe certs: real cert",
     [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("CN =")), "no cert rows");
+  check("observe certs: used-by column", d.body.textContent.includes("Used by"), "no Used by column");
   await visit("#/obs-configs", 1600);
   check("observe configs renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Configs"));
   await visit("#/obs-alerts");
   check("observe alerts: live card (engine wired)", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Alerts") && d.body.textContent.includes("Firing now:"), "alerts card missing");
   check("observe alerts: empty state honest", d.body.textContent.includes("No alerts"), "no empty-state text");
+  check("observe alerts: rules card", d.body.textContent.includes("Rules"), "rules card missing");
+  check("observe alerts: seeded rule row", rowsWithText(d, "web restart loop") > 0, "rule row missing");
+  check("observe alerts: M6.1 kind chip", rowsWithText(d, "service_restarting") > 0, "kind missing");
+  check("observe alerts: new rule button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("New rule")), "no New rule button");
+  const newRuleBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("New rule"));
+  if (newRuleBtn) newRuleBtn.click();
+  await sleep(300);
+  check("observe alerts: rule form opens (kind select)",
+    [...d.querySelectorAll("select option")].some((o) => o.value === "service_restarting"), "form kind select missing");
+  check("observe alerts: drift kind option", [...d.querySelectorAll("select option")].some((o) => o.value === "config_drift"), "no config_drift option");
 
   await visit("#/account");
   check("account renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Account"));

@@ -102,6 +102,7 @@ func TestParseUnitShowLastExitCode(t *testing.T) {
 		"After=network-online.target basic.target",
 		"MemoryCurrent=45678901",
 		"CPUSec=12.345",
+		"NRestarts=42",
 	}, "\n"))
 
 	if f.LastExitCode != 3 {
@@ -124,6 +125,9 @@ func TestParseUnitShowLastExitCode(t *testing.T) {
 	}
 	if f.MemoryCurrent != 45678901 {
 		t.Errorf("MemoryCurrent = %d, want 45678901", f.MemoryCurrent)
+	}
+	if f.NRestarts != 42 {
+		t.Errorf("NRestarts = %d, want 42", f.NRestarts)
 	}
 	if f.CPUUsageSec != "12.345" {
 		t.Errorf("CPUUsageSec = %q, want 12.345", f.CPUUsageSec)

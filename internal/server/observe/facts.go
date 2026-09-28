@@ -140,6 +140,7 @@ type UnitFact struct {
 	RestartPolicy  string   `json:"restart_policy,omitempty"`
 	MemoryCurrent  uint64   `json:"memory_current,omitempty"`
 	CPUUsageSec    string   `json:"cpu_usage_sec,omitempty"`
+	NRestarts      int64    `json:"n_restarts,omitempty"`
 	LastExitCode   int      `json:"last_exit_code,omitempty"`
 	LastExitStatus string   `json:"last_exit_status,omitempty"`
 	Labels         []string `json:"labels,omitempty"`

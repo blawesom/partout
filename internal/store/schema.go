@@ -441,10 +441,11 @@ CREATE TABLE IF NOT EXISTS alert_rules (
   id         TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
   kind       TEXT NOT NULL,
-               -- service_failed | cert_expiring | config_invalid (service_restarting: M6.1)
+               -- service_failed | service_restarting | cert_expiring | config_invalid | config_drift
   selector   TEXT NOT NULL DEFAULT 'all',
   thresholds TEXT NOT NULL DEFAULT '{}',
-               -- JSON: {"service_failed_minutes":0|5}, {"cert_days_remaining":30}, {"config_invalid":true}
+               -- JSON: {"service_failed_minutes":0|5}, {"service_restart_rate_per_hour":10},
+               --       {"cert_days_remaining":30}, {"config_drift_tolerance":0}
   severity   TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('info','warning','critical')),
   enabled    INTEGER NOT NULL DEFAULT 1,
   created_by TEXT,
