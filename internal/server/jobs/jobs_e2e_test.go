@@ -328,3 +328,64 @@ func TestControllerOnRunResult(t *testing.T) {
 		t.Fatalf("bad assignment: %+v", assignments)
 	}
 }
+
+// TestOnRunResultRebootResume verifies the PRD §5.5 handshake on the server
+// side: a `rebooting` report creates the run row, and the post-reboot
+// `resume` report (same run id) finalizes that row in place instead of
+// inserting a duplicate.
+func TestOnRunResultRebootResume(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.CreateTask(&store.Task{ID: "task_test", Name: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateJob(&store.Job{
+		ID: "job_test", Name: "test", TaskID: "task_test", TaskVersion: 1,
+		Cron: "* * * * *", Selector: "all",
+	}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if err := st.AssignJob(&store.JobAssignment{JobID: "job_test", AgentID: "ag_test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := jobs.New(st, nil, sse.New(), log.New(io.Discard, "jobs:", 0))
+
+	// 1. The run pauses at a reboot step: the agent reports `rebooting`.
+	ctrl.OnRunResult("ag_test", &pb.JobRunResult{
+		RunId: "jr_reboot_1", JobId: "job_test", State: "rebooting",
+		ScheduledAt: 100, Trigger: "cron",
+	})
+	run, _ := st.GetJobRun("jr_reboot_1")
+	if run == nil || run.State != "rebooting" {
+		t.Fatalf("after rebooting report: %+v", run)
+	}
+
+	// 2. The host reboots; the agent resumes the remaining steps and reports
+	// the final state under the same run id.
+	ctrl.OnRunResult("ag_test", &pb.JobRunResult{
+		RunId: "jr_reboot_1", JobId: "job_test", State: "succeeded",
+		ScheduledAt: 100, StartedAt: 101, FinishedAt: 102, Trigger: "resume",
+	})
+	run, _ = st.GetJobRun("jr_reboot_1")
+	if run == nil || run.State != "succeeded" {
+		t.Fatalf("after resume report: %+v", run)
+	}
+
+	// Exactly one run row (no duplicate insert).
+	runs, err := st.JobRunsForJob("job_test", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("listed %d runs, want 1: %+v", len(runs), runs)
+	}
+	// Lineage survived the finalize.
+	if run.TaskID != "task_test" || run.TaskVersion != 1 {
+		t.Fatalf("task lineage lost: %+v", run)
+	}
+}

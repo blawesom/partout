@@ -14,10 +14,17 @@
 package selector
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 )
+
+// ErrNoMatch is returned (wrapped) when a selector matches zero hosts.
+// Callers that can meaningfully operate on an empty set (e.g. a jobs
+// selector edit that drops every host) check with errors.Is; callers that
+// need at least one target treat it as a hard error.
+var ErrNoMatch = errors.New("selector: no hosts matched")
 
 // PredicateKind identifies the type of a selector predicate.
 type PredicateKind int
@@ -128,7 +135,7 @@ func Resolve(expr string, r Resolver, groups Groups) ([]HostInfo, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	if len(result) == 0 {
-		return nil, fmt.Errorf("selector: %q resolved to no hosts", expr)
+		return nil, fmt.Errorf("selector: %q resolved to no hosts: %w", expr, ErrNoMatch)
 	}
 	return result, nil
 }

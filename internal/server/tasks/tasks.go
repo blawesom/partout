@@ -159,6 +159,33 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 	return action, nil
 }
 
+// OnLateResult records a task run result that arrived without a live
+// waiter: typically a post-reboot resume of a run whose original dispatch
+// already timed out (PRD §5.5). It finalizes the existing row in place and
+// records the reported steps. A no-op when the run id is unknown.
+func (c *Controller) OnLateResult(agentID, runID string, tr *pb.TaskRunResult) {
+	run, err := c.st.TaskRun(runID)
+	if err != nil || run == nil {
+		return // unknown run: nothing to finalize
+	}
+	for _, sr := range tr.GetSteps() {
+		_ = c.st.RecordTaskRunStep(&store.TaskRunStep{
+			RunID: runID, StepIdx: int(sr.GetStepIndex()),
+			Kind: "unknown", State: sr.GetState(), Detail: sr.GetDetail(),
+			Started: sr.GetStarted(), Finished: sr.GetFinished(),
+		})
+	}
+	status := "succeeded"
+	errMsg := ""
+	if tr.GetState() != "succeeded" {
+		status = tr.GetState()
+		errMsg = tr.GetError()
+	}
+	_ = c.st.FinalizeTaskRun(runID, status, errMsg, 0)
+	c.log.Printf("tasks: late result for %s (agent %s): %s %s", runID, agentID, status, errMsg)
+	c.audit(agentID, runID, Actor{Principal: "agent", Role: "agent"}, status, 0, "")
+}
+
 // GetRun returns one task run by ID.
 func (c *Controller) GetRun(id string) (*store.TaskRun, error) {
 	return c.st.TaskRun(id)

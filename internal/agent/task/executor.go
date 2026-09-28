@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -23,17 +24,88 @@ type Executor struct {
 	// secrets resolves a secret ref to its plaintext value.
 	secrets    func(ref string, version int64) (string, error)
 	fileExists func(path string) bool
+	// rebootFlush is the grace period before the reboot command fires, so
+	// the "rebooting" report can flush up the stream (default 5 s).
+	rebootFlush time.Duration
+	// rebootCmd performs the reboot (default: systemctl reboot →
+	// shutdown -r now → reboot). Injectable for tests.
+	rebootCmd func() error
 }
 
 // NewExecutor builds an executor.
 func NewExecutor(secrets func(ref string, version int64) (string, error)) *Executor {
+	flush := 5 * time.Second
+	if v := os.Getenv("PARTOUT_REBOOT_FLUSH_S"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			flush = time.Duration(n) * time.Second
+		}
+	}
 	return &Executor{
 		secrets: secrets,
 		fileExists: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
 		},
+		rebootFlush: flush,
+		rebootCmd:   defaultReboot,
 	}
+}
+
+// SetRebootFlush overrides the pre-reboot grace period (tests use 0).
+func (e *Executor) SetRebootFlush(d time.Duration) {
+	e.mu.Lock()
+	e.rebootFlush = d
+	e.mu.Unlock()
+}
+
+// SetRebootCmd overrides the reboot command (tests use a fake).
+func (e *Executor) SetRebootCmd(fn func() error) {
+	e.mu.Lock()
+	e.rebootCmd = fn
+	e.mu.Unlock()
+}
+
+// DoReboot performs the reboot half of the reboot-step handshake: a short
+// grace period so the "rebooting" report flushes up the stream, then the
+// reboot command. Returns (changed, detail) on success — the host goes
+// down and the caller should stop the run as `rebooting` — or
+// (failed, detail) if no reboot command could run (the host stays up; the
+// caller reports the run failed and discards the resume marker).
+func (e *Executor) DoReboot(ctx context.Context) (string, string) {
+	e.mu.RLock()
+	flush, cmd := e.rebootFlush, e.rebootCmd
+	e.mu.RUnlock()
+	if flush > 0 {
+		select {
+		case <-time.After(flush):
+		case <-ctx.Done():
+			return StateFailed, "reboot cancelled before command: " + ctx.Err().Error()
+		}
+	}
+	if err := cmd(); err != nil {
+		return StateFailed, err.Error()
+	}
+	return StateChanged, "reboot initiated; resuming after boot"
+}
+
+// defaultReboot tries the usual reboot entry points in order. The agent
+// runs unprivileged (systemd unit), so this only works when the agent user
+// has reboot permission (root, sudo, or polkit).
+func defaultReboot() error {
+	cmds := [][]string{
+		{"systemctl", "reboot"},
+		{"shutdown", "-r", "now"},
+		{"reboot"},
+	}
+	var lastErr error
+	for _, c := range cmds {
+		if out, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err == nil {
+			return nil
+		} else {
+			lastErr = fmt.Errorf("%s: %s", strings.Join(c, " "), truncate(string(out), 200))
+		}
+	}
+	return fmt.Errorf("reboot command failed (agent needs reboot permission, e.g. run as root or grant sudo/polkit): %v", lastErr)
 }
 
 // SetFacts installs the live fact map (updated on each facts batch).
@@ -101,7 +173,10 @@ func (e *Executor) doStep(ctx context.Context, step *pb.TaskStep) (string, strin
 	case "assert":
 		return e.doAssert(step)
 	case "reboot":
-		return StateChanged, "reboot requested"
+		// Reboot steps are orchestrated by the Runner (resume marker first,
+		// then the reboot command). Reaching here means the runner wiring
+		// is missing — fail closed rather than rebooting without a marker.
+		return StateFailed, "reboot step must be run via the task Runner (marker hook missing)"
 	default:
 		return StateFailed, fmt.Sprintf("unknown kind: %s", step.GetKind())
 	}

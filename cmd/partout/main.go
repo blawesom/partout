@@ -245,6 +245,11 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	h.JobRunResultHook = func(agentID string, r *pb.JobRunResult) {
 		jobC.OnRunResult(agentID, r)
 	}
+	// Post-reboot task resumes: a TaskRunResult with no live waiter
+	// finalizes the existing run row in place (PRD §5.5).
+	h.TaskResultHook = func(agentID, runID string, tr *pb.TaskRunResult) {
+		taskC.OnLateResult(agentID, runID, tr)
+	}
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)
 	apiH.SetSessions(sm)

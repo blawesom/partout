@@ -383,10 +383,11 @@ func TestJobRunNowAllowedDispatchesSignedDecision(t *testing.T) {
 	}
 }
 
-// TestJobUpdateNoMatchingSelectorRejected verifies a selector that resolves to
-// no hosts is rejected outright by the policy gate (pre-existing resolver
-// semantics), leaving existing assignments untouched.
-func TestJobUpdateNoMatchingSelectorRejected(t *testing.T) {
+// TestJobUpdateNoMatchingSelectorClearsAssignments verifies (PRD §5.4
+// acceptance) that editing a job's selector to one matching no hosts is a
+// valid save: reconciliation drops every remaining assignment so the job
+// targets no host (the job row itself stays for re-targeting).
+func TestJobUpdateNoMatchingSelectorClearsAssignments(t *testing.T) {
 	harness := newJobPolicyHarness(t)
 	defer harness.cleanup()
 	harness.seedTask(t)
@@ -407,12 +408,16 @@ func TestJobUpdateNoMatchingSelectorRejected(t *testing.T) {
 	if _, err := harness.ctrl.Update(context.Background(), job.ID, jobs.Job{
 		Name: "cron job", TaskID: "task_test",
 		Cron: "* * * * *", Selector: "role:does-not-exist",
-	}, jobs.Actor{Principal: "admin", Role: "admin"}); err == nil {
-		t.Fatal("Update to a selector matching no hosts: expected an error")
+	}, jobs.Actor{Principal: "admin", Role: "admin"}); err != nil {
+		t.Fatalf("Update to a zero-match selector: %v (want success, assignments cleared)", err)
 	}
-	// The rejected update must not have dropped the existing assignment.
-	if n := len(mustAssignments(t, harness, job.ID)); n != 1 {
-		t.Fatalf("assignments after rejected update = %d, want 1", n)
+	// The update reconciles: every previous assignment is dropped.
+	if n := len(mustAssignments(t, harness, job.ID)); n != 0 {
+		t.Fatalf("assignments after zero-match update = %d, want 0", n)
+	}
+	// The job row survives (operator can re-target it).
+	if got, err := harness.ctrl.Get(job.ID); err != nil || got == nil {
+		t.Fatalf("job row should survive: %v", err)
 	}
 }
 

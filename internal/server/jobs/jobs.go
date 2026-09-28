@@ -16,6 +16,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	sel "github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -105,10 +107,14 @@ func (c *Controller) Create(ctx context.Context, spec Job, actor Actor) (*store.
 	jobID := id.New("job")
 	// Policy gate BEFORE persisting: every host the selector matches must
 	// be allowed to run task.run. A denied host rejects the whole write
-	// (fail closed; no orphan job row, nothing assigned).
+	// (fail closed; no orphan job row, nothing assigned). A create whose
+	// selector matches no host is rejected up front (user error).
 	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role)
 	if err != nil {
 		return nil, err
+	}
+	if len(decisions) == 0 {
+		return nil, fmt.Errorf("jobs: selector %q matched no hosts", spec.Selector)
 	}
 
 	job := &store.Job{
@@ -234,12 +240,14 @@ func (c *Controller) Delete(ctx context.Context, jobID string) error {
 // resolveAndPush resolves the selector to concrete agents and pushes a
 // per-host schedule to each (with the pre-gated signed Decision per host).
 // Records the selector snapshot on each assignment and returns the set of
-// agent ids that currently belong to the job.
+// agent ids that currently belong to the job. A zero-match selector is a
+// valid empty set (the job exists but targets no host yet; reconcile drops
+// any previous assignments) — not an error.
 func (c *Controller) resolveAndPush(job *store.Job, spec Job, steps []store.TaskStep, decisions map[string]*pb.Decision) (map[string]bool, error) {
 	// Resolve the selector to agent ids.
 	r := store.NewResolver(c.st)
 	agentsList, err := r.ResolveSelector(spec.Selector)
-	if err != nil {
+	if err != nil && !errors.Is(err, sel.ErrNoMatch) {
 		return nil, fmt.Errorf("resolve selector %q: %w", spec.Selector, err)
 	}
 	if len(agentsList) == 0 {
@@ -329,7 +337,7 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*
 	}
 	r := store.NewResolver(c.st)
 	agents, err := r.ResolveSelector(selector)
-	if err != nil {
+	if err != nil && !errors.Is(err, sel.ErrNoMatch) {
 		return nil, fmt.Errorf("resolve selector %q: %w", selector, err)
 	}
 	d := make(map[string]*pb.Decision, len(agents))
@@ -405,6 +413,10 @@ func toPBSteps(steps []store.TaskStep) []*pb.TaskStep {
 
 // OnRunResult records a job run + audit when an agent reports a scheduled
 // job completion (wired as the stream JobRunResultHook).
+//
+// A run id can arrive twice: a `rebooting` report (the host is going down)
+// followed by the `resume` report after the reboot (PRD §5.5). The second
+// arrival finalizes the existing row instead of inserting a duplicate.
 func (c *Controller) OnRunResult(agentID string, r *pb.JobRunResult) {
 	run := &store.JobRun{
 		ID:          r.RunId,
@@ -424,7 +436,13 @@ func (c *Controller) OnRunResult(agentID string, r *pb.JobRunResult) {
 		run.TaskID = job.TaskID
 		run.TaskVersion = job.TaskVersion
 	}
-	if err := c.st.CreateJobRun(run); err != nil {
+	if existing, _ := c.st.GetJobRun(r.RunId); existing != nil {
+		// Resume (or duplicate) report for a known run: finalize in place.
+		if err := c.st.FinalizeJobRun(r.RunId, r.State, r.Error); err != nil {
+			c.log.Printf("jobs: finalize run %s: %v", r.RunId, err)
+			return
+		}
+	} else if err := c.st.CreateJobRun(run); err != nil {
 		c.log.Printf("jobs: create run %s: %v", r.RunId, err)
 		return
 	}

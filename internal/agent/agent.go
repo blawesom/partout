@@ -23,6 +23,7 @@ import (
 	"github.com/blawesom/partout/internal/agent/guardrail"
 	"github.com/blawesom/partout/internal/agent/jobs"
 	pkg "github.com/blawesom/partout/internal/agent/pkg"
+	"github.com/blawesom/partout/internal/agent/resume"
 	agentsecrets "github.com/blawesom/partout/internal/agent/secrets"
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
@@ -80,6 +81,9 @@ type Agent struct {
 
 	// jobs runs scheduled jobs on the agent's own clock (M3, PRD §5.4).
 	jobs *jobs.Scheduler
+
+	// resumer resumes post-reboot task continuations (M3, PRD §5.5).
+	resumer *resume.Resumer
 
 	// sendMu serializes all up-sends (direct + spool drain) on the stream.
 	sendMu sync.Mutex
@@ -174,6 +178,53 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		a.sendJobResult(r)
 	}, a.log)
 	a.jobs.SetGuard(a.guard) // policy re-check before every cron fire
+
+	// Reboot continuation (M3, PRD §5.5): a `reboot` step persists a resume
+	// marker, reboots the host, and the remaining steps run after the agent
+	// comes back. The hook is shared by manual task runs and job fires.
+	markerStore, rErr := resume.NewStore(filepath.Join(cfg.DataDir, "resume"))
+	if rErr != nil {
+		a.log.Printf("agent: resume store: %v (reboot steps will fail)", rErr)
+	}
+	rebootHook := func(_ context.Context, rc *task.RebootCtx) error {
+		if markerStore == nil {
+			return fmt.Errorf("resume store unavailable")
+		}
+		m := &resume.Marker{
+			RunID:       rc.Run.GetRunId(),
+			Kind:        resume.KindTask,
+			TaskID:      rc.Run.GetTaskId(),
+			TaskVersion: rc.Run.GetTaskVersion(),
+			StartIdx:    rc.RebootIndex,
+			Steps:       rc.Run.GetSteps()[rc.RebootIndex+1:],
+			MaxRunS:     rc.MaxRunS,
+			Decision:    rc.Run.GetDecision(),
+			CreatedAt:   time.Now().Unix(),
+		}
+		if rc.JobID != "" {
+			m.Kind = resume.KindJob
+			m.JobID = rc.JobID
+		}
+		for _, d := range rc.Done {
+			m.DoneSteps = append(m.DoneSteps, resume.DoneStep{
+				Index: d.Index, Name: d.Name, State: d.State, Detail: d.Detail,
+				Started: d.Started, Finished: d.Finished,
+			})
+		}
+		return markerStore.Save(m)
+	}
+	rebootAbort := func(runID string) {
+		if markerStore != nil {
+			_ = markerStore.Delete(runID)
+		}
+	}
+	a.taskRunner.SetRebootHook(rebootHook)
+	a.taskRunner.SetRebootAbort(rebootAbort)
+	a.jobs.SetRebootHook(rebootHook, rebootAbort)
+	if markerStore != nil {
+		a.resumer = resume.New(markerStore, a.taskExec, a.guard, rebootHook, rebootAbort,
+			a.sendJobResult, a.sendTaskResult, a.log)
+	}
 	// Session manager uses a closure that can reach the agent instance.
 	a.sessions = session.NewManager(func(sid string, exitCode int32, state string, durationMs int64) {
 		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
@@ -599,6 +650,11 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		a.guard.OnBundle(bundle)
 		if err := a.savePolicy(bundle); err != nil {
 			a.log.Printf("agent: save policy: %v", err)
+		}
+		// The guardrail is now (re-)loaded: (re)try pending post-reboot
+		// continuations (PRD §5.5). A no-op when there are no markers.
+		if a.resumer != nil {
+			go a.resumer.ResumePending()
 		}
 
 	case env.GetRevoke() != nil:

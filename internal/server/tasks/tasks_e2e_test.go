@@ -230,6 +230,59 @@ func TestRunTaskPolicyDeny(t *testing.T) {
 	}
 }
 
+// TestOnLateResult verifies the PRD §5.5 resume path for manual task runs:
+// a TaskRunResult that arrives without a live waiter (the original dispatch
+// timed out while the host was rebooting) finalizes the existing run row in
+// place instead of being dropped.
+func TestOnLateResult(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.CreateTask(&store.Task{ID: "task_test", Name: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	tc := tasks.New(st, nil, sse.New(), log.New(io.Discard, "tasks:", 0))
+
+	// A run dispatched before the reboot; its waiter timed out while the
+	// host was down, leaving the row non-terminal.
+	if err := st.CreateTaskRun(&store.TaskRun{
+		ID: "tr_late", TaskID: "task_test", TaskVersion: 1, AgentID: "ag_test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.FinalizeTaskRun("tr_late", "failed", "timeout: dispatch timed out", 0)
+
+	// The resumed run reports after the agent is back.
+	tc.OnLateResult("ag_test", "tr_late", &pb.TaskRunResult{
+		RunId: "tr_late", State: "succeeded",
+		Steps: []*pb.TaskStepResult{
+			{StepIndex: 0, State: "ok", Detail: "done"},
+			{StepIndex: 2, State: "changed", Detail: "resumed"},
+		},
+	})
+
+	run, err := st.TaskRun("tr_late")
+	if err != nil || run == nil {
+		t.Fatalf("TaskRun: %v %v", err, run)
+	}
+	if run.State != "succeeded" {
+		t.Fatalf("state=%q, want succeeded (late result must finalize in place)", run.State)
+	}
+	steps, _ := st.TaskRunSteps("tr_late")
+	if len(steps) != 2 || steps[1].State != "changed" {
+		t.Fatalf("steps: %+v", steps)
+	}
+
+	// Unknown run ids are a no-op (no panic, no row created).
+	tc.OnLateResult("ag_test", "tr_unknown", &pb.TaskRunResult{RunId: "tr_unknown", State: "succeeded"})
+	if got, _ := st.TaskRun("tr_unknown"); got != nil {
+		t.Fatalf("unknown run materialized: %+v", got)
+	}
+}
+
 // --- store tests -----------------------------------------------------------
 
 func TestTaskCRUD(t *testing.T) {

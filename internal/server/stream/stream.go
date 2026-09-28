@@ -80,6 +80,12 @@ type Handler struct {
 	// audit event.
 	JobRunResultHook func(agentID string, r *pb.JobRunResult)
 
+	// TaskResultHook, if set, is called when a TaskRunResult arrives with no
+	// live waiter — e.g. a post-reboot resume whose original dispatch already
+	// timed out (PRD §5.5). Wired to the tasks controller, which finalizes
+	// the existing run row in place.
+	TaskResultHook func(agentID, runID string, tr *pb.TaskRunResult)
+
 	// ObserveFactsHook, if set, is called when an agent reports structured
 	// observe facts (M5). It receives the agent ID and the raw JSON blob
 	// (already merged into host_facts).
@@ -343,6 +349,11 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 			default:
 				// Waiter already gave up.
 			}
+		} else if h.TaskResultHook != nil {
+			// Late result with no waiter (e.g. a post-reboot resume of a run
+			// whose dispatch already timed out): let the controller finalize
+			// the run row in place (PRD §5.5).
+			h.TaskResultHook(sess.AgentID, tr.RunId, tr)
 		}
 	case msg.GetJobRunResult() != nil:
 		jr := msg.GetJobRunResult()

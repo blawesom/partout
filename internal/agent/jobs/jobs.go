@@ -77,6 +77,11 @@ type Scheduler struct {
 	cron     *cron.Cron
 	reportFn func(*Report) // send JobRunResult up (wired by agent)
 
+	// Reboot continuation hooks (PRD §5.5): applied to each fire's runner
+	// so a `reboot` step in a job task persists a resume marker (kind=job).
+	rebootHook  task.RebootHook
+	rebootAbort task.RebootAbort
+
 	mu        sync.Mutex
 	assigns   map[string]*Assignment  // job_id -> assignment
 	runStates map[string]*runState    // job_id -> in-flight state
@@ -105,6 +110,13 @@ func New(dataDir string, exec *task.Executor, reportFn func(*Report), lg *log.Lo
 // SetGuard installs the policy guardrail (the agent wires its guard here).
 // Fires fail closed until a decision can be verified.
 func (s *Scheduler) SetGuard(g *guardrail.Guard) { s.guard = g }
+
+// SetRebootHook installs the reboot-continuation hooks (PRD §5.5) so a job
+// task with a `reboot` step persists a kind=job resume marker.
+func (s *Scheduler) SetRebootHook(h task.RebootHook, a task.RebootAbort) {
+	s.rebootHook = h
+	s.rebootAbort = a
+}
 
 // SetFacts updates the executor's fact set (called on facts receipt).
 func (s *Scheduler) SetFacts(f map[string]string) { s.exec.SetFacts(f) }
@@ -292,6 +304,15 @@ func (s *Scheduler) fire(a *Assignment, schedAt time.Time, trigger string, retry
 	}
 	started := time.Now()
 	runner := task.New(s.exec)
+	if s.rebootHook != nil {
+		runner.SetRebootHook(s.rebootHook)
+	}
+	if s.rebootAbort != nil {
+		runner.SetRebootAbort(s.rebootAbort)
+	}
+	runner.JobID = a.JobID
+	runner.JobTrigger = trigger
+	runner.MaxRunS = a.MaxRunS
 	res := runner.Run(ctx, taskRun)
 	finished := time.Now()
 

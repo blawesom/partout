@@ -42,7 +42,7 @@ type JobRun struct {
 	ScheduledAt int64  `json:"scheduled_at"`
 	StartedAt   int64  `json:"started_at"`
 	FinishedAt  int64  `json:"finished_at"`
-	State       string `json:"state"`   // pending, running, succeeded, failed, timeout
+	State       string `json:"state"`   // pending, running, rebooting, succeeded, failed, timeout, denied
 	Trigger     string `json:"trigger"` // cron, manual, resume
 	Error       string `json:"error"`
 }
