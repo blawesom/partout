@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -206,6 +207,50 @@ func TestUIShape_ApprovalsFields(t *testing.T) {
 		"matched_rules", "state", "created_unix", "expires_unix", "decided_by", "decision_reason"} {
 		if _, ok := body.Approvals[0][k]; !ok {
 			t.Errorf("approval missing %q (UI reads it); got %v", k, keysOf(body.Approvals[0]))
+		}
+	}
+}
+
+// TestUIShape_MCPInfo: GET /mcp/info → {protocol_version, http_endpoint,
+// transports[], stdio_command, auth, tools:[{name,write,description}]}.
+// The UI (MCP page, M4/R11) renders the connect card + tools table from
+// these; a rename silently blanks the page.
+func TestUIShape_MCPInfo(t *testing.T) {
+	_, _, srv := startAPITest(t)
+
+	code, b := apiReq(t, "GET", srv.URL+"/api/v1/mcp/info", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /mcp/info = %d (%s)", code, truncate(b, 120))
+	}
+	var body struct {
+		ProtocolVersion string           `json:"protocol_version"`
+		HTTPEndpoint    string           `json:"http_endpoint"`
+		Transports      []string         `json:"transports"`
+		StdioCommand    string           `json:"stdio_command"`
+		Auth            string           `json:"auth"`
+		Tools           []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.ProtocolVersion == "" || body.HTTPEndpoint == "" || len(body.Transports) == 0 {
+		t.Errorf("missing protocol/endpoint/transports: %+v", body)
+	}
+	if len(body.Tools) < 20 {
+		t.Errorf("expected 20+ tools, got %d", len(body.Tools))
+	}
+	names := map[string]bool{}
+	for _, tl := range body.Tools {
+		for _, k := range []string{"name", "write", "description"} {
+			if _, ok := tl[k]; !ok {
+				t.Errorf("tool missing %q; got %v", k, keysOf(tl))
+			}
+		}
+		names[fmt.Sprint(tl["name"])] = true
+	}
+	for _, want := range []string{"list_hosts", "get_host_facts", "run_command", "decide_approval"} {
+		if !names[want] {
+			t.Errorf("expected tool %q in catalog", want)
 		}
 	}
 }

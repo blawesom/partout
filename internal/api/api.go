@@ -34,6 +34,7 @@ type Handler struct {
 	tasks       *tasks.Controller
 	jobs        *jobs.Controller
 	approvals   *serverapprovals.Controller
+	mcpWired    bool // true once HandleMCP registered the /mcp route
 	sess        *sessions.Manager
 	secretsMgr  *serversecrets.Manager
 	extdata     *externaldata.Refresher
@@ -116,6 +117,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M4: approvals engine (PRD §5.8). Routes 503 until SetApprovals.
 	handler.RegisterApprovals(mux)
 
+	// M4: MCP self-description (R11). Read-only catalog for the UI's MCP page.
+	handler.RegisterMCP(mux)
+
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
 
@@ -196,6 +200,7 @@ func (h *Handler) HandleMCP(mcpSrv http.Handler) {
 		return
 	}
 	h.mux.Handle("POST /mcp", h.requireRole(roleViewer)(mcpSrv))
+	h.mcpWired = true
 }
 
 // SetAuthController installs the local-user identity controller (PRD

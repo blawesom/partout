@@ -107,6 +107,14 @@ async function main() {
   check("approvals: approve button (admin)", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Approve")), "no Approve button");
   check("approvals: pending badge", !!d.querySelector(".badge.warn") && d.querySelector(".badge.warn").textContent.includes("pending"), "no pending badge");
 
+  await visit("#/mcp");
+  check("mcp: page renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("MCP"));
+  check("mcp: http endpoint", rowsWithText(d, "/mcp") > 0, "endpoint missing");
+  check("mcp: run_command tool row", rowsWithText(d, "run_command") > 0, "tool row missing");
+  check("mcp: write badge", rowsWithText(d, "write") > 0, "no write badge");
+  check("mcp: mcp.json snippet", d.body.textContent.includes("mcpServers"), "snippet missing");
+  check("mcp: 22 tools", (d.body.textContent.match(/list_hosts|get_host_facts|decide_approval/g) || []).length >= 3, "tool names missing");
+
   await visit("#/users");
   check("users: admin + alice", rowsWithText(d, "admin") > 0 && rowsWithText(d, "alice") > 0, "users missing");
 

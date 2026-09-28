@@ -539,6 +539,45 @@
           </div>
         </section>
 
+        <!-- ============ MCP ============ -->
+        <section v-else-if="page==='mcp'">
+          <h1 class="page">MCP</h1>
+          <p class="page-sub">MCP server for AI assistants (R11, PRD §10.3): JSON-RPC 2.0 over stdio + Streamable HTTP. Read tools are read-only; write tools are RBAC- and policy-gated by the same control plane the UI uses.</p>
+          <div v-if="!mcpInfo">
+            <div class="card"><div class="empty">MCP surface not available in this build.</div></div>
+          </div>
+          <template v-else>
+            <div class="card" style="margin-bottom:12px">
+              <h2>Connect</h2>
+              <table class="tbl">
+                <tbody>
+                  <tr><td style="width:170px">HTTP endpoint</td><td class="mono">POST {{ protocolHost() }}{{ mcpInfo.http_endpoint }}</td></tr>
+                  <tr><td>Protocol</td><td class="mono">{{ mcpInfo.protocol_version }} (JSON-RPC 2.0)</td></tr>
+                  <tr><td>Transports</td><td>{{ mcpInfo.transports.join(' + ') }}</td></tr>
+                  <tr><td>Auth</td><td>{{ mcpInfo.auth }}</td></tr>
+                </tbody>
+              </table>
+              <h2 style="margin-top:12px">stdio client config (mcp.json)</h2>
+              <p class="cap">Paste into your MCP client (Claude Code / Cursor); replace the token placeholder with a bearer token.</p>
+              <pre class="console" style="white-space:pre-wrap">{{ mcpSnippet() }}</pre>
+            </div>
+            <div class="card">
+              <h2>Tools ({{ (mcpInfo.tools||[]).length }})</h2>
+              <p class="cap">Read tools are read-only; write tools are RBAC- and policy-gated (approvals surface as structured tool errors).</p>
+              <table class="tbl">
+                <thead><tr><th>Name</th><th>Kind</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr v-for="t in (mcpInfo.tools||[])" :key="t.name">
+                    <td class="mono" style="white-space:nowrap">{{ t.name }}</td>
+                    <td><span class="badge" :class="t.write?'warn':'ok'">{{ t.write?'write':'read' }}</span></td>
+                    <td class="muted">{{ t.description }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </section>
+
         <!-- ============ PROVISION ============ -->
         <section v-else-if="page==='provision'">
           <h1 class="page">Provision</h1>
@@ -733,6 +772,7 @@
         updHost: "", jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], provRuns: [], users: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
+        mcpInfo: null,
         services: [], svcLabel: "", svcState: "",
         certs: [], certDays: "",
         configs: [], cfgKind: "",
@@ -820,6 +860,7 @@
           { key: "secrets", label: "Secrets", icon: "🔒", cap: "secrets" },
           { key: "policies", label: "Policies", icon: "§", cap: "policies" },
           { key: "approvals", label: "Approvals", icon: "☑", cap: "approvals" },
+          { key: "mcp", label: "MCP", icon: "⟨⟩", cap: "mcp" },
           { key: "provision", label: "Provision", icon: "➕", cap: "provision", admin: true },
           { key: "users", label: "Users", icon: "👤", cap: "users", admin: true },
         ];
@@ -926,6 +967,7 @@
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
+          case "mcp": await this.loadMcp(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
           case "obs-services": await this.loadServices(); break;
@@ -989,6 +1031,15 @@
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || d || []; } catch (e) { this.provRuns = []; } },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
       async loadApprovals() { this.apprMsg = ""; const q = this.apprState ? "?state=" + encodeURIComponent(this.apprState) : ""; try { const d = await this.api("/approvals" + q); this.approvals = d.approvals || []; } catch (e) { this.approvals = []; } },
+      async loadMcp() { try { this.mcpInfo = await this.api("/mcp/info"); } catch (e) { this.mcpInfo = null; } },
+      protocolHost() { return location.protocol + '//' + location.host; },
+      mcpSnippet() {
+        if (!this.mcpInfo) return '';
+        const cmd = (this.mcpInfo.stdio_command || '').replace('<bearer>', '<your token>');
+        // stdio command line from the server-rendered template, split on first space.
+        const parts = cmd.split(/\s+/);
+        return JSON.stringify({ mcpServers: { partout: { command: parts[0], args: parts.slice(1) } } }, null, 2);
+      },
       async decideApproval(id, verb) {
         // Approve is a write to a host: confirm; deny takes an optional reason.
         if (verb === "approve") {

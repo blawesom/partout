@@ -140,6 +140,37 @@ func query(pairs ...[2]string) string {
 // tool registry
 // ---------------------------------------------------------------------------
 
+// ToolInfo is one catalog entry (for the UI and the self-description
+// endpoint): name + read/write class + description.
+type ToolInfo struct {
+	Name        string `json:"name"`
+	Write       bool   `json:"write"`
+	Description string `json:"description"`
+}
+
+// writeTools are the mutating tools; every other catalog entry is read-only.
+var writeTools = map[string]bool{
+	"run_command":      true,
+	"cancel_execution": true,
+	"run_job":          true,
+	"apply_updates":    true,
+	"create_secret":    true,
+	"decide_approval":  true,
+}
+
+// ToolCatalog returns the tool set with its read/write classification
+// (sorted by name). It is what the Web UI MCP page and the
+// GET /api/v1/mcp/info endpoint render.
+func ToolCatalog() []ToolInfo {
+	tools := DefaultTools()
+	out := make([]ToolInfo, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, ToolInfo{Name: t.Name, Write: writeTools[t.Name], Description: t.Description})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // DefaultTools is the R11 tool set (PRD §10.3): read tools for the fleet +
 // observe layer, and write tools for the governed control plane. Interactive
 // PTY (open_session) is deliberately absent — MCP is request/response.

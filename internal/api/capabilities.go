@@ -55,6 +55,12 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// M4 approvals — wired when the approvals controller is installed.
 		"alerts":    false,
 		"approvals": h.approvals != nil,
+
+		// M4 MCP server (R11) — true once the /mcp route is registered.
+		// The UI gates its MCP page on this; the info endpoint is always
+		// available (read-only catalog) but the live surface is only usable
+		// when wired.
+		"mcp": h.mcpWired,
 	}
 	writeJSON(w, http.StatusOK, caps)
 }
