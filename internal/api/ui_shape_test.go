@@ -410,15 +410,8 @@ func TestUIShape_SSESubscriptionsAreEmitted(t *testing.T) {
 		emitted["provision."+st] = true
 	}
 
-	// audit.event is a known pre-existing dead subscription (the audit page is
-	// refreshed by other events); tracked rather than silently ignored.
-	knownDead := map[string]bool{"audit.event": true}
 	for _, k := range subs {
 		if emitted[k] || prefixes[k] {
-			continue
-		}
-		if knownDead[k] {
-			t.Logf("known dead SSE subscription (pre-existing): %s", k)
 			continue
 		}
 		t.Errorf("UI subscribes to SSE %q but no server emit site produces it "+

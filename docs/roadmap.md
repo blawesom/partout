@@ -151,7 +151,7 @@ Done (ui-guidelines S7 — the last open M7 slice; all remainders closed in v0.7
 - ✅ **Config drift (R22)**: rendered as the `config_drift` alert rule (above) — cross-host `config_sha256` vs the fleet majority, per-host divergence alert, tolerance-thresholded.
 - ✅ **Task actions**: the **Tasks & Playbooks** page gains per-task **Run…** (host prompt, policy-gated, parks on approvals with a notice) and per-playbook **Run** (fan-out with per-host outcome summary), plus a **Recent task runs** table with expandable per-step state/detail (ok/changed/failed/skipped/rebooting), SSE-refreshed on `task.run`.
 - ✅ **Live PTY terminal (xterm.js)**: the **Sessions** page gains *Open terminal* (host + command, operator-gated, record-on) and the session page renders a live xterm.js terminal when the session is `open` — input via `POST /sessions/{id}/input` (base64), output via the `session.data` SSE stream (pre-mount chunks are buffered and replayed on attach), resize via `POST /sessions/{id}/resize`, close via `POST /sessions/{id}/close`. Closed sessions fall back to the recorded replay. Vendored offline in `internal/api/webui/lib/` (no CDN). Verified end-to-end against a real embedded server in a headless browser (`scripts/pty-e2e.py`: mount → type command → output round-trips → close → replay).
-- ✅ **Write actions** (previously read-only surfaces are now drivable from the browser): the **Provision** page can **start a run** (host + mode, admin-gated), **confirm/deny the host key** at the `key_confirm` security gate (fingerprint shown), **cancel** a run, and shows live **step detail** (SSE-refreshed on `provision.*`); the **Updates** page can **apply packages** (package list, **dry-run** toggle, operator-gated, parks on approvals, shows the action history with expandable `dry_summary`); the **Jobs** page can **create/edit/delete** jobs (task + cron + selector + enabled form, `policy_denied` surfaced) and inspect **run history**. All three are exercised end-to-end against a real embedded server in a headless browser by `scripts/writes-e2e.py` (job create, package **dry-run** apply, provision start).
+- ✅ **Write actions** (previously read-only surfaces are now drivable from the browser): the **Provision** page can **start a run** (host + mode, admin-gated), **confirm/deny the host key** at the `key_confirm` security gate (fingerprint shown), **cancel** a run, and shows live **step detail** (SSE-refreshed on `provision.*`); the **Updates** page can **apply packages** (package list, **dry-run** toggle, operator-gated, parks on approvals, shows the action history with expandable `dry_summary`) and shows **EOL external-data status + refresh** (admin); the **Jobs** page can **create/edit/delete** jobs (task + cron + selector + enabled form, `policy_denied` surfaced) and inspect **run history**; the **Tasks** page can **create a task** (versioned multi-step form: command/file/package/service steps); the **Secrets** page can **create + rotate** secrets (values stay write-only, never displayed); the **Users** page can **create a user** and **change role / enable / disable** (self-protection: you can't demote/disable/delete yourself); the **Files** page can **download** a host file; the **MCP** page lists **registered OAuth2 clients**. All are exercised by `scripts/ui-smoke.sh` (headless render checks).
 - ✅ **Services page** now shows the `NRestarts` counter (feeds the `service_restarting` rule).
 
 ### M4 — Governance: approvals + MCP (shipped)
@@ -199,6 +199,21 @@ Done (PRD §5.8 — the approval path of the guardrail system):
 17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit over the real interval between counter movements (not the 30 s alert tick, which inflated the rate ~10×), holds the rate while a loop continues (no firing/resolved flapping between facts uploads), folds counter resets, and ignores units whose collector failed; fires ≥ `service_restart_rate_per_hour` (default 10), resolves after 10 min quiet.
 17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js), and write actions (jobs CRUD, package apply/dry-run, provision start/key-confirm/cancel). See the M7 section above.
 18. Postgres backend; then **M8 — Distribution & polish** (installers, cloud-init, Helm, status page).
+
+### Polish items (closed this cycle)
+
+- **`partout --version`** — prints the stamped version and exits (used by the
+  provisioning version-diff check too).
+- **Live audit log** — the previously-dead `audit.event` SSE subscription is now
+  real: the server emits `audit.event` on every audit record, so the Audit page
+  updates live. The `TestUIShape_SSESubscriptionsAreEmitted` guard no longer needs
+  a `knownDead` exemption for it.
+- **Global toast notifications** — consistent success/error feedback across every
+  page (replaces blocking `alert()` boxes); write actions surface errors globally,
+  GET loads stay quiet. See the M7 Web UI section.
+- **UI write surfaces wired** — users (create + role/enable/disable), secrets
+  (create + rotate), tasks (create), external-data (status + refresh), MCP
+  clients (list), files (download). See the M7 Write actions item above.
 
 ## TLS / transport security (implemented)
 

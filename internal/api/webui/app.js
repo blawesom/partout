@@ -399,15 +399,16 @@
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Name</th><th>Size</th><th>Mode</th><th>Modified</th></tr></thead>
+              <thead><tr><th>Name</th><th>Size</th><th>Mode</th><th>Modified</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="(f,i) in fileEntries" :key="i">
                   <td class="mono" :style="{cursor: f.is_dir?'pointer':'default'}" @click="openFile(f)">{{ f.is_dir ? '📁' : (f.is_symlink ? '🔗' : '📄') }} {{ f.name }}</td>
                   <td class="mono">{{ f.is_dir ? '—' : fmtBytes(f.size) }}</td>
                   <td class="mono">{{ f.mode || '—' }}</td>
                   <td class="muted">{{ fmtAgo(f.mtime_unix) }}</td>
+                  <td class="row-actions"><button v-if="!f.is_dir && !f.is_symlink" class="btn sm" :disabled="!fileHost" @click="downloadFile(f)">Download</button></td>
                 </tr>
-                <tr v-if="!fileLoading && !fileEntries.length"><td colspan="4"><div class="empty">{{ fileHost ? 'Empty or no access.' : 'No hosts available.' }}</div></td></tr>
+                <tr v-if="!fileLoading && !fileEntries.length"><td colspan="5"><div class="empty">{{ fileHost ? 'Empty or no access.' : 'No hosts available.' }}</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -497,6 +498,52 @@
           <h1 class="page">Tasks &amp; Playbooks</h1>
           <p class="page-sub">Multi-step automation (M3). Runs are policy-gated (task.run) and can park on approvals.</p>
           <div v-if="taskMsg" class="info-box" style="margin-bottom:12px">{{ taskMsg }}</div>
+          <div class="card" style="margin-bottom:12px">
+            <div class="head">
+              <h2 v-if="!taskFormOpen">New task</h2>
+              <button v-if="!taskFormOpen" class="btn sm" :disabled="!isOperator" @click="openTaskForm">Create…</button>
+              <template v-else>
+                <h2>Create task</h2>
+                <button class="btn sm" @click="taskFormOpen=false">Close</button>
+              </template>
+            </div>
+            <template v-if="taskFormOpen">
+              <div class="form-row" style="margin:10px 0">
+                <label class="fld"><span>Name</span><input v-model="taskForm.name" placeholder="install-haproxy" /></label>
+                <label class="fld" style="flex:1"><span>Description</span><input v-model="taskForm.description" placeholder="optional" /></label>
+              </div>
+              <p class="cap">Steps run in order on the target host.</p>
+              <div v-for="(s,i) in taskForm.steps" :key="i" class="step-edit" style="margin-bottom:8px">
+                <div class="form-row" style="align-items:flex-end">
+                  <label class="fld" style="min-width:120px"><span>Kind</span><select v-model="s.kind"><option>command</option><option>file</option><option>package</option><option>service</option></select></label>
+                  <label class="fld" style="flex:1"><span>Name (display)</span><input v-model="s.name" placeholder="optional" /></label>
+                  <button class="btn danger sm" @click="taskForm.steps.splice(i,1)">Remove</button>
+                </div>
+                <div class="form-row" v-if="s.kind==='command'">
+                  <label class="fld" style="flex:2"><span>Command</span><input v-model="s.command" class="mono" placeholder="/usr/sbin/haproxy" /></label>
+                  <label class="fld" style="flex:3"><span>Args (space-separated)</span><input v-model="s.args" class="mono" placeholder="-f /etc/haproxy.cfg" /></label>
+                </div>
+                <div class="form-row" v-if="s.kind==='file'">
+                  <label class="fld" style="flex:1"><span>Path</span><input v-model="s.path" class="mono" placeholder="/etc/haproxy.cfg" /></label>
+                  <label class="fld" style="flex:2"><span>Content</span><input v-model="s.content" class="mono" placeholder="file content" /></label>
+                  <label class="fld" style="min-width:90px"><span>Mode</span><input v-model="s.mode" class="mono" placeholder="0644" /></label>
+                </div>
+                <div class="form-row" v-if="s.kind==='package'">
+                  <label class="fld" style="flex:1"><span>Package</span><input v-model="s.package" class="mono" placeholder="haproxy" /></label>
+                  <label class="fld" style="min-width:110px"><span>State</span><select v-model="s.state"><option>installed</option><option>absent</option></select></label>
+                </div>
+                <div class="form-row" v-if="s.kind==='service'">
+                  <label class="fld" style="flex:1"><span>Service</span><input v-model="s.service" class="mono" placeholder="haproxy" /></label>
+                  <label class="fld" style="min-width:110px"><span>State</span><select v-model="s.state"><option>running</option><option>stopped</option></select></label>
+                </div>
+              </div>
+              <div class="form-row">
+                <button class="btn sm" @click="addTaskStep">+ Add step</button>
+                <button class="btn primary sm" :disabled="!taskForm.name || !taskForm.steps.length || taskCreateBusy" @click="saveTask">Create task</button>
+              </div>
+            </template>
+            <p v-else class="muted" style="margin:0">Define a versioned, multi-step automation to run on hosts (via a playbook or Run…).</p>
+          </div>
           <div class="grid cols-2">
             <div class="card">
               <h2>Tasks</h2><p class="cap">Versioned step lists</p>
@@ -572,6 +619,10 @@
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
             </select>
             <button class="btn sm" @click="loadUpdates">Refresh</button>
+            <span class="ext-status" :class="{ 'ext-err': extStatus && extStatus.last_error, 'ext-stale': extStatus && !extStatus.last_error && (Date.now()/1000 - (extStatus.last_at||0) > 86400) }" title="{{ extStatus ? 'last refresh: ' + (extStatus.last_at ? new Date(extStatus.last_at*1000).toLocaleString() : 'never') + (extStatus.last_error ? ' — ' + extStatus.last_error : '') : 'unknown' }}">
+              EOL data: {{ extStatus ? (extStatus.last_at ? 'updated ' + fmtAgo(extStatus.last_at) : 'never') : '…' }}{{ extStatus && extStatus.last_error ? ' ⚠' : '' }}
+            </span>
+            <button v-if="isAdmin" class="btn sm" :disabled="!!extBusy" @click="refreshExtData"><span v-if="extBusy" class="spin"></span> Refresh EOL data</button>
             <div class="spacer"></div>
             <input v-model="pkgSel" class="mono" placeholder="packages (comma-separated, blank = all)" style="flex:1;max-width:340px" />
             <label class="lbl" style="margin:0;display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="pkgDryRun" /> dry run</label>
@@ -623,16 +674,28 @@
         <section v-else-if="page==='secrets'">
           <h1 class="page">Secrets</h1>
           <p class="page-sub">Encrypted at rest; values are write-only and never displayed (ui-guidelines §12.6).</p>
+          <div class="card" style="margin-bottom:12px">
+            <div class="form-row" style="align-items:flex-end">
+              <label class="fld"><span>Name</span><input v-model="secretForm.name" class="mono" placeholder="db-password" /></label>
+              <label class="fld" style="flex:1"><span>Value</span><input v-model="secretForm.value" type="password" placeholder="secret value" /></label>
+              <label class="fld"><span>Selector</span><input v-model="secretForm.selector" placeholder="all" /></label>
+              <button class="btn primary" :disabled="!isAdmin || !secretForm.name || !secretForm.value || secretBusy" @click="createSecret">Create secret</button>
+            </div>
+          </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Name</th><th>Selector</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>Selector</th><th>Version</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="s in secrets" :key="s.name">
                   <td class="mono">{{ s.name }}</td>
                   <td class="mono">{{ s.selector || 'all' }}</td>
-                  <td><button class="btn danger sm" :disabled="!isAdmin" @click="deleteSecret(s.name)">Delete</button></td>
+                  <td class="muted">v{{ s.version || 0 }}</td>
+                  <td class="row-actions">
+                    <button class="btn sm" :disabled="!isAdmin" @click="rotateSecret(s.name)">Rotate</button>
+                    <button class="btn danger sm" :disabled="!isAdmin" @click="deleteSecret(s.name)">Delete</button>
+                  </td>
                 </tr>
-                <tr v-if="!secrets.length"><td colspan="3"><div class="empty">No secrets (or feature disabled).</div></td></tr>
+                <tr v-if="!secrets.length"><td colspan="4"><div class="empty">No secrets (or feature disabled).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -723,6 +786,22 @@
               <p class="cap">Paste into your MCP client (Claude Code / Cursor); replace the token placeholder with a bearer token.</p>
               <pre class="console" style="white-space:pre-wrap">{{ mcpSnippet() }}</pre>
             </div>
+            <div class="card" style="margin-bottom:12px">
+              <h2>OAuth2 clients ({{ mcpClients.length }})</h2>
+              <p class="cap">Registered MCP OAuth2 (PKCE) clients for the HTTP transport. Admins register new clients via <span class="mono">POST /api/v1/mcp/clients</span>.</p>
+              <table class="tbl" v-if="mcpClients.length">
+                <thead><tr><th>Client</th><th>Name</th><th>Scope</th><th>Created</th></tr></thead>
+                <tbody>
+                  <tr v-for="c in mcpClients" :key="c.id">
+                    <td class="mono">{{ c.id }}</td>
+                    <td>{{ c.name }}</td>
+                    <td class="muted">{{ c.scope || '—' }}</td>
+                    <td class="muted">{{ c.created ? new Date(c.created*1000).toLocaleString() : '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else class="muted">No MCP clients registered.</p>
+            </div>
             <div class="card">
               <h2>Tools ({{ (mcpInfo.tools||[]).length }})</h2>
               <p class="cap">Read tools are read-only; write tools are RBAC- and policy-gated (approvals surface as structured tool errors).</p>
@@ -804,16 +883,33 @@
         <section v-else-if="page==='users'">
           <h1 class="page">Users</h1>
           <p class="page-sub">Local identity principals (admin).</p>
+          <div class="card" style="margin-bottom:14px">
+            <div class="form-row" style="align-items:flex-end">
+              <label class="fld"><span>Username</span><input v-model="userForm.username" placeholder="new-admin" /></label>
+              <label class="fld"><span>Password</span><input v-model="userForm.password" type="password" placeholder="min 8 chars" /></label>
+              <label class="fld"><span>Role</span><select v-model="userForm.role"><option value="admin">admin</option><option value="operator">operator</option><option value="viewer">viewer</option></select></label>
+              <button class="btn primary" :disabled="!userForm.username || !userForm.password || userBusy" @click="createUser">Create user</button>
+            </div>
+          </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Username</th><th>Role</th><th></th></tr></thead>
+              <thead><tr><th>Username</th><th>Role</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="u in users" :key="u.username || u.name">
                   <td class="mono">{{ u.username || u.name }}</td>
-                  <td><span class="badge neutral">{{ u.role }}</span></td>
-                  <td><button class="btn danger sm" @click="deleteUser(u.username||u.name)">Delete</button></td>
+                  <td>
+                    <select class="inline-sel" :value="u.role" @change="setUserRole(u, $event.target.value)"
+                      :disabled="(u.username||u.name)===meName">
+                      <option value="admin">admin</option><option value="operator">operator</option><option value="viewer">viewer</option>
+                    </select>
+                  </td>
+                  <td><span class="badge" :class="u.disabled?'warn':'ok'">{{ u.disabled ? 'disabled' : 'active' }}</span></td>
+                  <td class="row-actions">
+                    <button class="btn sm" :disabled="(u.username||u.name)===meName" @click="toggleUserDisabled(u)">{{ u.disabled ? 'Enable' : 'Disable' }}</button>
+                    <button class="btn danger sm" :disabled="(u.username||u.name)===meName" @click="deleteUser(u.username||u.name)">Delete</button>
+                  </td>
                 </tr>
-                <tr v-if="!users.length"><td colspan="3"><div class="empty">No users.</div></td></tr>
+                <tr v-if="!users.length"><td colspan="4"><div class="empty">No users.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1101,12 +1197,16 @@
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
         tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], users: [],
+        secretForm: { name: "", value: "", selector: "all" }, secretBusy: false,
+        userForm: { username: "", password: "", role: "operator" }, userBusy: false,
         provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false,
         provRuns: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
-        mcpInfo: null,
+        taskFormOpen: false, taskCreateBusy: false, taskForm: { name: "", description: "", steps: [] },
+        mcpInfo: null, mcpClients: [],
+        extStatus: null, extBusy: false,
         services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "",
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
@@ -1165,6 +1265,7 @@
         return this.hosts;
       },
       auditKinds() { return [...new Set(this.audit.map(a => a.kind))]; },
+      meName() { return (this.me && this.me.username) || ""; },
     },
     methods: {
       fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, pkgActionBadge, provBadge, provStepBadge, certBadge, svcBadge, eolBadge,
@@ -1346,12 +1447,12 @@
           case "files": await this.listFiles(); break;
           case "jobs": await this.loadJobs(); break;
           case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
-          case "updates": await this.loadUpdates(); this.loadPkgActions(); break;
+          case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); break;
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
           case "obs-alerts": await this.loadAlerts(); this.loadRules(); break;
-          case "mcp": await this.loadMcp(); break;
+          case "mcp": await this.loadMcp(); this.loadMcpClients(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
           case "obs-services": this.syncObserveQuery(); await this.loadServices(); break;
@@ -1469,6 +1570,29 @@
       },
       async loadJobs() { try { const d = await this.api("/jobs"); this.jobs = d.items || d || []; } catch (e) { this.jobs = []; } },
       async loadTasks() { try { const d = await this.api("/tasks"); this.tasks = d.items || d || []; } catch (e) { this.tasks = []; } },
+      openTaskForm() { this.taskForm = { name: "", description: "", steps: [{}] }; this.taskFormOpen = true; },
+      addTaskStep() { this.taskForm.steps.push({ kind: "command", name: "", command: "", args: "", path: "", content: "", mode: "0644", package: "", state: "installed", service: "" }); },
+      async saveTask() {
+        const f = this.taskForm;
+        if (!f.name || !f.steps.length) return;
+        // Map the form step shape to the API TaskStep shape (drop empties).
+        const steps = f.steps.map(s => {
+          const st = { kind: s.kind };
+          if (s.name) st.name = s.name;
+          if (s.kind === "command") { st.command = s.command || ""; const a = (s.args||"").split(/\s+/).filter(Boolean); if (a.length) st.args = a; }
+          if (s.kind === "file") { st.path = s.path || ""; st.content = s.content || ""; if (s.mode) st.mode = s.mode; }
+          if (s.kind === "package") { st.package = s.package || ""; st.state = s.state || "installed"; }
+          if (s.kind === "service") { st.service = s.service || ""; st.state = s.state || "running"; }
+          return st;
+        });
+        this.taskCreateBusy = true;
+        try {
+          await this.api("/tasks", { body: { name: f.name, description: f.description, steps } });
+          this.notify("ok", "task \"" + f.name + "\" created");
+          this.taskFormOpen = false; this.taskForm = { name: "", description: "", steps: [] };
+          this.loadTasks();
+        } catch (e) { /* toast shown by api() */ } finally { this.taskCreateBusy = false; }
+      },
       async loadPlaybooks() { try { const d = await this.api("/playbooks"); this.playbooks = d.items || d || []; } catch (e) { this.playbooks = []; } },
       async loadUpdates() {
         // /packages/updates is per-host and REQUIRES agent_id; there is no
@@ -1578,6 +1702,31 @@
         catch (e) { this.jobRunsDetail = null; }
       },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
+      async loadMcpClients() { try { const d = await this.api("/mcp/clients", { toast: false }); this.mcpClients = d.clients || d.items || d || []; } catch (e) { this.mcpClients = []; } },
+      async loadExtStatus() { try { this.extStatus = await this.api("/external-data/status", { toast: false }); } catch (e) { this.extStatus = null; } },
+      async refreshExtData() {
+        this.extBusy = true;
+        try { const d = await this.api("/external-data/refresh", { method: "POST", body: {} }); this.notify("ok", "EOL data refreshed (" + (d.rows != null ? d.rows + " rows" : "ok") + ")"); await this.loadExtStatus(); }
+        catch (e) { /* toast shown by api() */ } finally { this.extBusy = false; }
+      },
+      async createUser() {
+        const f = this.userForm;
+        if (!f.username || !f.password) return;
+        this.userBusy = true;
+        try { await this.api("/users", { body: { username: f.username, password: f.password, role: f.role } }); this.notify("ok", "user \"" + f.username + "\" created"); this.userForm = { username: "", password: "", role: "operator" }; this.loadUsers(); }
+        catch (e) { /* toast shown by api() */ } finally { this.userBusy = false; }
+      },
+      async setUserRole(u, role) {
+        const n = u.username || u.name;
+        try { await this.api("/users/" + encodeURIComponent(n), { method: "PATCH", body: { role } }); this.notify("ok", "" + n + " role set to " + role); this.loadUsers(); }
+        catch (e) { /* toast shown by api() */ }
+      },
+      async toggleUserDisabled(u) {
+        const n = u.username || u.name;
+        if (!confirm((u.disabled ? "Enable" : "Disable") + " user '" + n + "'?")) return;
+        try { await this.api("/users/" + encodeURIComponent(n), { method: "PATCH", body: { disabled: !u.disabled } }); this.notify("ok", "user \"" + n + "\" " + (u.disabled ? "enabled" : "disabled")); this.loadUsers(); }
+        catch (e) { /* toast shown by api() */ }
+      },
       async loadAlerts() { try { const d = await this.api("/alerts"); this.alerts = d.alerts || []; } catch (e) { this.alerts = []; } },
       async loadRules() { try { const d = await this.api("/alerts/rules"); this.rules = d.rules || []; } catch (e) { this.rules = []; } },
       // --- alert rule management (M7) ---
@@ -1772,6 +1921,17 @@
         } catch (e) { this.jobErr = e.message; } finally { this.jobRunBusy = ""; }
       },
       openFile(f) { if (f.is_dir) { this.fileDir = joinPath(this.fileDir, f.name); this.listFiles(); } },
+      async downloadFile(f) {
+        const path = joinPath(this.fileDir, f.name);
+        try {
+          const res = await fetch("/api/v1/files/download?agent_id=" + encodeURIComponent(this.fileHost) + "&path=" + encodeURIComponent(path), { headers: { Authorization: "Bearer " + this.token } });
+          if (!res.ok) { this.notify("err", "download failed: " + res.status); return; }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a"); a.href = url; a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 4000);
+        } catch (e) { this.notify("err", "download failed: " + e.message); }
+      },
       fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },
       pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.listFiles(); },
       async createGroup() {
@@ -1780,6 +1940,19 @@
         try { await this.api("/groups", { body: { name, selector } }); this.notify("ok", "group \"" + name + "\" created"); this.loadGroups(); } catch (e) { /* toast shown by api() */ }
       },
       async deleteSecret(n) { if (confirm("Delete secret '" + n + "'?")) { try { await this.api("/secrets/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "secret deleted"); this.loadSecrets(); } catch (e) { /* toast shown by api() */ } } },
+      async createSecret() {
+        const f = this.secretForm;
+        if (!f.name || !f.value) return;
+        this.secretBusy = true;
+        try { await this.api("/secrets", { body: { name: f.name, value: f.value, selector: f.selector || "all" } }); this.notify("ok", "secret \"" + f.name + "\" created"); this.secretForm = { name: "", value: "", selector: "all" }; this.loadSecrets(); }
+        catch (e) { /* toast shown by api() */ } finally { this.secretBusy = false; }
+      },
+      async rotateSecret(name) {
+        const v = prompt("New value for secret '" + name + "':");
+        if (v === null || v === "") return;
+        try { const d = await this.api("/secrets/" + encodeURIComponent(name) + "/rotate", { method: "POST", body: { value: v } }); this.notify("ok", "secret \"" + name + "\" rotated (v" + (d.version != null ? d.version : "") + ")"); this.loadSecrets(); }
+        catch (e) { /* toast shown by api() */ }
+      },
       async deletePolicy(id) { if (confirm("Delete policy " + id + "?")) { try { await this.api("/policies/" + encodeURIComponent(id), { method: "DELETE" }); this.notify("ok", "policy deleted"); this.loadPolicies(); } catch (e) { /* toast shown by api() */ } } },
       async deleteUser(n) { if (confirm("Delete user '" + n + "'?")) { try { await this.api("/users/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "user deleted"); this.loadUsers(); } catch (e) { /* toast shown by api() */ } } },
     },

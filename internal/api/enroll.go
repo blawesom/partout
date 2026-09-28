@@ -236,4 +236,10 @@ func (h *Handler) audit(kind, actor string, payload map[string]string) {
 		Actor:   actor,
 		Payload: string(b),
 	})
+	// Live audit log: notify subscribed clients (the audit page refreshes on
+	// this event). Emitted after the append so a connected client re-reads a
+	// row that is already durably in the store.
+	if h.sse != nil {
+		h.sse.Emit("audit.event", map[string]string{"kind": kind, "actor": actor})
+	}
 }

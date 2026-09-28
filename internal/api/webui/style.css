@@ -334,3 +334,17 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
 }
+
+/* Users page controls. */
+.form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.form-row .fld { min-width: 140px; }
+.inline-sel {
+  font-size: 12px; padding: 3px 6px; border: 1px solid var(--border);
+  border-radius: var(--radius-ctrl); background: var(--surface); color: var(--text);
+}
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+
+/* External-data status chip (Updates toolbar). */
+.ext-status { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+.ext-status.ext-err { color: var(--critical); }
+.ext-status.ext-stale { color: var(--warning); }

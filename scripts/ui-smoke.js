@@ -95,6 +95,10 @@ async function main() {
   const fileRows = d.querySelectorAll("table.tbl tbody tr").length;
   check("files: real entries", fileRows > 2, "file rows=" + fileRows + " (400/empty => broken)");
   check("files: directory row", [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("📁")));
+  // Browse into a directory that has regular files so a Download action renders.
+  if (w.__partout) { w.__partout.fileDir = "/etc"; w.__partout.listFiles(); }
+  await sleep(1200);
+  check("files: download action", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Download")), "no Download button in /etc");
 
   await visit("#/jobs");
   check("jobs: job name", rowsWithText(d, "nightly df") > 0, "no job row");
@@ -108,14 +112,18 @@ async function main() {
   check("tasks: playbooks card", d.body.textContent.includes("Playbooks"));
   check("tasks: run action", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Run")), "no Run button");
   check("tasks: recent runs card", d.body.textContent.includes("Recent task runs"), "runs card missing");
+  check("tasks: new-task create button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create…")), "no New task button");
 
   await visit("#/updates", 1800);
   check("updates renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Updates"));
   check("updates: apply button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Apply")), "no Apply button");
   check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
+  check("updates: EOL data status + refresh", d.body.textContent.includes("EOL data:") && [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Refresh EOL data")), "ext-data controls missing");
 
   await visit("#/secrets");
   check("secrets: row rendered", rowsWithText(d, "dbpass") > 0, "secret not rendered");
+  check("secrets: create form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create secret")), "no Create secret button");
+  check("secrets: rotate action", [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Rotate"), "no Rotate button");
 
   await visit("#/policies");
   check("policies: name", rowsWithText(d, "deny-rm") > 0, "policy name missing");
@@ -135,9 +143,12 @@ async function main() {
   check("mcp: write badge", rowsWithText(d, "write") > 0, "no write badge");
   check("mcp: mcp.json snippet", d.body.textContent.includes("mcpServers"), "snippet missing");
   check("mcp: 22 tools", (d.body.textContent.match(/list_hosts|get_host_facts|decide_approval/g) || []).length >= 3, "tool names missing");
+  check("mcp: oauth2 clients card", d.body.textContent.includes("OAuth2 clients"), "clients card missing");
 
   await visit("#/users");
   check("users: admin + alice", rowsWithText(d, "admin") > 0 && rowsWithText(d, "alice") > 0, "users missing");
+  check("users: create form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create user")), "no Create user button");
+  check("users: role selector + disable", [...d.querySelectorAll("select")].length > 0 && [...d.querySelectorAll("button")].some((b) => ["Disable", "Enable"].includes(b.textContent.trim())), "role/disable controls missing");
 
   await visit("#/provision");
   check("provision: new-run card", d.body.textContent.includes("New run"), "new-run card missing");
