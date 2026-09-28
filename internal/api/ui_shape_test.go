@@ -420,9 +420,9 @@ func TestUIShape_SSESubscriptionsAreEmitted(t *testing.T) {
 }
 
 var (
-	emitLitRe    = regexp.MustCompile(`Emit\("([a-z_]+(?:\.[a-z_]+)*)"`)
-	emitPrefixRe = regexp.MustCompile(`Emit\("([a-z_]+\.)"\s*\+`)
-	dottedLitRe  = regexp.MustCompile(`"([a-z_]+\.[a-z_.]+)"`)
+	emitLitRe    = regexp.MustCompile(`Emit\("([a-z_-]+(?:\.[a-z_-]+)*)"`)
+	emitPrefixRe = regexp.MustCompile(`Emit\("([a-z_-]+\.)"\s*\+`)
+	dottedLitRe  = regexp.MustCompile(`"([a-z_-]+\.[a-z_.-]+)"`)
 )
 
 // sseSubscriptions extracts the string literals of the subscription list that
@@ -438,7 +438,7 @@ func sseSubscriptions(src string) []string {
 	}
 	block := src[i : i+j]
 	var out []string
-	for _, m := range regexp.MustCompile(`"([a-z_]+(?:\.[a-z_.]+)*)"`).FindAllStringSubmatch(block, -1) {
+	for _, m := range regexp.MustCompile(`"([a-z_-]+(?:\.[a-z_.-]+)*)"`).FindAllStringSubmatch(block, -1) {
 		out = append(out, m[1])
 	}
 	return out
@@ -460,6 +460,33 @@ func TestUIShape_ToastSystem(t *testing.T) {
 	}
 	if n := strings.Count(s, "alert("); n != 0 {
 		t.Errorf("app.js still has %d alert() call(s); use the toast system instead", n)
+	}
+}
+
+// TestUIShape_ChangePasswordContract pins the /auth/password body field names
+// (old_password/new_password) and that the UI adopts the re-issued token. A
+// {current,new} body is rejected 400 by the server, and ignoring the returned
+// token logs the user out on the next request.
+func TestUIShape_ChangePasswordContract(t *testing.T) {
+	appJS, err := os.ReadFile(filepath.Join(repoRoot(t), "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	s := string(appJS)
+	if !strings.Contains(s, "old_password: this.pw.current") || !strings.Contains(s, "new_password: this.pw.next") {
+		t.Error("changePassword must POST old_password/new_password (server rejects current/new with 400)")
+	}
+	if strings.Contains(s, "body: { current: this.pw.current") {
+		t.Error("changePassword still sends the wrong {current,new} body")
+	}
+	// The server invalidates the caller's token and returns a fresh one.
+	idx := strings.Index(s, "async changePassword")
+	if idx < 0 {
+		t.Fatal("changePassword not found")
+	}
+	body := s[idx:min(idx+600, len(s))]
+	if !strings.Contains(body, ".token") || !strings.Contains(body, "LS_TOKEN") {
+		t.Error("changePassword must adopt the re-issued token (d.token + localStorage)")
 	}
 }
 

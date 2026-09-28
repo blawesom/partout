@@ -145,6 +145,54 @@ func (s *Store) MarkAllDisconnected() error {
 	return err
 }
 
+// ExpireStaleOfflineRuns marks runs parked in "queued_offline" as "expired" and
+// returns the distinct execution ids to finalize. The offline down-queue lives
+// in server memory, so a server restart orphans those runs (nothing can deliver
+// or expire them any more). Called at startup next to MarkAllDisconnected.
+func (s *Store) ExpireStaleOfflineRuns() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT execution_id FROM execution_runs WHERE state='queued_offline'`)
+	if err != nil {
+		return nil, err
+	}
+	var execs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		execs = append(execs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(execs) == 0 {
+		return nil, nil
+	}
+	if _, err := s.db.Exec(`UPDATE execution_runs SET state='expired', updated=? WHERE state='queued_offline'`, now()); err != nil {
+		return nil, err
+	}
+	return execs, nil
+}
+
+// MarkQueuedOfflineIfQueued sets a run to queued_offline only if it is still in
+// the initial "queued" state, reporting whether it changed the row. This closes
+// a dispatch race: the agent can reconnect and the queue drain can mark the run
+// "delivered"/"running" before the dispatcher's post-SendCommand write lands;
+// without the guard that write would regress a delivered/running run.
+func (s *Store) MarkQueuedOfflineIfQueued(id string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE execution_runs SET state='queued_offline', updated=? WHERE id=? AND state='queued'`, now(), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // DeleteAgent removes an agent and all cascaded rows (PRD R7).
 func (s *Store) DeleteAgent(id string) error {
 	_, err := s.db.Exec(`DELETE FROM agents WHERE id=?`, id)

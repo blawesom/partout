@@ -182,6 +182,7 @@ async function main() {
 
   await visit("#/account");
   check("account renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Account"));
+  check("account: change-password form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Update")) && d.querySelectorAll('input[type="password"]').length >= 2, "no password form");
 
   console.log(failures.length ? "\n" + failures.length + " FAILURE(S)" : "\nALL UI DATA-RENDER CHECKS PASSED");
   w.close();

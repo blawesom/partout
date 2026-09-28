@@ -252,12 +252,24 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 		if err := c.h.SendCommand(host.ID, cmd); err != nil {
 			if errors.Is(err, stream.ErrAgentOffline) {
 				// Host is offline: the command is queued for delivery on
-				// reconnect (within the offline TTL). Not a failure.
-				if err2 := c.st.UpdateRunState(runID, "queued_offline", -1, 0); err2 != nil {
+				// reconnect (within the offline TTL). Not a failure. Guard the
+				// write: a fast reconnect could already have delivered/run it.
+				changed, err2 := c.st.MarkQueuedOfflineIfQueued(runID)
+				if err2 != nil {
 					res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err2))
 					continue
 				}
-				res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "queued_offline"})
+				if changed {
+					res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "queued_offline"})
+				} else {
+					// Already advanced past queued (delivered/running state from a
+					// concurrent drain); report the run's current state.
+					st := "delivered"
+					if r, err3 := c.st.GetExecutionRun(runID); err3 == nil && r != nil {
+						st = r.State
+					}
+					res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: st})
+				}
 				allTerminal = false
 				continue
 			}
@@ -440,7 +452,7 @@ func (c *Control) FinalizeExecution(execID string) error {
 		switch r.State {
 		case "succeeded":
 			succeeded++
-		case "failed", "timed_out", "interrupted", "not_delivered", "cancelled", "denied":
+		case "failed", "timed_out", "interrupted", "not_delivered", "cancelled", "denied", "expired":
 			failed++
 		default:
 			other++

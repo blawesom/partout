@@ -125,3 +125,68 @@ func TestOfflineQueueConnectedAgent(t *testing.T) {
 		t.Errorf("expected immediate send, got %d", len(sent))
 	}
 }
+
+// TestOfflineQueueCapEvictsAndFinalizes verifies that when the per-agent queue
+// is full, the oldest queued envelope is evicted AND its run is finalized
+// (expired) rather than left dangling in a non-terminal state forever.
+func TestOfflineQueueCapEvictsAndFinalizes(t *testing.T) {
+	st, h, agentID := newTestHandlerStore(t)
+
+	// Shrink the cap for a deterministic, fast test.
+	h.offlineMu.Lock()
+	h.offlineCap = 2
+	h.offlineMu.Unlock()
+
+	mk := func(runID string) {
+		if err := st.CreateExecutionRun(store.ExecutionRun{ID: runID, ExecutionID: "exec_x", AgentID: agentID, State: "queued"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.SendCommand(agentID, makeCommand(runID)); !errors.Is(err, ErrAgentOffline) {
+			t.Fatalf("SendCommand(%s) err = %v, want ErrAgentOffline", runID, err)
+		}
+	}
+	mk("run_cap1")
+	mk("run_cap2")
+	mk("run_cap3") // evicts run_cap1
+
+	if got := h.QueueCount(agentID); got != 2 {
+		t.Errorf("queue depth = %d, want 2 (cap)", got)
+	}
+	// The evicted run must be terminal, not a dangling non-terminal state.
+	if got := runState(t, st, "run_cap1"); got != "expired" {
+		t.Errorf("evicted run state = %q, want expired", got)
+	}
+	// The surviving runs must NOT have been finalized (still non-terminal).
+	if got := runState(t, st, "run_cap2"); got != "queued" {
+		t.Errorf("run_cap2 state = %q, want queued (non-terminal)", got)
+	}
+	if got := runState(t, st, "run_cap3"); got != "queued" {
+		t.Errorf("run_cap3 state = %q, want queued (non-terminal)", got)
+	}
+}
+
+// TestOfflineExpiryRecomputesAggregate verifies expireQueued fires the
+// ResultHook (which recomputes the execution aggregate) so an expired run does
+// not leave its execution non-terminal forever.
+func TestOfflineExpiryRecomputesAggregate(t *testing.T) {
+	st, h, agentID := newTestHandlerStore(t)
+	var hooked []string
+	h.ResultHook = func(execID string) { hooked = append(hooked, execID) }
+
+	runID := "run_exp_hook"
+	if err := st.CreateExecutionRun(store.ExecutionRun{ID: runID, ExecutionID: "exec_x", AgentID: agentID, State: "queued_offline"}); err != nil {
+		t.Fatal(err)
+	}
+	h.offlineMu.Lock()
+	h.offlineQueue[agentID] = append(h.offlineQueue[agentID],
+		&queuedEnvelope{env: &pb.Envelope{Kind: pb.EnvelopeKind_COMMAND, Payload: &pb.Envelope_Command{Command: makeCommand(runID)}}, expiresAt: time.Now().Add(-time.Second)})
+	h.offlineMu.Unlock()
+
+	h.drainOffline(agentID, func(*pb.Envelope) error { return nil })
+	if got := runState(t, st, runID); got != "expired" {
+		t.Fatalf("run state = %q, want expired", got)
+	}
+	if len(hooked) != 1 || hooked[0] != "exec_x" {
+		t.Fatalf("ResultHook calls = %v, want [exec_x]", hooked)
+	}
+}

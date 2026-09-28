@@ -200,3 +200,81 @@ func TestInterruptAgentRunsNoop(t *testing.T) {
 		t.Fatalf("execs = %v, want none", execs)
 	}
 }
+
+// TestExpireStaleOfflineRuns verifies that runs orphaned by a server restart
+// (left queued_offline, which lives in server memory) are marked expired and
+// their execution ids returned for aggregate finalization.
+func TestExpireStaleOfflineRuns(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	setupExecFixture(t, db, "queued_offline") // run_sp in exec_sp
+
+	// A second, non-offline execution must be left untouched.
+	if err := db.CreateExecution(Execution{ID: "exec_live", Selector: "all", Cmd: "true", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateExecutionRun(ExecutionRun{ID: "run_live", ExecutionID: "exec_live", AgentID: "ag_sp", State: "running"}); err != nil {
+		t.Fatal(err)
+	}
+
+	execs, err := db.ExpireStaleOfflineRuns()
+	if err != nil {
+		t.Fatalf("ExpireStaleOfflineRuns: %v", err)
+	}
+	if len(execs) != 1 || execs[0] != "exec_sp" {
+		t.Fatalf("execs = %v, want [exec_sp]", execs)
+	}
+	runs, _ := db.ListRunsForExecution("exec_sp")
+	if runs[0].State != "expired" {
+		t.Errorf("orphaned run state = %q, want expired", runs[0].State)
+	}
+	live, _ := db.ListRunsForExecution("exec_live")
+	if live[0].State != "running" {
+		t.Errorf("unrelated run state = %q, want running (untouched)", live[0].State)
+	}
+
+	// Idempotent: a second sweep finds nothing.
+	execs2, err := db.ExpireStaleOfflineRuns()
+	if err != nil {
+		t.Fatalf("ExpireStaleOfflineRuns (2): %v", err)
+	}
+	if len(execs2) != 0 {
+		t.Errorf("second sweep = %v, want none", execs2)
+	}
+}
+
+// TestMarkQueuedOfflineIfQueued verifies the guarded transition used by
+// dispatch: it only parks a run in queued_offline while it is still "queued",
+// so a concurrent drain that already marked it "delivered"/"running" is not
+// regressed.
+func TestMarkQueuedOfflineIfQueued(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	setupExecFixture(t, db, "queued") // run_sp in exec_sp
+
+	changed, err := db.MarkQueuedOfflineIfQueued("run_sp")
+	if err != nil {
+		t.Fatalf("MarkQueuedOfflineIfQueued: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected the queued run to be parked")
+	}
+	if runs, _ := db.ListRunsForExecution("exec_sp"); runs[0].State != "queued_offline" {
+		t.Fatalf("state = %q, want queued_offline", runs[0].State)
+	}
+
+	// Simulate the drain advancing the run, then a late dispatch write.
+	if err := db.UpdateRunState("run_sp", "delivered", -1, 0); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = db.MarkQueuedOfflineIfQueued("run_sp")
+	if err != nil {
+		t.Fatalf("MarkQueuedOfflineIfQueued (2): %v", err)
+	}
+	if changed {
+		t.Error("must not re-park a delivered run")
+	}
+	if runs, _ := db.ListRunsForExecution("exec_sp"); runs[0].State != "delivered" {
+		t.Fatalf("state = %q, want delivered (not regressed)", runs[0].State)
+	}
+}

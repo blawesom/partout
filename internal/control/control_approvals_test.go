@@ -332,3 +332,37 @@ func TestDispatchRequireApprovalFailsClosedWithoutEngine(t *testing.T) {
 	}
 	streamClient.CloseSend()
 }
+
+// TestFinalizeExecutionExpiredRun verifies an 'expired' run (offline-dispatch
+// TTL) makes the execution aggregate terminal ('failed'), not 'running' — the
+// bug that would leave GET /executions and `ctl run --wait` hanging forever.
+func TestFinalizeExecutionExpiredRun(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	sseB := sse.New()
+	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	ctl := control.New(st, h, sseB, log.New(io.Discard, "ctl: ", 0))
+
+	execID := "exec_exp"
+	_ = st.UpsertAgent(store.Agent{ID: "ag_x", UUID: "uuid-x", ED25519Pub: "e", X25519Pub: "x"})
+	if err := st.CreateExecution(store.Execution{ID: execID, Selector: "all", Cmd: "true", State: "dispatching"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateExecutionRun(store.ExecutionRun{ID: "run_exp", ExecutionID: execID, AgentID: "ag_x", State: "expired"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctl.FinalizeExecution(execID); err != nil {
+		t.Fatalf("FinalizeExecution: %v", err)
+	}
+	ex, err := st.GetExecution(execID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex.State != "failed" {
+		t.Fatalf("execution state = %q, want failed (expired run is terminal)", ex.State)
+	}
+}

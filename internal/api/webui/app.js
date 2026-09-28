@@ -619,7 +619,7 @@
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
             </select>
             <button class="btn sm" @click="loadUpdates">Refresh</button>
-            <span class="ext-status" :class="{ 'ext-err': extStatus && extStatus.last_error, 'ext-stale': extStatus && !extStatus.last_error && (Date.now()/1000 - (extStatus.last_at||0) > 86400) }" title="{{ extStatus ? 'last refresh: ' + (extStatus.last_at ? new Date(extStatus.last_at*1000).toLocaleString() : 'never') + (extStatus.last_error ? ' — ' + extStatus.last_error : '') : 'unknown' }}">
+            <span class="ext-status" :class="{ 'ext-err': extStatus && extStatus.last_error, 'ext-stale': extStatus && !extStatus.last_error && (Date.now()/1000 - (extStatus.last_at||0) > 86400) }" :title="extStatus ? 'last refresh: ' + (extStatus.last_at ? new Date(extStatus.last_at*1000).toLocaleString() : 'never') + (extStatus.last_error ? ' — ' + extStatus.last_error : '') : 'unknown'">
               EOL data: {{ extStatus ? (extStatus.last_at ? 'updated ' + fmtAgo(extStatus.last_at) : 'never') : '…' }}{{ extStatus && extStatus.last_error ? ' ⚠' : '' }}
             </span>
             <button v-if="isAdmin" class="btn sm" :disabled="!!extBusy" @click="refreshExtData"><span v-if="extBusy" class="spin"></span> Refresh EOL data</button>
@@ -1283,19 +1283,33 @@
         if (this.token) headers["Authorization"] = "Bearer " + this.token;
         if (opts.body !== undefined && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
         const method = opts.method || (opts.body !== undefined ? "POST" : "GET");
-        const res = await fetch("/api/v1" + path, {
-          method, headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-        });
+        // Global feedback for write actions (POST/PUT/DELETE). GET loads are
+        // usually transient/polling and reset their own state, so they stay
+        // quiet unless the caller opts in with opts.toast. opts.silent always
+        // wins (e.g. high-frequency PTY input/resize).
+        const isWrite = method !== "GET";
+        const wantToast = (isWrite && !opts.silent) || opts.toast;
+        let res;
+        try {
+          res = await fetch("/api/v1" + path, {
+            method, headers, body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+          });
+        } catch (e) {
+          // Transport failure (server down, network blip): fetch rejects before
+          // any status handling, so surface it here rather than staying silent.
+          if (wantToast) this.notify("err", "network error: " + (e && e.message ? e.message : "request failed"));
+          throw new ApiError(0, "network error", "network_error", null);
+        }
         if (res.status === 401) { this.signOut(); throw new ApiError(401, "unauthorized"); }
-        if (res.status === 503) { this.refreshCaps(); throw new ApiError(503, "disabled"); }
+        if (res.status === 503) {
+          this.refreshCaps();
+          if (wantToast) this.notify("err", "feature disabled in this build (503)");
+          throw new ApiError(503, "disabled");
+        }
         let data = null; try { data = await res.json(); } catch (e) { }
         if (!res.ok) {
           const msg = (data && data.message) || String(res.status);
-          // Global feedback for write actions (POST/PUT/DELETE). GET loads are
-          // usually transient/polling and reset their own state, so they stay
-          // quiet unless the caller opts in with opts.toast.
-          const isWrite = method !== "GET";
-          if ((isWrite && !opts.silent) || opts.toast) this.notify("err", msg + (data && data.code ? " (" + data.code + ")" : ""));
+          if (wantToast) this.notify("err", msg + (data && data.code ? " (" + data.code + ")" : ""));
           throw new ApiError(res.status, msg, data && data.code, data);
         }
         return data;
@@ -1376,7 +1390,11 @@
       async changePassword() {
         this.pwMsg = ""; this.pwErr = "";
         try {
-          await this.api("/auth/password", { method: "POST", body: { current: this.pw.current, new: this.pw.next } });
+          // The server expects old_password/new_password and, on success,
+          // invalidates the caller's token and returns a fresh one — adopt it
+          // so the session stays live.
+          const d = await this.api("/auth/password", { method: "POST", body: { old_password: this.pw.current, new_password: this.pw.next } });
+          if (d && d.token) { this.token = d.token; localStorage.setItem(LS_TOKEN, d.token); }
           this.pwMsg = "Password updated."; this.pw.current = ""; this.pw.next = "";
           this.notify("ok", "password updated");
         } catch (e) { this.pwErr = e.message; }
@@ -1524,13 +1542,13 @@
         window.__partoutTerm = term; // debug/test hook (read terminal buffer headlessly)
         term.onData((d) => this._sendInput(d));
         term.onResize(({ cols, rows }) => {
-          this.api("/sessions/" + encodeURIComponent(this.p1) + "/resize", { method: "POST", body: { cols, rows } }).catch(() => {});
+          this.api("/sessions/" + encodeURIComponent(this.p1) + "/resize", { method: "POST", body: { cols, rows }, silent: true }).catch(() => {});
         });
         // Replay chunks that arrived before the terminal mounted (the initial
         // shell prompt usually precedes the mount).
         const key = s.session_id || s.id || this.p1;
         if (this._liveBuf && this._liveBuf[key]) {
-          try { term.write(atob(this._liveBuf[key])); } catch (e) { }
+          try { term.write(this._liveBuf[key]); } catch (e) { }
           delete this._liveBuf[key];
         }
         term.focus();
@@ -1538,14 +1556,19 @@
       _sendInput(d) {
         if (!this._term) return;
         const b64 = btoa(unescape(encodeURIComponent(d))); // unicode-safe
-        this.api("/sessions/" + encodeURIComponent(this.p1) + "/input", { method: "POST", body: { data_b64: b64 } }).catch(() => {});
+        this.api("/sessions/" + encodeURIComponent(this.p1) + "/input", { method: "POST", body: { data_b64: b64 }, silent: true }).catch(() => {});
       },
       _onSessionData(p) {
         if (!p || p.session_id !== this.p1) return;
         if (this._term) { try { if (p.data) this._term.write(atob(p.data)); } catch (e) { } return; }
         // Terminal not mounted yet: buffer recent output (bounded) for catch-up.
+        // Decode each chunk now — concatenating base64 strings then atob()ing the
+        // joined value is invalid (padding lands mid-string), so the pre-mount
+        // prompt would be dropped.
         this._liveBuf = this._liveBuf || {};
-        this._liveBuf[this.p1] = (this._liveBuf[this.p1] || "") + (p.data || "");
+        let chunk = "";
+        try { chunk = p.data ? atob(p.data) : ""; } catch (e) { chunk = ""; }
+        this._liveBuf[this.p1] = (this._liveBuf[this.p1] || "") + chunk;
         if (this._liveBuf[this.p1].length > 512 * 1024) this._liveBuf[this.p1] = this._liveBuf[this.p1].slice(-256 * 1024);
       },
       _termFinalize(p) {
@@ -1719,7 +1742,7 @@
       async setUserRole(u, role) {
         const n = u.username || u.name;
         try { await this.api("/users/" + encodeURIComponent(n), { method: "PATCH", body: { role } }); this.notify("ok", "" + n + " role set to " + role); this.loadUsers(); }
-        catch (e) { /* toast shown by api() */ }
+        catch (e) { /* toast shown by api() */ this.loadUsers(); } // revert the <select> on a rejected change
       },
       async toggleUserDisabled(u) {
         const n = u.username || u.name;

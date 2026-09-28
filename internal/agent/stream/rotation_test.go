@@ -115,3 +115,80 @@ func TestRotateLeafNoTLS(t *testing.T) {
 		t.Error("RotateLeaf with an invalid leaf should fail")
 	}
 }
+
+// TestRotateLeafProductionShape reproduces the REAL server leaf shape: the
+// stream handler signs rotation leaves with CN=<server agent id> and
+// SAN DNS=<identity UUID> (see internal/server/stream.RotateAgentCert and
+// certutil.SignLeafForPublicKey). The agent authenticates by UUID, so rotation
+// must accept a leaf whose SAN carries the UUID even though the CN is the
+// agent id. This test would have caught the CN==UUID mismatch bug.
+func TestRotateLeafProductionShape(t *testing.T) {
+	const uuid = "9f3c1a2b4d5e6f708192a3b4c5d6e7f8" // 32-hex identity uuid
+	const agentID = "ag_1a2b3c4d5e6f"               // server-side id (CN)
+
+	ca, key, dir := setupTLSCertDir(t, uuid)
+	id := &identity.Identity{UUID: uuid}
+	c := New(id, Config{
+		CAFile:   filepath.Join(dir, "ca.crt"),
+		CertFile: filepath.Join(dir, "agent.crt"),
+		KeyFile:  filepath.Join(dir, "key.pem"),
+		TLSDir:   dir,
+	}, nil)
+
+	// Exactly what the server produces on rotation.
+	newLeaf, _, err := ca.SignLeafForPublicKey(&key.PublicKey, agentID, []string{uuid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RotateLeaf([]byte(newLeaf), []byte(ca.CertPEM())); err != nil {
+		t.Fatalf("RotateLeaf rejected the server's production-shaped leaf: %v", err)
+	}
+}
+
+// TestRotateLeafRejectsForeignIdentity ensures the SAN check still rejects a
+// leaf minted for a different identity (no silent cross-agent acceptance).
+func TestRotateLeafRejectsForeignIdentity(t *testing.T) {
+	const uuid = "9f3c1a2b4d5e6f708192a3b4c5d6e7f8"
+	ca, key, dir := setupTLSCertDir(t, uuid)
+	c := New(&identity.Identity{UUID: uuid}, Config{
+		CAFile:   filepath.Join(dir, "ca.crt"),
+		CertFile: filepath.Join(dir, "agent.crt"),
+		KeyFile:  filepath.Join(dir, "key.pem"),
+		TLSDir:   dir,
+	}, nil)
+
+	foreign, _, err := ca.SignLeafForPublicKey(&key.PublicKey, "ag_other", []string{"11112222333344445555666677778888"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RotateLeaf([]byte(foreign), []byte(ca.CertPEM())); err == nil {
+		t.Fatal("RotateLeaf accepted a leaf for a foreign identity")
+	}
+}
+
+// TestRotateLeafRejectsWrongKey ensures a leaf that is valid and correctly bound
+// to the identity but minted for a DIFFERENT key is rejected — installing it
+// would break the mTLS handshake and (being persisted) survive a restart.
+func TestRotateLeafRejectsWrongKey(t *testing.T) {
+	const uuid = "aa11bb22cc33dd44ee55ff6677889900"
+	ca, _, dir := setupTLSCertDir(t, uuid)
+	c := New(&identity.Identity{UUID: uuid}, Config{
+		CAFile:   filepath.Join(dir, "ca.crt"),
+		CertFile: filepath.Join(dir, "agent.crt"),
+		KeyFile:  filepath.Join(dir, "key.pem"),
+		TLSDir:   dir,
+	}, nil)
+
+	otherKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Correct identity binding (SAN=uuid) but the wrong public key.
+	foreign, _, err := ca.SignLeafForPublicKey(&otherKey.PublicKey, "ag_x", []string{uuid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RotateLeaf([]byte(foreign), []byte(ca.CertPEM())); err == nil {
+		t.Fatal("RotateLeaf accepted a leaf whose key does not match the agent key")
+	}
+}

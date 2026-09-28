@@ -222,7 +222,6 @@ func (h *Handler) PushCertExpiryRotation(window time.Duration) int {
 	if err != nil {
 		return 0
 	}
-	now := time.Now()
 	n := 0
 	for _, a := range agents {
 		if a.TlsPub == "" || a.TlsNotAfter == 0 {
@@ -231,12 +230,16 @@ func (h *Handler) PushCertExpiryRotation(window time.Duration) int {
 		if time.Until(time.Unix(a.TlsNotAfter, 0)) > window {
 			continue
 		}
+		// Only rotate connected agents: an offline agent cannot receive the new
+		// leaf and would be retried (and error-logged) on every tick.
+		if a.State != "connected" {
+			continue
+		}
 		if _, err := h.RotateAgentCert(a.ID); err != nil {
 			h.log.Printf("stream: expiry rotation %s: %v", a.ID, err)
 			continue
 		}
 		n++
-		_ = now
 	}
 	return n
 }
@@ -286,7 +289,12 @@ func (h *Handler) BroadcastPolicyBundle() {
 // Session is one authenticated agent stream.
 type Session struct {
 	AgentID string
-	send    func(*pb.Envelope) error
+	// sendMu serializes down-sends on this stream: grpc's SendMsg is not safe
+	// to call concurrently from multiple goroutines, and down envelopes now
+	// originate from several (control dispatch, offline drain, hourly cert
+	// rotation ticker, admin rotate handler, session/file/pkg sends).
+	sendMu sync.Mutex
+	send   func(*pb.Envelope) error
 }
 
 // Register wires the handler into a grpc.Server.
@@ -354,6 +362,8 @@ func (h *Handler) Stream(stream pb.AgentStream_StreamServer) error {
 	// observes a published session whose send is nil (avoids a data race).
 	sess := &Session{AgentID: agent.ID}
 	sess.send = func(env *pb.Envelope) error {
+		sess.sendMu.Lock()
+		defer sess.sendMu.Unlock()
 		return stream.Send(env)
 	}
 	h.mu.Lock()
@@ -558,13 +568,22 @@ func (h *Handler) SendCommand(agentID string, cmd *pb.Command) error {
 // queueOffline enqueues a down envelope for an offline agent (bounded).
 func (h *Handler) queueOffline(agentID string, env *pb.Envelope) {
 	h.offlineMu.Lock()
-	defer h.offlineMu.Unlock()
 	q := h.offlineQueue[agentID]
+	var dropped *queuedEnvelope
 	if len(q) >= h.offlineCap {
+		dropped = q[0]
 		q = q[1:] // drop the oldest to bound memory
 	}
 	ttl := h.offlineTTL
 	h.offlineQueue[agentID] = append(q, &queuedEnvelope{env: env, expiresAt: time.Now().Add(ttl)})
+	h.offlineMu.Unlock()
+
+	// Finalize the evicted run OUTSIDE the lock so it cannot wedge in a
+	// non-terminal state forever (the sweeper can no longer see it).
+	if dropped != nil {
+		h.log.Printf("stream: offline queue for %s full (%d); evicting oldest envelope", agentID, h.offlineCap)
+		h.expireQueued(dropped)
+	}
 	h.log.Printf("stream: queued %s for offline agent %s (ttl %s)", env.Kind, agentID, ttl)
 }
 
@@ -582,14 +601,18 @@ func (h *Handler) drainOffline(agentID string, send func(*pb.Envelope) error) {
 	delete(h.offlineQueue, agentID)
 	h.offlineMu.Unlock()
 
-	for _, qe := range q {
+	for i, qe := range q {
 		if now.After(qe.expiresAt) {
 			h.expireQueued(qe)
 			continue
 		}
 		if err := send(qe.env); err != nil {
-			h.log.Printf("stream: drain offline %s: %v", agentID, err)
-			continue
+			// The stream failed mid-drain: re-queue this envelope and the
+			// remaining tail (preserving expiry) so nothing is lost or wedged
+			// in a non-terminal state with no sweepable queue entry.
+			h.log.Printf("stream: drain offline %s: %v; re-queueing %d envelope(s)", agentID, err, len(q)-i)
+			h.requeueOffline(agentID, q[i:])
+			return
 		}
 		if c := qe.env.GetCommand(); c != nil {
 			if err := h.st.UpdateRunState(c.RunId, "delivered", -1, 0); err != nil {
@@ -599,13 +622,28 @@ func (h *Handler) drainOffline(agentID string, send func(*pb.Envelope) error) {
 	}
 }
 
-// expireQueued finalizes a timed-out queued envelope (a COMMAND run becomes
-// 'expired').
+// requeueOffline puts previously-queued envelopes back (preserving their
+// original expiry) after a failed drain, so they stay visible to the sweeper.
+func (h *Handler) requeueOffline(agentID string, qes []*queuedEnvelope) {
+	h.offlineMu.Lock()
+	h.offlineQueue[agentID] = append(h.offlineQueue[agentID], qes...)
+	h.offlineMu.Unlock()
+}
+
+// expireQueued finalizes a timed-out (or evicted) queued envelope: a COMMAND
+// run becomes 'expired', and the execution aggregate is recomputed so it does
+// not stay non-terminal forever.
 func (h *Handler) expireQueued(qe *queuedEnvelope) {
-	if c := qe.env.GetCommand(); c != nil {
-		if err := h.st.UpdateRunState(c.RunId, "expired", -1, 0); err != nil {
-			h.log.Printf("stream: mark expired %s: %v", c.RunId, err)
-		}
+	c := qe.env.GetCommand()
+	if c == nil {
+		return
+	}
+	if err := h.st.UpdateRunState(c.RunId, "expired", -1, 0); err != nil {
+		h.log.Printf("stream: mark expired %s: %v", c.RunId, err)
+		return
+	}
+	if h.ResultHook != nil && c.ExecutionId != "" {
+		h.ResultHook(c.ExecutionId)
 	}
 }
 

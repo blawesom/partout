@@ -262,6 +262,21 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	apr.RegisterDispatcher(policy.ActionExec, apiH.Control().DispatchApprovedCommand)
 	apiH.SetApprovals(apr)
 
+	// The offline down-queue is in-memory, so a restart orphans any run parked as
+	// queued_offline (nothing can deliver or expire it). Finalize them now.
+	if staleExecs, err := st.ExpireStaleOfflineRuns(); err != nil {
+		lg.Printf("server: expire stale offline runs: %v", err)
+	} else {
+		for _, execID := range staleExecs {
+			if err := apiH.Control().FinalizeExecution(execID); err != nil {
+				lg.Printf("server: finalize stale offline exec %s: %v", execID, err)
+			}
+		}
+		if len(staleExecs) > 0 {
+			lg.Printf("server: expired %d execution(s) with orphaned queued_offline runs", len(staleExecs))
+		}
+	}
+
 	// M4/R11: OAuth2 (PKCE) for the MCP HTTP transport (A20). Access tokens
 	// are short-lived bearer credentials on the REST/MCP routes.
 	apiH.SetOAuth(oauth.New(st))

@@ -5,6 +5,8 @@ package stream
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -136,16 +138,46 @@ func (c *Client) RotateLeaf(leafPEM []byte, caPEM []byte) error {
 	if block == nil {
 		return errors.New("stream: rotate: no PEM block in leaf")
 	}
+	leafCert, perr := x509.ParseCertificate(block.Bytes)
+	if perr != nil {
+		return fmt.Errorf("stream: rotate: parse leaf: %w", perr)
+	}
 	c.certMu.Lock()
-	if c.cert == nil {
-		// No prior cert (e.g. loaded after a transient failure): rebuild from
-		// the persisted key + the new leaf.
+	// Refuse a leaf that does not match the private key we hold: installing it
+	// would break the handshake and — because it is persisted — survive a
+	// restart, bricking the agent until the file is removed by hand.
+	var haveKey crypto.Signer
+	if c.cert != nil {
+		if s, ok := c.cert.PrivateKey.(crypto.Signer); ok {
+			haveKey = s
+		}
+	}
+	if haveKey == nil {
 		key, kerr := parsePEMKey(c.keyPEM)
 		if kerr != nil {
 			c.certMu.Unlock()
-			return fmt.Errorf("stream: rotate: no key to rebuild cert: %w", kerr)
+			return fmt.Errorf("stream: rotate: no key to validate leaf against: %w", kerr)
 		}
-		c.cert = &tls.Certificate{Certificate: [][]byte{block.Bytes}, PrivateKey: key}
+		s, ok := key.(crypto.Signer)
+		if !ok {
+			c.certMu.Unlock()
+			return errors.New("stream: rotate: agent key is not a signer")
+		}
+		haveKey = s
+	}
+	leafPub, ok := leafCert.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		c.certMu.Unlock()
+		return errors.New("stream: rotate: leaf public key is not ECDSA")
+	}
+	if !leafPub.Equal(haveKey.Public()) {
+		c.certMu.Unlock()
+		return errors.New("stream: rotate: leaf public key does not match the agent key")
+	}
+	if c.cert == nil {
+		// No prior cert (e.g. loaded after a transient failure): rebuild from
+		// the persisted key + the new leaf (haveKey is the parsed key).
+		c.cert = &tls.Certificate{Certificate: [][]byte{block.Bytes}, PrivateKey: haveKey}
 	} else {
 		c.cert.Certificate = [][]byte{block.Bytes}
 	}

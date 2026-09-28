@@ -588,6 +588,12 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 				return fmt.Errorf("jobs: approval request: %w", err)
 			}
 			c.audit("run-parked", jobID, agentID, 0)
+			if c.sse != nil {
+				c.sse.Emit("job.run-parked", map[string]any{
+					"job_id": jobID, "agent_id": agentID,
+					"state": "awaiting_approval", "run_id": runID, "approval_id": areq.ID,
+				})
+			}
 			return &ApprovalRequiredError{ApprovalID: areq.ID, RunID: runID}
 		}
 		_ = c.st.CreateJobRun(&store.JobRun{

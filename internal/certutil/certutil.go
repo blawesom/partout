@@ -26,6 +26,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -231,10 +232,17 @@ func (ca *CA) SignLeafForPublicKey(pub *ecdsa.PublicKey, agentID string, dnsName
 }
 
 // VerifyAgentLeaf verifies a rotated leaf (PEM) is safe to install: it chains
-// to the given CA (PEM), is currently valid, is a client-auth cert, and its
-// Subject CN matches agentID. The stream is already Ed25519-authenticated, so
+// to the given CA (PEM), is currently valid, is a client-auth cert, and is bound
+// to the agent's identity.
+//
+// Identity binding: the server mints agent leaves with Subject CN = the
+// server-side agent id ("ag_…") and SAN DNS = the identity UUID (see
+// SignLeafForPublicKey / SignAgentCert, and the enrollment CSR which carries the
+// UUID as a SAN). The agent authenticates by UUID, so we bind on the SAN UUID
+// and accept the CN as a fallback (older/self-signed leaves minted before the
+// SAN carried the identity). The stream is already Ed25519-authenticated, so
 // this is defense-in-depth, not the primary trust boundary.
-func VerifyAgentLeaf(leafPEM, caPEM []byte, agentID string) error {
+func VerifyAgentLeaf(leafPEM, caPEM []byte, identity string) error {
 	leaf, err := parseCertPEM(leafPEM)
 	if err != nil {
 		return fmt.Errorf("certutil: parse rotated leaf: %w", err)
@@ -248,10 +256,14 @@ func VerifyAgentLeaf(leafPEM, caPEM []byte, agentID string) error {
 	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return fmt.Errorf("certutil: rotated leaf does not verify against CA: %w", err)
 	}
-	if leaf.Subject.CommonName != agentID {
-		return fmt.Errorf("certutil: rotated leaf CN %q != agent %q", leaf.Subject.CommonName, agentID)
+	if identity == "" {
+		return errors.New("certutil: empty agent identity")
 	}
-	return nil
+	if slices.Contains(leaf.DNSNames, identity) || leaf.Subject.CommonName == identity {
+		return nil
+	}
+	return fmt.Errorf("certutil: rotated leaf is not bound to agent %q (CN=%q SAN=%v)",
+		identity, leaf.Subject.CommonName, leaf.DNSNames)
 }
 
 // CSRPubKey returns the ECDSA public key carried by a PEM CSR. The server
