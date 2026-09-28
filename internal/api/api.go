@@ -4,8 +4,11 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
@@ -48,6 +51,7 @@ type Handler struct {
 	authC       *serverauth.Controller // local user identity (PRD Decision 6); nil until set
 	usersActive bool                   // true once the principals table is non-empty
 	ca          *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
+	streamH     *stream.Handler        // stream handler (for mTLS leaf rotation)
 }
 
 // New builds the REST handler and its router.
@@ -56,7 +60,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 		lg = log.Default()
 	}
 	ctrl := control.New(st, h, sseB, lg)
-	handler := &Handler{st: st, ctrl: ctrl, sse: sseB, log: lg}
+	handler := &Handler{st: st, ctrl: ctrl, sse: sseB, log: lg, streamH: h}
 	mux := http.NewServeMux()
 
 	// REST v1 endpoints (PRD §10).
@@ -101,6 +105,78 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"cert": handler.ca.CertPEM()})
+	})))
+
+	// POST /api/v1/tls/rotate (admin) — re-sign an agent's mTLS leaf now.
+	// Body: {"agent_id": "ag_..."} or {"all": true} (rotate every connected
+	// TLS agent). Returns the new leaf serial(s).
+	mux.Handle("POST /api/v1/tls/rotate", handler.requireRole(roleAdmin)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handler.ca == nil {
+			writeError(w, http.StatusServiceUnavailable, "tls_disabled",
+				"server is not running in TLS mode", nil)
+			return
+		}
+		var body struct {
+			AgentID string `json:"agent_id"`
+			All     bool   `json:"all"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+			return
+		}
+		if body.All {
+			agents, _ := handler.st.Agents()
+			n := 0
+			for _, a := range agents {
+				if a.TlsPub == "" {
+					continue
+				}
+				if _, err := handler.streamH.RotateAgentCert(a.ID); err == nil {
+					n++
+				}
+			}
+			handler.audit("tls.rotate", "admin", map[string]string{"scope": "all", "rotated": fmt.Sprint(n)})
+			writeJSON(w, http.StatusOK, map[string]any{"rotated": n})
+			return
+		}
+		if body.AgentID == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "agent_id or all required", nil)
+			return
+		}
+		serial, err := handler.streamH.RotateAgentCert(body.AgentID)
+		if err != nil {
+			writeError(w, http.StatusConflict, "rotate_failed", err.Error(), nil)
+			return
+		}
+		handler.audit("tls.rotate", "admin", map[string]string{"agent_id": body.AgentID, "serial": serial})
+		writeJSON(w, http.StatusOK, map[string]string{"agent_id": body.AgentID, "serial": serial})
+	})))
+
+	// GET /api/v1/tls/status (viewer) — per-agent mTLS leaf expiry.
+	mux.Handle("GET /api/v1/tls/status", handler.requireRole(roleViewer)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agents, err := handler.st.Agents()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error(), nil)
+			return
+		}
+		type row struct {
+			AgentID  string `json:"agent_id"`
+			TLS      bool   `json:"tls"`
+			NotAfter int64  `json:"not_after,omitempty"`
+			DaysLeft int64  `json:"days_left,omitempty"`
+			State    string `json:"state"`
+		}
+		out := make([]row, 0, len(agents))
+		for _, a := range agents {
+			r := row{AgentID: a.ID, State: a.State}
+			if a.TlsPub != "" {
+				r.TLS = true
+				r.NotAfter = a.TlsNotAfter
+				r.DaysLeft = (a.TlsNotAfter - time.Now().Unix()) / 86400
+			}
+			out = append(out, r)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tls": handler.ca != nil, "agents": out})
 	})))
 
 	// M2: files + sessions (PRD §5.3, §5.2.2).

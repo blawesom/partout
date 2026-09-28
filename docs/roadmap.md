@@ -65,7 +65,7 @@ Done:
 
 Remaining:
 - [ ] Postgres backend (second store implementation) — deferred to a later phase (after M2)
-- [ ] TLS cert rotation via the stream (v1.x) + optional revocation list
+- [x] TLS cert rotation via the stream — ✅ shipped (see TLS section below)
 - [ ] Dispatch to offline agents (server-side down-queue with TTL) — follow-up
 
 ### M2 — Files & sessions (complete)
@@ -225,15 +225,35 @@ zero per-host certificate management. Plaintext (`h2c`) remains the default for 
 - **mTLS is enforced only for the gRPC path** (the agent stream); REST/SSE rely on bearer
   tokens. A plaintext client is rejected outright on a TLS port.
 - The CA is the only trust anchor; agent leaves are CA-signed, so there is **no per-host
-  cert distribution** beyond the enroll response. **Rotation** (stream-delivered new
-  leaves) and a **revocation list** are v1.x follow-ups — the Ed25519 gate already gives
-  instant server-side revocation in the interim.
+  cert distribution** beyond the enroll response. **Rotation** is shipped (below); a full
+  **revocation list** is still a v1.x follow-up — the Ed25519 gate already gives instant
+  server-side revocation in the interim.
+
+#### mTLS leaf rotation (shipped)
+
+- **Server re-signs from the enrolled key.** At enrollment the agent's ECDSA public key is
+  persisted (`agents.tls_pub` + `tls_not_after`, schema v14). The server re-signs a fresh
+  2-year leaf from that key at any time — the agent's private key never changes or leaves
+  the host.
+- **Over the stream.** New `TLS_CERT` (down) / `TLS_RENEW` (up) envelopes. The server pushes
+  a rotated leaf on demand, on expiry (hourly sweep, 30-day window), or when the agent asks
+  (its leaf is expired/near-expiry on connect). The agent verifies the leaf chains to the CA
+  and matches its identity, **hot-swaps** it into the live client cert (`GetClientCertificate`),
+  persists it, and ACKs with the new serial.
+- **No interruption.** The old leaf stays valid until its own expiry, so a swap on the next
+  reconnect is seamless; both leaves verify against the same CA.
+- **API/CLI.** `POST /api/v1/tls/rotate` (admin; `{agent_id}` or `{all:true}`),
+  `GET /api/v1/tls/status` (viewer; per-agent expiry), `partout ctl tls status|rotate`.
+  SSE `tls.rotated`.
+- **Revocation** stays on the Ed25519 handshake (instant); cert-level revocation = re-issue.
+- Verified: unit tests (certutil round-trip, agent hot-swap + reject-bad, server re-sign +
+  store update) and a live TLS-mode E2E (`scripts/tls-rotation-e2e.sh`).
 
 See `deploy/systemd/` for the systemd units and env templates.
 
 ### Not yet covered (v1.x)
 
-- Certificate rotation via the stream (`TLS_CSR`/`TLS_CERT` envelopes).
+- ~~Certificate rotation via the stream (`TLS_CSR`/`TLS_CERT` envelopes).~~ ✅ Shipped (see above; uses `TLS_CERT`/`TLS_RENEW`).
 - Long-lived CA management / renewal reminders.
 - Optional `PARTOUT_TLS_INSECURE` (skip-verify) escape hatch for dev — intentionally **not**
   shipped; use a local CA instead.

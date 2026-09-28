@@ -492,9 +492,28 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 			MinVersion:   tls.VersionTLS12,
 		}
 		apiH.SetTLS(ca)
+		h.SetCA(ca)
 		protocols.SetHTTP2(true) // gRPC over TLS (ALPN h2)
 		lg.Printf("TLS enabled (CA in %s, SANs %v)", certDir, names)
 	}
+
+	// mTLS leaf rotation: periodically re-sign any connected agent whose
+	// leaf is expired or within the renewal window (30 days). No-op in
+	// plaintext mode. Runs in the background until shutdown.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n := h.PushCertExpiryRotation(30 * 24 * time.Hour); n > 0 {
+					lg.Printf("tls: rotated %d expiring agent leaf(s)", n)
+				}
+			}
+		}
+	}()
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {

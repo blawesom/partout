@@ -15,11 +15,16 @@ type Agent struct {
 	UUID       string
 	ED25519Pub string
 	X25519Pub  string
-	Version    string
-	State      string // pending|connected|disconnected|revoked
-	FirstSeen  int64
-	LastSeen   int64
-	Created    int64
+	// TlsPub is the enrolled ECDSA public key (PKIX b64) used to re-sign mTLS
+	// leaves on rotation; "" for a non-TLS agent. TlsNotAfter is the current
+	// leaf's expiry (unix s; 0 = none), used for expiry-driven rotation.
+	TlsPub      string
+	TlsNotAfter int64
+	Version     string
+	State       string // pending|connected|disconnected|revoked
+	FirstSeen   int64
+	LastSeen    int64
+	Created     int64
 }
 
 // Facts is a point-in-time fact set for a host.
@@ -72,7 +77,8 @@ func (s *Store) UpsertAgent(a Agent) error {
 // Agent returns a single agent by id.
 func (s *Store) Agent(id string) (*Agent, error) {
 	row := s.db.QueryRow(`
-		SELECT id, uuid, ed25519_pub, x25519_pub, version, state,
+		SELECT id, uuid, ed25519_pub, x25519_pub, COALESCE(tls_pub,''), COALESCE(tls_not_after,0),
+		       version, state,
 		       COALESCE(first_seen,0), COALESCE(last_seen,0), created
 		FROM agents WHERE id = ?`, id)
 	return scanAgent(row)
@@ -81,7 +87,8 @@ func (s *Store) Agent(id string) (*Agent, error) {
 // AgentByUUID returns an agent by its unique uuid.
 func (s *Store) AgentByUUID(uuid string) (*Agent, error) {
 	row := s.db.QueryRow(`
-		SELECT id, uuid, ed25519_pub, x25519_pub, version, state,
+		SELECT id, uuid, ed25519_pub, x25519_pub, COALESCE(tls_pub,''), COALESCE(tls_not_after,0),
+		       version, state,
 		       COALESCE(first_seen,0), COALESCE(last_seen,0), created
 		FROM agents WHERE uuid = ?`, uuid)
 	return scanAgent(row)
@@ -90,7 +97,8 @@ func (s *Store) AgentByUUID(uuid string) (*Agent, error) {
 // Agents lists all agents.
 func (s *Store) Agents() ([]*Agent, error) {
 	rows, err := s.db.Query(`
-		SELECT id, uuid, ed25519_pub, x25519_pub, version, state,
+		SELECT id, uuid, ed25519_pub, x25519_pub, COALESCE(tls_pub,''), COALESCE(tls_not_after,0),
+		       version, state,
 		       COALESCE(first_seen,0), COALESCE(last_seen,0), created
 		FROM agents ORDER BY id`)
 	if err != nil {
@@ -106,6 +114,14 @@ func (s *Store) Agents() ([]*Agent, error) {
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// SetAgentTLS records the agent's enrolled ECDSA public key (PKIX b64) and the
+// current mTLS leaf's expiry. Called at enrollment (when a CSR is presented) and
+// again after each rotation.
+func (s *Store) SetAgentTLS(id, tlsPubB64 string, notAfter int64) error {
+	_, err := s.db.Exec(`UPDATE agents SET tls_pub=?, tls_not_after=? WHERE id=?`, tlsPubB64, notAfter, id)
+	return err
 }
 
 // MarkSeen updates last_seen for an agent.
@@ -137,7 +153,7 @@ func (s *Store) DeleteAgent(id string) error {
 
 func scanAgent(row interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
-	if err := row.Scan(&a.ID, &a.UUID, &a.ED25519Pub, &a.X25519Pub,
+	if err := row.Scan(&a.ID, &a.UUID, &a.ED25519Pub, &a.X25519Pub, &a.TlsPub, &a.TlsNotAfter,
 		&sqlNullString{&a.Version}, &a.State,
 		&a.FirstSeen, &a.LastSeen, &a.Created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -67,6 +67,9 @@ const (
 	EnvelopeKind_JOB_RUN_RESULT     EnvelopeKind = 26 // up: agent reports job run result
 	// Observe layer — structured fact uploads (M5, R18–R20)
 	EnvelopeKind_OBSERVE_FACTS EnvelopeKind = 27 // up: structured facts (services, configs, certs)
+	// TLS rotation (v1.x)
+	EnvelopeKind_TLS_CERT  EnvelopeKind = 28 // down: server delivers a freshly signed mTLS leaf
+	EnvelopeKind_TLS_RENEW EnvelopeKind = 29 // up: agent requests a fresh leaf (expired/near-expiry)
 	// Handshake (per stream)
 	EnvelopeKind_CHALLENGE  EnvelopeKind = 40 // down: server issues
 	EnvelopeKind_AUTH_PROOF EnvelopeKind = 41 // up: agent replies
@@ -103,6 +106,8 @@ var (
 		25: "JOB_UNASSIGN",
 		26: "JOB_RUN_RESULT",
 		27: "OBSERVE_FACTS",
+		28: "TLS_CERT",
+		29: "TLS_RENEW",
 		40: "CHALLENGE",
 		41: "AUTH_PROOF",
 	}
@@ -135,6 +140,8 @@ var (
 		"JOB_UNASSIGN":              25,
 		"JOB_RUN_RESULT":            26,
 		"OBSERVE_FACTS":             27,
+		"TLS_CERT":                  28,
+		"TLS_RENEW":                 29,
 		"CHALLENGE":                 40,
 		"AUTH_PROOF":                41,
 	}
@@ -426,6 +433,8 @@ type Envelope struct {
 	//	*Envelope_PkgOp
 	//	*Envelope_Challenge
 	//	*Envelope_AuthProof
+	//	*Envelope_TlsCert
+	//	*Envelope_TlsRenew
 	Payload       isEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -764,6 +773,24 @@ func (x *Envelope) GetAuthProof() *AuthProof {
 	return nil
 }
 
+func (x *Envelope) GetTlsCert() *TlsCert {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_TlsCert); ok {
+			return x.TlsCert
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetTlsRenew() *TlsRenew {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_TlsRenew); ok {
+			return x.TlsRenew
+		}
+	}
+	return nil
+}
+
 type isEnvelope_Payload interface {
 	isEnvelope_Payload()
 }
@@ -888,6 +915,15 @@ type Envelope_AuthProof struct {
 	AuthProof *AuthProof `protobuf:"bytes,51,opt,name=auth_proof,json=authProof,proto3,oneof"`
 }
 
+type Envelope_TlsCert struct {
+	// TLS rotation
+	TlsCert *TlsCert `protobuf:"bytes,52,opt,name=tls_cert,json=tlsCert,proto3,oneof"` // down: rotated mTLS leaf
+}
+
+type Envelope_TlsRenew struct {
+	TlsRenew *TlsRenew `protobuf:"bytes,53,opt,name=tls_renew,json=tlsRenew,proto3,oneof"` // up: agent requests a fresh leaf
+}
+
 func (*Envelope_Heartbeat) isEnvelope_Payload() {}
 
 func (*Envelope_Facts) isEnvelope_Payload() {}
@@ -945,6 +981,10 @@ func (*Envelope_PkgOp) isEnvelope_Payload() {}
 func (*Envelope_Challenge) isEnvelope_Payload() {}
 
 func (*Envelope_AuthProof) isEnvelope_Payload() {}
+
+func (*Envelope_TlsCert) isEnvelope_Payload() {}
+
+func (*Envelope_TlsRenew) isEnvelope_Payload() {}
 
 // Ack is sent by the receiver of an envelope to confirm delivery (and, for
 // down envelopes, the guardrail re-check outcome).
@@ -3892,12 +3932,124 @@ func (x *AuthProof) GetSig() []byte {
 	return nil
 }
 
+// TlsCert delivers a freshly signed mTLS leaf to the agent. The server re-signs
+// from the agent's enrolled ECDSA public key (no new CSR, the private key never
+// leaves the host). The agent verifies the leaf chains to the CA and is for its
+// own identity, persists it, hot-swaps it into the live connection's client
+// certificate, and ACKs carrying the new leaf's serial.
+type TlsCert struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	LeafCert      string                 `protobuf:"bytes,1,opt,name=leaf_cert,json=leafCert,proto3" json:"leaf_cert,omitempty"` // new signed leaf (PEM)
+	CaCert        string                 `protobuf:"bytes,2,opt,name=ca_cert,json=caCert,proto3" json:"ca_cert,omitempty"`       // root CA (PEM); non-empty only if the CA also rotated
+	Serial        string                 `protobuf:"bytes,3,opt,name=serial,proto3" json:"serial,omitempty"`                     // hex serial of the new leaf (agent echoes it in the ACK)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TlsCert) Reset() {
+	*x = TlsCert{}
+	mi := &file_partout_partout_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TlsCert) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TlsCert) ProtoMessage() {}
+
+func (x *TlsCert) ProtoReflect() protoreflect.Message {
+	mi := &file_partout_partout_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TlsCert.ProtoReflect.Descriptor instead.
+func (*TlsCert) Descriptor() ([]byte, []int) {
+	return file_partout_partout_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *TlsCert) GetLeafCert() string {
+	if x != nil {
+		return x.LeafCert
+	}
+	return ""
+}
+
+func (x *TlsCert) GetCaCert() string {
+	if x != nil {
+		return x.CaCert
+	}
+	return ""
+}
+
+func (x *TlsCert) GetSerial() string {
+	if x != nil {
+		return x.Serial
+	}
+	return ""
+}
+
+// TlsRenew is the agent's request for a fresh leaf: its current leaf is expired
+// or within the renewal window, or it was told the CA rotated. The server
+// re-signs and answers with a TlsCert on the same stream.
+type TlsRenew struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"` // "expired" | "near_expiry" | "ca_rotated" | ""
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TlsRenew) Reset() {
+	*x = TlsRenew{}
+	mi := &file_partout_partout_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TlsRenew) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TlsRenew) ProtoMessage() {}
+
+func (x *TlsRenew) ProtoReflect() protoreflect.Message {
+	mi := &file_partout_partout_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TlsRenew.ProtoReflect.Descriptor instead.
+func (*TlsRenew) Descriptor() ([]byte, []int) {
+	return file_partout_partout_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *TlsRenew) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_partout_partout_proto protoreflect.FileDescriptor
 
 const file_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"\x15partout/partout.proto\x12\n" +
-	"partout.v1\"\xa2\x0e\n" +
+	"partout.v1\"\x89\x0f\n" +
 	"\bEnvelope\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12,\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x18.partout.v1.EnvelopeKindR\x04kind\x12\x10\n" +
@@ -3935,7 +4087,9 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\x06pkg_op\x18( \x01(\v2\x11.partout.v1.PkgOpH\x00R\x05pkgOp\x125\n" +
 	"\tchallenge\x182 \x01(\v2\x15.partout.v1.ChallengeH\x00R\tchallenge\x126\n" +
 	"\n" +
-	"auth_proof\x183 \x01(\v2\x15.partout.v1.AuthProofH\x00R\tauthProofB\t\n" +
+	"auth_proof\x183 \x01(\v2\x15.partout.v1.AuthProofH\x00R\tauthProof\x120\n" +
+	"\btls_cert\x184 \x01(\v2\x13.partout.v1.TlsCertH\x00R\atlsCert\x123\n" +
+	"\ttls_renew\x185 \x01(\v2\x14.partout.v1.TlsRenewH\x00R\btlsRenewB\t\n" +
 	"\apayload\"m\n" +
 	"\x03Ack\x12\x1f\n" +
 	"\venvelope_id\x18\x01 \x01(\tR\n" +
@@ -4227,7 +4381,13 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"agent_uuid\x18\x01 \x01(\tR\tagentUuid\x12\x0e\n" +
 	"\x02ts\x18\x02 \x01(\x03R\x02ts\x12\x10\n" +
-	"\x03sig\x18\x03 \x01(\fR\x03sig*\x9a\x04\n" +
+	"\x03sig\x18\x03 \x01(\fR\x03sig\"W\n" +
+	"\aTlsCert\x12\x1b\n" +
+	"\tleaf_cert\x18\x01 \x01(\tR\bleafCert\x12\x17\n" +
+	"\aca_cert\x18\x02 \x01(\tR\x06caCert\x12\x16\n" +
+	"\x06serial\x18\x03 \x01(\tR\x06serial\"\"\n" +
+	"\bTlsRenew\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason*\xb7\x04\n" +
 	"\fEnvelopeKind\x12\x1d\n" +
 	"\x19ENVELOPE_KIND_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tHEARTBEAT\x10\x01\x12\x0f\n" +
@@ -4262,7 +4422,9 @@ const file_partout_partout_proto_rawDesc = "" +
 	"JOB_ASSIGN\x10\x18\x12\x10\n" +
 	"\fJOB_UNASSIGN\x10\x19\x12\x12\n" +
 	"\x0eJOB_RUN_RESULT\x10\x1a\x12\x11\n" +
-	"\rOBSERVE_FACTS\x10\x1b\x12\r\n" +
+	"\rOBSERVE_FACTS\x10\x1b\x12\f\n" +
+	"\bTLS_CERT\x10\x1c\x12\r\n" +
+	"\tTLS_RENEW\x10\x1d\x12\r\n" +
 	"\tCHALLENGE\x10(\x12\x0e\n" +
 	"\n" +
 	"AUTH_PROOF\x10)*I\n" +
@@ -4307,7 +4469,7 @@ func file_partout_partout_proto_rawDescGZIP() []byte {
 }
 
 var file_partout_partout_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
+var file_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
 var file_partout_partout_proto_goTypes = []any{
 	(EnvelopeKind)(0),         // 0: partout.v1.EnvelopeKind
 	(AckStatus)(0),            // 1: partout.v1.AckStatus
@@ -4351,13 +4513,15 @@ var file_partout_partout_proto_goTypes = []any{
 	(*SessionClose)(nil),      // 39: partout.v1.SessionClose
 	(*Challenge)(nil),         // 40: partout.v1.Challenge
 	(*AuthProof)(nil),         // 41: partout.v1.AuthProof
-	nil,                       // 42: partout.v1.FactsBatch.FactsEntry
-	nil,                       // 43: partout.v1.Event.AttrsEntry
-	nil,                       // 44: partout.v1.TaskStep.EnvEntry
-	nil,                       // 45: partout.v1.TaskStep.VarsEntry
-	nil,                       // 46: partout.v1.Command.EnvEntry
-	nil,                       // 47: partout.v1.PolicyBundle.HostTagsEntry
-	nil,                       // 48: partout.v1.SessionOpen.EnvEntry
+	(*TlsCert)(nil),           // 42: partout.v1.TlsCert
+	(*TlsRenew)(nil),          // 43: partout.v1.TlsRenew
+	nil,                       // 44: partout.v1.FactsBatch.FactsEntry
+	nil,                       // 45: partout.v1.Event.AttrsEntry
+	nil,                       // 46: partout.v1.TaskStep.EnvEntry
+	nil,                       // 47: partout.v1.TaskStep.VarsEntry
+	nil,                       // 48: partout.v1.Command.EnvEntry
+	nil,                       // 49: partout.v1.PolicyBundle.HostTagsEntry
+	nil,                       // 50: partout.v1.SessionOpen.EnvEntry
 }
 var file_partout_partout_proto_depIdxs = []int32{
 	0,  // 0: partout.v1.Envelope.kind:type_name -> partout.v1.EnvelopeKind
@@ -4390,41 +4554,43 @@ var file_partout_partout_proto_depIdxs = []int32{
 	18, // 27: partout.v1.Envelope.pkg_op:type_name -> partout.v1.PkgOp
 	40, // 28: partout.v1.Envelope.challenge:type_name -> partout.v1.Challenge
 	41, // 29: partout.v1.Envelope.auth_proof:type_name -> partout.v1.AuthProof
-	1,  // 30: partout.v1.Ack.status:type_name -> partout.v1.AckStatus
-	42, // 31: partout.v1.FactsBatch.facts:type_name -> partout.v1.FactsBatch.FactsEntry
-	10, // 32: partout.v1.EventsBatch.events:type_name -> partout.v1.Event
-	43, // 33: partout.v1.Event.attrs:type_name -> partout.v1.Event.AttrsEntry
-	2,  // 34: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
-	3,  // 35: partout.v1.FileOp.kind:type_name -> partout.v1.FileOpKind
-	31, // 36: partout.v1.FileOp.decision:type_name -> partout.v1.Decision
-	4,  // 37: partout.v1.PkgOp.kind:type_name -> partout.v1.PkgOpKind
-	31, // 38: partout.v1.PkgOp.decision:type_name -> partout.v1.Decision
-	4,  // 39: partout.v1.PkgResult.kind:type_name -> partout.v1.PkgOpKind
-	17, // 40: partout.v1.PkgResult.updates:type_name -> partout.v1.PkgUpdate
-	17, // 41: partout.v1.PkgResult.before:type_name -> partout.v1.PkgUpdate
-	17, // 42: partout.v1.PkgResult.after:type_name -> partout.v1.PkgUpdate
-	44, // 43: partout.v1.TaskStep.env:type_name -> partout.v1.TaskStep.EnvEntry
-	45, // 44: partout.v1.TaskStep.vars:type_name -> partout.v1.TaskStep.VarsEntry
-	20, // 45: partout.v1.TaskRun.steps:type_name -> partout.v1.TaskStep
-	31, // 46: partout.v1.TaskRun.decision:type_name -> partout.v1.Decision
-	22, // 47: partout.v1.TaskRunResult.steps:type_name -> partout.v1.TaskStepResult
-	20, // 48: partout.v1.JobAssignment.steps:type_name -> partout.v1.TaskStep
-	31, // 49: partout.v1.JobAssignment.decision:type_name -> partout.v1.Decision
-	3,  // 50: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
-	29, // 51: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
-	30, // 52: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
-	46, // 53: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
-	31, // 54: partout.v1.Command.decision:type_name -> partout.v1.Decision
-	47, // 55: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
-	48, // 56: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
-	31, // 57: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
-	5,  // 58: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
-	5,  // 59: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
-	59, // [59:60] is the sub-list for method output_type
-	58, // [58:59] is the sub-list for method input_type
-	58, // [58:58] is the sub-list for extension type_name
-	58, // [58:58] is the sub-list for extension extendee
-	0,  // [0:58] is the sub-list for field type_name
+	42, // 30: partout.v1.Envelope.tls_cert:type_name -> partout.v1.TlsCert
+	43, // 31: partout.v1.Envelope.tls_renew:type_name -> partout.v1.TlsRenew
+	1,  // 32: partout.v1.Ack.status:type_name -> partout.v1.AckStatus
+	44, // 33: partout.v1.FactsBatch.facts:type_name -> partout.v1.FactsBatch.FactsEntry
+	10, // 34: partout.v1.EventsBatch.events:type_name -> partout.v1.Event
+	45, // 35: partout.v1.Event.attrs:type_name -> partout.v1.Event.AttrsEntry
+	2,  // 36: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
+	3,  // 37: partout.v1.FileOp.kind:type_name -> partout.v1.FileOpKind
+	31, // 38: partout.v1.FileOp.decision:type_name -> partout.v1.Decision
+	4,  // 39: partout.v1.PkgOp.kind:type_name -> partout.v1.PkgOpKind
+	31, // 40: partout.v1.PkgOp.decision:type_name -> partout.v1.Decision
+	4,  // 41: partout.v1.PkgResult.kind:type_name -> partout.v1.PkgOpKind
+	17, // 42: partout.v1.PkgResult.updates:type_name -> partout.v1.PkgUpdate
+	17, // 43: partout.v1.PkgResult.before:type_name -> partout.v1.PkgUpdate
+	17, // 44: partout.v1.PkgResult.after:type_name -> partout.v1.PkgUpdate
+	46, // 45: partout.v1.TaskStep.env:type_name -> partout.v1.TaskStep.EnvEntry
+	47, // 46: partout.v1.TaskStep.vars:type_name -> partout.v1.TaskStep.VarsEntry
+	20, // 47: partout.v1.TaskRun.steps:type_name -> partout.v1.TaskStep
+	31, // 48: partout.v1.TaskRun.decision:type_name -> partout.v1.Decision
+	22, // 49: partout.v1.TaskRunResult.steps:type_name -> partout.v1.TaskStepResult
+	20, // 50: partout.v1.JobAssignment.steps:type_name -> partout.v1.TaskStep
+	31, // 51: partout.v1.JobAssignment.decision:type_name -> partout.v1.Decision
+	3,  // 52: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
+	29, // 53: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
+	30, // 54: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
+	48, // 55: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
+	31, // 56: partout.v1.Command.decision:type_name -> partout.v1.Decision
+	49, // 57: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
+	50, // 58: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
+	31, // 59: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
+	5,  // 60: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
+	5,  // 61: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
+	61, // [61:62] is the sub-list for method output_type
+	60, // [60:61] is the sub-list for method input_type
+	60, // [60:60] is the sub-list for extension type_name
+	60, // [60:60] is the sub-list for extension extendee
+	0,  // [0:60] is the sub-list for field type_name
 }
 
 func init() { file_partout_partout_proto_init() }
@@ -4462,6 +4628,8 @@ func file_partout_partout_proto_init() {
 		(*Envelope_PkgOp)(nil),
 		(*Envelope_Challenge)(nil),
 		(*Envelope_AuthProof)(nil),
+		(*Envelope_TlsCert)(nil),
+		(*Envelope_TlsRenew)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -4469,7 +4637,7 @@ func file_partout_partout_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_partout_partout_proto_rawDesc), len(file_partout_partout_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   44,
+			NumMessages:   46,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

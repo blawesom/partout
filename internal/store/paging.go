@@ -17,7 +17,7 @@ func (s *Store) HostsPage(limit int, cursor string) ([]*Agent, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	q := `SELECT id, uuid, ed25519_pub, x25519_pub, version, state,
+	q := `SELECT id, uuid, ed25519_pub, x25519_pub, COALESCE(tls_pub,''), COALESCE(tls_not_after,0), version, state,
 	       COALESCE(first_seen,0), COALESCE(last_seen,0), created
 	       FROM agents`
 	args := []any{}

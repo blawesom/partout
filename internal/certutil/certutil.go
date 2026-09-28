@@ -201,6 +201,83 @@ func NewCSR(commonName string, extraDNSNames []string) (csrPEM []byte, key *ecds
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), key, nil
 }
 
+// SignLeafForPublicKey signs a fresh mTLS client leaf for an agent's existing
+// ECDSA public key (rotation). Unlike SignAgentCert, no CSR is needed: the
+// agent keeps its private key, and the server re-signs from the enrolled public
+// key it persisted at enrollment. This is the core of TLS rotation — the
+// server can re-issue a leaf at any time (on demand or on expiry) without the
+// agent generating new key material. Returns the leaf PEM and its hex serial.
+func (ca *CA) SignLeafForPublicKey(pub *ecdsa.PublicKey, agentID string, dnsNames []string) (string, string, error) {
+	tmpl := &x509.Certificate{
+		SerialNumber:          newSerial(),
+		Subject:               pkix.Name{CommonName: agentID, Organization: []string{"Partout"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(LeafValidity),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		DNSNames:              dnsNames,
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, pub, ca.Key)
+	if err != nil {
+		return "", "", fmt.Errorf("certutil: sign rotation leaf: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return "", "", err
+	}
+	return string(pemCert(leaf)), fmt.Sprintf("%x", leaf.SerialNumber), nil
+}
+
+// VerifyAgentLeaf verifies a rotated leaf (PEM) is safe to install: it chains
+// to the given CA (PEM), is currently valid, is a client-auth cert, and its
+// Subject CN matches agentID. The stream is already Ed25519-authenticated, so
+// this is defense-in-depth, not the primary trust boundary.
+func VerifyAgentLeaf(leafPEM, caPEM []byte, agentID string) error {
+	leaf, err := parseCertPEM(leafPEM)
+	if err != nil {
+		return fmt.Errorf("certutil: parse rotated leaf: %w", err)
+	}
+	caCert, err := parseCertPEM(caPEM)
+	if err != nil {
+		return fmt.Errorf("certutil: parse CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return fmt.Errorf("certutil: rotated leaf does not verify against CA: %w", err)
+	}
+	if leaf.Subject.CommonName != agentID {
+		return fmt.Errorf("certutil: rotated leaf CN %q != agent %q", leaf.Subject.CommonName, agentID)
+	}
+	return nil
+}
+
+// CSRPubKey returns the ECDSA public key carried by a PEM CSR. The server
+// persists it at enrollment so it can re-sign the agent's mTLS leaf on
+// rotation without a new CSR (the private key never leaves the host).
+func CSRPubKey(csrPEM []byte) (*ecdsa.PublicKey, error) {
+	csr, err := parseCSRPEM(csrPEM)
+	if err != nil {
+		return nil, fmt.Errorf("certutil: parse CSR: %w", err)
+	}
+	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, errors.New("certutil: CSR public key is not ECDSA")
+	}
+	return pub, nil
+}
+
+// ParseLeafNotAfter returns the expiry of a PEM leaf certificate.
+func ParseLeafNotAfter(leafPEM []byte) (time.Time, error) {
+	leaf, err := parseCertPEM(leafPEM)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("certutil: parse leaf: %w", err)
+	}
+	return leaf.NotAfter, nil
+}
+
 // PEMKey encodes an ECDSA private key as PEM (PKCS#8).
 func PEMKey(key *ecdsa.PrivateKey) []byte { return pemKey(key) }
 

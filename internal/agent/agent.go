@@ -44,6 +44,9 @@ const (
 	heartbeatInterval = 15 * time.Second
 	backoffBase       = 1 * time.Second
 	backoffCap        = 60 * time.Second
+	// tlsRenewWindow: the agent asks the server for a fresh mTLS leaf when its
+	// current leaf expires within this window (or has already expired).
+	tlsRenewWindow = 30 * 24 * time.Hour
 )
 
 // Agent is the long-running agent process.
@@ -149,7 +152,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		id:            id,
 		cfg:           cfg,
 		log:           lg,
-		streamC:       stream.New(id, stream.Config{ServerURL: cfg.ServerURL, CAFile: cfg.TLSCAFile, CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile}, lg),
+		streamC:       stream.New(id, stream.Config{ServerURL: cfg.ServerURL, CAFile: cfg.TLSCAFile, CertFile: cfg.TLSCertFile, KeyFile: cfg.TLSKeyFile, TLSDir: filepath.Join(cfg.DataDir, "tls")}, lg),
 		start:         time.Now(),
 		factset:       facts.Collector(id, cfg.FactsInterval),
 		policyDir:     policyDir,
@@ -304,6 +307,15 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	}
 	defer a.streamC.Close()
 	a.log.Printf("agent: connected to %s", a.cfg.ServerURL)
+
+	// If the mTLS leaf is expired or within the renewal window, ask the server
+	// for a fresh one (rotation). No-op in plaintext mode or when the leaf is
+	// still valid. The server answers with a TlsCert on the same stream.
+	if na, ok := a.streamC.LeafNotAfter(); ok && time.Until(na) < tlsRenewWindow {
+		a.log.Printf("agent: mTLS leaf expires %s; requesting renewal", na)
+		_ = a.streamC.Send(sessCtx, &pb.Envelope{Kind: pb.EnvelopeKind_TLS_RENEW,
+			Payload: &pb.Envelope_TlsRenew{TlsRenew: &pb.TlsRenew{Reason: "near_expiry"}}})
+	}
 
 	if err := a.sendFacts(sessCtx, true); err != nil {
 		return fmt.Errorf("agent: send facts: %w", err)
@@ -674,6 +686,25 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 			return nil
 		}
 		a.log.Printf("agent: secret %s v%d materialized (ttl=%ds)", sm.Ref, sm.Version, sm.CacheTtlS)
+
+	case env.GetTlsCert() != nil:
+		tc := env.GetTlsCert()
+		caPEM, err := os.ReadFile(a.cfg.TLSCAFile)
+		if err != nil {
+			a.log.Printf("agent: tls rotation: read CA: %v", err)
+			_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
+				Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_DENIED_AGENT, Detail: "read CA: " + err.Error()}}})
+			return nil
+		}
+		if err := a.streamC.RotateLeaf([]byte(tc.LeafCert), caPEM); err != nil {
+			a.log.Printf("agent: tls rotation FAILED: %v", err)
+			_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
+				Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_DENIED_AGENT, Detail: err.Error()}}})
+			return nil
+		}
+		a.log.Printf("agent: tls leaf rotated (serial %s)", tc.Serial)
+		_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
+			Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_OK, Detail: tc.Serial}}})
 
 	default:
 		return nil

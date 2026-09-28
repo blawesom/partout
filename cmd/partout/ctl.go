@@ -138,6 +138,8 @@ commands:
 		c.cmdProvision(rest)
 	case "ca":
 		c.cmdCA()
+	case "tls":
+		c.cmdTLS(rest)
 	case "files":
 		c.cmdFiles(rest)
 	case "sessions":
@@ -173,6 +175,70 @@ func (c *ctl) cmdCA() {
 		fatal(err)
 	}
 	fmt.Print(res.Cert)
+}
+
+// cmdTLS handles `ctl tls <status|rotate>` (mTLS leaf rotation).
+func (c *ctl) cmdTLS(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ctl tls <status|rotate> [agent_id|--all]")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "status":
+		var res struct {
+			TLS bool `json:"tls"`
+			Agents []struct {
+				AgentID  string `json:"agent_id"`
+				TLS      bool   `json:"tls"`
+				NotAfter int64  `json:"not_after"`
+				DaysLeft int64  `json:"days_left"`
+				State    string `json:"state"`
+			} `json:"agents"`
+		}
+		if err := c.do("GET", "/api/v1/tls/status", nil, &res); err != nil {
+			fatal(err)
+		}
+		if !res.TLS {
+			fmt.Println("TLS mode: off (plaintext)")
+			return
+		}
+		fmt.Printf("%-20s %-10s %-12s %s\n", "AGENT", "STATE", "DAYS_LEFT", "EXPIRES")
+		for _, a := range res.Agents {
+			if !a.TLS {
+				fmt.Printf("%-20s %-10s %-12s %s\n", a.AgentID, a.State, "-", "(non-TLS)")
+				continue
+			}
+			exp := time.Unix(a.NotAfter, 0).UTC().Format("2006-01-02 15:04 MST")
+			fmt.Printf("%-20s %-10s %-12d %s\n", a.AgentID, a.State, a.DaysLeft, exp)
+		}
+	case "rotate":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: ctl tls rotate <agent_id|--all>")
+			os.Exit(2)
+		}
+		body := map[string]any{}
+		if args[1] == "--all" {
+			body["all"] = true
+		} else {
+			body["agent_id"] = args[1]
+		}
+		var res struct {
+			AgentID string `json:"agent_id"`
+			Serial  string `json:"serial"`
+			Rotated int    `json:"rotated"`
+		}
+		if err := c.do("POST", "/api/v1/tls/rotate", body, &res); err != nil {
+			fatal(err)
+		}
+		if body["all"] == true {
+			fmt.Printf("rotated %d agent(s)\n", res.Rotated)
+		} else {
+			fmt.Printf("rotated %s -> serial %s\n", res.AgentID, res.Serial)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown tls subcommand %q\n", args[0])
+		os.Exit(2)
+	}
 }
 
 // ctlTokenFile is where `ctl auth login` persists the session token

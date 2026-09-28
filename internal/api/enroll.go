@@ -7,12 +7,15 @@ package api
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -200,6 +203,17 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp.TLS = &enrollTLS{CACert: h.ca.CertPEM(), LeafCert: leafPEM}
+		// Persist the enrolled ECDSA public key + leaf expiry so the server can
+		// re-sign this agent's leaf on rotation (on demand or on expiry).
+		if pub, perr := certutil.CSRPubKey([]byte(req.CSR)); perr == nil {
+			if na, nerr := certutil.ParseLeafNotAfter([]byte(leafPEM)); nerr == nil {
+				der, _ := x509.MarshalPKIXPublicKey(pub)
+				pubB64 := base64.StdEncoding.EncodeToString(der)
+				if serr := h.st.SetAgentTLS(agentID, pubB64, na.Unix()); serr != nil {
+					h.log.Printf("enroll: set agent TLS %s: %v", agentID, serr)
+				}
+			}
+		}
 		if h.log != nil {
 			h.log.Printf("enroll: issued TLS leaf cert for %s", agentID)
 		}

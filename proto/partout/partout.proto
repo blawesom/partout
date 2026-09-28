@@ -59,6 +59,10 @@ enum EnvelopeKind {
   // Observe layer — structured fact uploads (M5, R18–R20)
   OBSERVE_FACTS = 27;       // up: structured facts (services, configs, certs)
 
+  // TLS rotation (v1.x)
+  TLS_CERT  = 28;           // down: server delivers a freshly signed mTLS leaf
+  TLS_RENEW = 29;           // up: agent requests a fresh leaf (expired/near-expiry)
+
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
   AUTH_PROOF = 41;  // up: agent replies
@@ -105,6 +109,9 @@ message Envelope {
     // Handshake
     Challenge challenge = 50;
     AuthProof auth_proof = 51;
+    // TLS rotation
+    TlsCert tls_cert = 52;    // down: rotated mTLS leaf
+    TlsRenew tls_renew = 53;  // up: agent requests a fresh leaf
   }
 }
 
@@ -511,4 +518,24 @@ message AuthProof {
   string agent_uuid = 1;
   int64 ts = 2;            // agent epoch seconds (skew check ±300s)
   bytes sig = 3;
+}
+
+// ---- TLS rotation ----------------------------------------------------------
+
+// TlsCert delivers a freshly signed mTLS leaf to the agent. The server re-signs
+// from the agent's enrolled ECDSA public key (no new CSR, the private key never
+// leaves the host). The agent verifies the leaf chains to the CA and is for its
+// own identity, persists it, hot-swaps it into the live connection's client
+// certificate, and ACKs carrying the new leaf's serial.
+message TlsCert {
+  string leaf_cert = 1;  // new signed leaf (PEM)
+  string ca_cert = 2;    // root CA (PEM); non-empty only if the CA also rotated
+  string serial = 3;     // hex serial of the new leaf (agent echoes it in the ACK)
+}
+
+// TlsRenew is the agent's request for a fresh leaf: its current leaf is expired
+// or within the renewal window, or it was told the CA rotated. The server
+// re-signs and answers with a TlsCert on the same stream.
+message TlsRenew {
+  string reason = 1;  // "expired" | "near_expiry" | "ca_rotated" | ""
 }

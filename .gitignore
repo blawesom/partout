@@ -20,6 +20,9 @@ coverage.*
 **/tls/key.pem
 identity.json
 
+# Server identity (Ed25519 signing key) generated at runtime
+identity/
+
 # Editors / OS
 .DS_Store
 *.swp

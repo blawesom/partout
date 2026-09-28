@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS agents (
   uuid          TEXT NOT NULL UNIQUE,
   ed25519_pub   TEXT NOT NULL,
   x25519_pub    TEXT NOT NULL,
+  tls_pub       TEXT NOT NULL DEFAULT '',   -- enrolled ECDSA pub (PKIX b64); '' = non-TLS agent
+  tls_not_after INTEGER NOT NULL DEFAULT 0, -- current mTLS leaf expiry (unix s); 0 = none
   version       TEXT,
   state         TEXT NOT NULL DEFAULT 'pending',
   first_seen    INTEGER,
@@ -471,4 +473,4 @@ CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 13
+const currentSchemaVersion = 14

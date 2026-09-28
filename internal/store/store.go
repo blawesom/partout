@@ -148,6 +148,14 @@ func (s *Store) applySchema() error {
 	if _, err := tx.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("store: apply: %w", err)
 	}
+	// Ensure columns added after v1 exist on pre-upgrade DBs (CREATE TABLE IF
+	// NOT EXISTS skips them). Idempotent: checks PRAGMA table_info first.
+	if err := ensureColumns(tx, []columnSpec{
+		{table: "agents", column: "tls_pub", def: "TEXT NOT NULL DEFAULT ''"},
+		{table: "agents", column: "tls_not_after", def: "INTEGER NOT NULL DEFAULT 0"},
+	}); err != nil {
+		return fmt.Errorf("store: ensure columns: %w", err)
+	}
 	if _, err := tx.Exec(
 		`INSERT OR IGNORE INTO schema_version(version) VALUES(?)`,
 		currentSchemaVersion,
@@ -159,3 +167,43 @@ func (s *Store) applySchema() error {
 
 // now returns current epoch seconds.
 func now() int64 { return time.Now().Unix() }
+
+// columnSpec names a column that must exist on a table (forward migration on
+// pre-existing databases).
+type columnSpec struct {
+	table  string
+	column string
+	def    string // e.g. "TEXT NOT NULL DEFAULT ''"
+}
+
+// ensureColumns adds any missing columns (idempotent via PRAGMA table_info).
+// Table names are trusted constants, not user input.
+func ensureColumns(tx *sql.Tx, cols []columnSpec) error {
+	for _, c := range cols {
+		rows, err := tx.Query("PRAGMA table_info(" + c.table + ")")
+		if err != nil {
+			return fmt.Errorf("table_info %s: %w", c.table, err)
+		}
+		found := false
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, ctype string
+			var dflt sql.NullString
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+				rows.Close()
+				return err
+			}
+			if name == c.column {
+				found = true
+			}
+		}
+		rows.Close()
+		if found {
+			continue
+		}
+		if _, err := tx.Exec("ALTER TABLE " + c.table + " ADD COLUMN " + c.column + " " + c.def); err != nil {
+			return fmt.Errorf("add column %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}

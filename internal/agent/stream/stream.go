@@ -7,9 +7,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/hsauth"
 	"github.com/blawesom/partout/internal/identity"
 	pb "github.com/blawesom/partout/internal/proto"
@@ -29,10 +33,14 @@ type Config struct {
 	CAFile   string
 	CertFile string // agent leaf cert (PEM)
 	KeyFile  string // agent private key (PEM)
+	// TLSDir, when non-empty, is where RotateLeaf persists a rotated leaf
+	// (agent.crt) so it survives an agent restart. Empty = rotation not
+	// persisted (in-memory only).
+	TLSDir string
 }
 
 // Client connects to the server over gRPC, authenticates, and manages the
-// bidirectional envelope loop. For M0, the connection is insecure.
+// bidirectional envelope loop.
 type Client struct {
 	id   *identity.Identity
 	cfg  Config
@@ -40,18 +48,135 @@ type Client struct {
 	conn *grpc.ClientConn
 	mu   sync.Mutex
 	s    pb.AgentStream_StreamClient
+
+	// certMu guards cert (the in-memory mTLS client certificate). It is
+	// swapped in place by RotateLeaf so a rotated leaf is used on the next
+	// connection without a config reload.
+	certMu sync.Mutex
+	cert   *tls.Certificate
+	keyPEM []byte // agent private key PEM (for re-building the cert on rotation)
+	caPEM  []byte // root CA PEM (for verifying rotated leaves)
 }
 
-// New creates a client.
+// New creates a client. When TLS is configured it loads the mTLS client
+// certificate into memory (so RotateLeaf can hot-swap it).
 func New(id *identity.Identity, cfg Config, lg *log.Logger) *Client {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Client{id: id, cfg: cfg, log: lg}
+	c := &Client{id: id, cfg: cfg, log: lg}
+	c.loadCert()
+	return c
+}
+
+// loadCert reads the mTLS client cert + key + CA into memory (TLS mode only).
+func (c *Client) loadCert() {
+	if c.cfg.CAFile == "" {
+		return
+	}
+	caPEM, err := os.ReadFile(c.cfg.CAFile)
+	if err != nil {
+		c.log.Printf("stream: load CA %s: %v", c.cfg.CAFile, err)
+		return
+	}
+	cert, err := tls.LoadX509KeyPair(c.cfg.CertFile, c.cfg.KeyFile)
+	if err != nil {
+		c.log.Printf("stream: load client cert: %v", err)
+		return
+	}
+	keyPEM, kerr := os.ReadFile(c.cfg.KeyFile)
+	if kerr != nil {
+		keyPEM = nil
+	}
+	c.certMu.Lock()
+	c.caPEM = caPEM
+	c.keyPEM = keyPEM
+	c.cert = &cert
+	c.certMu.Unlock()
+}
+
+// currentCert returns a copy of the live client certificate (nil = plaintext).
+func (c *Client) currentCert() *tls.Certificate {
+	c.certMu.Lock()
+	defer c.certMu.Unlock()
+	if c.cert == nil {
+		return nil
+	}
+	cp := *c.cert
+	return &cp
+}
+
+// LeafNotAfter returns the expiry of the current client leaf (ok=false when
+// there is no TLS cert loaded).
+func (c *Client) LeafNotAfter() (time.Time, bool) {
+	c.certMu.Lock()
+	defer c.certMu.Unlock()
+	if c.cert == nil || len(c.cert.Certificate) == 0 {
+		return time.Time{}, false
+	}
+	leaf, err := x509.ParseCertificate(c.cert.Certificate[0])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return leaf.NotAfter, true
+}
+
+// RotateLeaf verifies a newly signed leaf (PEM) against the root CA and this
+// agent's identity, then hot-swaps it into the live client certificate and
+// persists it to TLSDir/agent.crt (when configured). The private key is
+// unchanged — the server re-signed the same enrolled key.
+func (c *Client) RotateLeaf(leafPEM []byte, caPEM []byte) error {
+	if caPEM == nil {
+		caPEM = c.caPEM
+	}
+	if err := certutil.VerifyAgentLeaf(leafPEM, caPEM, c.id.UUID); err != nil {
+		return err
+	}
+	block, _ := pem.Decode(leafPEM)
+	if block == nil {
+		return errors.New("stream: rotate: no PEM block in leaf")
+	}
+	c.certMu.Lock()
+	if c.cert == nil {
+		// No prior cert (e.g. loaded after a transient failure): rebuild from
+		// the persisted key + the new leaf.
+		key, kerr := parsePEMKey(c.keyPEM)
+		if kerr != nil {
+			c.certMu.Unlock()
+			return fmt.Errorf("stream: rotate: no key to rebuild cert: %w", kerr)
+		}
+		c.cert = &tls.Certificate{Certificate: [][]byte{block.Bytes}, PrivateKey: key}
+	} else {
+		c.cert.Certificate = [][]byte{block.Bytes}
+	}
+	newCert := *c.cert
+	c.certMu.Unlock()
+
+	if c.cfg.TLSDir != "" {
+		if err := os.WriteFile(filepath.Join(c.cfg.TLSDir, "agent.crt"), leafPEM, 0o644); err != nil {
+			c.log.Printf("stream: persist rotated leaf: %v", err)
+		}
+	}
+	c.log.Printf("stream: mTLS leaf rotated in place")
+	_ = newCert
+	return nil
+}
+
+func parsePEMKey(pemBytes []byte) (any, error) {
+	if len(pemBytes) == 0 {
+		return nil, errors.New("empty key PEM")
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, errors.New("no PEM block in key")
+	}
+	return x509.ParsePKCS8PrivateKey(block.Bytes)
 }
 
 // connectDial builds the transport credentials (mTLS if TLS material is
-// configured, plaintext otherwise).
+// configured, plaintext otherwise). The client certificate is supplied via
+// GetClientCertificate so a rotated leaf (RotateLeaf) is used on the next
+// connection without rebuilding the credentials.
 func (c *Client) transportCredentials() (credentials.TransportCredentials, error) {
 	if c.cfg.CAFile == "" {
 		return insecure.NewCredentials(), nil
@@ -64,14 +189,15 @@ func (c *Client) transportCredentials() (credentials.TransportCredentials, error
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("stream: no certificate found in CA file " + c.cfg.CAFile)
 	}
-	cert, err := tls.LoadX509KeyPair(c.cfg.CertFile, c.cfg.KeyFile)
-	if err != nil {
-		return nil, err
+	if c.currentCert() == nil {
+		return nil, errors.New("stream: TLS configured but no client certificate loaded")
 	}
 	return credentials.NewTLS(&tls.Config{
-		RootCAs:      roots,
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		RootCAs:    roots,
+		MinVersion: tls.VersionTLS12,
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return c.currentCert(), nil
+		},
 	}), nil
 }
 

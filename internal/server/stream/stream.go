@@ -5,8 +5,10 @@ package stream
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/cryptoutil"
 	"github.com/blawesom/partout/internal/hsauth"
 	pb "github.com/blawesom/partout/internal/proto"
@@ -35,7 +38,8 @@ type Handler struct {
 	st           *store.Store
 	sse          Emitter
 	log          *log.Logger
-	serverPubB64 string // server Ed25519 public key (b64) for policy bundles
+	serverPubB64 string       // server Ed25519 public key (b64) for policy bundles
+	ca           *certutil.CA // root CA for mTLS leaf rotation (nil = plaintext)
 
 	mu       sync.Mutex
 	sessions map[string]*Session // agent_id -> active session
@@ -103,6 +107,108 @@ func NewHandler(st *store.Store, sse Emitter, lg *log.Logger) *Handler {
 // SetServerPubKey installs the server's Ed25519 public key (b64) which is
 // included in every policy bundle so agents can verify decision signatures.
 func (h *Handler) SetServerPubKey(b64 string) { h.serverPubB64 = b64 }
+
+// SetCA installs the root CA used to re-sign agent mTLS leaves on rotation.
+// nil = plaintext mode (rotation disabled).
+func (h *Handler) SetCA(ca *certutil.CA) { h.ca = ca }
+
+// sendDown delivers a down envelope to a specific agent's live session.
+// Returns an error if the agent is not currently connected.
+func (h *Handler) sendDown(agentID string, env *pb.Envelope) error {
+	h.mu.Lock()
+	sess := h.sessions[agentID]
+	h.mu.Unlock()
+	if sess == nil {
+		return fmt.Errorf("stream: agent %s not connected", agentID)
+	}
+	return sess.send(env)
+}
+
+// RotateAgentCert re-signs the agent's mTLS leaf from its enrolled ECDSA
+// public key and delivers the new leaf over the live stream (TlsCert). The
+// agent's private key is unchanged. Returns the new leaf's hex serial.
+// Errors if rotation is disabled (plaintext), the agent has no enrolled key,
+// or the agent is not connected.
+func (h *Handler) RotateAgentCert(agentID string) (string, error) {
+	if h.ca == nil {
+		return "", fmt.Errorf("stream: TLS rotation disabled (plaintext mode)")
+	}
+	agent, err := h.st.Agent(agentID)
+	if err != nil {
+		return "", fmt.Errorf("stream: load agent %s: %w", agentID, err)
+	}
+	if agent.TlsPub == "" {
+		return "", fmt.Errorf("stream: agent %s has no enrolled TLS key", agentID)
+	}
+	pubB64, err := base64.StdEncoding.DecodeString(agent.TlsPub)
+	if err != nil {
+		return "", fmt.Errorf("stream: decode tls_pub: %w", err)
+	}
+	pkixKey, err := x509.ParsePKIXPublicKey(pubB64)
+	if err != nil {
+		return "", fmt.Errorf("stream: parse tls_pub: %w", err)
+	}
+	pub, ok := pkixKey.(*ecdsa.PublicKey)
+	if !ok {
+		return "", fmt.Errorf("stream: tls_pub is not ECDSA")
+	}
+	leafPEM, serial, err := h.ca.SignLeafForPublicKey(pub, agentID, []string{agent.UUID})
+	if err != nil {
+		return "", fmt.Errorf("stream: sign leaf: %w", err)
+	}
+	env := &pb.Envelope{
+		Kind: pb.EnvelopeKind_TLS_CERT,
+		Payload: &pb.Envelope_TlsCert{TlsCert: &pb.TlsCert{
+			LeafCert: leafPEM,
+			Serial:   serial,
+		}},
+	}
+	if err := h.sendDown(agentID, env); err != nil {
+		return "", err
+	}
+	// Record the new leaf's expiry (optimistic: the new leaf is valid now and
+	// the old leaf stays valid until its own expiry, so this is safe even if
+	// the agent swaps on its next reconnect).
+	if na, err := certutil.ParseLeafNotAfter([]byte(leafPEM)); err == nil {
+		if err := h.st.SetAgentTLS(agentID, agent.TlsPub, na.Unix()); err != nil {
+			h.log.Printf("stream: set agent TLS expiry %s: %v", agentID, err)
+		}
+	}
+	if h.sse != nil {
+		h.sse.Emit("tls.rotated", map[string]string{"agent_id": agentID, "serial": serial})
+	}
+	h.log.Printf("stream: rotated mTLS leaf for %s (serial %s)", agentID, serial)
+	return serial, nil
+}
+
+// PushCertExpiryRotation rotates every connected TLS agent whose current leaf
+// is expired or within the given window. Returns the count rotated.
+func (h *Handler) PushCertExpiryRotation(window time.Duration) int {
+	if h.ca == nil {
+		return 0
+	}
+	agents, err := h.st.Agents()
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	n := 0
+	for _, a := range agents {
+		if a.TlsPub == "" || a.TlsNotAfter == 0 {
+			continue
+		}
+		if time.Until(time.Unix(a.TlsNotAfter, 0)) > window {
+			continue
+		}
+		if _, err := h.RotateAgentCert(a.ID); err != nil {
+			h.log.Printf("stream: expiry rotation %s: %v", a.ID, err)
+			continue
+		}
+		n++
+		_ = now
+	}
+	return n
+}
 
 // pushPolicyBundle sends the current policy bundle to a newly connected
 // agent.  The bundle carries the rules, bundle version, content hash, the
@@ -314,6 +420,14 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		a := msg.GetAck()
 		// For M0, we just log the ack.
 		h.log.Printf("stream: ack %s (status=%s)", a.EnvelopeId, a.Status)
+	case msg.GetTlsRenew() != nil:
+		tr := msg.GetTlsRenew()
+		h.log.Printf("stream: tls renew request from %s (reason=%s)", sess.AgentID, tr.Reason)
+		if serial, err := h.RotateAgentCert(sess.AgentID); err != nil {
+			h.log.Printf("stream: tls renew %s: %v", sess.AgentID, err)
+		} else {
+			h.log.Printf("stream: tls renewed %s (serial %s)", sess.AgentID, serial)
+		}
 	case msg.GetFileOpResult() != nil:
 		fr := msg.GetFileOpResult()
 		h.fileMu.Lock()
