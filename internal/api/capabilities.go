@@ -49,11 +49,10 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// M5 observe read path (R18–R20) — wired in this build.
 		"observe": true,
 
-		// M6 alert engine — not built yet. The UI renders it as a
-		// "not yet available (M6)" placeholder, and the probe must say so
-		// honestly rather than let the UI guess.
+		// M6 alert engine (PRD R23/R25) — wired in this build: rules CRUD,
+		// GET /alerts, SSE alert.firing/alert.resolved, MCP list_alerts.
+		"alerts": true,
 		// M4 approvals — wired when the approvals controller is installed.
-		"alerts":    false,
 		"approvals": h.approvals != nil,
 
 		// M4 MCP server (R11) — true once the /mcp route is registered.

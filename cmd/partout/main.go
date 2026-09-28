@@ -48,6 +48,7 @@ import (
 	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/server/mcp"
 	"github.com/blawesom/partout/internal/server/oauth"
+	serverobserve "github.com/blawesom/partout/internal/server/observe"
 	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/provision"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
@@ -419,6 +420,23 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	binPath, _ := os.Executable()
 	prov := provision.New(st, sshutil.Default(sshDir), serverHost+":"+fmt.Sprint(cfg.Port), binPath, sseB, lg)
 	apiH.SetProvisioner(prov)
+
+	// M6: alert engine (PRD R23/R25). Server-side evaluation of threshold
+	// rules over stored observe facts (Decision 16); fires/resolves alerts
+	// with dedup and fans out alert.firing / alert.resolved SSE events.
+	// Tick: PARTOUT_ALERT_TICK_S (default 30 s).
+	alertTick := 30 * time.Second
+	if v := os.Getenv("PARTOUT_ALERT_TICK_S"); v != "" {
+		if s, err := strconv.ParseInt(v, 10, 64); err == nil && s > 0 {
+			alertTick = time.Duration(s) * time.Second
+		}
+	}
+	alertsC := serverobserve.New(st, sseB, lg, alertTick)
+	alertsC.Start()
+	go func() {
+		<-ctx.Done()
+		alertsC.Stop()
+	}()
 
 	// gRPC server (served via HTTP/2 demux below).
 	gs := grpc.NewServer()

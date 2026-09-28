@@ -110,9 +110,13 @@ func (l *localAPI) Call(ctx context.Context, method, path, token string, body an
 	} else {
 		rd = io.NopCloser(bytes.NewReader(nil))
 	}
+	u, err := url.Parse(path)
+	if err != nil {
+		return 0, nil, err
+	}
 	req := &http.Request{
 		Method: method,
-		URL:    &url.URL{Path: path},
+		URL:    u,
 		Body:   rd,
 		Header: http.Header{},
 	}

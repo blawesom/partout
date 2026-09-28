@@ -167,16 +167,34 @@ func parseUnitList(out string) []string {
 		if len(fields) < 1 {
 			continue
 		}
-		name := fields[0]
-		// Skip the trailing summary lines (`N loaded units listed.`) and
-		// header rows, which have no unit-type suffix and would otherwise be
-		// reported as units named "N".
-		if !strings.Contains(name, ".") {
+		// systemctl prints a status glyph (●, ○) as the first field on some
+		// systemd versions; the unit name is the first field that carries a
+		// known unit-type suffix. Summary lines ("N loaded units listed.")
+		// and header rows carry none, so they are skipped.
+		name := ""
+		for _, f := range fields {
+			if isUnitName(f) {
+				name = f
+				break
+			}
+		}
+		if name == "" {
 			continue
 		}
 		names = append(names, strings.TrimSuffix(name, ".service"))
 	}
 	return names
+}
+
+// isUnitName reports whether s looks like a systemd unit name (carries a
+// known unit-type suffix).
+func isUnitName(s string) bool {
+	for _, ext := range []string{".service", ".target", ".timer", ".socket", ".path", ".mount"} {
+		if strings.HasSuffix(s, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // unitDetail runs systemctl show for a unit and parses the key=value output.

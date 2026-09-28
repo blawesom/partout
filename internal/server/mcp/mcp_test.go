@@ -97,7 +97,8 @@ func TestMCPToolsList(t *testing.T) {
 		byName[m["name"].(string)] = m
 	}
 	for _, want := range []string{"list_hosts", "get_host_facts", "get_audit", "list_approvals",
-		"run_command", "apply_updates", "create_secret", "decide_approval", "list_services", "list_certificates"} {
+		"run_command", "apply_updates", "create_secret", "decide_approval", "list_services", "list_certificates",
+		"list_alerts"} {
 		if _, ok := byName[want]; !ok {
 			t.Fatalf("missing tool %q", want)
 		}

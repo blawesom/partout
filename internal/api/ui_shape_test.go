@@ -271,6 +271,53 @@ func mapKeys(m map[string]json.RawMessage) []string {
 	return out
 }
 
+// TestUIShape_Alerts: GET /alerts + /alerts/rules shapes for the M6 alert
+// engine (capability "alerts": true; UI page lands in M7). A rename or
+// reshaped payload silently blanks the consumers, so pin the field names.
+func TestUIShape_Alerts(t *testing.T) {
+	_, _, srv := startAPITest(t)
+
+	code, b := apiReq(t, "POST", srv.URL+"/api/v1/alerts/rules", "",
+		`{"name":"shape","kind":"service_failed","selector":"all","severity":"warning"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("POST /alerts/rules = %d (%s)", code, truncate(b, 120))
+	}
+
+	code, b = apiReq(t, "GET", srv.URL+"/api/v1/alerts/rules", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /alerts/rules = %d (%s)", code, truncate(b, 120))
+	}
+	var rules struct {
+		Rules []map[string]any `json:"rules"`
+	}
+	if err := json.Unmarshal(b, &rules); err != nil {
+		t.Fatalf("decode rules: %v", err)
+	}
+	if len(rules.Rules) != 1 {
+		t.Fatalf("rules: %s", b)
+	}
+	for _, k := range []string{"id", "name", "kind", "selector", "thresholds", "severity", "enabled"} {
+		if _, ok := rules.Rules[0][k]; !ok {
+			t.Errorf("rule missing field %q", k)
+		}
+	}
+
+	code, b = apiReq(t, "GET", srv.URL+"/api/v1/alerts", "", "")
+	if code != http.StatusOK {
+		t.Fatalf("GET /alerts = %d (%s)", code, truncate(b, 120))
+	}
+	var alerts struct {
+		Alerts []map[string]any `json:"alerts"`
+		Count  int              `json:"count"`
+	}
+	if err := json.Unmarshal(b, &alerts); err != nil {
+		t.Fatalf("decode alerts: %v", err)
+	}
+	if alerts.Count != 0 {
+		t.Errorf("alerts: count = %d, want 0 (nothing fired yet)", alerts.Count)
+	}
+}
+
 func truncate(b []byte, n int) string {
 	if len(b) <= n {
 		return string(b)

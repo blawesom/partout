@@ -50,6 +50,7 @@ commands:
   audit [--kind K] [--actor A] [--limit N]   show audit log
   policy <list|create|delete>                manage policy deny rules
   approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
+  alerts <list|rules>                         view alerts + alert rules (M6)
   provision <new|list|get|key|cancel>        host provisioning (admin)
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
   files stat  --agent A --path P             show file metadata
@@ -131,6 +132,8 @@ commands:
 		c.cmdPolicy(rest)
 	case "approvals":
 		c.cmdApprovals(rest)
+	case "alerts":
+		c.cmdAlerts(rest)
 	case "provision":
 		c.cmdProvision(rest)
 	case "ca":
@@ -589,6 +592,81 @@ func (c *ctl) approvalDecide(id, verb, reason string) {
 	} else {
 		fmt.Printf("approval %s denied\n", id)
 	}
+}
+
+// ---- alerts (M6, PRD R23/R25) -----------------------------------------------
+
+func (c *ctl) cmdAlerts(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl alerts <list|rules>")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		c.alertsList(rest)
+	case "rules":
+		c.alertRules(rest)
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown alerts command %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) alertsList(args []string) {
+	fs := flag.NewFlagSet("alerts list", flag.ExitOnError)
+	state := fs.String("state", "", "filter by state (firing|resolved)")
+	severity := fs.String("severity", "", "filter by severity (info|warning|critical)")
+	fs.Parse(args)
+	path := "/api/v1/alerts"
+	q := url.Values{}
+	if *state != "" {
+		q.Set("state", *state)
+	}
+	if *severity != "" {
+		q.Set("severity", *severity)
+	}
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var page struct {
+		Alerts []map[string]any `json:"alerts"`
+	}
+	if err := c.do("GET", path, nil, &page); err != nil {
+		fatal(err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tSTATE\tSEVERITY\tKIND\tHOST\tSTARTED\tMESSAGE\t")
+	for _, a := range page.Alerts {
+		started := ""
+		if t, ok := a["started_at"]; ok {
+			started = unixTime(int64(num(t)))
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t\n",
+			strval(a["id"]), strval(a["state"]), strval(a["severity"]),
+			strval(a["kind"]), strval(a["agent_id"]), started, strval(a["message"]))
+	}
+	w.Flush()
+	fmt.Printf("\n%d alert(s)\n", len(page.Alerts))
+}
+
+func (c *ctl) alertRules(args []string) {
+	var page struct {
+		Rules []map[string]any `json:"rules"`
+	}
+	if err := c.do("GET", "/api/v1/alerts/rules", nil, &page); err != nil {
+		fatal(err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tNAME\tKIND\tSELECTOR\tSEVERITY\tENABLED\tTHRESHOLDS\t")
+	for _, ru := range page.Rules {
+		th, _ := json.Marshal(ru["thresholds"])
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%v\t%s\t\n",
+			strval(ru["id"]), strval(ru["name"]), strval(ru["kind"]),
+			strval(ru["selector"]), strval(ru["severity"]), ru["enabled"], string(th))
+	}
+	w.Flush()
+	fmt.Printf("\n%d rule(s)\n", len(page.Rules))
 }
 
 // ---- provision -----------------------------------------------------------

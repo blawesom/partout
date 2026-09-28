@@ -54,7 +54,7 @@ and any build without the approvals engine wired still fails closed as deny.
 New env var: `PARTOUT_APPROVAL_TTL_S`.
 **What v0.6 also adds (M4: MCP server + OAuth2, R11/A20):** a JSON-RPC 2.0
 tool surface over stdio (`partout --mode=mcp`, §3.9) and Streamable HTTP
-(`POST /mcp`) — 25 read/write tools that forward the caller's credential to
+(`POST /mcp`) — 26 read/write tools that forward the caller's credential to
 the same REST router the UI/CLI use, so RBAC/policy/audit are the control
 plane's (no duplicated write path). **OAuth2 (PKCE)** for the HTTP transport:
 admin-registered MCP clients (`POST /api/v1/mcp/clients`),
@@ -64,13 +64,26 @@ valid as a bearer on REST + MCP. No new server env vars; the stdio mode takes
 `--server` + `--token` (+ `--ca-file` for TLS). Browser-login grant + refresh
 tokens are post-v1 (A20).
 
+**What v0.6 also adds (M6: alert engine, PRD R23/R25):** server-side threshold
+rules over the observe facts — `service_failed` (delay window
+`service_failed_minutes`), `cert_expiring` (`cert_days_remaining`),
+`config_invalid` (selector + severity per rule; CRUD on
+`/api/v1/alerts/rules`, list on `GET /api/v1/alerts`). The engine ticks every
+`PARTOUT_ALERT_TICK_S` (default 30 s), dedups per (rule, host, subject),
+transitions firing→resolved on recovery, and fans out `alert.firing` /
+`alert.resolved` SSE events. `service_restarting` is deferred to M6.1 (the
+agent doesn't collect a restart counter yet; A21). **Web UI**: the Alerts page
+now renders live firing alerts (the rule-management UI is M7).
+New env var: `PARTOUT_ALERT_TICK_S`.
+
 **Not yet wired:** elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
 `none`/`/`), the Postgres backend, the OAuth2 browser-login grant + refresh
-tokens (post-v1, A20), MCP session-read tools, and the alert engine (M6).
+tokens (post-v1, A20), MCP session-read tools, and the M6.1 alert kinds
+(`service_restarting` et al.; A21).
 **Web UI is shipped** (v0.5): open the main
-listener in a browser and log in — the fleet, execute, audit, and M1–M5 data pages (including
-Observe · Services/Certificates/Configs) are live. Remaining UI scope: the M6 Alerts page (now a
-labeled placeholder) and M7 cross-links/task-actions.
+listener in a browser and log in — the fleet, execute, audit, and M1–M6 data pages (including
+Observe · Services/Certificates/Configs/Alerts) are live. Remaining UI scope:
+alert rule management and M7 cross-links/task-actions.
 
 ---
 
@@ -348,6 +361,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_SECRET_KEY_FILE` / `PARTOUT_SECRET_KEY` | *(empty)* | secrets master key (PRD §5.7): key file (mode `0600`) or env var; per-secret keys derived via HKDF. No key → the secrets feature is disabled at startup |
 | `PARTOUT_SESSION_RETENTION_DAYS` | **30** | retention sweeper window for session recordings (PRD §9) |
 | `PARTOUT_APPROVAL_TTL_S` | **3600** | (M4) approval-request TTL in seconds (PRD §5.8): a `require_approval`-parked action expires and is finalized `failed` if un-acted within this window; expired requests can never be retroactively honored |
+| `PARTOUT_ALERT_TICK_S` | **30** | (M6) alert-engine evaluation cadence in seconds (PRD R25); one pass over all enabled rules × all host facts per tick |
 | `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` | **false** | air-gap switch: disables all external data fetching, EOL + CVE (PRD §6.3) |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for future output blobs — external data cache is in-DB (`eol_cache`/`vuln_cache`) |
 | `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules |

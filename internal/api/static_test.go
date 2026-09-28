@@ -21,12 +21,12 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 	if err := json.Unmarshal(b, &caps); err != nil {
 		t.Fatalf("decode capabilities: %v", err)
 	}
-	for _, wantTrue := range []string{"hosts", "groups", "exec", "policies", "audit", "observe"} {
+	for _, wantTrue := range []string{"hosts", "groups", "exec", "policies", "audit", "observe", "alerts", "mcp"} {
 		if !caps[wantTrue] {
 			t.Errorf("capability %s = false, want true", wantTrue)
 		}
 	}
-	for _, wantFalse := range []string{"alerts", "approvals"} {
+	for _, wantFalse := range []string{"approvals"} {
 		if caps[wantFalse] {
 			t.Errorf("capability %s = true, want false (not built)", wantFalse)
 		}

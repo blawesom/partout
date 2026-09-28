@@ -713,17 +713,35 @@
           <div class="card" v-if="!configs.length"><div class="empty">No config facts (haproxy/nginx must be installed).</div></div>
         </section>
 
-        <!-- ============ OBSERVE · ALERTS (M6 placeholder) ============ -->
+        <!-- ============ OBSERVE · ALERTS (M6 engine live; full page M7) ============ -->
         <section v-else-if="page==='obs-alerts'">
           <h1 class="page">Alerts</h1>
           <p class="page-sub">Threshold rules, firing/resolved state, SSE fan-out (R23, R25).</p>
-          <div class="notavail">
+          <div v-if="caps.alerts" class="card">
+            <div class="row" style="margin-bottom:8px">
+              <strong>Firing now: {{ alerts.filter(a=>a.state==='firing').length }}</strong>
+              <button class="btn sm" @click="loadAlerts">Refresh</button>
+            </div>
+            <table v-if="alerts.length">
+              <thead><tr><th>Severity</th><th>Kind</th><th>Host</th><th>Message</th><th>Started</th></tr></thead>
+              <tbody>
+                <tr v-for="a in alerts" :key="a.id">
+                  <td><span class="tag" :class="a.severity">{{ a.severity }}</span></td>
+                  <td>{{ a.kind }}</td>
+                  <td class="mono">{{ a.agent_id || '—' }}</td>
+                  <td>{{ a.message }}</td>
+                  <td>{{ a.started_at ? new Date(a.started_at*1000).toLocaleString() : '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="muted">No alerts (firing or recently resolved).</p>
+            <p class="muted" style="margin-top:8px">Rule management UI lands in M7; rules are managed via
+            <span class="mono">/api/v1/alerts/rules</span> or <span class="mono">partout ctl alerts rules</span>.</p>
+          </div>
+          <div v-else class="notavail">
             <span class="tag">M6 · not yet available</span>
-            <h3>Alert engine not built</h3>
-            <p>The observe <b>data path</b> (Services, Certificates, Configs) is live. The alert
-            engine — rule store, periodic evaluation, firing/resolved states, and
-            <span class="mono">alert.firing</span>/<span class="mono">alert.resolved</span> SSE fan-out —
-            ships in <b>M6</b>. This page will render active alerts here.</p>
+            <h3>Alert engine not wired on this server</h3>
+            <p>Rebuild/upgrade the server to get the M6 alert engine.</p>
           </div>
         </section>
 
@@ -772,6 +790,7 @@
         updHost: "", jobs: [], jobRuns: [], tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], provRuns: [], users: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
+        alerts: [],
         mcpInfo: null,
         services: [], svcLabel: "", svcState: "",
         certs: [], certDays: "",
@@ -870,7 +889,7 @@
           { key: "obs-services", label: "Services", icon: "◈" },
           { key: "obs-certs", label: "Certificates", icon: "✦" },
           { key: "obs-configs", label: "Configs", icon: "⌘" },
-          { key: "obs-alerts", label: "Alerts", icon: "⚠", placeholder: "M6" },
+          { key: "obs-alerts", label: "Alerts", icon: "⚠" },
         ];
       },
       navEnabled(n) { return this.capOn(n.cap) && (!n.admin || this.isAdmin); },
@@ -930,7 +949,7 @@
           opened = true;
         };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
-        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied"];
+        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
@@ -944,6 +963,7 @@
         else if (kind === "file.action" && this.page === "files") this.listFiles();
         else if ((kind === "session.data" || kind === "session.result") && this.page === "session") this.loadSessionReplay();
         else if ((kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") && this.page === "approvals") this.loadApprovals();
+        else if ((kind === "alert.firing" || kind === "alert.resolved") && this.page === "obs-alerts") this.loadAlerts();
       },
       async loadPageData() {
         // Files, Updates, and Jobs need the host list (default host selection,
@@ -967,6 +987,7 @@
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
+          case "obs-alerts": await this.loadAlerts(); break;
           case "mcp": await this.loadMcp(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
@@ -1030,6 +1051,7 @@
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || d || []; } catch (e) { this.provRuns = []; } },
       async loadUsers() { try { const d = await this.api("/users"); this.users = d.items || d || []; } catch (e) { this.users = []; } },
+      async loadAlerts() { try { const d = await this.api("/alerts"); this.alerts = d.alerts || []; } catch (e) { this.alerts = []; } },
       async loadApprovals() { this.apprMsg = ""; const q = this.apprState ? "?state=" + encodeURIComponent(this.apprState) : ""; try { const d = await this.api("/approvals" + q); this.approvals = d.approvals || []; } catch (e) { this.approvals = []; } },
       async loadMcp() { try { this.mcpInfo = await this.api("/mcp/info"); } catch (e) { this.mcpInfo = null; } },
       protocolHost() { return location.protocol + '//' + location.host; },

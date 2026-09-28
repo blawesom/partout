@@ -1,7 +1,7 @@
 # Partout — Operations
 
-**Status:** Draft v0.5 — day-2 runbook for the control plane. Reflects the current
-implementation (M0–M5 complete, Web UI shipped, M6/M7-remainder in progress) where stated;
+**Status:** Draft v0.6 — day-2 runbook for the control plane. Reflects the current
+implementation (M0–M6 complete, Web UI shipped, M7-remainder in progress) where stated;
 steps for features that ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
 
@@ -174,25 +174,32 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   `partout ctl policy list` and a test dispatch (a denied run records `state=denied` with the
   matched rule id(s) and reason).
 
-### 3.4 Observe layer & alerts (M5–M6, in progress)
+### 3.4 Observe layer & alerts (M5 done, M6 engine shipped)
 
 - **Fact collection cadence**: service facts refresh every 5 min, config facts every 15 min
   or on mtime change, cert facts every 1 hour. Configurable via
   `PARTOUT_OBSERVE_FACTS_INTERVAL` (default 300s; individual collectors may differ).
 - **Config fact validity**: `haproxy -c` and `nginx -t` run on each refresh; a failed
-  validation fires a `config_invalid` alert (M6) and is flagged in the config UI.
-- **Config drift**: the server compares `config_sha256` across hosts in the same group;
-  divergent hosts are flagged. Drift alerts are `info` severity by default.
+  validation fires a `config_invalid` alert and is flagged in the config UI.
+- **Config drift**: not yet implemented (R22, M7) — `config_sha256` is collected but
+  cross-host comparison + drift alerts are deferred.
 - **Certificate expiry tracking**: the server computes `days_remaining` from each cert's
-  `not_after` epoch. Alerts fire when certs approach expiry:
-  - `cert_expiring` (warning): <30 days remaining (default threshold)
-  - `cert_chain_broken` (critical): chain verification failed
-- **Service health**: failed units fire `service_failed` alerts (default: critical if
-  failed >5 min). Restart-loop detection (`service_restarting`) fires if a unit has
-  >10 restarts per hour.
-- **Alert rule CRUD** (M6): `GET/POST/PUT/DELETE /api/v1/alerts/rules` (admin). Rules
-  are server-side only — no agent-side evaluation. Rules have `kind`, `selector`,
-  `thresholds` (JSON), and `severity`. SSE events: `alert.firing`, `alert.resolved`.
+  `not_after` epoch. `cert_expiring` fires at or below the rule's `cert_days_remaining`
+  threshold (default 30). `cert_chain_broken` is M6.1+ (A21).
+- **Service health**: `service_failed` fires when a unit is in `failed` state and has
+  stayed there for the rule's `service_failed_minutes` (default 5; set 0 for immediate).
+  Restart-loop detection (`service_restarting`) is M6.1 — the agent doesn't collect a
+  restart counter yet (A21).
+- **Alert engine** (M6): server-side only (PRD Decision 16) — ticks every
+  `PARTOUT_ALERT_TICK_S` (default 30 s) over one bulk `host_facts` read; dedup key is
+  rule|host|subject (unit name / cert path / config kind) so a flapping condition yields
+  one alert that re-arms on recurrence; missing facts fail soft (they neither fire nor
+  resolve). Every transition is audit-logged (`alert` events) + SSE-broadcast
+  (`alert.firing` / `alert.resolved`).
+- **Alert rule CRUD** (M6): `GET /api/v1/alerts/rules` (viewer) + `POST/PUT/DELETE`
+  (operator) + `GET /api/v1/alerts[?state=&severity=]` (viewer). CLI:
+  `partout ctl alerts list [--state firing] [--severity critical]` and
+  `partout ctl alerts rules`. MCP read tool: `list_alerts`.
 
 ### 3.5 Secrets management
 
@@ -470,6 +477,9 @@ never connects.
 | `POST /oauth2/token` returns `invalid_grant` | PKCE mismatch (`code_verifier` ≠ the challenge), code reused, code expired (5 min), or the `client_id` doesn't match the one that was authorized | Redo the authorize→exchange round-trip with a fresh code + matching verifier/client; S256 only |
 | MCP upload returns `202 {approval_required}` | A `require_approval` rule matched file.write; the body is staged in `<dbdir>/filestaging/` (0600) until decided | An admin `decide_approval` (approve) re-dispatches the staged body; expiry (default 1 h) discards it and the request can never be retroactively honored |
 | Job create/update rejected: `task.run blocked … (requires approval)` | A host in the selector matches `require_approval` for task.run; a job carries a *standing* decision and cannot hold one that needs approval | Change the policy/selector, or use the existing job's manual RunNow (park → admin approve → dispatch) |
+| No alerts fire although a unit is `failed` | The engine ticks every `PARTOUT_ALERT_TICK_S` (30 s) over *stored* facts — the agent's service collector runs every 5 min by default, so a new failure can take up to ~5.5 min to become visible; `service_failed_minutes` (default 5) adds a delay window on top; the rule must be enabled and its selector must match the host | Check `partout ctl alerts rules` (enabled? selector?), `GET /api/v1/services?state=failed` (fact present?), and the server log line `observe/alerts: tick:` |
+| Alert won't resolve after recovery | Missing/stale facts fail soft by design (no data ≠ recovery): if the host's facts stop updating (agent down), the alert stays firing; also confirm the unit's `state` actually left `failed` in the stored facts | Check host last-seen + `GET /api/v1/services?agent_id=…`; once fresh facts show `active`, the next tick resolves it |
+| Duplicate alerts for the same condition | Should not happen — the dedup key is rule|host|subject; if you see repeats, check for two rules with the same kind+selector (each rule has its own dedup key) | Consolidate rules or delete the redundant one (`DELETE /api/v1/alerts/rules/{id}`) |
 | Empty selector → no hosts affected | No hosts match the selector predicates | Check the live resolution preview in the UI before dispatch |
 | Output too large → UI hangs | Command producing >16 MB output (PARTOUT_MAX_OUTPUT_MB) | Reduce output or increase the limit |
 

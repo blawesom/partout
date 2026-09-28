@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE, 25 tools) shipped
+**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE, 26 tools) + **M6 alert engine** shipped
 **Date:** 2025-09-25
 
 ---
@@ -774,6 +774,11 @@ feature paywall (R14). Consequences that follow from "everything free":
   (PRD Decision 16). No UI pages yet — alerts fire over SSE and are visible via API/CLI.
   **Exit:** a `service_failed` rule fires an alert when a unit enters `failed` state;
   the alert resolves when the unit recovers.
+  *v0.6: shipped — `service_failed` (delay window `service_failed_minutes`),
+  `cert_expiring` (`cert_days_remaining`), `config_invalid` rules; dedup per
+  (rule, host, subject); 30 s tick (`PARTOUT_ALERT_TICK_S`); CLI `alerts list|rules`;
+  live Alerts page (full rule-management UI stays M7). `service_restarting` deferred
+  to M6.1 (needs a restart-counter fact the agent doesn't collect yet).*
 
 - **M7 — Observe: UI pages (`R24`).** The human-facing surface.
   Three pages: Services (fleet table, label filter, dependency tree, task actions),

@@ -313,6 +313,20 @@ func DefaultTools() []*Tool {
 			},
 		},
 		{
+			Name:        "list_alerts",
+			Description: "List alerts from the alert engine (M6, R25): firing and recently resolved alerts over service/cert/config facts. Filter by state (firing|resolved) and severity (info|warning|critical).",
+			InputSchema: objSchema(map[string]any{
+				"state":    strProp("filter by state (firing|resolved); empty = all"),
+				"severity": strProp("filter by severity (info|warning|critical)"),
+			}),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/alerts"+query(
+					[2]string{"state", argStr(args, "state")},
+					[2]string{"severity", argStr(args, "severity")},
+				), nil)
+			},
+		},
+		{
 			Name:        "list_updates",
 			Description: "List available package updates for one host (installed vs available, CVE correlation when available).",
 			InputSchema: objSchema(map[string]any{"agent_id": strProp("host id (ag_…)")}, "agent_id"),

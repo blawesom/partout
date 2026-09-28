@@ -918,7 +918,19 @@ Facts ingestion (`observe/facts.go`):
 - Cross-link: cert path in `configs.nginx.vhosts[*].tls_cert` → linked to cert in `certificates.items[*]` → linked to service via haproxy frontend/backend.
 - API: `GET /api/v1/certificates?days_remaining_lt=30` returns near-expiry certs.
 
-### 7.5 Alert engine (`observe/alerts.go`)
+### 7.5 Alert engine (`observe/alerts.go`) — **implemented (M6)**
+
+The engine is server-side only (PRD Decision 16): the controller ticks every
+`PARTOUT_ALERT_TICK_S` (default 30 s), reads all latest `host_facts` in one
+bulk query (the “DB cache” from the design below — not per-host hot queries),
+resolves each enabled rule's selector, and transitions alerts with dedup.
+Shipped kinds: `service_failed` (delay window `service_failed_minutes`,
+default 5 — the first-failed timestamp is tracked in engine memory and resets
+on server restart), `cert_expiring` (`cert_days_remaining`, default 30),
+`config_invalid` (boolean). Tracked for M6.1/later: `service_restarting`
+(needs a restart-counter fact the agent doesn't collect yet),
+`service_absent`, `cert_chain_broken`, `config_drift` (R22), `endpoint_down`.
+Missing facts fail soft: they neither fire nor resolve (no data ≠ recovery).
 
 **Rule model**:
 
@@ -1463,3 +1475,4 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; agent state (`identity.json`, `tls/`, `spool/`) untouched unless `fresh` | §3.5 |
 | A19 | Manual handoff triggers | unreachable, non-systemd init, Docker-host, air-gapped; prints binary + one-line install with one-time token | §3.5 |
 | A20 | MCP auth (R11) | **Implemented (M4)**: stdio + Streamable HTTP. Credentials: the caller's bearer token (static env token, a local-user session token from `ctl auth login`, or an **OAuth2 (PKCE) access token**) — all forwarded to the same REST router, so RBAC/policy/audit are the control plane's. OAuth2 (PKCE) v1 model (`internal/server/oauth`, schema v12 `mcp_clients`/`oauth_codes`/`oauth_tokens`): admin-registered clients; `POST /oauth2/authorize` (authenticated by the owner's existing bearer) → 5-min one-time code bound to an S256 challenge; `POST /oauth2/token` verifies `S256(code_verifier)` → 1-h access token, stored only as a SHA-256 hash, single-use codes. Deviations: no browser login grant (bearer-token codebase), no refresh tokens — post-v1. | §10.3 |
+| A21 | Alert engine v1 scope (R23/R25) | **Implemented (M6)** with a reduced kind set: `service_failed`, `cert_expiring`, `config_invalid`. Deferred: `service_restarting` (agent doesn't collect a restart counter yet — M6.1), `service_absent`, `cert_chain_broken`, `config_drift` (needs R22 time series), `endpoint_down` (needs a probe channel). The 2-minute design tick became 30 s (`PARTOUT_ALERT_TICK_S`). | §7.5 |

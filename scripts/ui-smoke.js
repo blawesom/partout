@@ -128,7 +128,8 @@ async function main() {
   await visit("#/obs-configs", 1600);
   check("observe configs renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Configs"));
   await visit("#/obs-alerts");
-  check("observe alerts: M6 placeholder", !!d.querySelector(".notavail") && d.querySelector(".notavail").textContent.includes("M6"));
+  check("observe alerts: live card (engine wired)", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Alerts") && d.body.textContent.includes("Firing now:"), "alerts card missing");
+  check("observe alerts: empty state honest", d.body.textContent.includes("No alerts"), "no empty-state text");
 
   await visit("#/account");
   check("account renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Account"));

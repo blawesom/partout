@@ -126,6 +126,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// registry. Routes 503 until SetOAuth installs the manager.
 	handler.RegisterOAuth(mux)
 
+	// M6: alert engine (PRD R23/R25). Read/list routes; rule CRUD.
+	handler.RegisterAlerts(mux)
+
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
 

@@ -67,6 +67,18 @@ To show all installed unit files use 'systemctl list-unit-files'.
 	}
 }
 
+func TestParseUnitListBulletGlyph(t *testing.T) {
+	// Newer systemd prints a status glyph (●/○) as the first field.
+	out := `acme-serve.service        loaded active running ACME
+● m6smoke.service         loaded failed failed  M6 smoke
+4 loaded units listed.
+`
+	got := parseUnitList(out)
+	if len(got) != 2 || got[0] != "acme-serve" || got[1] != "m6smoke" {
+		t.Fatalf("parseUnitList(bullet) = %v, want [acme-serve m6smoke]", got)
+	}
+}
+
 func TestParseUnitListEmpty(t *testing.T) {
 	if got := parseUnitList(""); len(got) != 0 {
 		t.Errorf("parseUnitList(\"\") = %v, want empty", got)

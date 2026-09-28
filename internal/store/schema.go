@@ -433,7 +433,41 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   created     INTEGER NOT NULL,
   expires     INTEGER NOT NULL
 );
+
+-- M6 alert engine (PRD R23/R25, arch §7): threshold rules over the observe
+-- domains + the unified alert store. Dedup key = rule|host|subject so one
+-- condition yields one alert row (re-fires re-arm the same row).
+CREATE TABLE IF NOT EXISTS alert_rules (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+               -- service_failed | cert_expiring | config_invalid (service_restarting: M6.1)
+  selector   TEXT NOT NULL DEFAULT 'all',
+  thresholds TEXT NOT NULL DEFAULT '{}',
+               -- JSON: {"service_failed_minutes":0|5}, {"cert_days_remaining":30}, {"config_invalid":true}
+  severity   TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('info','warning','critical')),
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id          TEXT PRIMARY KEY,
+  rule_id     TEXT NOT NULL,
+  agent_id    TEXT,              -- NULL = fleet-wide (v1 rules are per-host)
+  kind        TEXT NOT NULL,     -- matches alert_rules.kind
+  severity    TEXT NOT NULL CHECK (severity IN ('info','warning','critical')),
+  message     TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'firing' CHECK (state IN ('firing','resolved')),
+  dedup_key   TEXT NOT NULL UNIQUE,
+  started_at  INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_state ON alerts(state);
+CREATE INDEX IF NOT EXISTS idx_alerts_agent ON alerts(agent_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 12
+const currentSchemaVersion = 13
