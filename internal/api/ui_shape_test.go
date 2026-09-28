@@ -3,7 +3,12 @@ package api_test
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/blawesom/partout/internal/certutil"
@@ -334,4 +339,132 @@ func trimSpace(b []byte) []byte {
 		j--
 	}
 	return b[i:j]
+}
+
+// TestUIShape_SSESubscriptionsAreEmitted guards the failure mode where the UI
+// subscribes to a named SSE event that the server never emits. Because SSE
+// named events only reach listeners registered for the exact name, a typo
+// (e.g. "provision.key.confirmed" while the server emits
+// "provision.key_confirm") silently disables a live update — the page just
+// stops refreshing. That is exactly how the provision key-confirm gate was
+// invisible in the browser until an operator refreshed manually.
+//
+// It cross-checks the UI's subscription list against the emitted event names
+// in the linked source tree (including dynamically built names such as
+// "provision."+state and "job."+kind).
+func TestUIShape_SSESubscriptionsAreEmitted(t *testing.T) {
+	root := repoRoot(t)
+
+	appJS, err := os.ReadFile(filepath.Join(root, "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	subs := sseSubscriptions(string(appJS))
+	if len(subs) == 0 {
+		t.Fatal("no SSE subscriptions found in app.js (parser drift?)")
+	}
+
+	// Collect every literal emitted event name across the whole module (not just
+	// internal/server: control.go emits execution.state), plus the dynamic
+	// prefixes that are concatenated at the emit site. Event names are also
+	// passed as helper arguments (e.g. c.emit(a, "alert.firing")), so match any
+	// quoted dotted literal alongside an emit-ish identifier.
+	emitted := map[string]bool{}
+	prefixes := map[string]bool{}
+	err = filepath.WalkDir(root,
+		func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			if strings.Contains(path, string(filepath.Separator)+"webui"+string(filepath.Separator)) {
+				return nil
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			src := string(b)
+			for _, m := range emitLitRe.FindAllStringSubmatch(src, -1) {
+				emitted[m[1]] = true
+			}
+			for _, m := range emitPrefixRe.FindAllStringSubmatch(src, -1) {
+				prefixes[m[1]] = true
+			}
+			// Helper-argument form: emitX(a, "alert.firing") / Emit(event...) with
+			// a literal in the same call. Only consider lines mentioning emit.
+			for _, line := range strings.Split(src, "\n") {
+				if !strings.Contains(line, "mit(") {
+					continue
+				}
+				for _, m := range dottedLitRe.FindAllStringSubmatch(line, -1) {
+					emitted[m[1]] = true
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("walk module: %v", err)
+	}
+	// "provision."+state produces provision.<state> for the terminal states.
+	for _, st := range []string{"failed", "cancelled", "connected", "handoff"} {
+		emitted["provision."+st] = true
+	}
+
+	// audit.event is a known pre-existing dead subscription (the audit page is
+	// refreshed by other events); tracked rather than silently ignored.
+	knownDead := map[string]bool{"audit.event": true}
+	for _, k := range subs {
+		if emitted[k] || prefixes[k] {
+			continue
+		}
+		if knownDead[k] {
+			t.Logf("known dead SSE subscription (pre-existing): %s", k)
+			continue
+		}
+		t.Errorf("UI subscribes to SSE %q but no server emit site produces it "+
+			"(named SSE only reaches exact-match listeners, so this live update is dead)", k)
+	}
+}
+
+var (
+	emitLitRe    = regexp.MustCompile(`Emit\("([a-z_]+(?:\.[a-z_]+)*)"`)
+	emitPrefixRe = regexp.MustCompile(`Emit\("([a-z_]+\.)"\s*\+`)
+	dottedLitRe  = regexp.MustCompile(`"([a-z_]+\.[a-z_.]+)"`)
+)
+
+// sseSubscriptions extracts the string literals of the subscription list that
+// is iterated with addEventListener in app.js.
+func sseSubscriptions(src string) []string {
+	i := strings.Index(src, "const kinds = [")
+	if i < 0 {
+		return nil
+	}
+	j := strings.Index(src[i:], "];")
+	if j < 0 {
+		return nil
+	}
+	block := src[i : i+j]
+	var out []string
+	for _, m := range regexp.MustCompile(`"([a-z_]+(?:\.[a-z_.]+)*)"`).FindAllStringSubmatch(block, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above test dir")
+		}
+		dir = parent
+	}
 }

@@ -129,18 +129,22 @@ type ServiceFacts struct {
 
 // UnitFact is one systemd unit's state, dependencies, enablement, and labels.
 type UnitFact struct {
-	Name           string   `json:"name"`
-	Type           string   `json:"type"`
-	State          string   `json:"state"`
-	SubState       string   `json:"sub_state"`
-	Enabled        bool     `json:"enabled"`
-	WantedBy       []string `json:"wanted_by,omitempty"`
-	RequiredBy     []string `json:"required_by,omitempty"`
-	After          []string `json:"after,omitempty"`
-	RestartPolicy  string   `json:"restart_policy,omitempty"`
-	MemoryCurrent  uint64   `json:"memory_current,omitempty"`
-	CPUUsageSec    string   `json:"cpu_usage_sec,omitempty"`
-	NRestarts      int64    `json:"n_restarts,omitempty"`
+	Name          string   `json:"name"`
+	Type          string   `json:"type"`
+	State         string   `json:"state"`
+	SubState      string   `json:"sub_state"`
+	Enabled       bool     `json:"enabled"`
+	WantedBy      []string `json:"wanted_by,omitempty"`
+	RequiredBy    []string `json:"required_by,omitempty"`
+	After         []string `json:"after,omitempty"`
+	RestartPolicy string   `json:"restart_policy,omitempty"`
+	MemoryCurrent uint64   `json:"memory_current,omitempty"`
+	CPUUsageSec   string   `json:"cpu_usage_sec,omitempty"`
+	NRestarts     int64    `json:"n_restarts,omitempty"`
+	// NRestartsKnown reports that the agent actually collected the counter
+	// (absent means the systemctl probe failed, so the engine must not read
+	// the zero value as a real count).
+	NRestartsKnown bool     `json:"n_restarts_known,omitempty"`
 	LastExitCode   int      `json:"last_exit_code,omitempty"`
 	LastExitStatus string   `json:"last_exit_status,omitempty"`
 	Labels         []string `json:"labels,omitempty"`

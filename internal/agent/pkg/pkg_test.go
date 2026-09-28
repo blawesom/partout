@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSelectBackend verifies the distro → backend mapping.
@@ -159,5 +160,30 @@ func TestSummarizeAptUpgrade(t *testing.T) {
 	got := len(strings.Split(out, "\n"))
 	if got > 20 {
 		t.Errorf("summary has %d lines, want <= 20", got)
+	}
+}
+
+// TestRunHonoursTimeout: the timeout argument was accepted but never applied,
+// so a command that blocks (apt waiting on a lock/prompt, stalled mirror) hung
+// forever — the package action stayed "running" and the server never received
+// a result. run() must bound the child and surface a timeout error.
+func TestRunHonoursTimeout(t *testing.T) {
+	start := time.Now()
+	_, err := run(context.Background(), 300*time.Millisecond, "sleep", "30")
+	if err == nil {
+		t.Fatal("expected a timeout error from a hanging command")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %v, want a timeout error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("run blocked for %s; the timeout was not enforced", elapsed)
+	}
+}
+
+// TestRunNilStdin: a child must not be able to block on terminal input.
+func TestRunNilStdin(t *testing.T) {
+	if _, err := run(context.Background(), 5*time.Second, "true"); err != nil {
+		t.Fatalf("run(true): %v", err)
 	}
 }

@@ -181,15 +181,20 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   `PARTOUT_OBSERVE_FACTS_INTERVAL` (default 300s; individual collectors may differ).
 - **Config fact validity**: `haproxy -c` and `nginx -t` run on each refresh; a failed
   validation fires a `config_invalid` alert and is flagged in the config UI.
-- **Config drift**: not yet implemented (R22, M7) — `config_sha256` is collected but
-  cross-host comparison + drift alerts are deferred.
+- **Config drift**: shipped (R22) as the `config_drift` rule kind — each host's
+  `config_sha256` is compared against the fleet majority (lexicographic tie-break)
+  and a minority host alerts. `config_drift_tolerance` (default 0) allows that many
+  competing hashes before anything is flagged.
 - **Certificate expiry tracking**: the server computes `days_remaining` from each cert's
   `not_after` epoch. `cert_expiring` fires at or below the rule's `cert_days_remaining`
   threshold (default 30). `cert_chain_broken` is M6.1+ (A21).
 - **Service health**: `service_failed` fires when a unit is in `failed` state and has
   stayed there for the rule's `service_failed_minutes` (default 5; set 0 for immediate).
-  Restart-loop detection (`service_restarting`) is M6.1 — the agent doesn't collect a
-  restart counter yet (A21).
+  Restart-loop detection (`service_restarting`, M6.1) uses the systemd `NRestarts`
+  counter the agent now collects: the server computes a rate (restarts/hour) over the
+  interval between counter movements and fires at or above
+  `service_restart_rate_per_hour` (default 10), resolving after the unit has been
+  quiet for 10 minutes.
 - **Alert engine** (M6): server-side only (PRD Decision 16) — ticks every
   `PARTOUT_ALERT_TICK_S` (default 30 s) over one bulk `host_facts` read; dedup key is
   rule|host|subject (unit name / cert path / config kind) so a flapping condition yields

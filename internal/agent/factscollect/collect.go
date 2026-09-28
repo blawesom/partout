@@ -102,18 +102,23 @@ type ServiceFacts struct {
 
 // UnitFact is one systemd unit's state, dependencies, enablement, and labels.
 type UnitFact struct {
-	Name           string   `json:"name"`
-	Type           string   `json:"type"`
-	State          string   `json:"state"`
-	SubState       string   `json:"sub_state"`
-	Enabled        bool     `json:"enabled"`
-	WantedBy       []string `json:"wanted_by,omitempty"`
-	RequiredBy     []string `json:"required_by,omitempty"`
-	After          []string `json:"after,omitempty"`
-	RestartPolicy  string   `json:"restart_policy,omitempty"`
-	MemoryCurrent  uint64   `json:"memory_current,omitempty"`
-	CPUUsageSec    string   `json:"cpu_usage_sec,omitempty"`
-	NRestarts      int64    `json:"n_restarts,omitempty"`
+	Name          string   `json:"name"`
+	Type          string   `json:"type"`
+	State         string   `json:"state"`
+	SubState      string   `json:"sub_state"`
+	Enabled       bool     `json:"enabled"`
+	WantedBy      []string `json:"wanted_by,omitempty"`
+	RequiredBy    []string `json:"required_by,omitempty"`
+	After         []string `json:"after,omitempty"`
+	RestartPolicy string   `json:"restart_policy,omitempty"`
+	MemoryCurrent uint64   `json:"memory_current,omitempty"`
+	CPUUsageSec   string   `json:"cpu_usage_sec,omitempty"`
+	NRestarts     int64    `json:"n_restarts,omitempty"`
+	// NRestartsKnown distinguishes a genuine counter value (including 0) from
+	// a failed `systemctl show` (where NRestarts is simply absent). Without
+	// it the engine cannot tell "no datum" from "counter reset to 0" and
+	// would treat a transient collector failure as a spike of restarts.
+	NRestartsKnown bool     `json:"n_restarts_known,omitempty"`
 	LastExitCode   int      `json:"last_exit_code,omitempty"`
 	LastExitStatus string   `json:"last_exit_status,omitempty"`
 	Labels         []string `json:"labels,omitempty"`
@@ -252,6 +257,7 @@ func parseUnitShow(name, out string) UnitFact {
 			// (M6.1) as a rate computed server-side across ticks.
 			if n, err := parseUint64(v); err == nil {
 				f.NRestarts = int64(n)
+				f.NRestartsKnown = true
 			}
 		case "ExecMainStatus":
 			// The unit's last exit status. Empty for units that have never

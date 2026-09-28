@@ -44,20 +44,21 @@ type Controller struct {
 
 	mu          sync.Mutex
 	firstFailed map[string]time.Time   // "agentID|unit" -> first time observed failed
-	restartSamp map[string]restartSamp // "agentID|unit" -> last (count, time) sample
+	restartSamp map[string]restartSamp // "agentID|unit" -> last (count, time, rate) sample
 	now         func() time.Time       // injectable clock (tests)
-}
-
-// restartSamp is one sample of a unit's systemd NRestarts counter, used to
-// compute the restart rate over the window since the previous sample.
-type restartSamp struct {
-	count int64
-	at    time.Time
 }
 
 // minRateWindow bounds how short the sample window may be before a restart
 // rate is computed (avoids divide-by-near-zero on back-to-back ticks).
 const minRateWindow = 30 * time.Second
+
+// restartQuietWindow is how long a unit's NRestarts counter must stay
+// unchanged before its held restart rate decays to zero and a
+// service_restarting alert resolves. The counter only changes when the agent
+// re-uploads facts (default 300 s), so a looping unit keeps its rate held
+// across the intervening ticks; once it has been quiet for two facts cycles
+// the loop has stopped and the alert may clear.
+const restartQuietWindow = 10 * time.Minute
 
 // New builds the controller. tick <= 0 → DefaultTick.
 func New(st *store.Store, sseB *sse.Broker, lg *log.Logger, tick time.Duration) *Controller {
@@ -386,42 +387,95 @@ func (c *Controller) restartRateThresh(r *store.AlertRule) float64 {
 	return float64(thresholdInt(r, "service_restart_rate_per_hour", 10))
 }
 
-// sampleRestartRates advances the per-unit restart-counter samples for every
-// host with service facts and returns the restart rate (restarts/hour) for
-// every unit with a usable window. First sighting of a unit only establishes
-// a baseline (no rate); the sample advances once the window since the
-// previous sample reaches minRateWindow. A counter reset (NRestarts dropped
-// — the unit was stopped/restarted) folds into the new count. The engine's
-// in-memory baseline is lost on a server restart; the first post-restart
-// tick re-baselines silently.
+// restartSamp is the per-unit baseline for the restart-rate calculation.
+//
+// count/at describe the last *observed* counter value at the time it was
+// observed. They are only advanced when the counter actually changes, so the
+// measurement window spans the real interval between counter movements rather
+// than the alert tick: the engine ticks every 30 s but the agent only uploads
+// facts every ~300 s, and dividing a 300 s delta by a 30 s window inflated the
+// rate ~10x. rate holds the last computed rate so a still-crashing unit keeps
+// alerting on the ticks where the counter has not moved yet (otherwise the
+// alert resolved and re-fired once per facts cycle).
+type restartSamp struct {
+	count int64
+	at    time.Time
+	rate  float64
+}
+
+// sampleRestartRates computes the per-unit restart rate (restarts/hour) from
+// the NRestarts counter facts.
+//
+// Semantics: a unit's sample is advanced only when its counter changes, so the
+// divisible window is the true interval between counter movements (>= the
+// facts cadence), not the faster alert tick. Between movements the previously
+// computed rate is held, so a continuously crash-looping unit keeps firing
+// instead of flapping firing/resolved each facts cycle. A genuine counter
+// reset (NRestarts dropped) folds into the new count. A unit whose counter has
+// never moved yields no rate. The in-memory baseline is lost on a server
+// restart; the first post-restart sighting re-baselines silently.
 //
 // Returns map "agentID|unit" -> rate.
 func (c *Controller) sampleRestartRates(docs map[string]*Document, now time.Time) map[string]float64 {
 	out := make(map[string]float64)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Evict baselines for units that are no longer present (decommissioned
+	// hosts or removed units) so the in-memory map does not grow for the
+	// lifetime of the process.
+	seen := make(map[string]bool)
 	for agID, doc := range docs {
 		sf := doc.Services()
 		if sf == nil {
 			continue
 		}
 		for _, u := range sf.Units {
+			if !u.NRestartsKnown {
+				// No datum (the collector's `systemctl show` failed for this
+				// unit). Do not treat the absent counter as 0 — that would look
+				// like a reset now and a spike when collection recovers.
+				continue
+			}
 			key := agID + "|" + u.Name
+			seen[key] = true
 			prev, ok := c.restartSamp[key]
 			if !ok {
 				c.restartSamp[key] = restartSamp{count: u.NRestarts, at: now}
 				continue
 			}
+			if u.NRestarts == prev.count {
+				// Counter has not moved since the last observation. Hold the last
+				// rate so a still-crashing unit keeps alerting (the counter only
+				// moves once per facts upload, which is slower than the tick), but
+				// let it decay to zero once the unit has been quiet for a full
+				// observation window so the alert eventually resolves.
+				quiet := now.Sub(prev.at)
+				if prev.rate > 0 && quiet < restartQuietWindow {
+					out[key] = prev.rate
+				} else if prev.rate > 0 {
+					out[key] = 0 // quiet long enough: report a zero rate to resolve
+					c.restartSamp[key] = restartSamp{count: u.NRestarts, at: now}
+				}
+				continue
+			}
 			elapsed := now.Sub(prev.at)
 			if elapsed < minRateWindow {
-				continue // keep the baseline; the window widens over ticks
+				// Too soon to attribute the change to a stable window; keep the
+				// existing baseline and try again on a later tick.
+				continue
 			}
 			delta := u.NRestarts - prev.count
 			if delta < 0 {
 				delta = u.NRestarts // counter reset (unit stop/restart)
 			}
-			out[key] = float64(delta) / elapsed.Hours()
-			c.restartSamp[key] = restartSamp{count: u.NRestarts, at: now}
+			rate := float64(delta) / elapsed.Hours()
+			out[key] = rate
+			c.restartSamp[key] = restartSamp{count: u.NRestarts, at: now, rate: rate}
+		}
+	}
+	for k := range c.restartSamp {
+		if !seen[k] {
+			delete(c.restartSamp, k)
 		}
 	}
 	return out

@@ -130,6 +130,103 @@ func TestAlertsRuleKinds(t *testing.T) {
 	}
 }
 
+// TestAlertsRulePartialUpdatePreservesFields: a partial PUT must not reset a
+// rule's thresholds to defaults nor re-enable a disabled rule. Both were
+// silently clobbered because empty/absent values were treated as "clear".
+func TestAlertsRulePartialUpdatePreservesFields(t *testing.T) {
+	_, _, srv := startAPITest(t)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/v1/alerts/rules", "application/json",
+		strings.NewReader(`{"name":"keep","kind":"service_restarting","selector":"role:db","severity":"critical","enabled":false,"thresholds":{"service_restart_rate_per_hour":42}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create: %d %s", resp.StatusCode, body)
+	}
+	var created map[string]any
+	_ = json.Unmarshal(body, &created)
+	id, _ := created["id"].(string)
+	if id == "" {
+		t.Fatalf("no id in %s", body)
+	}
+
+	// Rename only: everything else must survive.
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/v1/alerts/rules/"+id,
+		strings.NewReader(`{"name":"renamed"}`))
+	req.Header.Set("Content-Type", "application/json")
+	r2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := io.ReadAll(r2.Body)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("put: %d %s", r2.StatusCode, b2)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b2, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["name"] != "renamed" {
+		t.Errorf("name = %v, want renamed", got["name"])
+	}
+	if got["enabled"] != false {
+		t.Errorf("partial update re-enabled the rule: enabled = %v", got["enabled"])
+	}
+	if got["selector"] != "role:db" || got["severity"] != "critical" {
+		t.Errorf("selector/severity lost: %v / %v", got["selector"], got["severity"])
+	}
+	th, _ := got["thresholds"].(map[string]any)
+	if th == nil || th["service_restart_rate_per_hour"] != float64(42) {
+		t.Errorf("thresholds reset to defaults: %v", got["thresholds"])
+	}
+}
+
+// TestAlertsRuleThresholdValidation: negative/fractional known thresholds are
+// rejected at the API (a negative rate silently inverts the rule's condition).
+func TestAlertsRuleThresholdValidation(t *testing.T) {
+	_, _, srv := startAPITest(t)
+	defer srv.Close()
+	bad := []string{
+		`{"name":"n","kind":"service_restarting","thresholds":{"service_restart_rate_per_hour":-1}}`,
+		`{"name":"n","kind":"cert_expiring","thresholds":{"cert_days_remaining":-5}}`,
+		`{"name":"n","kind":"service_failed","thresholds":{"service_failed_minutes":-1}}`,
+		`{"name":"n","kind":"config_drift","thresholds":{"config_drift_tolerance":-1}}`,
+		`{"name":"n","kind":"cert_expiring","thresholds":{"cert_days_remaining":1.5}}`,
+		`{"name":"n","kind":"cert_expiring","thresholds":{"cert_days_remaining":"soon"}}`,
+	}
+	for _, payload := range bad {
+		resp, err := http.Post(srv.URL+"/api/v1/alerts/rules", "application/json", strings.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("payload %s: %d, want 400", payload, resp.StatusCode)
+		}
+	}
+	// A valid zero and a valid positive still work.
+	for _, ok := range []string{
+		`{"name":"z","kind":"service_restarting","thresholds":{"service_restart_rate_per_hour":0}}`,
+		`{"name":"p","kind":"cert_expiring","thresholds":{"cert_days_remaining":30}}`,
+	} {
+		resp, err := http.Post(srv.URL+"/api/v1/alerts/rules", "application/json", strings.NewReader(ok))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("payload %s: %d, want 201", ok, resp.StatusCode)
+		}
+	}
+}
+
 // TestAlertsE2EFiresAndResolvesViaSSE: seed a failing service fact, tick the
 // engine, verify the alert is listed and SSE emitted alert.firing; then
 // recovery → alert.resolved.

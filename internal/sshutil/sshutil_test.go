@@ -252,3 +252,32 @@ func TestDirArgsEmptySSHDirPassthrough(t *testing.T) {
 		t.Errorf("dirArgs(empty SSHDir) = %v, want nil", args)
 	}
 }
+
+// TestHostKeyStripsUserPrefix: provision targets are entered as user@host, but
+// ssh-keyscan/ssh-keygen -F take a bare hostname. Passing "root@127.0.0.1"
+// made keyscan fail with a name-resolution error, so every provision run died
+// at the key_confirm gate instead of pausing there. Run/Copy still need the
+// full target, so only the host-key paths strip it.
+func TestHostKeyStripsUserPrefix(t *testing.T) {
+	bin := writeFakeBinaries(t)
+	cfg := newTestCfg(t, bin)
+	ctx := context.Background()
+
+	if _, _, _, err := cfg.HostKey(ctx, "root@127.0.0.1"); err != nil {
+		t.Fatalf("HostKey: %v", err)
+	}
+	if _, err := cfg.HasHost(ctx, "root@127.0.0.1"); err != nil {
+		t.Fatalf("HasHost: %v", err)
+	}
+	log, _ := os.ReadFile(filepath.Join(bin, "calls.log"))
+	for _, line := range strings.Split(strings.TrimSpace(string(log)), "\n") {
+		if strings.HasPrefix(line, "keyscan ") || strings.HasPrefix(line, "keygen -F") {
+			if strings.Contains(line, "root@") {
+				t.Errorf("host-key tooling received the user prefix: %q", line)
+			}
+			if !strings.Contains(line, "127.0.0.1") {
+				t.Errorf("host-key tooling lost the hostname: %q", line)
+			}
+		}
+	}
+}

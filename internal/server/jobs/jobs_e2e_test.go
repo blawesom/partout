@@ -2,6 +2,7 @@ package jobs_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"strings"
@@ -387,5 +388,86 @@ func TestOnRunResultRebootResume(t *testing.T) {
 	// Lineage survived the finalize.
 	if run.TaskID != "task_test" || run.TaskVersion != 1 {
 		t.Fatalf("task lineage lost: %+v", run)
+	}
+}
+
+// TestControllerUpdateCanDisableJob guards a regression where an explicit
+// "enabled": false in an update body was indistinguishable from an omitted
+// field (both decode to the bool zero value), so Update preserved the stored
+// true and the job kept firing. EnabledSet now records key presence.
+func TestControllerUpdateCanDisableJob(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.UpsertAgent(store.Agent{ID: "ag_test", UUID: "uuid", ED25519Pub: "eA==", X25519Pub: "eA=="}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	if err := st.SetTag("ag_test", "env", "test"); err != nil {
+		t.Fatalf("SetTag: %v", err)
+	}
+	if err := st.CreateTask(&store.Task{ID: "task_test", Name: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTaskVersion(&store.TaskVersion{TaskID: "task_test", Version: 1,
+		StepsJSON: `[{"kind":"command","name":"echo","command":"echo"}]`}); err != nil {
+		t.Fatal(err)
+	}
+
+	sseB := sse.New()
+	lg := log.New(io.Discard, "jobs:", 0)
+	ctrl := jobs.New(st, nil, sseB, lg)
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("server identity: %v", err)
+	}
+	ctrl.SetIdentity(ident)
+
+	job, err := ctrl.Create(context.Background(), jobs.Job{
+		Name: "cron job", TaskID: "task_test", Cron: "* * * * *",
+		Selector: "tag:env=test", Enabled: true,
+	}, jobs.Actor{Principal: "admin", Role: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !job.Enabled {
+		t.Fatal("created job should be enabled")
+	}
+
+	// An update decoded from JSON with "enabled": false must disable it.
+	var spec jobs.Job
+	if err := json.Unmarshal([]byte(`{"enabled":false}`), &spec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !spec.EnabledSet {
+		t.Fatal("EnabledSet should be true when the key is present")
+	}
+	upd, err := ctrl.Update(context.Background(), job.ID, spec, jobs.Actor{Principal: "admin", Role: "admin"})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if upd.Enabled {
+		t.Fatal("job stayed enabled after an explicit enabled:false update")
+	}
+
+	// Omitting the key must still preserve the current value (now false).
+	var bare jobs.Job
+	if err := json.Unmarshal([]byte(`{"cron":"0 5 * * *"}`), &bare); err != nil {
+		t.Fatalf("decode bare: %v", err)
+	}
+	if bare.EnabledSet {
+		t.Fatal("EnabledSet should be false when the key is absent")
+	}
+	upd2, err := ctrl.Update(context.Background(), job.ID, bare, jobs.Actor{Principal: "admin", Role: "admin"})
+	if err != nil {
+		t.Fatalf("Update bare: %v", err)
+	}
+	if upd2.Enabled {
+		t.Fatal("omitting enabled must preserve the stored false")
+	}
+	if upd2.Cron != "0 5 * * *" {
+		t.Fatalf("cron=%q, want 0 5 * * *", upd2.Cron)
 	}
 }

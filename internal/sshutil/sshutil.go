@@ -197,12 +197,23 @@ func (c Config) Copy(ctx context.Context, local, host, remote string) (string, e
 	return "", nil
 }
 
+// bareHost strips the optional user@ prefix from a target so it can be passed
+// to host-key tooling. ssh-keyscan and ssh-keygen -F take a hostname, not an
+// ssh target: "root@127.0.0.1" makes keyscan fail with a name resolution
+// error, which used to fail every provision run at the key-confirm gate.
+func bareHost(host string) string {
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		return host[i+1:]
+	}
+	return host
+}
+
 // HostKey captures the remote host key via ssh-keyscan and computes its
 // fingerprint. Returns the key type (e.g. "ED25519"), the fingerprint
 // (e.g. "SHA256:…"), and the raw keyscan line (for adding to known_hosts).
 func (c Config) HostKey(ctx context.Context, host string) (keyType, fingerprint, keyLine string, err error) {
 	// ssh-keyscan writes the key line to stdout.
-	stdout, stderr, exit, err := c.run(ctx, c.keyscanBin(), "-t", "ed25519,ecdsa,rsa", host)
+	stdout, stderr, exit, err := c.run(ctx, c.keyscanBin(), "-t", "ed25519,ecdsa,rsa", bareHost(host))
 	if err != nil {
 		return "", "", "", err
 	}
@@ -225,7 +236,7 @@ func (c Config) HostKey(ctx context.Context, host string) (keyType, fingerprint,
 // explicitly: `ssh-keygen -F` otherwise consults the passwd-db home, which
 // would silently ignore PARTOUT_SSH_DIR.
 func (c Config) HasHost(ctx context.Context, host string) (bool, error) {
-	args := []string{"-F", host}
+	args := []string{"-F", bareHost(host)}
 	if c.SSHDir != "" {
 		args = append(args, "-f", c.knownHostsPath())
 	}

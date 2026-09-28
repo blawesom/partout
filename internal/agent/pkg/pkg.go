@@ -316,9 +316,23 @@ func (n *noopBackend) Installed(ctx context.Context) ([]PkgUpdate, error) {
 // run executes a command with a deadline, reading only stdout (stderr is
 // included via CombinedOutput).
 func run(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	// The timeout argument was previously ignored, so a hung apt/dnf (waiting
+	// on a lock, a prompt, or a stalled mirror) blocked the operation forever:
+	// the package action stayed "running" and the server's waiter only gave up
+	// at opTimeout, leaving no result. Enforce it here, and give the child a
+	// nil stdin so it cannot block waiting for terminal input.
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = nil
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("%s: timed out after %s", name, timeout)
+		}
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil

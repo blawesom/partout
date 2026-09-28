@@ -427,7 +427,7 @@
                   <td class="mono">{{ j.selector }}</td>
                   <td>{{ j.enabled ? 'yes' : 'no' }}</td>
                   <td style="white-space:nowrap">
-                    <button class="btn sm" :disabled="!isOperator" @click="runJob(j)">Run now</button>
+                    <button class="btn sm" :disabled="!isOperator || jobRunBusy===j.id" @click="runJob(j)">Run now</button>
                     <button class="btn sm" :disabled="!isOperator" @click="editJob(j)">Edit</button>
                     <button class="btn sm" :disabled="!isOperator" @click="showJobRuns(j.id)">Runs</button>
                     <button class="btn danger sm" :disabled="!isOperator" @click="deleteJob(j)">Delete</button>
@@ -742,7 +742,7 @@
             <div class="toolbar">
               <input v-model="provHost" class="mono" placeholder="user@host" style="max-width:240px" />
               <select v-model="provMode"><option value="fresh">fresh</option><option value="join">join</option></select>
-              <button class="btn primary sm" :disabled="!isAdmin || !provHost" @click="createProvRun()">Start provisioning</button>
+              <button class="btn primary sm" :disabled="!isAdmin || !provHost || !!provBusy" @click="createProvRun()">Start provisioning</button>
               <span v-if="!isAdmin" class="muted small">requires admin role</span>
             </div>
             <div v-if="provMsg" class="info-box" style="margin-top:8px">{{ provMsg }}</div>
@@ -1090,11 +1090,11 @@
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
-        updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: "", jobErr: "", jobRunsDetail: null,
+        updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
         tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], users: [],
-        provHost: "", provMode: "fresh", provMsg: "", provDetail: null,
+        provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false,
         provRuns: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
@@ -1269,7 +1269,7 @@
           opened = true;
         };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
-        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved", "provision.requested", "provision.start", "provision.step", "provision.key.confirmed", "provision.key.denied", "provision.connected", "provision.completed"];
+        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "job.run-parked", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved", "provision.start", "provision.step", "provision.key_confirm", "provision.connected", "provision.failed", "provision.cancelled", "provision.handoff"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
@@ -1277,7 +1277,7 @@
         if (kind === "host.state") this.loadHosts();
         else if (kind === "execution.state") { if (this.page === "execute") this.loadExecutions(); if (this.page === "exec") this.loadExecDetail(); }
         else if (kind === "audit.event" && this.page === "audit") this.loadAudit();
-        else if (kind === "job.run" && this.page === "jobs") { this.loadJobs(); if (this.jobRunsDetail) this.loadJobRuns(this.jobRunsDetail.job_id); }
+        else if ((kind === "job.run" || kind === "job.run-parked") && this.page === "jobs") { this.loadJobs(); if (this.jobRunsDetail) this.loadJobRuns(this.jobRunsDetail.job_id); }
         else if (kind === "task.run" && this.page === "tasks") { this.loadTasks(); this.loadPlaybooks(); this.loadTaskRuns(); }
         else if (kind === "package.action" && this.page === "updates") { this.loadUpdates(); this.loadPkgActions(); }
         else if (kind.startsWith("provision.") && this.page === "provision") { this.loadProvRuns(); if (this.provDetail) this.loadProvDetail(this.provDetail.run.id); }
@@ -1454,7 +1454,7 @@
       async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.secrets || d.items || []; } catch (e) { this.secrets = []; } },
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || []; } catch (e) { this.provRuns = []; } },
-      provTerminal(state) { return ["enrolled", "completed", "failed", "cancelled", "handoff"].includes(state); },
+      provTerminal(state) { return ["connected", "failed", "cancelled", "handoff"].includes(state); },
       async showProvRun(id) {
         if (this.provDetail && this.provDetail.run && this.provDetail.run.id === id) { this.provDetail = null; return; }
         await this.loadProvDetail(id);
@@ -1464,13 +1464,13 @@
         catch (e) { this.provDetail = null; }
       },
       async createProvRun() {
-        this.provMsg = "";
+        this.provMsg = ""; this.provBusy = true;
         try {
           const d = await this.api("/provision-runs", { method: "POST", body: { host: this.provHost, mode: this.provMode } });
           this.provMsg = "Provisioning run " + (d.id || "") + " started on " + this.provHost + " (state " + (d.state || "") + ").";
           this.provHost = "";
           this.loadProvRuns();
-        } catch (e) { this.provMsg = "Provision failed: " + e.message; }
+        } catch (e) { this.provMsg = "Provision failed: " + e.message; } finally { this.provBusy = false; }
       },
       async decideProvKey(id, action) {
         const run = this.provRuns.find(r => r.id === id);
@@ -1534,7 +1534,7 @@
           else await this.api("/jobs", { body });
           this.jobForm = null;
           this.loadJobs();
-        } catch (e) { this.jobErr = e.code === "policy_denied" ? "Policy denied: " + e.message : e.message; } finally { this.jobBusy = ""; }
+        } catch (e) { this.jobErr = e.code === "policy_denied" ? "Policy denied: " + e.message : e.message; } finally { this.jobBusy = false; }
       },
       async deleteJob(j) {
         if (!confirm("Delete job " + j.name + " (" + j.id + ")? Its scheduled fires stop immediately.")) return;
@@ -1736,7 +1736,11 @@
         if (!this.hosts.length) { alert("No hosts available to run this job on."); return; }
         const agent = this.hosts.length === 1 ? this.hosts[0].id : prompt("Run on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
         if (!agent) return;
-        try { await this.api("/jobs/" + encodeURIComponent(job.id) + "/run", { method: "POST", body: { agent_id: agent } }); } catch (e) { alert(e.message); }
+        this.jobRunBusy = job.id; this.jobErr = "";
+        try {
+          const d = await this.api("/jobs/" + encodeURIComponent(job.id) + "/run", { method: "POST", body: { agent_id: agent } });
+          if (d && d.state === "approval_required") this.jobErr = "Run parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page).";
+        } catch (e) { this.jobErr = e.message; } finally { this.jobRunBusy = ""; }
       },
       openFile(f) { if (f.is_dir) { this.fileDir = joinPath(this.fileDir, f.name); this.listFiles(); } },
       fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },

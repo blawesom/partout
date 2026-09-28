@@ -99,6 +99,26 @@ type Job struct {
 	FailurePolicy string `json:"failure_policy"` // no_retry | retry
 	RetryBackoffS int    `json:"retry_backoff_s"`
 	Enabled       bool   `json:"enabled"`
+	// EnabledSet records whether the incoming JSON carried an "enabled" key.
+	// It is not persisted and never serialized; Update uses it to tell
+	// "unset" (preserve) from an explicit false (disable), which a plain
+	// zero-value check cannot express.
+	EnabledSet bool `json:"-"`
+}
+
+// UnmarshalJSON decodes a Job and records whether "enabled" was present.
+func (j *Job) UnmarshalJSON(b []byte) error {
+	type alias Job
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*j = Job(a)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err == nil {
+		_, j.EnabledSet = raw["enabled"]
+	}
+	return nil
 }
 
 // create resolves the selector, saves the job, and pushes per-host schedules.
@@ -190,7 +210,7 @@ func (c *Controller) Update(ctx context.Context, jobID string, spec Job, actor A
 	if spec.FailurePolicy == "" {
 		spec.FailurePolicy = "no_retry"
 	}
-	if spec.Enabled == false {
+	if !spec.EnabledSet {
 		spec.Enabled = job.Enabled
 	}
 

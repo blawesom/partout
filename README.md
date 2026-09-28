@@ -291,7 +291,7 @@ Done (PRD §5.8 — the approval path of the guardrail system):
 16. ~~**M4 — Governance**~~ ✅ Done (v0.6): local user auth ✅, approvals engine ✅ on all policy-gated surfaces (exec, pkg.apply, files, sessions, tasks, jobs), MCP server ✅ (stdio + HTTP + OAuth2 PKCE, 26 tools). Secrets are a server-side vault (RBAC-only, not policy-gated). See the M4 section above.
 17. ~~**Observe layer (§6)**~~ ✅ Done (M5) — fact collectors + `host_facts` merge + read APIs + Web UI pages.
 17a. ~~**M6 — Alert engine**~~ ✅ Done (v0.6.5) — see the M6 section above (rules, evaluation, dedup, SSE, API/CLI/MCP, live Alerts page).
-17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit (30 s min window, counter-reset folding); fires ≥ `service_restart_rate_per_hour` (default 10), resolves below.
+17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit over the real interval between counter movements (not the 30 s alert tick, which inflated the rate ~10×), holds the rate while a loop continues (no firing/resolved flapping between facts uploads), folds counter resets, and ignores units whose collector failed; fires ≥ `service_restart_rate_per_hour` (default 10), resolves after 10 min quiet.
 17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js), and write actions (jobs CRUD, package apply/dry-run, provision start/key-confirm/cancel). See the M7 section above.
 18. Postgres backend; then **M8 — Distribution & polish** (installers, cloud-init, Helm, status page).
 

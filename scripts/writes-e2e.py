@@ -22,6 +22,15 @@ def check(name, cond, extra=""):
     print(("  PASS " if cond else "  FAIL ") + name + ("" if cond else "  <<< " + str(extra)[:200]))
     if not cond: FAILURES.append(name)
 
+def _keyscan_ok():
+    """True when a loopback ssh-keyscan returns a host key (gate is testable)."""
+    try:
+        out = subprocess.run(["ssh-keyscan", "-t", "ed25519", "localhost"],
+                             capture_output=True, timeout=15)
+        return out.returncode == 0 and b"ssh-" in out.stdout
+    except Exception:
+        return False
+
 def curl(method, path, body=None, token=None):
     url = f"http://127.0.0.1:{PORT}/api/v1{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -39,10 +48,15 @@ try:
     subprocess.run([GO, "build", "-o", BIN, "./cmd/partout"], cwd=REPO, check=True)
     run = os.path.join(WORK, "run"); os.makedirs(run)
     logf = open(os.path.join(WORK, "server.log"), "wb")
+    LOGPATH = os.path.join(WORK, "server.log")
     srv = subprocess.Popen([BIN], cwd=run, env={**os.environ,
         "PARTOUT_ADMIN_PASSWORD": "w-e2e-pass", "PARTOUT_TOKEN_ADMIN": "w-e2e-token",
         "PARTOUT_PORT": str(PORT),
         "PARTOUT_DB_PATH": os.path.join(run, "p.db"), "PARTOUT_DATA_DIR": os.path.join(run, "agent"),
+        # Isolate the SSH trust store: the provisioner's known_hosts check would
+        # otherwise consult the real ~/.ssh, where loopback entries may already
+        # exist, silently skipping the key_confirm gate this suite verifies.
+        "PARTOUT_SSH_DIR": os.path.join(run, "ssh"),
         "PARTOUT_MODE": "embedded"}, stdout=logf, stderr=subprocess.STDOUT)
     for _ in range(60):
         try:
@@ -86,6 +100,10 @@ try:
         page.wait_for_timeout(200)
         form.locator("button:has-text('Create')").click()
         page.wait_for_timeout(1500)
+        jobs_now = curl("GET", "/jobs", token="w-e2e-token") or []
+        created = [j for j in (jobs_now if isinstance(jobs_now, list) else jobs_now.get("items", [])) if j.get("name") == "w-e2e cron job"]
+        check("jobs: created via UI (API confirms)", bool(created),
+              "no job named 'w-e2e cron job' in GET /jobs")
         check("jobs: created job row renders",
               "w-e2e cron job" in (page.evaluate("() => document.body.innerText") or ""),
               "new job row missing")
@@ -93,35 +111,120 @@ try:
         # ---- 2. Updates: package dry-run apply (safe) ----
         page.goto(f"http://127.0.0.1:{PORT}/#/updates")
         page.wait_for_timeout(1800)
+        before = {a.get("id") for a in (curl("GET", "/packages/actions", token="w-e2e-token") or [])}
         page.locator("label:has-text('dry run') input").check()
         page.click("button:has-text('Apply')")
-        # apt dry-run can take a few seconds; wait for an action row.
-        ok = False
-        for _ in range(60):
-            body = page.evaluate("() => document.body.innerText") or ""
-            if "Package actions" in body and "dry_run" in body:
-                ok = True; break
+        # The UI click creates the action asynchronously; wait for a NEW action to
+        # reach a terminal state (a dry-run of apt takes a second or two).
+        new_action = None
+        for _ in range(90):
+            acts = curl("GET", "/packages/actions", token="w-e2e-token") or []
+            cand = [a for a in acts if a.get("id") not in before]
+            if cand and cand[0].get("status") in ("succeeded", "failed"):
+                new_action = cand[0]
+                break
+            if cand:
+                new_action = cand[0]  # created but still running
             time.sleep(1)
-        check("packages: dry-run action row rendered", ok, "no dry_run action row within 60s")
+        check("packages: dry-run action created via UI",
+              bool(new_action) and new_action.get("kind") == "dry_run",
+              new_action and new_action.get("kind"))
+        check("packages: dry-run action succeeded",
+              bool(new_action) and new_action.get("status") == "succeeded",
+              new_action and (new_action.get("status"), new_action.get("error")))
+        check("packages: dry-run produced a summary",
+              bool(new_action) and bool(new_action.get("dry_summary")),
+              "dry_summary empty")
+        check("packages: action row rendered in UI",
+              bool(new_action) and new_action["id"] in (page.evaluate("() => document.body.innerText") or ""),
+              "action id not visible on the Updates page")
 
         # ---- 3. Provision: start a run (fails fast) then cancel ----
         page.goto(f"http://127.0.0.1:{PORT}/#/provision")
         page.wait_for_timeout(1000)
+        prov_before = {r.get("id") for r in ((curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or [])}
         page.fill("input[placeholder='user@host']", "nobody@127.0.0.1")
         page.click("button:has-text('Start provisioning')")
-        page.wait_for_timeout(1000)
-        body = page.evaluate("() => document.body.innerText") or ""
-        check("provision: new run row appears", "nobody@127.0.0.1" in body, "run row missing")
-        # The run is either still connecting or already failed; cancel if possible.
-        cancel = page.locator("button:has-text('Cancel')")
-        if cancel.count():
-            cancel.first.click()
-            page.wait_for_timeout(1000)
-            check("provision: cancel action executed", True)
+        page.wait_for_timeout(1200)
+        prov_after = (curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or []
+        new_runs = [r for r in prov_after if r.get("id") not in prov_before and r.get("host") == "nobody@127.0.0.1"]
+        check("provision: run created via UI", bool(new_runs), "no new provision run for nobody@127.0.0.1")
+        check("provision: new run row appears in UI",
+              "nobody@127.0.0.1" in (page.evaluate("() => document.body.innerText") or ""),
+              "run row missing")
+        # The run fails fast (unreachable host), so drive cancel explicitly
+        # against the run we just created and assert the state transition.
+        if new_runs:
+            rid = new_runs[0]["id"]
+            try:
+                curl("POST", f"/provision-runs/{rid}/cancel", {}, token="w-e2e-token")
+                state = next((r.get("state") for r in (curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or [] if r.get("id") == rid), None)
+                check("provision: cancel drives terminal state", state in ("cancelled", "failed"), state)
+            except RuntimeError as e:
+                # Already terminal -> the API refuses to cancel; that is correct.
+                state = next((r.get("state") for r in (curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or [] if r.get("id") == rid), None)
+                check("provision: run already terminal (cancel refused)", state in ("cancelled", "failed"), str(e))
         else:
-            check("provision: run terminal (nothing to cancel)", "failed" in body or "cancelled" in body, body[:200])
+            check("provision: cancel drives terminal state", False, "no run to cancel")
+
+        # ---- 4. Provision key-confirm gate (LIVE, via SSE) ----
+        # This is the flagship "no silent TOFU" security gate. It regressed once:
+        # the server emits "provision.key_confirm" but the UI listened for
+        # "provision.key.confirmed", so the Confirm/Deny buttons never appeared
+        # until a manual refresh. Driving a REAL ssh target (loopback) is the
+        # only way to cover it: an unreachable host fails before keyscan.
+        if shutil.which("ssh-keyscan") and _keyscan_ok():
+            page.goto(f"http://127.0.0.1:{PORT}/#/provision")
+            page.wait_for_timeout(800)
+            before2 = {r.get("id") for r in ((curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or [])}
+            page.fill("input[placeholder='user@host']", "root@localhost")
+            page.click("button:has-text('Start provisioning')")
+            # Wait for the run to pause at key_confirm (poll the API as ground truth).
+            run = None
+            for _ in range(30):
+                items = (curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or []
+                cand = [r for r in items if r.get("id") not in before2 and r.get("host") == "root@localhost"]
+                if cand and cand[0].get("state") == "key_confirm":
+                    run = cand[0]; break
+                if cand and cand[0].get("state") in ("failed", "cancelled"):
+                    run = cand[0]; break
+                time.sleep(1)
+            if run and run.get("state") == "key_confirm":
+                check("provision: run paused at key_confirm", True)
+                check("provision: fingerprint exposed", bool(run.get("fingerprint")), run.get("fingerprint"))
+                # The UI must surface the gate WITHOUT a manual refresh (SSE).
+                live = False
+                for _ in range(15):
+                    body = page.evaluate("() => document.body.innerText") or ""
+                    if "Confirm key" in body:
+                        live = True; break
+                    time.sleep(1)
+                check("provision: Confirm button appears live (SSE)", live,
+                      "key-confirm gate did not appear without a manual refresh")
+                if live:
+                    page.click("button:has-text('Confirm key')")
+                    page.wait_for_timeout(2500)
+                    after = next((r.get("state") for r in (curl("GET", "/provision-runs", token="w-e2e-token") or {}).get("items") or [] if r.get("id") == run["id"]), None)
+                    # Confirming resumes the run past the gate: it either advances
+                    # (connecting/connected) or fails later at preflight, but it
+                    # must no longer sit at key_confirm.
+                    check("provision: confirm resumes past the gate",
+                          after not in ("key_confirm", None), after)
+            else:
+                check("provision: run paused at key_confirm", False,
+                      "state=%s err=%s (needs sshd on :22 and a fresh PARTOUT_SSH_DIR)" % (
+                          run and run.get("state"), run and run.get("error")))
+        else:
+            print("  SKIP provision key-confirm gate (ssh-keyscan or a local sshd unavailable)")
 
         browser.close()
+
+    if FAILURES:
+        try:
+            tail = open(LOGPATH, "rb").read()[-4000:].decode("utf-8", "replace")
+            print("\n--- server.log tail (on failure) ---\n" + tail)
+        except Exception as e:
+            print("could not read server log:", e)
 
     sys.exit(1 if FAILURES else 0)
 finally:

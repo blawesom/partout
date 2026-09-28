@@ -262,7 +262,7 @@ func TestMissingFactsFailSoft(t *testing.T) {
 // NRestarts counter value.
 func restartFacts(count int) string {
 	return `{"services_detailed":{"units":[{"name":"crashy","state":"active","sub_state":"running","n_restarts":` +
-		strconv.Itoa(count) + `}]}}`
+		strconv.Itoa(count) + `,"n_restarts_known":true}]}}`
 }
 
 // TestServiceRestartingFireResolve (M6.1): baseline → crash loop fires at
@@ -301,8 +301,10 @@ func TestServiceRestartingFireResolve(t *testing.T) {
 		t.Fatalf("dedup tick: %+v, want 0/0", res)
 	}
 
-	// Tick 4: stable (0 new restarts) → rate below threshold → resolves.
-	now = now.Add(10 * time.Minute)
+	// Tick 4: the unit is quiet long enough (past the quiet window) → the held
+	// rate decays to zero and the alert resolves. An unchanged counter on the
+	// very next tick must NOT resolve (that was the flapping bug).
+	now = now.Add(restartQuietWindow + time.Minute)
 	seedHost(t, st, "ag_1", restartFacts(120))
 	res, _ = c.EvaluateOnce()
 	if res.Fired != 0 || res.Resolved != 1 {
@@ -431,5 +433,119 @@ func TestConfigDriftTolerance(t *testing.T) {
 	res, _ = c.EvaluateOnce()
 	if res.Fired != 2 {
 		t.Fatalf("third-hash tick: %+v, want 2 fired (the two non-majority hosts)", res)
+	}
+}
+
+// TestServiceRestartingProductionCadence models the real wiring: the alert
+// engine ticks every DefaultTick (30 s) but the agent only refreshes the
+// facts document every ~300 s, so the NRestarts counter is *unchanged* on the
+// intervening ticks. The pre-existing tests advance the counter on every tick,
+// which is why they missed this.
+//
+// Two defects this pins:
+//  1. the rate window is the 30 s tick, so a delta accumulated over ~300 s is
+//     divided by 30 s (≈10× inflation) — a single restart reads as 120/h and
+//     trips the default 10/h threshold;
+//  2. the tick after a fire sees delta=0 → rate=0 → the alert is resolved, so a
+//     continuously crash-looping unit flaps firing/resolved every facts cycle.
+func TestServiceRestartingProductionCadence(t *testing.T) {
+	c, st := newEngine(t, 30*time.Second)
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+
+	// Baseline: a healthy counter of 100 restarts.
+	seedHost(t, st, "ag_1", restartFacts(100))
+	if res, _ := c.EvaluateOnce(); res.Fired != 0 {
+		t.Fatalf("baseline tick fired: %+v", res)
+	}
+
+	// Over the next 300 s the unit restarts exactly ONCE (100 → 101) — a true
+	// rate of 12/h. Set the threshold above that (20/h) so a correct engine
+	// stays quiet; the buggy 30 s window would compute 1/30s = 120/h and fire.
+	makeRule(t, st, KindServiceRestarting, "all", `{"service_restart_rate_per_hour":20}`, "warning", true)
+	for i := 0; i < 10; i++ {
+		now = now.Add(30 * time.Second)
+		if res, _ := c.EvaluateOnce(); res.Fired != 0 {
+			t.Fatalf("tick %d fired on a steady counter (%+v): the 30 s tick is "+
+				"being used as the rate window instead of the facts interval", i, res)
+		}
+	}
+	// The facts document finally updates with the one real restart.
+	seedHost(t, st, "ag_1", restartFacts(101))
+	res, _ := c.EvaluateOnce()
+	// 1 restart in 300 s = 12/h, under the 20/h threshold.
+	if res.Fired != 0 {
+		t.Fatalf("1 restart in 300 s (12/h) fired against a 20/h threshold: "+
+			"window inflation bug (%+v)", res)
+	}
+}
+
+// TestServiceRestartingNoFlap: a unit that keeps crash-looping must keep ONE
+// firing alert across the ticks where the counter is unchanged, not flap.
+func TestServiceRestartingNoFlap(t *testing.T) {
+	c, st := newEngine(t, 30*time.Second)
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	makeRule(t, st, KindServiceRestarting, "all", `{"service_restart_rate_per_hour":10}`, "warning", true)
+
+	seedHost(t, st, "ag_1", restartFacts(100))
+	c.EvaluateOnce() // baseline
+
+	// A heavy crash loop: +60 restarts over 300 s (720/h, far above threshold).
+	now = now.Add(300 * time.Second)
+	seedHost(t, st, "ag_1", restartFacts(160))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("crash loop should fire: %+v", res)
+	}
+
+	// The counter cannot change again until the next facts upload (~300 s), so
+	// the following 30 s ticks see an unchanged counter. The alert must stay
+	// firing (no resolve) because the loop is still in progress.
+	for i := 0; i < 5; i++ {
+		now = now.Add(30 * time.Second)
+		res, _ = c.EvaluateOnce()
+		if res.Resolved != 0 {
+			t.Fatalf("tick %d after fire resolved the alert while the unit is "+
+				"still crash-looping (flapping): %+v", i, res)
+		}
+	}
+	firing, _ := st.ListAlerts("firing", "", "", 10)
+	if len(firing) != 1 {
+		t.Fatalf("want 1 persistent firing alert, got %d", len(firing))
+	}
+}
+
+// TestServiceRestartingCollectorFailureNoSpike: when the agent's `systemctl
+// show` fails, UnitFact carries no NRestarts datum (n_restarts_known absent).
+// The engine must skip that unit rather than read the zero value as a counter
+// reset — otherwise the next successful collection looks like a burst of
+// restarts and raises a spurious alert.
+func TestServiceRestartingCollectorFailureNoSpike(t *testing.T) {
+	c, st := newEngine(t, 30*time.Second)
+	t0 := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	makeRule(t, st, KindServiceRestarting, "all", `{"service_restart_rate_per_hour":10}`, "warning", true)
+
+	seedHost(t, st, "ag_1", restartFacts(5))
+	c.EvaluateOnce() // baseline at 5
+
+	// 300 s later the collector failed for this unit: no n_restarts datum.
+	now = now.Add(300 * time.Second)
+	seedHost(t, st, "ag_1", `{"services_detailed":{"units":[{"name":"crashy","state":"active","sub_state":"running"}]}}`)
+	if res, _ := c.EvaluateOnce(); res.Fired != 0 {
+		t.Fatalf("collector failure fired an alert: %+v", res)
+	}
+
+	// Collection recovers with the true counter (5 → 6: one real restart).
+	now = now.Add(300 * time.Second)
+	seedHost(t, st, "ag_1", restartFacts(6))
+	res, _ := c.EvaluateOnce()
+	// 1 restart over the widened window is well under 10/h.
+	if res.Fired != 0 {
+		t.Fatalf("recovery after a collector failure produced a spurious spike: %+v", res)
 	}
 }

@@ -13,6 +13,8 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -122,6 +124,21 @@ func (h *Handler) rulesList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rules": items, "count": len(items)})
 }
 
+// existingThresholds decodes a stored thresholds JSON blob so a partial rule
+// update can preserve it (invalid/empty blobs degrade to an empty map so the
+// engine applies its documented defaults).
+func existingThresholds(raw string) map[string]any {
+	m := map[string]any{}
+	if raw == "" {
+		return m
+	}
+	_ = json.Unmarshal([]byte(raw), &m)
+	if m == nil {
+		m = map[string]any{}
+	}
+	return m
+}
+
 type ruleBody struct {
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`
@@ -147,7 +164,62 @@ func (b *ruleBody) validate() error {
 	if !validSeverities[b.Severity] {
 		return errors.New("severity must be one of: info, warning, critical")
 	}
+	return validateThresholds(b.Kind, b.Thresholds)
+}
+
+// thresholdKeys maps each rule kind to the threshold keys it honours and
+// whether a value of 0 is meaningful. Values must be non-negative integers;
+// a negative threshold silently inverts a rule's condition (e.g. a negative
+// restart rate fires for every unit), so it is rejected at the API boundary
+// where the CLI/MCP/UI all funnel through.
+var thresholdIntKeys = map[string][]string{
+	observe.KindServiceFailed:     {"service_failed_minutes"},
+	observe.KindServiceRestarting: {"service_restart_rate_per_hour"},
+	observe.KindCertExpiring:      {"cert_days_remaining"},
+	observe.KindConfigDrift:       {"config_drift_tolerance"},
+}
+
+func validateThresholds(kind string, t any) error {
+	keys, ok := thresholdIntKeys[kind]
+	if !ok || t == nil {
+		return nil
+	}
+	m, ok := t.(map[string]any)
+	if !ok {
+		return errors.New("thresholds must be a JSON object")
+	}
+	for _, k := range keys {
+		v, present := m[k]
+		if !present {
+			continue
+		}
+		f, ok := toFloat(v)
+		if !ok {
+			return fmt.Errorf("threshold %q must be a number", k)
+		}
+		if f < 0 {
+			return fmt.Errorf("threshold %q must be >= 0", k)
+		}
+		if f != math.Trunc(f) {
+			return fmt.Errorf("threshold %q must be a whole number", k)
+		}
+	}
 	return nil
+}
+
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	}
+	return 0, false
 }
 
 func (b *ruleBody) toRule(actor string) *store.AlertRule {
@@ -215,6 +287,17 @@ func (h *Handler) ruleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.Name == "" {
 		b.Name = existing.Name
+	}
+	// Thresholds and Enabled are presence-sensitive: a partial update (e.g.
+	// {"name":"x"}) must not silently reset thresholds to defaults or flip a
+	// disabled rule back on. The UI always sends full bodies, but the public
+	// API/CLI/MCP callers may not.
+	if b.Thresholds == nil {
+		b.Thresholds = existingThresholds(existing.Thresholds)
+	}
+	if b.Enabled == nil {
+		enabled := existing.Enabled
+		b.Enabled = &enabled
 	}
 	if err := b.validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
