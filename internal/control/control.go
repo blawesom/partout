@@ -7,6 +7,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -249,6 +250,17 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 		}
 		// Dispatch down the stream.
 		if err := c.h.SendCommand(host.ID, cmd); err != nil {
+			if errors.Is(err, stream.ErrAgentOffline) {
+				// Host is offline: the command is queued for delivery on
+				// reconnect (within the offline TTL). Not a failure.
+				if err2 := c.st.UpdateRunState(runID, "queued_offline", -1, 0); err2 != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", host.ID, err2))
+					continue
+				}
+				res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "queued_offline"})
+				allTerminal = false
+				continue
+			}
 			c.st.UpdateRunState(runID, "not_delivered", -1, 0)
 			res.Runs = append(res.Runs, RunRef{RunID: runID, AgentID: host.ID, State: "not_delivered"})
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: not delivered: %v", host.ID, err))
@@ -310,6 +322,19 @@ func (c *Control) DispatchApprovedCommand(req *store.ApprovalRequest, dec *pb.De
 		Decision:    dec,
 	}
 	if err := c.h.SendCommand(req.AgentID, cmd); err != nil {
+		if errors.Is(err, stream.ErrAgentOffline) {
+			// Approved command queued for an offline agent; delivered on reconnect.
+			if req.RunID != "" {
+				_ = c.st.UpdateRunState(req.RunID, "queued_offline", -1, 0)
+			}
+			c.audit("approval.dispatch", "", map[string]string{
+				"approval_id": req.ID,
+				"run_id":      req.RunID,
+				"agent_id":    req.AgentID,
+				"queued":      "offline",
+			})
+			return nil
+		}
 		if req.RunID != "" {
 			_ = c.st.UpdateRunState(req.RunID, "not_delivered", -1, 0)
 		}

@@ -66,7 +66,24 @@ Done:
 Remaining:
 - [ ] Postgres backend (second store implementation) — deferred to a later phase (after M2)
 - [x] TLS cert rotation via the stream — ✅ shipped (see TLS section below)
-- [ ] Dispatch to offline agents (server-side down-queue with TTL) — follow-up
+- [x] Dispatch to offline agents — ✅ shipped (see below)
+
+#### Dispatch to offline agents (shipped)
+
+- **Server-side down-queue with TTL.** A command dispatched to a host that is not
+  currently connected is **queued** (run state `queued_offline`) instead of failing
+  `not_delivered`. Each queued envelope carries a TTL (default 30 min, `SetOfflineTTL`).
+- **Delivered on reconnect.** When the agent reconnects, the server drains the queue:
+  the command is sent and the run transitions `queued_offline → delivered → <result>`.
+  The execution aggregate stays `running` (pending) while any run is `queued_offline`.
+- **Expiry.** A background sweeper (30 s) expires queued envelopes for agents that do not
+  reconnect within the TTL (the run becomes `expired`, a terminal state).
+- **Bounded.** Per-agent queue cap (default 100) to bound memory; the oldest is dropped
+  on overflow. Approvals re-dispatch also honors the queue (an approved command for an
+  offline agent is queued, not lost).
+- **API/CLI:** unchanged — `POST /api/v1/executions` to an offline host now reports the run
+  as `queued_offline`. Verified: unit tests (queue/drain/expiry/connected) + store state-
+  transition tests + a live E2E (`scripts/offline-dispatch-e2e.sh`).
 
 ### M2 — Files & sessions (complete)
 

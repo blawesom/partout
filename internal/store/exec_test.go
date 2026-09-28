@@ -79,6 +79,31 @@ func TestUpdateRunStateGuarded(t *testing.T) {
 	}
 }
 
+// TestUpdateRunStateQueuedOffline verifies a run parked as queued_offline
+// (dispatch-to-offline) can transition to delivered and then a terminal result
+// state when the agent reconnects (regression: the guard must allow
+// queued_offline as a source state).
+func TestUpdateRunStateQueuedOffline(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	setupExecFixture(t, db, "queued_offline")
+
+	if err := db.UpdateRunState("run_sp", "delivered", -1, 0); err != nil {
+		t.Fatalf("UpdateRunState queued_offline->delivered: %v", err)
+	}
+	runs, _ := db.ListRunsForExecution("exec_sp")
+	if runs[0].State != "delivered" {
+		t.Fatalf("state = %q, want delivered", runs[0].State)
+	}
+	if err := db.UpdateRunState("run_sp", "succeeded", 0, 10); err != nil {
+		t.Fatalf("UpdateRunState delivered->succeeded: %v", err)
+	}
+	runs, _ = db.ListRunsForExecution("exec_sp")
+	if runs[0].State != "succeeded" {
+		t.Fatalf("state = %q, want succeeded", runs[0].State)
+	}
+}
+
 func TestInterruptedCanReFinalize(t *testing.T) {
 	db, _ := setupTestDB(t)
 	defer db.Close()

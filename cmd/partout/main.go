@@ -181,6 +181,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 
 	sseB := sse.New()
 	h := stream.NewHandler(st, sseB, lg)
+	// Dispatch to offline agents: expire down envelopes queued for agents that
+	// do not reconnect within the TTL.
+	h.StartOfflineSweeper(ctx)
 	apiH := api.New(st, h, sseB, lg)
 	apiH.SetAuth(cfg.AdminToken, cfg.OperatorToken, cfg.ViewerToken)
 

@@ -186,7 +186,7 @@ func (c *ctl) cmdTLS(args []string) {
 	switch args[0] {
 	case "status":
 		var res struct {
-			TLS bool `json:"tls"`
+			TLS    bool `json:"tls"`
 			Agents []struct {
 				AgentID  string `json:"agent_id"`
 				TLS      bool   `json:"tls"`

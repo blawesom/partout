@@ -24,7 +24,7 @@ type ExecutionRun struct {
 	ID          string
 	ExecutionID string
 	AgentID     string
-	State       string // queued|delivered|running|succeeded|failed|timed_out|cancelled|interrupted|not_delivered
+	State       string // queued|queued_offline|delivered|running|succeeded|failed|timed_out|cancelled|interrupted|expired|not_delivered|denied|awaiting_approval
 	ExitCode    sql.NullInt32
 	DurationMS  sql.NullInt64
 	Created     int64
@@ -158,11 +158,13 @@ func (s *Store) UpdateRunState(id, state string, exitCode int32, durationMS int6
 	// runs may be re-finalized by a replayed result after a disconnect.
 	// "awaiting_approval" is a parked (non-terminal) state that may be
 	// finalized by approval dispatch / denial / expiry (M4).
+	// "queued_offline" is a parked (non-terminal) state for a command held for an
+	// offline agent; it transitions to delivered on reconnect then to a result.
 	// A duplicate update with the same state is a no-op.
 	_, err := s.db.Exec(`
 		UPDATE execution_runs
 		SET state=?, exit_code=?, duration_ms=?, updated=?
-		WHERE id=? AND (state IN ('queued','delivered','running','interrupted','awaiting_approval') OR state=?)
+		WHERE id=? AND (state IN ('queued','delivered','running','interrupted','awaiting_approval','queued_offline') OR state=?)
 	`, state, exitCode, durationMS, now(), id, state)
 	return err
 }

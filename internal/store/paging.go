@@ -137,7 +137,7 @@ func (s *Store) PromoteRunToRunning(id string) error {
 func (s *Store) CancelNonTerminalRuns(executionID string) (int64, error) {
 	res, err := s.db.Exec(`
 		UPDATE execution_runs SET state='cancelled', updated=?
-		WHERE execution_id=? AND state IN ('queued','delivered','running','awaiting_approval')
+		WHERE execution_id=? AND state IN ('queued','delivered','running','awaiting_approval','queued_offline')
 	`, now(), executionID)
 	if err != nil {
 		return 0, err
@@ -149,7 +149,7 @@ func (s *Store) CancelNonTerminalRuns(executionID string) (int64, error) {
 var terminalStates = map[string]bool{
 	"succeeded": true, "failed": true, "timed_out": true,
 	"cancelled": true, "interrupted": true, "not_delivered": true,
-	"denied": true,
+	"denied": true, "expired": true,
 }
 
 // IsTerminalRun reports whether a run state is final.

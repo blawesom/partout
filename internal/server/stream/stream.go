@@ -59,6 +59,14 @@ type Handler struct {
 	taskMu      sync.Mutex
 	taskPending map[string]chan *pb.TaskRunResult
 
+	// offlineMu guards offlineQueue: agent_id -> down envelopes queued for an
+	// agent that is not currently connected (dispatch to offline agents). Each
+	// entry expires after offlineTTL; on reconnect the queue is drained.
+	offlineMu    sync.Mutex
+	offlineQueue map[string][]*queuedEnvelope
+	offlineTTL   time.Duration
+	offlineCap   int // max queued envelopes per agent (bounded growth)
+
 	// ResultHook, if set, is called after a CommandResult is recorded with the
 	// execution id of the finished run. Control uses it to recompute the
 	// execution's aggregate state.
@@ -96,12 +104,35 @@ type Handler struct {
 	ObserveFactsHook func(agentID string)
 }
 
+// queuedEnvelope is one down envelope held for an offline agent.
+type queuedEnvelope struct {
+	env       *pb.Envelope
+	expiresAt time.Time
+}
+
+// ErrAgentOffline is returned by SendCommand when the target agent is not
+// connected and the command has been queued for delivery on reconnect (within
+// the offline TTL). Callers treat it as "accepted, pending delivery", not a
+// failure.
+var ErrAgentOffline = fmt.Errorf("stream: agent offline; command queued for delivery on reconnect")
+
 // NewHandler builds a stream handler.
 func NewHandler(st *store.Store, sse Emitter, lg *log.Logger) *Handler {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult), pkgPending: make(map[string]chan *pb.PkgResult), taskPending: make(map[string]chan *pb.TaskRunResult)}
+	return &Handler{st: st, sse: sse, log: lg, sessions: make(map[string]*Session), filePending: make(map[string]chan *pb.FileOpResult), pkgPending: make(map[string]chan *pb.PkgResult), taskPending: make(map[string]chan *pb.TaskRunResult), offlineQueue: make(map[string][]*queuedEnvelope), offlineTTL: 30 * time.Minute, offlineCap: 100}
+}
+
+// SetOfflineTTL sets how long a down envelope is held for an offline agent
+// before it expires (default 30 minutes).
+func (h *Handler) SetOfflineTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	h.offlineMu.Lock()
+	h.offlineTTL = d
+	h.offlineMu.Unlock()
 }
 
 // SetServerPubKey installs the server's Ed25519 public key (b64) which is
@@ -361,6 +392,11 @@ func (h *Handler) Stream(stream pb.AgentStream_StreamServer) error {
 	// immediately (fail-closed until first bundle).
 	h.pushPolicyBundle(sess)
 
+	// 4c. Deliver any down envelopes queued while this agent was offline
+	// (dispatch to offline agents). Runs after the session is registered so
+	// SendCommand would also find it, but we drain the explicit queue here.
+	h.drainOffline(agent.ID, sess.send)
+
 	// 5. Envelope loop.
 	for {
 		msg, err := stream.Recv()
@@ -507,14 +543,115 @@ func (h *Handler) SendCommand(agentID string, cmd *pb.Command) error {
 	h.mu.Lock()
 	sess, ok := h.sessions[agentID]
 	h.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("stream: no active session for %s", agentID)
-	}
 	env := &pb.Envelope{
 		Kind:    pb.EnvelopeKind_COMMAND,
 		Payload: &pb.Envelope_Command{Command: cmd},
 	}
+	if !ok {
+		// Dispatch-to-offline: hold the command for delivery on reconnect.
+		h.queueOffline(agentID, env)
+		return ErrAgentOffline
+	}
 	return sess.send(env)
+}
+
+// queueOffline enqueues a down envelope for an offline agent (bounded).
+func (h *Handler) queueOffline(agentID string, env *pb.Envelope) {
+	h.offlineMu.Lock()
+	defer h.offlineMu.Unlock()
+	q := h.offlineQueue[agentID]
+	if len(q) >= h.offlineCap {
+		q = q[1:] // drop the oldest to bound memory
+	}
+	ttl := h.offlineTTL
+	h.offlineQueue[agentID] = append(q, &queuedEnvelope{env: env, expiresAt: time.Now().Add(ttl)})
+	h.log.Printf("stream: queued %s for offline agent %s (ttl %s)", env.Kind, agentID, ttl)
+}
+
+// drainOffline delivers any queued (non-expired) down envelopes to a
+// reconnected agent. For COMMAND envelopes it marks the run delivered so the
+// execution aggregate proceeds.
+func (h *Handler) drainOffline(agentID string, send func(*pb.Envelope) error) {
+	now := time.Now()
+	h.offlineMu.Lock()
+	q := h.offlineQueue[agentID]
+	if len(q) == 0 {
+		h.offlineMu.Unlock()
+		return
+	}
+	delete(h.offlineQueue, agentID)
+	h.offlineMu.Unlock()
+
+	for _, qe := range q {
+		if now.After(qe.expiresAt) {
+			h.expireQueued(qe)
+			continue
+		}
+		if err := send(qe.env); err != nil {
+			h.log.Printf("stream: drain offline %s: %v", agentID, err)
+			continue
+		}
+		if c := qe.env.GetCommand(); c != nil {
+			if err := h.st.UpdateRunState(c.RunId, "delivered", -1, 0); err != nil {
+				h.log.Printf("stream: mark delivered %s: %v", c.RunId, err)
+			}
+		}
+	}
+}
+
+// expireQueued finalizes a timed-out queued envelope (a COMMAND run becomes
+// 'expired').
+func (h *Handler) expireQueued(qe *queuedEnvelope) {
+	if c := qe.env.GetCommand(); c != nil {
+		if err := h.st.UpdateRunState(c.RunId, "expired", -1, 0); err != nil {
+			h.log.Printf("stream: mark expired %s: %v", c.RunId, err)
+		}
+	}
+}
+
+// QueueCount returns the number of down envelopes queued for an agent (tests).
+func (h *Handler) QueueCount(agentID string) int {
+	h.offlineMu.Lock()
+	defer h.offlineMu.Unlock()
+	return len(h.offlineQueue[agentID])
+}
+
+// StartOfflineSweeper periodically expires queued envelopes for agents that
+// have not reconnected within the TTL. Runs until ctx is done.
+func (h *Handler) StartOfflineSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				now := time.Now()
+				var expired []*queuedEnvelope
+				h.offlineMu.Lock()
+				for agentID, q := range h.offlineQueue {
+					kept := q[:0]
+					for _, qe := range q {
+						if now.After(qe.expiresAt) {
+							expired = append(expired, qe)
+						} else {
+							kept = append(kept, qe)
+						}
+					}
+					if len(kept) == 0 {
+						delete(h.offlineQueue, agentID)
+					} else {
+						h.offlineQueue[agentID] = kept
+					}
+				}
+				h.offlineMu.Unlock()
+				for _, qe := range expired {
+					h.expireQueued(qe)
+				}
+			}
+		}
+	}()
 }
 
 // SendCancel asks the agent to stop an in-flight run (kills the process,
