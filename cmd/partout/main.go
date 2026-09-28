@@ -90,9 +90,14 @@ func main() {
 	tlsOn := fs.String("tls", tlsDefault(cfg.TLS), "server: TLS mode on|off (generates a local root CA on first run)")
 	tlsNames := fs.String("tls-names", cfg.TLSNames, "server: comma-separated SAN names for the server leaf cert (default localhost,127.0.0.1,hostname)")
 	caFile := fs.String("ca-file", cfg.TLSCAFile, "agent: path to the server root CA (PEM); enables TLS enrollment + mTLS stream")
+	version := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "partout:", err)
 		os.Exit(2)
+	}
+	if *version {
+		fmt.Println("partout " + agentfacts.Version)
+		return
 	}
 
 	// Apply effective values (flag > env > default: each flag was seeded with

@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	agentfacts "github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
@@ -55,13 +56,14 @@ type activeRun struct {
 
 // Provisioner orchestrates host provisioning runs.
 type Provisioner struct {
-	store      *store.Store
-	ssh        sshutil.Config
-	emitter    Emitter
-	log        *log.Logger
-	serverHost string // address the new agent connects to (PARTOUT_SERVER)
-	binaryPath string // path to the partout binary on the server
-	tokenTTL   int    // enrollment token TTL seconds (short, arch §3.5)
+	store        *store.Store
+	ssh          sshutil.Config
+	emitter      Emitter
+	log          *log.Logger
+	serverHost   string // address the new agent connects to (PARTOUT_SERVER)
+	binaryPath   string // path to the partout binary on the server
+	localVersion string // the server's own version (for the version-diff check)
+	tokenTTL     int    // enrollment token TTL seconds (short, arch §3.5)
 
 	mu   sync.Mutex
 	runs map[string]*activeRun
@@ -76,14 +78,15 @@ func New(st *store.Store, ssh sshutil.Config, serverHost, binaryPath string, em 
 		lg = log.Default()
 	}
 	return &Provisioner{
-		store:      st,
-		ssh:        ssh,
-		emitter:    em,
-		log:        lg,
-		serverHost: serverHost,
-		binaryPath: binaryPath,
-		tokenTTL:   300, // 5 min — short TTL for the one-time token
-		runs:       make(map[string]*activeRun),
+		store:        st,
+		ssh:          ssh,
+		emitter:      em,
+		log:          lg,
+		serverHost:   serverHost,
+		binaryPath:   binaryPath,
+		localVersion: agentfacts.Version,
+		tokenTTL:     300, // 5 min — short TTL for the one-time token
+		runs:         make(map[string]*activeRun),
 	}
 }
 
@@ -331,6 +334,8 @@ echo "arch=$(uname -m)"
 if command -v systemctl >/dev/null 2>&1; then echo "init=systemd"; else echo "init=none"; fi
 echo "user=$(whoami)"
 if sudo -n true 2>/dev/null; then echo "sudo=yes"; else echo "sudo=no"; fi
+# Currently-installed partout version (version-diff check). none = not present.
+if [ -x /usr/local/bin/partout ]; then echo "remote_version=$(/usr/local/bin/partout --version 2>/dev/null | awk '{print $2}')"; else echo "remote_version=none"; fi
 echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
 # Host -> server reachability on the control-plane port.
 SRV=%s
@@ -358,6 +363,13 @@ fi
 	facts := parseKeyValues(out)
 	p.log.Printf("provision: %s preflight: %v", run.ID, facts)
 
+	// Version-diff check (read-only): report the currently-installed agent
+	// version vs the version about to be installed, so the operator sees an
+	// install vs upgrade (and in which direction) before anything changes.
+	remoteVer := facts["remote_version"]
+	facts["update"] = versionNote(remoteVer, p.localVersion)
+	p.log.Printf("provision: %s version: remote=%s local=%s (%s)", run.ID, remoteVer, p.localVersion, facts["update"])
+
 	if facts["init"] != "systemd" {
 		_ = p.store.FinishProvisionStep(run.ID, 2, "handoff", out, "")
 		p.setTerminal(run, "handoff", "non-systemd init; manual install required")
@@ -374,7 +386,13 @@ fi
 			p.serverHost))
 	}
 
-	p.finishStep(run, 2)
+	// Record the version-diff note in the step output so it is visible in the
+	// step detail + SSE (preflight is the read-only step where the diff is known).
+	verNote := fmt.Sprintf("remote_version=%s local_version=%s update=%s", remoteVer, p.localVersion, facts["update"])
+	if err := p.store.FinishProvisionStep(run.ID, 2, "done", verNote, ""); err != nil {
+		p.log.Printf("provision: %s finish preflight: %v", run.ID, err)
+	}
+	p.emitStep(run, 2, stepNames[1], "done")
 	return true
 }
 
@@ -408,12 +426,66 @@ func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, 
 	sha12 := hex.EncodeToString(sha[:])[:12]
 	fullSHA := hex.EncodeToString(sha[:])
 
-	script := fmt.Sprintf(`set -eu
+	script := buildInstallScript(sha12, fullSHA, wipeScript(run.Mode), p.serverHost, token)
+
+	// Pipe the script as base64 through sudo bash -s (avoids stdin plumbing
+	// and shell-quoting issues). The token is one-time + short-TTL and is
+	// never logged.
+	b64 := base64.StdEncoding.EncodeToString([]byte(script))
+	cmd := fmt.Sprintf("echo %s | base64 -d | sudo -n bash -s", b64)
+	out, stderr, exit, err := p.ssh.Run(ctx, run.Host, cmd)
+	if err != nil {
+		return p.failStep(run, 4, fmt.Sprintf("ssh failed: %v", err))
+	}
+	if exit != 0 || !strings.Contains(out, "INSTALL_OK") {
+		return p.failStep(run, 4, fmt.Sprintf("install exit %d: %s", exit, strings.TrimSpace(stderr)))
+	}
+	p.finishStep(run, 4)
+	return true
+}
+
+// wipeScript returns the destructive-wipe prelude for fresh mode (stop +
+// disable the existing agent unit, remove its identity + env so the reinstall
+// enrolls as a brand-new agent), or "" for join mode (non-destructive in-place
+// update that preserves existing state).
+func wipeScript(mode string) string {
+	if mode != "fresh" {
+		return ""
+	}
+	return `# fresh mode: destructive wipe of existing agent state
+systemctl stop partout-agent 2>/dev/null || true
+systemctl disable partout-agent 2>/dev/null || true
+rm -rf /var/lib/partout/agent
+rm -f /etc/partout/agent.env
+`
+}
+
+// versionNote summarizes the version-diff for the preflight step: whether the
+// host gets a fresh install, is already at the target version, or an upgrade
+// (with direction). remoteVer is "none"/"" when no agent is installed yet.
+func versionNote(remoteVer, localVer string) string {
+	switch {
+	case remoteVer == "" || remoteVer == "none":
+		return "install"
+	case remoteVer == localVer:
+		return "same (" + localVer + ")"
+	default:
+		return remoteVer + " -> " + localVer
+	}
+}
+
+// buildInstallScript renders the one-shot root install script. wipe is the
+// mode-specific prelude (empty for join). serverHost and token are inserted
+// raw into the quoted (<<'EOF') heredoc — they must NOT be shell-quoted there
+// or the env file would contain literal quotes (token is prefix+hex and
+// serverHost is host:port, both quote-safe).
+func buildInstallScript(sha12, fullSHA, wipe, serverHost, token string) string {
+	return fmt.Sprintf(`set -eu
 BIN=/tmp/partout-%s
 EXPECT=%s
 ACTUAL=$(sha256sum "$BIN" | cut -d' ' -f1)
 if [ "$ACTUAL" != "$EXPECT" ]; then echo "sha256 mismatch: $ACTUAL" >&2; exit 1; fi
-install -m 0755 "$BIN" /usr/local/bin/partout
+%sinstall -m 0755 "$BIN" /usr/local/bin/partout
 id partout >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin partout
 mkdir -p /var/lib/partout/agent
 chown partout:partout /var/lib/partout/agent
@@ -449,22 +521,7 @@ systemctl enable partout-agent
 systemctl restart partout-agent
 rm -f "$BIN"
 echo INSTALL_OK
-`, sha12, fullSHA, shellQuote(p.serverHost), shellQuote(token))
-
-	// Pipe the script as base64 through sudo bash -s (avoids stdin plumbing
-	// and shell-quoting issues). The token is one-time + short-TTL and is
-	// never logged.
-	b64 := base64.StdEncoding.EncodeToString([]byte(script))
-	cmd := fmt.Sprintf("echo %s | base64 -d | sudo -n bash -s", b64)
-	out, stderr, exit, err := p.ssh.Run(ctx, run.Host, cmd)
-	if err != nil {
-		return p.failStep(run, 4, fmt.Sprintf("ssh failed: %v", err))
-	}
-	if exit != 0 || !strings.Contains(out, "INSTALL_OK") {
-		return p.failStep(run, 4, fmt.Sprintf("install exit %d: %s", exit, strings.TrimSpace(stderr)))
-	}
-	p.finishStep(run, 4)
-	return true
+`, sha12, fullSHA, wipe, serverHost, token)
 }
 
 // stepWaitEnroll polls until the agent from this run has connected. Terminal:

@@ -422,3 +422,58 @@ exit 0
 	}
 	return bin
 }
+
+// TestInstallScriptFreshWipe verifies fresh mode's install script includes the
+// destructive wipe (stop/disable unit + remove identity/env) and join mode's
+// does not, and that the env-file values are NOT shell-quoted (they sit in a
+// quoted <<'EOF' heredoc).
+func TestInstallScriptFreshWipe(t *testing.T) {
+	fresh := buildInstallScript("abc123def456", "fullsha", wipeScript("fresh"), "127.0.0.1:8443", "ptok_0123456789abcdef")
+	if !strings.Contains(fresh, "rm -rf /var/lib/partout/agent") {
+		t.Fatalf("fresh script missing data-dir wipe:\n%s", fresh)
+	}
+	if !strings.Contains(fresh, "systemctl stop partout-agent") {
+		t.Fatalf("fresh script missing unit stop:\n%s", fresh)
+	}
+	if !strings.Contains(fresh, "systemctl disable partout-agent") {
+		t.Fatalf("fresh script missing unit disable:\n%s", fresh)
+	}
+
+	join := buildInstallScript("abc123def456", "fullsha", wipeScript("join"), "127.0.0.1:8443", "ptok_0123456789abcdef")
+	if strings.Contains(join, "rm -rf /var/lib/partout/agent") {
+		t.Fatalf("join script must NOT wipe the data dir:\n%s", join)
+	}
+	if strings.Contains(join, "systemctl stop partout-agent") {
+		t.Fatalf("join script must NOT stop the unit:\n%s", join)
+	}
+
+	// Env-file values must be raw (no surrounding single quotes) because they
+	// are inside a quoted heredoc; a quoted value would corrupt the env file.
+	if !strings.Contains(fresh, "PARTOUT_SERVER=127.0.0.1:8443\n") {
+		t.Fatalf("PARTOUT_SERVER should be raw in the heredoc:\n%s", fresh)
+	}
+	if !strings.Contains(fresh, "PARTOUT_TOKEN=ptok_0123456789abcdef\n") {
+		t.Fatalf("PARTOUT_TOKEN should be raw in the heredoc:\n%s", fresh)
+	}
+	if strings.Contains(fresh, "PARTOUT_SERVER='") || strings.Contains(fresh, "PARTOUT_TOKEN='") {
+		t.Fatalf("env values must not be shell-quoted in the heredoc:\n%s", fresh)
+	}
+}
+
+// TestVersionNote checks the version-diff classification used in preflight.
+func TestVersionNote(t *testing.T) {
+	cases := []struct {
+		remote, local, want string
+	}{
+		{"none", "v0.7.0", "install"},
+		{"", "v0.7.0", "install"},
+		{"v0.7.0", "v0.7.0", "same (v0.7.0)"},
+		{"v0.6.5", "v0.7.0", "v0.6.5 -> v0.7.0"},
+		{"v0.8.0", "v0.7.0", "v0.8.0 -> v0.7.0"}, // downgrade direction is reported too
+	}
+	for _, c := range cases {
+		if got := versionNote(c.remote, c.local); got != c.want {
+			t.Errorf("versionNote(%q,%q) = %q, want %q", c.remote, c.local, got, c.want)
+		}
+	}
+}
