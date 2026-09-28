@@ -58,15 +58,15 @@ echo "==> starting embedded server on :$PORT"
 mkdir -p "$WORK/run"
 (
   cd "$WORK/run"
-  PARTOUT_ADMIN_PASSWORD="$PASS" \
-  PARTOUT_TOKEN_ADMIN="$ADMIN_TOKEN" \
-  PARTOUT_PORT="$PORT" \
-  PARTOUT_DB_PATH="$WORK/run/p.db" \
-  PARTOUT_DATA_DIR="$WORK/run/agent" \
-  PARTOUT_MODE=embedded \
-  PARTOUT_OBSERVE_FACTS_INTERVAL=2 \
-  PARTOUT_SECRET_KEY=0123456789abcdef0123456789abcdef \
-  "$BIN" > "$WORK/server.log" 2>&1
+  exec env PARTOUT_ADMIN_PASSWORD="$PASS" \
+    PARTOUT_TOKEN_ADMIN="$ADMIN_TOKEN" \
+    PARTOUT_PORT="$PORT" \
+    PARTOUT_DB_PATH="$WORK/run/p.db" \
+    PARTOUT_DATA_DIR="$WORK/run/agent" \
+    PARTOUT_MODE=embedded \
+    PARTOUT_OBSERVE_FACTS_INTERVAL=2 \
+    PARTOUT_SECRET_KEY=0123456789abcdef0123456789abcdef \
+    "$BIN" > "$WORK/server.log" 2>&1
 ) &
 SRV_PID=$!
 

@@ -120,8 +120,15 @@ func (c *Config) Validate() error {
 		if c.ServerURL == "" {
 			return errors.New("agent mode requires PARTOUT_SERVER (or --server) to be set")
 		}
+	case "mcp":
+		if c.ServerURL == "" {
+			return errors.New("mcp mode requires PARTOUT_SERVER (or --server) to be set")
+		}
+		if c.Token == "" {
+			return errors.New("mcp mode requires PARTOUT_TOKEN (or --token): the caller's bearer token (admin|operator|viewer or a session token from `ctl auth login`)")
+		}
 	default:
-		return fmt.Errorf("invalid mode %q (want server|agent|embedded)", c.Mode)
+		return fmt.Errorf("invalid mode %q (want server|agent|embedded|mcp)", c.Mode)
 	}
 	return nil
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/blawesom/partout/internal/hsauth"
 	"github.com/blawesom/partout/internal/identity"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/mcp"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -41,6 +42,10 @@ func startAPITest(t *testing.T) (*api.Handler, *stream.Handler, *httptest.Server
 	sseB := sse.New()
 	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
 	apiH := api.New(st, h, sseB, log.New(io.Discard, "api: ", 0))
+
+	// MCP server (R11): in-process /mcp route over the same router, so
+	// tests exercise the production wiring (mirrors main.go).
+	apiH.HandleMCP(mcp.HTTPHandler(mcp.New(mcp.NewLocalAPI(apiH), log.New(io.Discard, "mcp: ", 0))))
 
 	// bufconn gRPC.
 	lis := bufconn.Listen(1024 * 1024)

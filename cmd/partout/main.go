@@ -46,6 +46,7 @@ import (
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
+	"github.com/blawesom/partout/internal/server/mcp"
 	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/provision"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
@@ -149,8 +150,14 @@ func main() {
 				lg.Fatal(err)
 			}
 		}
+	case "mcp":
+		if err := runMCP(ctx, cfg, lg); err != nil {
+			if err != context.Canceled {
+				lg.Fatal(err)
+			}
+		}
 	default:
-		lg.Fatalf("unknown mode %q (want server|agent|embedded)", cfg.Mode)
+		lg.Fatalf("unknown mode %q (want server|agent|embedded|mcp)", cfg.Mode)
 	}
 }
 
@@ -244,6 +251,12 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	apr.RegisterDispatcher(policy.ActionExec, apiH.Control().DispatchApprovedCommand)
 	apiH.SetApprovals(apr)
+
+	// M4/R11: MCP server (PRD §10.3) — Streamable HTTP on POST /mcp. The
+	// caller's bearer token is forwarded in-process to the REST router, so
+	// RBAC + policy gating + audit are the same control plane the UI/CLI
+	// use (no duplicated write path). stdio mode: `partout mcp`.
+	apiH.HandleMCP(mcp.HTTPHandler(mcp.New(mcp.NewLocalAPI(apiH), lg)))
 
 	// M2: files + sessions (PRD §5.3, §5.2.2). Both sign Decisions with the
 	// same server identity (agent-side guardrail re-check).
@@ -707,6 +720,27 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 		return e
 	}
 	return ctx.Err()
+}
+
+// runMCP serves the MCP server (R11) over stdio against a remote server:
+// line-delimited JSON-RPC on stdin/stdout; the caller's bearer token
+// (PARTOUT_TOKEN/--token) authenticates every tool call, so RBAC, policy
+// gating, and audit attribute actions to that principal. Launched by MCP
+// clients (Claude Code / Cursor / CI):
+//
+//	partout --mode=mcp --server host:port --token $TOKEN [--ca-file ca.crt]
+func runMCP(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
+	client := &http.Client{Timeout: 15 * time.Minute} // apply_updates can take minutes
+	if cfg.TLSCAFile != "" {
+		c, err := tlsHTTPClient(cfg.TLSCAFile)
+		if err != nil {
+			return fmt.Errorf("mcp: read CA: %w", err)
+		}
+		client.Transport = c.Transport
+	}
+	s := mcp.New(mcp.NewRESTClient(cfg.ServerURL, client), lg)
+	lg.Printf("mcp: stdio server for %s (tools: %d)", cfg.ServerURL, len(mcp.DefaultTools()))
+	return mcp.RunStdio(ctx, s, cfg.Token)
 }
 
 // waitForReady polls /healthz until it returns 200 or the context is done.

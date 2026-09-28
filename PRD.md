@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + approvals engine (M4, exec + pkg.apply) shipped
+**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + M4 (approvals engine for exec + pkg.apply, MCP server stdio + HTTP) shipped
 **Date:** 2025-09-25
 
 ---
@@ -746,8 +746,12 @@ feature paywall (R14). Consequences that follow from "everything free":
   admin approve/deny via API; approve signs a fresh `EffectAllow` decision whose signature
   covers the approval id and re-dispatches the stored payload; agent guardrail honors
   approved decisions while a local hard deny still wins; expiry can never be retroactively
-  honored). Shipped surfaces: exec + pkg.apply; other surfaces fail closed as deny. Remaining:
-  approvals UI page, approvals on the remaining surfaces, MCP server (R11) + write tools.*
+  honored). Shipped surfaces: exec + pkg.apply; other surfaces fail closed as deny.
+  **MCP server (R11) is shipped**: JSON-RPC 2.0 over stdio (`partout --mode=mcp`) +
+  Streamable HTTP (`POST /mcp`); 22 read/write tools; the caller's bearer token is forwarded
+  to the same REST router so RBAC/policy/audit are the control plane's; OAuth2 (PKCE) for the
+  HTTP transport is the post-v1 model (architecture A20). Remaining: approvals on the
+  remaining surfaces, OAuth2 (PKCE), MCP `run_playbook` + file-transfer tools.*
 - **M5 — Observe: fact collectors (`R18`–`R20`).** The read side of the loop.
   Agent-side collectors: `factscollect/service.go` (systemd unit state, deps, labels),
   `factscollect/config.go` (haproxy/nginx validity + topology), `factscollect/cert.go`

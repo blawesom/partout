@@ -39,7 +39,8 @@ type Handler struct {
 	extdata     *externaldata.Refresher
 	sse         *sse.Broker
 	log         *log.Logger
-	router      http.Handler
+	router      http.Handler   // final router (API mux + SPA static wrapper)
+	mux         *http.ServeMux // the API mux (routes register here, pre-wrapper)
 	auth        *auth
 	authC       *serverauth.Controller // local user identity (PRD Decision 6); nil until set
 	usersActive bool                   // true once the principals table is non-empty
@@ -129,6 +130,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	handler.RegisterCapabilities(mux)
 
 	handler.router = mux
+	handler.mux = mux
 
 	// Embedded web UI (ui-guidelines S0). Wraps the API mux: any GET that
 	// isn't an API/health route serves the SPA. Installed last so it sees a
@@ -178,6 +180,23 @@ func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }
 
 // SetExternalData installs the EOL/vuln refresher (M3, PRD §6.3).
 func (h *Handler) SetExternalData(r *externaldata.Refresher) { h.extdata = r }
+
+// HandleMCP registers the MCP Streamable HTTP endpoint (POST /mcp, R11).
+// The caller's bearer token (Authorization header) is forwarded to the
+// control plane for every tool call, so RBAC + policy + audit attribute
+// actions to the caller exactly as the REST API does. Read tools are
+// usable by any authenticated role (viewer+); write tools enforce their
+// own role gates at the REST layer (a refusal is returned as a structured
+// tool error).
+func (h *Handler) HandleMCP(mcpSrv http.Handler) {
+	// Register on the API mux directly (h.router is the SPA-wrapped router
+	// after RegisterStatic; POSTs fall through the wrapper to the mux).
+	if h.mux == nil {
+		h.log.Printf("api: HandleMCP before router built; /mcp not registered")
+		return
+	}
+	h.mux.Handle("POST /mcp", h.requireRole(roleViewer)(mcpSrv))
+}
 
 // SetAuthController installs the local-user identity controller (PRD
 // Decision 6). Session tokens become valid bearer credentials alongside

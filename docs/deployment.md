@@ -1,7 +1,7 @@
 # Partout — Deployment
 
 **Status:** Draft v0.6 — reflects the current implementation (M0–M5 complete, Web UI
-shipped, M4 approvals engine shipped, M6/M7-remainder in progress). Sections marked *proposed* describe planned work
+shipped, M4 approvals engine + MCP server shipped, M6/M7-remainder in progress). Sections marked *proposed* describe planned work
 that is not yet wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
@@ -49,10 +49,19 @@ guardrail honors approved decisions; a local hard deny still wins). Expired requ
 can never be retroactively honored. Surfaces without an approval path (files/sessions/
 tasks/jobs/secrets) still fail closed as deny, as does any build without the approvals
 engine wired. New env var: `PARTOUT_APPROVAL_TTL_S`.
+**What v0.6 also adds (M4: MCP server, R11):** a JSON-RPC 2.0 tool surface over
+stdio (`partout --mode=mcp`, §3.9) and Streamable HTTP (`POST /mcp`) — 22
+read/write tools that forward the caller's bearer token to the same REST router
+the UI/CLI use, so RBAC/policy/audit are the control plane's (no duplicated write
+path). No new server env vars; the stdio mode takes `--server` + `--token`
+(+ `--ca-file` for TLS). OAuth2 (PKCE) for the HTTP transport is post-v1
+(A20).
 
 **Not yet wired:** elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
 `none`/`/`), Postgres backend, approvals on the remaining surfaces (files/sessions/
-tasks/jobs/secrets), the MCP server + write tools (R11), and the alert engine (M6).
+tasks/jobs/secrets), OAuth2 (PKCE) for the MCP HTTP transport + MCP `run_playbook`
+and file-transfer tools (their REST endpoints are not built), and the alert
+engine (M6).
 **Web UI is shipped** (v0.5): open the main
 listener in a browser and log in — the fleet, execute, audit, and M1–M5 data pages (including
 Observe · Services/Certificates/Configs) are live. Remaining UI scope: the M6 Alerts page (now a
@@ -269,6 +278,29 @@ first boot and reconnects with its persisted identity on restart). Use: single
 self-managed machine, dev environment, CI e2e rig. Data under `PARTOUT_DB_PATH`
 (default `./partout.db`).
 
+### 3.9 MCP mode (R11, M4)
+
+`partout --mode=mcp --server host:port --token T [--ca-file ca.crt]` — runs the
+**MCP server over stdio** against a remote server, for MCP clients (Claude Code /
+Cursor / CI) that launch the process. It is a JSON-RPC 2.0 (2025-06-18) tool
+surface (22 tools: fleet/observe reads + governed writes); the `--token` is the
+**caller's** bearer token (a static RBAC token or a local-user session token from
+`partout ctl auth login`) and is forwarded with every tool call, so RBAC, policy
+gating, and audit attribute each action to that principal exactly as the REST API
+does. A policy denial / 403 / `approval_required` comes back as a structured tool
+error. Example (Claude Code / `mcp.json`):
+
+```json
+{ "mcpServers": { "partout": {
+    "command": "/usr/local/bin/partout",
+    "args": ["--mode=mcp", "--server=partout.example.com:8443",
+             "--token=par_tok_…", "--ca-file=/etc/partout/ca.crt"] } } }
+```
+
+The same tools are also reachable over **Streamable HTTP** at `POST /mcp` on the
+main listener (bearer token in `Authorization`). No PTY tool (PRD §10.3). OAuth2
+(PKCE) for the HTTP transport is the post-v1 model (architecture A20).
+
 ---
 
 ## 4. Configuration reference
@@ -369,9 +401,10 @@ implementation.)
 
 ### 4.5 All flags (current)
 
-`--mode=server|agent|embedded`, `--port=`, `--db=`, `--data-dir=`, `--server=`,
+`--mode=server|agent|embedded|mcp`, `--port=`, `--db=`, `--data-dir=`, `--server=`,
 `--token=`, `--facts-interval=`, `--admin-token=`, `--operator-token=`,
 `--viewer-token=`, `--admin-password=`, `--tls=on|off`, `--tls-names=…`, `--ca-file=…`.
+For `mcp` mode, `--token` is the caller's bearer token (not an enrollment token).
 Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 
 ---
