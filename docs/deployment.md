@@ -46,22 +46,27 @@ a TTL (`PARTOUT_APPROVAL_TTL_S`, default 1 h). Admins act via `GET/POST
 /api/v1/approvals[/{id}[/approve|deny]]`; approve signs a fresh `EffectAllow` decision
 whose signature covers the approval id and re-dispatches the stored payload (the agent
 guardrail honors approved decisions; a local hard deny still wins). Expired requests
-can never be retroactively honored. Surfaces without an approval path (files/sessions/
-tasks/jobs/secrets) still fail closed as deny, as does any build without the approvals
-engine wired. New env var: `PARTOUT_APPROVAL_TTL_S`.
-**What v0.6 also adds (M4: MCP server, R11):** a JSON-RPC 2.0 tool surface over
-stdio (`partout --mode=mcp`, §3.9) and Streamable HTTP (`POST /mcp`) — 22
-read/write tools that forward the caller's bearer token to the same REST router
-the UI/CLI use, so RBAC/policy/audit are the control plane's (no duplicated write
-path). No new server env vars; the stdio mode takes `--server` + `--token`
-(+ `--ca-file` for TLS). OAuth2 (PKCE) for the HTTP transport is post-v1
-(A20).
+can never be retroactively honored. **Every policy-gated surface has the
+approval path** (exec, pkg.apply, files upload/edit/perm — staged bodies live
+in `<dbdir>/filestaging/` 0600 until decided — sessions, tasks, jobs manual
+RunNow); secrets are a server-side vault (RBAC-only, no host action class),
+and any build without the approvals engine wired still fails closed as deny.
+New env var: `PARTOUT_APPROVAL_TTL_S`.
+**What v0.6 also adds (M4: MCP server + OAuth2, R11/A20):** a JSON-RPC 2.0
+tool surface over stdio (`partout --mode=mcp`, §3.9) and Streamable HTTP
+(`POST /mcp`) — 25 read/write tools that forward the caller's credential to
+the same REST router the UI/CLI use, so RBAC/policy/audit are the control
+plane's (no duplicated write path). **OAuth2 (PKCE)** for the HTTP transport:
+admin-registered MCP clients (`POST /api/v1/mcp/clients`),
+`POST /oauth2/authorize` (owner's existing bearer) → one-time code bound to
+an S256 challenge, `POST /oauth2/token` → 1-h access token (hashed at rest)
+valid as a bearer on REST + MCP. No new server env vars; the stdio mode takes
+`--server` + `--token` (+ `--ca-file` for TLS). Browser-login grant + refresh
+tokens are post-v1 (A20).
 
 **Not yet wired:** elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
-`none`/`/`), Postgres backend, approvals on the remaining surfaces (files/sessions/
-tasks/jobs/secrets), OAuth2 (PKCE) for the MCP HTTP transport + MCP `run_playbook`
-and file-transfer tools (their REST endpoints are not built), and the alert
-engine (M6).
+`none`/`/`), the Postgres backend, the OAuth2 browser-login grant + refresh
+tokens (post-v1, A20), MCP session-read tools, and the alert engine (M6).
 **Web UI is shipped** (v0.5): open the main
 listener in a browser and log in — the fleet, execute, audit, and M1–M5 data pages (including
 Observe · Services/Certificates/Configs) are live. Remaining UI scope: the M6 Alerts page (now a
@@ -283,9 +288,10 @@ self-managed machine, dev environment, CI e2e rig. Data under `PARTOUT_DB_PATH`
 `partout --mode=mcp --server host:port --token T [--ca-file ca.crt]` — runs the
 **MCP server over stdio** against a remote server, for MCP clients (Claude Code /
 Cursor / CI) that launch the process. It is a JSON-RPC 2.0 (2025-06-18) tool
-surface (22 tools: fleet/observe reads + governed writes); the `--token` is the
-**caller's** bearer token (a static RBAC token or a local-user session token from
-`partout ctl auth login`) and is forwarded with every tool call, so RBAC, policy
+surface (25 tools: fleet/observe reads + governed writes); the `--token` is the
+**caller's** credential — a static RBAC token, a local-user session token from
+`partout ctl auth login`, or an OAuth2 (PKCE) access token (§3.10) — and is
+forwarded with every tool call, so RBAC, policy
 gating, and audit attribute each action to that principal exactly as the REST API
 does. A policy denial / 403 / `approval_required` comes back as a structured tool
 error. Example (Claude Code / `mcp.json`):
@@ -298,8 +304,28 @@ error. Example (Claude Code / `mcp.json`):
 ```
 
 The same tools are also reachable over **Streamable HTTP** at `POST /mcp` on the
-main listener (bearer token in `Authorization`). No PTY tool (PRD §10.3). OAuth2
-(PKCE) for the HTTP transport is the post-v1 model (architecture A20).
+main listener (bearer / OAuth2 access token in `Authorization`). No PTY tool
+(PRD §10.3).
+
+### 3.10 OAuth2 (PKCE) for MCP clients (R11/A20, M4)
+
+For MCP clients that can hold a credential (or to scope per-assistant access),
+the HTTP transport supports the authorization-code + PKCE flow:
+
+1. **Register a client** (admin): `POST /api/v1/mcp/clients {"name":"claude-code"}`
+   → `mcpcl_…` (list: `GET /api/v1/mcp/clients`).
+2. **Authorize** (the resource owner, using their existing bearer token):
+   `POST /oauth2/authorize {client_id, code_challenge, code_challenge_method:"S256"}`
+   → one-time `code` (5-min TTL, bound to the owner + challenge).
+3. **Exchange**: `POST /oauth2/token {grant_type:"authorization_code", code,
+   code_verifier, client_id}` → `access_token` (1 h) + principal/role. The
+   server verifies `S256(code_verifier) == code_challenge`; codes are single-use.
+
+The access token then works anywhere a bearer works: `POST /mcp`, any REST
+route, SSE — RBAC/policy/audit attribute it to the owner exactly as a session
+token would. Tokens are stored only as SHA-256 hashes. v1 deviations (A20):
+no browser-login grant (this codebase is bearer-token-based), no refresh
+tokens.
 
 ---
 

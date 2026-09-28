@@ -17,6 +17,7 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -186,6 +187,15 @@ func isPolicyDeny(err error) bool {
 
 // sessionErr maps session errors to HTTP codes.
 func (h *Handler) sessionErr(w http.ResponseWriter, err error) {
+	var apprErr *sessions.ApprovalRequiredError
+	if errors.As(err, &apprErr) {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"state":       "approval_required",
+			"approval_id": apprErr.ApprovalID,
+			"message":     "session open parked on an approval request; an admin must approve it",
+		})
+		return
+	}
 	msg := err.Error()
 	switch {
 	case isPolicyDeny(err):

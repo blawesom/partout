@@ -89,11 +89,11 @@ func (s *Server) HandleRPC(ctx context.Context, data []byte, token string) []byt
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": serverName, "version": facts.Version},
 			"instructions": "Partout fleet control plane. Read tools are read-only. " +
-				"Write tools (run_command, cancel_execution, run_job, apply_updates, " +
-				"create_secret, decide_approval) mutate hosts and are RBAC-gated " +
-				"(operator/admin) and policy-gated; policy denials and approval " +
-				"requests come back as structured errors — do not retry them " +
-				"without operator input.",
+				"Write tools (run_command, cancel_execution, run_job, run_playbook, " +
+				"apply_updates, upload_file, create_secret, decide_approval) mutate " +
+				"hosts and are RBAC-gated (operator/admin) and policy-gated; policy " +
+				"denials and approval requests come back as structured errors — do " +
+				"not retry them without operator input.",
 		}
 	case "ping":
 		result = map[string]any{}

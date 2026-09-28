@@ -129,6 +129,16 @@ func startAPITest(t *testing.T) (*api.Handler, *stream.Handler, *httptest.Server
 			}
 			cmd := down.GetCommand()
 			if cmd == nil {
+				if tr := down.GetTaskRun(); tr != nil {
+					// Answer task runs so playbook/task E2E tests can drive
+					// the full server path (the fixture has no task engine).
+					streamClient.Send(&pb.Envelope{
+						Kind: pb.EnvelopeKind_TASK_RUN_RESULT,
+						Payload: &pb.Envelope_TaskRunResult{TaskRunResult: &pb.TaskRunResult{
+							RunId: tr.RunId, State: "succeeded",
+						}},
+					})
+				}
 				continue
 			}
 			for i, a := range cmd.Args {

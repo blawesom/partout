@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + M4 (approvals engine for exec + pkg.apply, MCP server stdio + HTTP) shipped
+**Status:** Draft v0.6 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE, 25 tools) shipped
 **Date:** 2025-09-25
 
 ---
@@ -748,10 +748,13 @@ feature paywall (R14). Consequences that follow from "everything free":
   approved decisions while a local hard deny still wins; expiry can never be retroactively
   honored). Shipped surfaces: exec + pkg.apply; other surfaces fail closed as deny.
   **MCP server (R11) is shipped**: JSON-RPC 2.0 over stdio (`partout --mode=mcp`) +
-  Streamable HTTP (`POST /mcp`); 22 read/write tools; the caller's bearer token is forwarded
-  to the same REST router so RBAC/policy/audit are the control plane's; OAuth2 (PKCE) for the
-  HTTP transport is the post-v1 model (architecture A20). Remaining: approvals on the
-  remaining surfaces, OAuth2 (PKCE), MCP `run_playbook` + file-transfer tools.*
+  Streamable HTTP (`POST /mcp`) + **OAuth2 (PKCE)** (A20 v1 model: client registry,
+  `POST /oauth2/authorize` + `POST /oauth2/token`, S256-only, short-lived hashed
+  access tokens valid on REST + MCP); 25 read/write tools (adds `run_playbook`,
+  `upload_file`, `download_file`). All policy-gated surfaces now have the approval
+  path: exec, pkg.apply, files (upload/edit/perm), sessions, tasks, jobs (manual
+  RunNow). Secrets are a server-side vault (RBAC-only, no host action class).
+  Remaining M4-adjacent: browser-login OAuth grant + refresh tokens (post-v1).*
 - **M5 — Observe: fact collectors (`R18`–`R20`).** The read side of the loop.
   Agent-side collectors: `factscollect/service.go` (systemd unit state, deps, labels),
   `factscollect/config.go` (haproxy/nginx validity + topology), `factscollect/cert.go`

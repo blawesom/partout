@@ -47,6 +47,7 @@ import (
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/server/mcp"
+	"github.com/blawesom/partout/internal/server/oauth"
 	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/provision"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
@@ -252,6 +253,10 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	apr.RegisterDispatcher(policy.ActionExec, apiH.Control().DispatchApprovedCommand)
 	apiH.SetApprovals(apr)
 
+	// M4/R11: OAuth2 (PKCE) for the MCP HTTP transport (A20). Access tokens
+	// are short-lived bearer credentials on the REST/MCP routes.
+	apiH.SetOAuth(oauth.New(st))
+
 	// M4/R11: MCP server (PRD §10.3) — Streamable HTTP on POST /mcp. The
 	// caller's bearer token is forwarded in-process to the REST router, so
 	// RBAC + policy gating + audit are the same control plane the UI/CLI
@@ -262,6 +267,14 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// same server identity (agent-side guardrail re-check).
 	fc := files.New(st, h, sseB, lg)
 	fc.SetIdentity(ident)
+	fc.SetApprovals(apr)
+	fc.SetStagingDir(filepath.Join(filepath.Dir(cfg.DBPath), "filestaging"))
+	apr.RegisterDispatcher(policy.ActionFileWrite, func(req *store.ApprovalRequest, dec *pb.Decision) error {
+		return fc.DispatchApprovedFileOp(context.Background(), req, dec)
+	})
+	apr.RegisterDispatcher(policy.ActionFilePerm, func(req *store.ApprovalRequest, dec *pb.Decision) error {
+		return fc.DispatchApprovedFileOp(context.Background(), req, dec)
+	})
 	apiH.SetFiles(fc)
 	pkgC := packages.New(st, h, sseB, lg)
 	pkgC.SetIdentity(ident)
@@ -273,9 +286,13 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	apiH.SetPkgs(pkgC)
 	taskC := tasks.New(st, h, sseB, lg)
 	taskC.SetIdentity(ident)
+	taskC.SetApprovals(apr)
+	apr.RegisterDispatcher(policy.ActionTaskRun, taskC.DispatchApprovedTaskRun)
 	apiH.SetTasks(taskC)
 	jobC := jobs.New(st, h, sseB, lg)
 	jobC.SetIdentity(ident)
+	jobC.SetApprovals(apr)
+	apr.RegisterDispatcher("job.run", jobC.DispatchApprovedJobRun)
 	apiH.SetJobs(jobC)
 	h.JobRunResultHook = func(agentID string, r *pb.JobRunResult) {
 		jobC.OnRunResult(agentID, r)
@@ -287,6 +304,10 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)
+	sm.SetApprovals(apr)
+	apr.RegisterDispatcher("session.open", func(req *store.ApprovalRequest, dec *pb.Decision) error {
+		return sm.DispatchApprovedSession(context.Background(), req, dec)
+	})
 	apiH.SetSessions(sm)
 
 	// M3: external data refresh (PRD §6.3). EOL feed fetched at startup and

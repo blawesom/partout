@@ -9,18 +9,23 @@
 package files
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -33,6 +38,12 @@ type Controller struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity
+	// approvals is the M4 approvals engine (require_approval parking).
+	approvals *approvals.Controller
+	// stagingDir holds uploaded bodies while their approval request is
+	// pending (0600 <opid>.part); empty = uploads fail closed on
+	// require_approval (no place to hold the body).
+	stagingDir string
 	// opTimeout bounds one synchronous file op over the stream.
 	opTimeout time.Duration
 }
@@ -48,6 +59,33 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 // SetIdentity installs the server's Ed25519 signing key (signs Decisions on
 // write ops so the agent guardrail can verify them).
 func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
+
+// SetApprovals installs the M4 approvals engine (require_approval parking).
+func (c *Controller) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
+
+// SetStagingDir installs the directory where parked upload bodies are held
+// until their approval is decided.
+func (c *Controller) SetStagingDir(dir string) { c.stagingDir = dir }
+
+// ApprovalRequiredError is returned when a file op is parked on an approval
+// request (M4). The API layer maps it to 202 with the request id.
+type ApprovalRequiredError struct {
+	ApprovalID string
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	return "files: approval required (" + e.ApprovalID + ")"
+}
+
+// approvalHold is the internal policyGate signal that a write op matched a
+// require_approval rule (and the approvals engine is wired): the caller
+// parks the exact payload and returns an ApprovalRequiredError.
+type approvalHold struct {
+	class    string
+	decision policy.Decision
+}
+
+func (a *approvalHold) Error() string { return "files: " + a.class + " requires approval" }
 
 // Actor carries the requester identity for audit + policy.
 type Actor struct {
@@ -112,6 +150,17 @@ func (c *Controller) Upload(ctx context.Context, agentID, path string, r io.Read
 		Path: path, TotalSize: size, Mode: mode,
 	}
 	if err := c.policyGate(ctx, agentID, beginOp, actor, "upload"); err != nil {
+		var hold *approvalHold
+		if errors.As(err, &hold) {
+			// Park: stage the body (the approved re-dispatch replays it) and
+			// create the approval request for the exact payload.
+			stage, serr := c.stageBody(id.New("fstage"), r)
+			if serr != nil {
+				return "", serr
+			}
+			return "", c.park(agentID, "upload", hold, beginOp, actor,
+				map[string]any{"staged": stage, "total_size": size})
+		}
 		return "", err
 	}
 	beginRes, err := c.doSend(ctx, agentID, beginOp)
@@ -183,6 +232,15 @@ func (c *Controller) Edit(ctx context.Context, agentID, path, expectedSHA string
 		Path: path, ExpectedSha256: expectedSHA, Data: content,
 	}
 	if err := c.policyGate(ctx, agentID, op, actor, "edit"); err != nil {
+		var hold *approvalHold
+		if errors.As(err, &hold) {
+			stage, serr := c.stageBody(id.New("fstage"), bytes.NewReader(content))
+			if serr != nil {
+				return "", serr
+			}
+			return "", c.park(agentID, "edit", hold, op, actor,
+				map[string]any{"staged": stage, "size": len(content)})
+		}
 		return "", err
 	}
 	res, err := c.doSend(ctx, agentID, op)
@@ -210,6 +268,10 @@ func (c *Controller) SetPerm(ctx context.Context, agentID, path, mode, owner, gr
 		Path: path, Mode: mode, User: owner, Group: group,
 	}
 	if err := c.policyGate(ctx, agentID, op, actor, "perm"); err != nil {
+		var hold *approvalHold
+		if errors.As(err, &hold) {
+			return c.park(agentID, "perm", hold, op, actor, nil)
+		}
 		return err
 	}
 	res, err := c.doSend(ctx, agentID, op)
@@ -291,16 +353,233 @@ func (c *Controller) policyGate(ctx context.Context, agentID string, op *pb.File
 		return fmt.Errorf("files: load policies: %w", err)
 	}
 	decision := policy.Evaluate(rules, action)
-	if decision.Effect != policy.EffectAllow {
+	switch decision.Effect {
+	case policy.EffectAllow:
+		// Sign the decision (agent guardrail verifies; arch §5.3).
+		if c.ident != nil {
+			dec := c.signDecision(op.OpId, decision, actor.Role)
+			op.Decision = dec
+		}
+		return nil
+	case policy.EffectRequireApproval:
+		if c.approvals == nil {
+			// Fail closed without the approvals engine.
+			c.audit(agentID, opName, op.Path, op.OpId, actor, "denied", 0, 0, "", decision.Reason)
+			return fmt.Errorf("files: %s requires approval but the approvals engine is not wired; failing closed", opName)
+		}
+		return &approvalHold{class: class, decision: decision}
+	default:
 		c.audit(agentID, opName, op.Path, op.OpId, actor, "denied", 0, 0, "", decision.Reason)
 		return fmt.Errorf("files: %s denied by policy: %s", opName, decision.Reason)
 	}
-	// Sign the decision (agent guardrail verifies; arch §5.3).
-	if c.ident != nil {
-		dec := c.signDecision(op.OpId, decision, actor.Role)
-		op.Decision = dec
+}
+
+// stageBody copies r into the staging dir (0600) and returns the path.
+// require_approval parking is fail-closed without a staging dir (no place
+// to hold the body until an admin decides).
+func (c *Controller) stageBody(prefix string, r io.Reader) (string, error) {
+	if c.stagingDir == "" {
+		return "", fmt.Errorf("files: require_approval matched but no staging dir is configured; failing closed")
 	}
-	return nil
+	if err := os.MkdirAll(c.stagingDir, 0o700); err != nil {
+		return "", fmt.Errorf("files: staging dir: %w", err)
+	}
+	p := filepath.Join(c.stagingDir, prefix+".part")
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("files: stage: %w", err)
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		os.Remove(p)
+		return "", fmt.Errorf("files: stage: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(p)
+		return "", fmt.Errorf("files: stage: %w", err)
+	}
+	return p, nil
+}
+
+// park creates the approval request for a held write op and returns the
+// error the API maps to 202 {approval_required}.
+func (c *Controller) park(agentID, opName string, hold *approvalHold, op *pb.FileOp, actor Actor, extra map[string]any) *ApprovalRequiredError {
+	payload := map[string]any{
+		"op":   opName,
+		"path": op.Path,
+		"kind": int32(op.Kind),
+	}
+	if op.Mode != "" {
+		payload["mode"] = op.Mode
+	}
+	if op.ExpectedSha256 != "" {
+		payload["expected_sha256"] = op.ExpectedSha256
+	}
+	if op.User != "" {
+		payload["owner"] = op.User
+	}
+	if op.Group != "" {
+		payload["group"] = op.Group
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	req, err := c.approvals.NewRequest(approvals.NewRequestParams{
+		ActionClass:  hold.class,
+		AgentID:      agentID,
+		Actor:        actor.Principal,
+		ActorRole:    actor.Role,
+		MatchedRules: hold.decision.MatchedRules,
+		Payload:      payload,
+	})
+	if err != nil {
+		c.log.Printf("files: approval request %s: %v", opName, err)
+		return &ApprovalRequiredError{ApprovalID: "error"}
+	}
+	return &ApprovalRequiredError{ApprovalID: req.ID}
+}
+
+// DispatchApprovedFileOp re-dispatches a stored file op after its approval
+// was granted (registered as the approvals dispatcher for file.write and
+// file.perm). The signed decision (bound to the approval id) rides the op
+// down; the agent guardrail's approval path honors it. Staged bodies are
+// consumed and removed.
+func (c *Controller) DispatchApprovedFileOp(ctx context.Context, req *store.ApprovalRequest, dec *pb.Decision) error {
+	var p struct {
+		Op          string `json:"op"`
+		Path        string `json:"path"`
+		Mode        string `json:"mode"`
+		ExpectedSHA string `json:"expected_sha256"`
+		Owner       string `json:"owner"`
+		Group       string `json:"group"`
+		Staged      string `json:"staged"`
+	}
+	if err := json.Unmarshal([]byte(req.PayloadJSON), &p); err != nil {
+		return fmt.Errorf("files: approval %s: bad payload: %w", req.ID, err)
+	}
+	actor := Actor{Principal: req.Actor, Role: req.ActorRole}
+	defer func() {
+		if p.Staged != "" {
+			os.Remove(p.Staged) // consume the staged body either way
+		}
+	}()
+	switch p.Op {
+	case "upload":
+		data, err := os.ReadFile(p.Staged)
+		if err != nil {
+			return fmt.Errorf("files: approval %s: staged body: %w", req.ID, err)
+		}
+		sha, err := c.uploadFromBytes(ctx, req.AgentID, p.Path, data, p.Mode, dec, actor)
+		if err != nil {
+			return err
+		}
+		c.audit(req.AgentID, "upload", p.Path, dec.RunId, actor, "ok", int64(len(data)), 0, sha, "approval:"+req.ID)
+		return nil
+	case "edit":
+		data, err := os.ReadFile(p.Staged)
+		if err != nil {
+			return fmt.Errorf("files: approval %s: staged body: %w", req.ID, err)
+		}
+		op := &pb.FileOp{
+			OpId: id.New("fop"), Kind: pb.FileOpKind_FILE_OP_EDIT_CAS,
+			Path: p.Path, ExpectedSha256: p.ExpectedSHA, Data: data,
+			Decision: dec,
+		}
+		res, err := c.doSend(ctx, req.AgentID, op)
+		if err != nil {
+			c.audit(req.AgentID, "edit", p.Path, op.OpId, actor, "error", int64(len(data)), 0, "", err.Error())
+			return err
+		}
+		if res.Code != 0 {
+			state := opStateForCode(res.Code)
+			c.audit(req.AgentID, "edit", p.Path, op.OpId, actor, state, int64(len(data)), 0, "", res.Error)
+			if res.Code == 409 {
+				return ErrConflict
+			}
+			return fmt.Errorf("files: edit: %s (code %d)", res.Error, res.Code)
+		}
+		c.audit(req.AgentID, "edit", p.Path, op.OpId, actor, "ok", int64(len(data)), 0, res.NewSha256, "approval:"+req.ID)
+		return nil
+	case "perm":
+		op := &pb.FileOp{
+			OpId: id.New("fop"), Kind: pb.FileOpKind_FILE_OP_SET_PERM,
+			Path: p.Path, Mode: p.Mode, User: p.Owner, Group: p.Group,
+			Decision: dec,
+		}
+		res, err := c.doSend(ctx, req.AgentID, op)
+		if err != nil {
+			c.audit(req.AgentID, "perm", p.Path, op.OpId, actor, "error", 0, 0, "", err.Error())
+			return err
+		}
+		if res.Code != 0 {
+			state := opStateForCode(res.Code)
+			c.audit(req.AgentID, "perm", p.Path, op.OpId, actor, state, 0, 0, "", res.Error)
+			return fmt.Errorf("files: perm: %s (code %d)", res.Error, res.Code)
+		}
+		c.audit(req.AgentID, "perm", p.Path, op.OpId, actor, "ok", 0, 0, "", "approval:"+req.ID)
+		return nil
+	default:
+		return fmt.Errorf("files: approval %s: unknown op %q", req.ID, p.Op)
+	}
+}
+
+// uploadFromBytes replays the begin/chunks/commit sequence for a staged
+// upload body (used by the approval re-dispatch). dec rides the begin op.
+func (c *Controller) uploadFromBytes(ctx context.Context, agentID, path string, data []byte, mode string, dec *pb.Decision, actor Actor) (string, error) {
+	const chunk = 256 << 10
+	beginOp := &pb.FileOp{
+		OpId: id.New("fop"), Kind: pb.FileOpKind_FILE_OP_UPLOAD_BEGIN,
+		Path: path, TotalSize: int64(len(data)), Mode: mode,
+		Decision: dec,
+	}
+	beginRes, err := c.doSend(ctx, agentID, beginOp)
+	if err != nil {
+		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", 0, 0, "", err.Error())
+		return "", err
+	}
+	temp := beginRes.TempPath
+	committed := false
+	defer func() {
+		if !committed {
+			_ = c.abort(ctx, agentID, path, temp, actor, "upload")
+		}
+	}()
+	offset := 0
+	for offset < len(data) {
+		n := chunk
+		if len(data)-offset < n {
+			n = len(data) - offset
+		}
+		chunkOp := &pb.FileOp{
+			OpId: id.New("fop"), Kind: pb.FileOpKind_FILE_OP_UPLOAD_CHUNK,
+			Path: path, TempPath: temp, Offset: uint64(offset), Data: data[offset : offset+n],
+		}
+		chunkRes, err := c.doSend(ctx, agentID, chunkOp)
+		if err != nil {
+			c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
+			return "", err
+		}
+		if chunkRes.Code != 0 {
+			c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", chunkRes.Error)
+			return "", fmt.Errorf("files: upload chunk: %s (code %d)", chunkRes.Error, chunkRes.Code)
+		}
+		offset += n
+	}
+	commitOp := &pb.FileOp{
+		OpId: id.New("fop"), Kind: pb.FileOpKind_FILE_OP_UPLOAD_COMMIT,
+		Path: path, TempPath: temp, TotalSize: int64(offset), Mode: mode,
+	}
+	commitRes, err := c.doSend(ctx, agentID, commitOp)
+	if err != nil {
+		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
+		return "", err
+	}
+	if commitRes.Code != 0 {
+		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", commitRes.Error)
+		return "", fmt.Errorf("files: upload commit: %s (code %d)", commitRes.Error, commitRes.Code)
+	}
+	committed = true
+	return commitRes.NewSha256, nil
 }
 
 func (c *Controller) signDecision(opID string, d policy.Decision, actorRole string) *pb.Decision {

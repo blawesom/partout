@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/blawesom/partout/internal/server/approvals"
+	"github.com/blawesom/partout/internal/server/oauth"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -24,6 +25,9 @@ func (h *Handler) RegisterApprovals(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/approvals/{id}/approve", h.requireRole(roleAdmin)(http.HandlerFunc(h.approvalApprove)))
 	mux.Handle("POST /api/v1/approvals/{id}/deny", h.requireRole(roleAdmin)(http.HandlerFunc(h.approvalDeny)))
 }
+
+// SetOAuth installs the OAuth2 (PKCE) manager (M4, R11/A20).
+func (h *Handler) SetOAuth(m *oauth.Manager) { h.oauthC = m }
 
 // SetApprovals installs the approvals controller (M4).
 func (h *Handler) SetApprovals(ac *approvals.Controller) { h.approvals = ac }

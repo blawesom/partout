@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -83,7 +84,7 @@ func argStrSlice(args map[string]any, key string) []string {
 // 4xx/5xx → error carrying the server's structured message (the MCP client
 // sees it as a tool error, which is how structured refusals surface).
 func doCall(ctx context.Context, api API, token, method, path string, body any) (string, error) {
-	code, b, err := api.Call(ctx, method, path, token, body)
+	code, b, err := doCallRaw(ctx, api, token, method, path, body)
 	if err != nil {
 		return "", fmt.Errorf("%s %s: %w", method, path, err)
 	}
@@ -101,6 +102,12 @@ func doCall(ctx context.Context, api API, token, method, path string, body any) 
 		msg = string(b)
 	}
 	return "", fmt.Errorf("%s %s → HTTP %d: %s", method, path, code, msg)
+}
+
+// doCallRaw is doCall's lower half: it returns the status + raw body so
+// tools with binary responses (download_file) can post-process.
+func doCallRaw(ctx context.Context, api API, token, method, path string, body any) (int, []byte, error) {
+	return api.Call(ctx, method, path, token, body)
 }
 
 func prettyJSON(b []byte) string {
@@ -153,7 +160,9 @@ var writeTools = map[string]bool{
 	"run_command":      true,
 	"cancel_execution": true,
 	"run_job":          true,
+	"run_playbook":     true,
 	"apply_updates":    true,
+	"upload_file":      true,
 	"create_secret":    true,
 	"decide_approval":  true,
 }
@@ -405,6 +414,16 @@ func DefaultTools() []*Tool {
 			},
 		},
 		{
+			Name:        "run_playbook",
+			Description: "Run a playbook (a pinned task version + selector) on every host the selector matches (operator+). Per-host outcomes come back as runs; a host whose task.run is require_approval parks with state awaiting_approval (an admin must approve it).",
+			InputSchema: objSchema(map[string]any{
+				"playbook_id": strProp("playbook id (pb_…)"),
+			}, "playbook_id"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "POST", "/api/v1/playbooks/"+url.PathEscape(argStr(args, "playbook_id"))+"/run", nil)
+			},
+		},
+		{
 			Name: "apply_updates",
 			Description: "Apply package updates on one host (operator+). Policy-gated (pkg.apply); " +
 				"with dry_run=true it only reports what would change (read-only, not gated). " +
@@ -420,6 +439,60 @@ func DefaultTools() []*Tool {
 					body["packages"] = p
 				}
 				return doCall(ctx, api, token, "POST", "/api/v1/packages/apply", body)
+			},
+		},
+		{
+			Name: "upload_file",
+			Description: "Upload a file to one host (operator+; file.write policy gate — a " +
+				"require_approval match parks the op and returns 202 {approval_required}; " +
+				"an admin must approve before the file lands). Content is base64.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id":    strProp("host id (ag_…)"),
+				"path":        strProp("absolute destination path on the host"),
+				"content_b64": strProp("file content, base64-encoded"),
+				"mode":        strProp("octal mode (e.g. 0644); default 0644"),
+			}, "agent_id", "path", "content_b64"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				body := map[string]any{
+					"agent_id":    argStr(args, "agent_id"),
+					"path":        argStr(args, "path"),
+					"content_b64": argStr(args, "content_b64"),
+				}
+				if m := argStr(args, "mode"); m != "" {
+					body["mode"] = m
+				}
+				return doCall(ctx, api, token, "POST", "/api/v1/files/upload", body)
+			},
+		},
+		{
+			Name: "download_file",
+			Description: "Download a file from one host (operator+; file.read policy gate). " +
+				"Returns the content base64-encoded with its size.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host id (ag_…)"),
+				"path":     strProp("absolute path on the host"),
+			}, "agent_id", "path"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				code, b, err := doCallRaw(ctx, api, token, "GET",
+					"/api/v1/files/download"+query(
+						[2]string{"agent_id", argStr(args, "agent_id")},
+						[2]string{"path", argStr(args, "path")}), nil)
+				if err != nil {
+					return "", fmt.Errorf("GET /api/v1/files/download: %w", err)
+				}
+				if code < 200 || code >= 300 {
+					var eb struct {
+						Code    string `json:"code"`
+						Message string `json:"message"`
+					}
+					msg := string(b)
+					if json.Unmarshal(b, &eb) == nil && eb.Message != "" {
+						msg = fmt.Sprintf("%s (%s)", eb.Message, eb.Code)
+					}
+					return "", fmt.Errorf("GET /api/v1/files/download → HTTP %d: %s", code, msg)
+				}
+				return prettyJSON([]byte(fmt.Sprintf(`{"path":%q,"size":%d,"content_b64":"%s"}`,
+					argStr(args, "path"), len(b), base64.StdEncoding.EncodeToString(b)))), nil
 			},
 		},
 		{

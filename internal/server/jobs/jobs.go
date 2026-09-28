@@ -27,6 +27,7 @@ import (
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	sel "github.com/blawesom/partout/internal/selector"
+	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -39,6 +40,9 @@ type Controller struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity
+	// approvals is the M4 approvals engine (require_approval parking on
+	// manual RunNow; scheduled fires stay fail-closed on the agent side).
+	approvals *approvals.Controller
 }
 
 // New builds a Controller.
@@ -52,6 +56,20 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 // SetIdentity installs the server's Ed25519 signing key (signs job
 // Decisions, like tasks/packages/files/sessions).
 func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
+
+// SetApprovals installs the M4 approvals engine (require_approval parking).
+func (c *Controller) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
+
+// ApprovalRequiredError is returned when a manual job run is parked on an
+// approval request (M4). The API layer maps it to 202 with the request id.
+type ApprovalRequiredError struct {
+	ApprovalID string
+	RunID      string
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	return "jobs: approval required (" + e.ApprovalID + ")"
+}
 
 // Actor carries the requester identity for audit + policy.
 type Actor struct {
@@ -357,31 +375,39 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*
 				act.HostRoles = roles
 			}
 		}
-		decision, reason, ok := c.signTaskRunDecision(jobID, actorRole, act)
-		if !ok {
-			denied = append(denied, fmt.Sprintf("%s (%s)", a.ID, reason))
+		decision, effect, reason := c.signTaskRunDecision(jobID, actorRole, act)
+		if decision == nil {
+			if effect == policy.EffectRequireApproval {
+				// A job carries a STANDING decision pushed to the agent; it
+				// cannot hold one that requires approval. Reject the write
+				// with an actionable message (M4): manual RunNow on an
+				// existing job still gets the park/approve flow.
+				denied = append(denied, fmt.Sprintf("%s (requires approval)", a.ID))
+			} else {
+				denied = append(denied, fmt.Sprintf("%s (%s)", a.ID, reason))
+			}
 			continue
 		}
 		d[a.ID] = decision
 	}
 	if len(denied) > 0 {
-		return nil, &PolicyError{Reason: "task.run denied for host(s) " + strings.Join(denied, ", ")}
+		return nil, &PolicyError{Reason: "task.run blocked for host(s) " + strings.Join(denied, ", ")}
 	}
 	return d, nil
 }
 
 // signTaskRunDecision evaluates the task.run action class and, when allowed,
-// signs a Decision bound to runID. ok=false means the policy denied it
-// (reason carries the denial reason).
-func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Action) (*pb.Decision, string, bool) {
+// signs a Decision bound to runID. effect is the policy effect (ok=false
+// means it was not allow; reason carries the denial/approval reason).
+func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Action) (*pb.Decision, string, string) {
 	if c.ident == nil {
 		// Callers gate on this up front; keep the failure closed.
-		return nil, "server signing identity not configured", false
+		return nil, policy.EffectDeny, "server signing identity not configured"
 	}
 	rules, _ := c.st.GetPolicyRules()
 	decision := policy.Evaluate(rules, act)
 	if decision.Effect != policy.EffectAllow {
-		return nil, decision.Reason, false
+		return nil, decision.Effect, decision.Reason
 	}
 	version, _ := c.st.PolicyBundleVersion()
 	sig := policy.SignDecision(c.ident.Priv, runID, version,
@@ -393,7 +419,7 @@ func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Act
 		MatchedRules:  decision.MatchedRules,
 		Sig:           sig,
 		ActorRole:     actorRole,
-	}, "", true
+	}, decision.Effect, ""
 }
 
 // toPBSteps converts store task steps to the wire format.
@@ -516,8 +542,34 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 			act.HostRoles = roles
 		}
 	}
-	decision, _, ok := c.signTaskRunDecision(runID, actor.Role, act)
-	if !ok {
+	decision, effect, _ := c.signTaskRunDecision(runID, actor.Role, act)
+	if decision == nil {
+		if effect == policy.EffectRequireApproval && c.approvals != nil {
+			// Park: record the run as awaiting_approval + create the request.
+			_ = c.st.CreateJobRun(&store.JobRun{
+				ID: runID, JobID: jobID, AgentID: agentID,
+				TaskID: job.TaskID, TaskVersion: job.TaskVersion,
+				ScheduledAt: time.Now().Unix(), Trigger: "manual",
+				State: "awaiting_approval",
+			})
+			areq, err := c.approvals.NewRequest(approvals.NewRequestParams{
+				ActionClass:  "job.run",
+				AgentID:      agentID,
+				RunID:        runID,
+				Actor:        actor.Principal,
+				ActorRole:    actor.Role,
+				MatchedRules: nil,
+				Payload: map[string]any{
+					"job_id": jobID, "agent_id": agentID, "trigger": "manual",
+				},
+			})
+			if err != nil {
+				_ = c.st.FinalizeJobRun(runID, "failed", "approval request: "+err.Error())
+				return fmt.Errorf("jobs: approval request: %w", err)
+			}
+			c.audit("run-parked", jobID, agentID, 0)
+			return &ApprovalRequiredError{ApprovalID: areq.ID, RunID: runID}
+		}
 		_ = c.st.CreateJobRun(&store.JobRun{
 			ID: runID, JobID: jobID, AgentID: agentID,
 			TaskID: job.TaskID, TaskVersion: job.TaskVersion,
@@ -526,6 +578,9 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 		})
 		_ = c.st.FinalizeJobRun(runID, "denied", "denied by policy")
 		c.audit("run-denied", jobID, "", 0)
+		if effect == policy.EffectRequireApproval {
+			return &PolicyError{Reason: "task.run for host " + agentID + " requires approval but the approvals engine is not wired; failing closed"}
+		}
 		return &PolicyError{Reason: "task.run denied for host " + agentID}
 	}
 
@@ -545,6 +600,46 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 	})
 	_ = c.st.FinalizeJobRun(runID, "dispatched", "")
 	c.audit("run", jobID, "", 0)
+	return nil
+}
+
+// DispatchApprovedJobRun re-dispatches a parked manual job run after its
+// approval was granted (the approvals engine's job.run dispatcher). The
+// signed decision (bound to the approval id) rides the task run down; the
+// agent guardrail's approval path honors it.
+func (c *Controller) DispatchApprovedJobRun(req *store.ApprovalRequest, dec *pb.Decision) error {
+	run, err := c.st.GetJobRun(req.RunID)
+	if err != nil || run == nil {
+		return fmt.Errorf("jobs: approval %s: run %s not found", req.ID, req.RunID)
+	}
+	if run.State != "awaiting_approval" {
+		return fmt.Errorf("jobs: approval %s: run %s is %s, not awaiting_approval", req.ID, req.RunID, run.State)
+	}
+	job, err := c.st.GetJob(run.JobID)
+	if err != nil || job == nil {
+		return fmt.Errorf("jobs: approval %s: job %s not found", req.ID, run.JobID)
+	}
+	ver, err := c.st.TaskVersion(job.TaskID, job.TaskVersion)
+	if err != nil || ver == nil {
+		return fmt.Errorf("jobs: approval %s: task version not found", req.ID)
+	}
+	steps, err := store.DecodeTaskSteps(ver.StepsJSON)
+	if err != nil {
+		return fmt.Errorf("jobs: approval %s: decode steps: %w", req.ID, err)
+	}
+	if err := c.h.SendTaskRun(req.AgentID, &pb.TaskRun{
+		RunId:       req.RunID,
+		TaskId:      job.TaskID,
+		TaskVersion: int32(job.TaskVersion),
+		Steps:       toPBSteps(steps),
+		Decision:    dec,
+	}); err != nil {
+		_ = c.st.FinalizeJobRun(req.RunID, "failed", "dispatch: "+err.Error())
+		c.audit("run-error", run.JobID, req.AgentID, 0)
+		return fmt.Errorf("jobs: dispatch: %w", err)
+	}
+	_ = c.st.FinalizeJobRun(req.RunID, "dispatched", "")
+	c.audit("run", run.JobID, req.AgentID, 1)
 	return nil
 }
 

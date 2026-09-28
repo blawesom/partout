@@ -28,6 +28,16 @@ func (h *Handler) jobActor(r *http.Request) jobs.Actor {
 
 // writeJobErr writes a job error, mapping policy denials to 403.
 func writeJobErr(w http.ResponseWriter, err error) {
+	var apprErr *jobs.ApprovalRequiredError
+	if errors.As(err, &apprErr) {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"state":       "approval_required",
+			"approval_id": apprErr.ApprovalID,
+			"run_id":      apprErr.RunID,
+			"message":     "job run parked on an approval request; an admin must approve it",
+		})
+		return
+	}
 	var pe *jobs.PolicyError
 	if errors.As(err, &pe) {
 		writeError(w, http.StatusForbidden, "policy_denied", pe.Error(), nil)

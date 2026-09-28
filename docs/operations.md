@@ -163,8 +163,10 @@ Step-by-step bring-up, also referenced in deployment §6:
   Approve signs a fresh `EffectAllow` decision carrying the approval id and re-dispatches the
   stored payload; the agent guardrail honors it (a local hard deny still wins). Requests
   expire after `PARTOUT_APPROVAL_TTL_S` (default 1 h) and can never be retroactively
-  honored — the parked run finalizes `failed`. Surfaces without an approval path
-  (files/sessions/tasks/jobs/secrets) still fail closed as deny.
+  honored — the parked run/row finalizes `failed` (per surface). Every policy-
+gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
+  bodies staged in `<dbdir>/filestaging/` 0600), sessions, tasks, jobs manual
+  RunNow. Secrets are a server-side vault (RBAC-only; no host action class).
 - **Editing a rule** *(v0.2)*: create/delete a rule; the server pushes a fresh bundle to all
   connected agents immediately (no reconnect needed). Bundles are versioned + content-hashed,
   and the agent's cached bundle persists under `<data dir>/agent/`.
@@ -465,6 +467,9 @@ never connects.
 | MCP `run_command`/`apply_updates` returns a policy refusal or `approval_required` | A `deny`/`require_approval` policy matched (structured message names the rule / approval id) | Satisfy the policy: change the command/selector, or have an admin `decide_approval` (approve) the parked request; do not retry a `deny` |
 | `POST /mcp` returns 404 | The build predates the MCP route, or the request hit the SPA wrapper (must be `POST`, not `GET`) | Confirm v0.6+; use `POST` with `Content-Type: application/json` and a bearer token |
 | MCP stdio client hangs / no tools | The launched `partout --mode=mcp` needs a reachable `--server` and a valid `--token`; a dead server or bad token fails the first call (the process stays up) | Verify `--server` is reachable and `--token` is a live bearer token; test with `curl` against `POST /mcp` on the same server |
+| `POST /oauth2/token` returns `invalid_grant` | PKCE mismatch (`code_verifier` ≠ the challenge), code reused, code expired (5 min), or the `client_id` doesn't match the one that was authorized | Redo the authorize→exchange round-trip with a fresh code + matching verifier/client; S256 only |
+| MCP upload returns `202 {approval_required}` | A `require_approval` rule matched file.write; the body is staged in `<dbdir>/filestaging/` (0600) until decided | An admin `decide_approval` (approve) re-dispatches the staged body; expiry (default 1 h) discards it and the request can never be retroactively honored |
+| Job create/update rejected: `task.run blocked … (requires approval)` | A host in the selector matches `require_approval` for task.run; a job carries a *standing* decision and cannot hold one that needs approval | Change the policy/selector, or use the existing job's manual RunNow (park → admin approve → dispatch) |
 | Empty selector → no hosts affected | No hosts match the selector predicates | Check the live resolution preview in the UI before dispatch |
 | Output too large → UI hangs | Command producing >16 MB output (PARTOUT_MAX_OUTPUT_MB) | Reduce output or increase the limit |
 

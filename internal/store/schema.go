@@ -400,7 +400,40 @@ CREATE TABLE IF NOT EXISTS principals (
   disabled      INTEGER NOT NULL DEFAULT 0,
   created_unix  INTEGER NOT NULL
 );
+
+-- M4 OAuth2 (PKCE) for the MCP HTTP transport (PRD R11, A20).
+-- mcp_clients: registered MCP clients (admin-managed). Codes and tokens are
+-- stored hashed (SHA-256 hex); the plaintext exists only in transit.
+CREATE TABLE IF NOT EXISTS mcp_clients (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  scope      TEXT NOT NULL DEFAULT 'fleet',
+  created    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  id          TEXT PRIMARY KEY,
+  code_hash   TEXT NOT NULL UNIQUE,
+  client_id   TEXT NOT NULL,
+  principal   TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  scope       TEXT NOT NULL,
+  challenge   TEXT NOT NULL,   -- S256 code challenge
+  expires     INTEGER NOT NULL,
+  used        INTEGER NOT NULL DEFAULT 0,
+  created     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  token_hash  TEXT PRIMARY KEY,
+  client_id   TEXT NOT NULL,
+  principal   TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  scope       TEXT NOT NULL,
+  created     INTEGER NOT NULL,
+  expires     INTEGER NOT NULL
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 11
+const currentSchemaVersion = 12

@@ -14,6 +14,7 @@ import (
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
+	"github.com/blawesom/partout/internal/server/oauth"
 	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/provision"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
@@ -34,6 +35,7 @@ type Handler struct {
 	tasks       *tasks.Controller
 	jobs        *jobs.Controller
 	approvals   *serverapprovals.Controller
+	oauthC      *oauth.Manager
 	mcpWired    bool // true once HandleMCP registered the /mcp route
 	sess        *sessions.Manager
 	secretsMgr  *serversecrets.Manager
@@ -119,6 +121,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// M4: MCP self-description (R11). Read-only catalog for the UI's MCP page.
 	handler.RegisterMCP(mux)
+
+	// M4: OAuth2 (PKCE) for the MCP HTTP transport (R11, A20) + client
+	// registry. Routes 503 until SetOAuth installs the manager.
+	handler.RegisterOAuth(mux)
 
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)

@@ -244,6 +244,20 @@ func (s *Store) FinalizeTaskRun(id, state, errMsg string, finished int64) error 
 	return nil
 }
 
+// MarkTaskRunAwaiting parks a running task run on an approval request
+// (M4): state=awaiting_approval, no finished timestamp. The approval
+// re-dispatch (or expiry) finalizes it.
+func (s *Store) MarkTaskRunAwaiting(id string) error {
+	res, err := s.db.Exec(`UPDATE task_runs SET state='awaiting_approval', error='' WHERE id=?`, id)
+	if err != nil {
+		return fmt.Errorf("store: mark task run awaiting: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("store: task run not found")
+	}
+	return nil
+}
+
 // TaskRun returns one run by ID.
 func (s *Store) TaskRun(id string) (*TaskRun, error) {
 	row := s.db.QueryRow(`SELECT id, task_id, task_version, agent_id, state, started, finished, error FROM task_runs WHERE id=?`, id)
@@ -273,7 +287,7 @@ func (s *Store) TaskRunsForHost(agentID string, limit int) ([]*TaskRun, error) {
 
 func scanTaskRun(row scanRow) (*TaskRun, error) {
 	var r TaskRun
-	var finished int64
+	var finished sql.NullInt64
 	var errMsg *string
 	if err := row.Scan(&r.ID, &r.TaskID, &r.TaskVersion, &r.AgentID, &r.State, &r.Started, &finished, &errMsg); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -281,7 +295,7 @@ func scanTaskRun(row scanRow) (*TaskRun, error) {
 		}
 		return nil, fmt.Errorf("store: scan task run: %w", err)
 	}
-	r.Finished = finished
+	r.Finished = finished.Int64
 	if errMsg != nil {
 		r.Error = *errMsg
 	}

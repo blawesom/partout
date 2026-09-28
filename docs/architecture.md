@@ -1257,29 +1257,32 @@ are dropped and re-subscribe (SSE retry) — never block the broker.
 
 - **Package** `internal/server/mcp`: a stateless JSON-RPC 2.0 dispatcher
   (protocol `2025-06-18`) with two transports. Both transports forward the
-  **caller's bearer token** to the **same REST router** the UI/CLI use —
+  **caller's credential** (bearer token or OAuth2 access token) to the
+  **same REST router** the UI/CLI use —
   `POST /mcp` (Streamable HTTP, registered on the API mux before the SPA
   wrapper) calls the router in-process; `partout --mode=mcp` (stdio,
   line-delimited) is a plain REST client against the server. So RBAC, the
   policy gate, and audit are the control plane's — the MCP layer never
   bypasses or duplicates them.
-- **Read tools** (16): `list_hosts`, `get_host`, `get_host_facts`, `list_groups`,
+- **Read tools** (17): `list_hosts`, `get_host`, `get_host_facts`, `list_groups`,
   `list_executions`, `get_execution`, `get_execution_output`, `get_audit`,
   `list_policies`, `list_jobs`, `list_tasks`, `list_approvals`, `list_updates`,
-  `list_services`, `list_certificates`, `list_configs`.
-- **Write tools** (6): `run_command`, `cancel_execution`, `run_job`,
-  `apply_updates`, `create_secret` (value write-only), `decide_approval`
-  (approve/deny a parked request). A 403 / policy-deny / `approval_required`
-  surfaces as a structured tool error (`isError`) carrying the server's
-  message (the rule/role that refused and what would satisfy it).
+  `list_services`, `list_certificates`, `list_configs`, `download_file`
+  (base64 content).
+- **Write tools** (8): `run_command`, `cancel_execution`, `run_job`,
+  `run_playbook` (fan-out over the playbook's selector, `POST
+  /api/v1/playbooks/{id}/run`), `apply_updates`, `upload_file` (base64
+  content, file.write-gated), `create_secret` (value write-only),
+  `decide_approval` (approve/deny a parked request). A 403 / policy-deny /
+  `approval_required` surfaces as a structured tool error (`isError`) carrying
+  the server's message (the rule/role that refused and what would satisfy it).
 - **Not a tool** (PRD): interactive PTY (`open_session`) — MCP is
   request/response; terminals stay a UI/CLI surface.
-- **Deferred / deviations**: OAuth2 (PKCE) for the HTTP transport is the
-  post-v1 auth model — v1 uses the existing bearer-token + local-user model
-  (A20). `run_playbook`, `upload_file`, `download_file`, and
-  `list_sessions`/`get_session` are deferred: their backing REST endpoints
-  are not built (playbook-run and the session read endpoints land with their
-  M3/M2 follow-ups). The stdio token is the launched process's trust boundary
+- **Deviations**: OAuth2 (PKCE) ships as the A20 v1 model (client registry +
+  authorization-code/PKCE + short-lived hashed access tokens on REST/MCP;
+  browser-login grant and refresh tokens are post-v1). `list_sessions`/
+  `get_session` remain deferred (session read endpoints land with the M2
+  follow-ups). The stdio token is the launched process's trust boundary
   (the MCP client's env/args), so `--token` there is the caller's credential,
 
 ---
@@ -1459,4 +1462,4 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A17 | Preflight checks | os-release, arch, systemd, `sudo -n true`, disk, host→server `/healthz`, existing install; remediation text on failure | §3.5 |
 | A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; agent state (`identity.json`, `tls/`, `spool/`) untouched unless `fresh` | §3.5 |
 | A19 | Manual handoff triggers | unreachable, non-systemd init, Docker-host, air-gapped; prints binary + one-line install with one-time token | §3.5 |
-| A20 | MCP auth (R11) | **Implemented (M4)**: stdio + Streamable HTTP; the caller's bearer token (static env token or a local-user session token from `ctl auth login`) authenticates every tool call — forwarded to the same REST router, so RBAC/policy/audit are the control plane's. OAuth2 (PKCE) for the HTTP transport is the post-v1 model, not shipped. | §10.3 |
+| A20 | MCP auth (R11) | **Implemented (M4)**: stdio + Streamable HTTP. Credentials: the caller's bearer token (static env token, a local-user session token from `ctl auth login`, or an **OAuth2 (PKCE) access token**) — all forwarded to the same REST router, so RBAC/policy/audit are the control plane's. OAuth2 (PKCE) v1 model (`internal/server/oauth`, schema v12 `mcp_clients`/`oauth_codes`/`oauth_tokens`): admin-registered clients; `POST /oauth2/authorize` (authenticated by the owner's existing bearer) → 5-min one-time code bound to an S256 challenge; `POST /oauth2/token` verifies `S256(code_verifier)` → 1-h access token, stored only as a SHA-256 hash, single-use codes. Deviations: no browser login grant (bearer-token codebase), no refresh tokens — post-v1. | §10.3 |

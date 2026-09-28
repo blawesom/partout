@@ -14,6 +14,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/blawesom/partout/internal/id"
@@ -32,6 +33,7 @@ func (h *Handler) RegisterTasks(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/tasks/runs/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.taskRunGet)))
 	mux.Handle("GET /api/v1/playbooks", h.requireRole(roleViewer)(http.HandlerFunc(h.playbookList)))
 	mux.Handle("POST /api/v1/playbooks", h.requireRole(roleOperator)(http.HandlerFunc(h.playbookCreate)))
+	mux.Handle("POST /api/v1/playbooks/{id}/run", h.requireRole(roleOperator)(http.HandlerFunc(h.playbookRun)))
 }
 
 // taskActor derives the requester identity (username + role).
@@ -149,6 +151,16 @@ func (h *Handler) taskRun(w http.ResponseWriter, r *http.Request) {
 	run, err := h.tasks.Run(r.Context(), body.AgentID, id, ver.Version, pbSteps,
 		tasks.Actor{Principal: principal, Role: role})
 	if err != nil {
+		var apprErr *tasks.ApprovalRequiredError
+		if errors.As(err, &apprErr) {
+			writeJSON(w, http.StatusAccepted, map[string]any{
+				"state":       "approval_required",
+				"approval_id": apprErr.ApprovalID,
+				"run_id":      apprErr.RunID,
+				"message":     "task run parked on an approval request; an admin must approve it",
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
 		return
 	}
@@ -203,6 +215,34 @@ func (h *Handler) taskRunGet(w http.ResponseWriter, r *http.Request) {
 		"steps": stepsOut,
 	})
 
+}
+
+// playbookRun runs a playbook's pinned task on every host its selector
+// matches (operator). Per-host outcomes come back as runs (succeeded /
+// failed / awaiting_approval).
+func (h *Handler) playbookRun(w http.ResponseWriter, r *http.Request) {
+	if h.tasks == nil {
+		writeError(w, http.StatusServiceUnavailable, "tasks_disabled", "tasks not initialized", nil)
+		return
+	}
+	id := r.PathValue("id")
+	principal, role := h.taskActor(r)
+	runs, errs, err := h.tasks.RunPlaybook(r.Context(), id, tasks.Actor{Principal: principal, Role: role})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+		return
+	}
+	out := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, map[string]any{
+			"run_id": run.ID, "agent_id": run.AgentID, "state": run.State,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"playbook_id": id,
+		"runs":        out,
+		"errors":      errs,
+	})
 }
 
 func (h *Handler) playbookList(w http.ResponseWriter, r *http.Request) {

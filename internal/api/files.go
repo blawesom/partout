@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -214,6 +215,15 @@ func statJSON(st *pb.FileStat) map[string]any {
 
 // fileErr maps file op errors to HTTP codes.
 func (h *Handler) fileErr(w http.ResponseWriter, err error) {
+	var apprErr *files.ApprovalRequiredError
+	if errors.As(err, &apprErr) {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"state":       "approval_required",
+			"approval_id": apprErr.ApprovalID,
+			"message":     "file op parked on an approval request; an admin must approve it",
+		})
+		return
+	}
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "denied"):

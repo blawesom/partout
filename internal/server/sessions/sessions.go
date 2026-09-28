@@ -16,6 +16,7 @@ import (
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -34,6 +35,8 @@ type Manager struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity
+	// approvals is the M4 approvals engine (require_approval parking).
+	approvals *approvals.Controller
 
 	mu     sync.Mutex
 	active map[string]activeSession
@@ -57,6 +60,20 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 // SetIdentity installs the server's Ed25519 signing key (signs the Decision
 // attached to SESSION_OPEN; the session is an exec action, arch §5.3).
 func (m *Manager) SetIdentity(ident *certutil.ServerIdentity) { m.ident = ident }
+
+// SetApprovals installs the M4 approvals engine (require_approval parking).
+func (m *Manager) SetApprovals(ac *approvals.Controller) { m.approvals = ac }
+
+// ApprovalRequiredError is returned when a session open is parked on an
+// approval request (M4). The API layer maps it to 202 with the request id.
+type ApprovalRequiredError struct {
+	ApprovalID string
+	Session    *store.Session
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	return "sessions: approval required (" + e.ApprovalID + ")"
+}
 
 // OpenRequest is a new PTY session.
 type OpenRequest struct {
@@ -108,7 +125,49 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.Session, er
 		return nil, fmt.Errorf("sessions: load policies: %w", err)
 	}
 	decision := policy.Evaluate(rules, action)
-	if decision.Effect != policy.EffectAllow {
+	switch decision.Effect {
+	case policy.EffectAllow:
+		// fall through to open
+	case policy.EffectRequireApproval:
+		sess := &store.Session{
+			ID: id.New("sess"), AgentID: req.AgentID,
+			Cmd: req.Cmd, ArgsJSON: argsJSON, Cols: req.Cols, Rows: req.Rows,
+			Record: req.Record, Actor: req.Actor, Opened: now(),
+		}
+		if m.approvals == nil {
+			// Fail closed without the approvals engine.
+			sess.State = "denied"
+			if err := m.st.CreateSession(*sess); err != nil {
+				return nil, err
+			}
+			m.audit(sess.ID, req.AgentID, "denied", "require_approval without approvals engine; failing closed")
+			return sess, fmt.Errorf("sessions: %s requires approval but the approvals engine is not wired; failing closed", req.Cmd)
+		}
+		sess.State = "awaiting_approval"
+		if err := m.st.CreateSession(*sess); err != nil {
+			return nil, err
+		}
+		areq, err := m.approvals.NewRequest(approvals.NewRequestParams{
+			// Routing class (not a policy class — the policy action is exec);
+			// "session.open" keeps this out of the exec dispatcher's path.
+			ActionClass:  "session.open",
+			AgentID:      req.AgentID,
+			RunID:        sess.ID,
+			Actor:        req.Actor,
+			ActorRole:    req.Role,
+			MatchedRules: decision.MatchedRules,
+			Payload: map[string]any{
+				"surface": "session", "cmd": req.Cmd, "args": req.Args,
+				"cols": req.Cols, "rows": req.Rows, "record": req.Record,
+			},
+		})
+		if err != nil {
+			_ = m.st.UpdateSessionState(sess.ID, "failed", -1, "approval request: "+err.Error())
+			return sess, fmt.Errorf("sessions: approval request: %w", err)
+		}
+		m.audit(sess.ID, req.AgentID, "awaiting_approval", decision.Reason)
+		return sess, &ApprovalRequiredError{ApprovalID: areq.ID, Session: sess}
+	default:
 		sess := &store.Session{
 			ID: id.New("sess"), AgentID: req.AgentID,
 			Cmd: req.Cmd, ArgsJSON: argsJSON, Cols: req.Cols, Rows: req.Rows,
@@ -165,6 +224,62 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.Session, er
 		})
 	}
 	return sess, nil
+}
+
+// DispatchApprovedSession opens a parked PTY session after its approval was
+// granted (registered as the approvals dispatcher for "exec" requests whose
+// payload surface is "session"). The signed decision rides SESSION_OPEN; the
+// agent's command recheck (approval path) honors it.
+func (m *Manager) DispatchApprovedSession(ctx context.Context, req *store.ApprovalRequest, dec *pb.Decision) error {
+	var p struct {
+		Surface string   `json:"surface"`
+		Cmd     string   `json:"cmd"`
+		Args    []string `json:"args"`
+		Cols    int32    `json:"cols"`
+		Rows    int32    `json:"rows"`
+		Record  bool     `json:"record"`
+	}
+	if err := json.Unmarshal([]byte(req.PayloadJSON), &p); err != nil {
+		return fmt.Errorf("sessions: approval %s: bad payload: %w", req.ID, err)
+	}
+	if p.Surface != "session" {
+		return fmt.Errorf("sessions: approval %s: not a session request (surface %q)", req.ID, p.Surface)
+	}
+	sess, err := m.st.GetSession(req.RunID)
+	if err != nil || sess == nil {
+		return fmt.Errorf("sessions: approval %s: session %s not found", req.ID, req.RunID)
+	}
+	if sess.State != "awaiting_approval" {
+		return fmt.Errorf("sessions: approval %s: session %s is %s, not awaiting_approval", req.ID, req.RunID, sess.State)
+	}
+	if p.Cols <= 0 {
+		p.Cols = 80
+	}
+	if p.Rows <= 0 {
+		p.Rows = 24
+	}
+	open := &pb.SessionOpen{
+		SessionId: sess.ID, Cmd: p.Cmd, Args: p.Args,
+		Cols: p.Cols, Rows: p.Rows, Record: p.Record, Decision: dec,
+	}
+	if err := m.h.SendSessionOpen(req.AgentID, open); err != nil {
+		_ = m.st.UpdateSessionState(sess.ID, "failed", -1, err.Error())
+		m.audit(sess.ID, req.AgentID, "failed", err.Error())
+		return fmt.Errorf("sessions: dispatch: %w", err)
+	}
+	if err := m.st.UpdateSessionState(sess.ID, "open", -1, ""); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.active[sess.ID] = activeSession{agentID: req.AgentID, record: p.Record}
+	m.mu.Unlock()
+	m.audit(sess.ID, req.AgentID, "open", "approval:"+req.ID)
+	if m.sse != nil {
+		m.sse.Emit("session.opened", map[string]string{
+			"session_id": sess.ID, "agent_id": req.AgentID, "cmd": p.Cmd,
+		})
+	}
+	return nil
 }
 
 // Input forwards terminal input to the agent.

@@ -6,6 +6,7 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -26,6 +28,8 @@ type Controller struct {
 	sse   *sse.Broker
 	log   *log.Logger
 	ident *certutil.ServerIdentity
+	// approvals is the M4 approvals engine (require_approval parking).
+	approvals *approvals.Controller
 	// opTimeout bounds one task run over the stream.
 	opTimeout time.Duration
 }
@@ -40,6 +44,20 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 // SetIdentity installs the server's Ed25519 signing key (signs Decisions).
 func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
+
+// SetApprovals installs the M4 approvals engine (require_approval parking).
+func (c *Controller) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
+
+// ApprovalRequiredError is returned when a task run is parked on an approval
+// request (M4). The API layer maps it to 202 with the request id.
+type ApprovalRequiredError struct {
+	ApprovalID string
+	RunID      string
+}
+
+func (e *ApprovalRequiredError) Error() string {
+	return "tasks: approval required (" + e.ApprovalID + ")"
+}
 
 // Actor carries the requester identity for audit + policy.
 type Actor struct {
@@ -64,7 +82,8 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 		return nil, fmt.Errorf("tasks: create run %s: %w", runID, err)
 	}
 
-	// Policy gate: create a signed Decision for the task.run action.
+	// Policy gate: evaluate the task.run action and, when allowed, sign a
+	// Decision. A require_approval match parks the run (M4).
 	var pbDecision *pb.Decision
 	if c.ident != nil {
 		host, _ := c.st.Agent(agentID)
@@ -83,21 +102,46 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 		}
 		rules, _ := c.st.GetPolicyRules()
 		decision := policy.Evaluate(rules, act)
-		if decision.Effect == policy.EffectDeny {
+		switch decision.Effect {
+		case policy.EffectDeny:
 			_ = c.st.FinalizeTaskRun(runID, "failed", "denied by policy: "+decision.Reason, 0)
 			c.audit(agentID, runID, actor, "denied", 0, decision.Reason)
 			if final, err := c.st.TaskRun(runID); err == nil && final != nil {
 				return final, nil
 			}
 			return action, nil
-		}
-		if decision.Effect == policy.EffectAllow {
-			version, _ := c.st.PolicyBundleVersion()
-			sig := policy.SignDecision(c.ident.Priv, runID, version,
+		case policy.EffectRequireApproval:
+			if c.approvals == nil {
+				// Fail closed without the approvals engine.
+				_ = c.st.FinalizeTaskRun(runID, "failed", "denied by policy: "+decision.Reason, 0)
+				c.audit(agentID, runID, actor, "denied", 0, "require_approval without approvals engine; failing closed")
+				return action, fmt.Errorf("tasks: %s requires approval but the approvals engine is not wired; failing closed", taskID)
+			}
+			_ = c.st.MarkTaskRunAwaiting(runID)
+			areq, err := c.approvals.NewRequest(approvals.NewRequestParams{
+				ActionClass:  policy.ActionTaskRun,
+				AgentID:      agentID,
+				RunID:        runID,
+				Actor:        actor.Principal,
+				ActorRole:    actor.Role,
+				MatchedRules: decision.MatchedRules,
+				Payload: map[string]any{
+					"task_id": taskID, "task_version": version,
+				},
+			})
+			if err != nil {
+				_ = c.st.FinalizeTaskRun(runID, "failed", "approval request: "+err.Error(), 0)
+				return action, fmt.Errorf("tasks: approval request: %w", err)
+			}
+			c.audit(agentID, runID, actor, "awaiting_approval", 0, decision.Reason)
+			return action, &ApprovalRequiredError{ApprovalID: areq.ID, RunID: runID}
+		case policy.EffectAllow:
+			bundleVersion, _ := c.st.PolicyBundleVersion()
+			sig := policy.SignDecision(c.ident.Priv, runID, bundleVersion,
 				decision.Effect, decision.MatchedRules, actor.Role, "")
 			pbDecision = &pb.Decision{
 				RunId:         runID,
-				BundleVersion: version,
+				BundleVersion: bundleVersion,
 				Effect:        decision.Effect,
 				MatchedRules:  decision.MatchedRules,
 				Sig:           sig,
@@ -106,7 +150,14 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 		}
 	}
 
-	// Dispatch the task run.
+	return c.dispatchRun(ctx, runID, taskID, version, steps, agentID, pbDecision, actor)
+}
+
+// dispatchRun sends a task run down the stream, waits for the result,
+// records per-step results, and finalizes the row. Shared by the direct
+// path (Run) and the approval re-dispatch (DispatchApprovedTaskRun).
+func (c *Controller) dispatchRun(ctx context.Context, runID, taskID string, version int,
+	steps []*pb.TaskStep, agentID string, pbDecision *pb.Decision, actor Actor) (*store.TaskRun, error) {
 	pbRun := &pb.TaskRun{
 		RunId:       runID,
 		TaskId:      taskID,
@@ -117,7 +168,7 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 	if err := c.h.SendTaskRun(agentID, pbRun); err != nil {
 		_ = c.st.FinalizeTaskRun(runID, "failed", "dispatch: "+err.Error(), 0)
 		c.audit(agentID, runID, actor, "error", 0, err.Error())
-		return action, err
+		return nil, err
 	}
 
 	// Wait for result.
@@ -127,7 +178,7 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 	if err != nil {
 		_ = c.st.FinalizeTaskRun(runID, "failed", "timeout: "+err.Error(), 0)
 		c.audit(agentID, runID, actor, "error", 0, err.Error())
-		return action, err
+		return nil, err
 	}
 
 	// Record per-step results.
@@ -156,7 +207,99 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 	if final, err := c.st.TaskRun(runID); err == nil && final != nil {
 		return final, nil
 	}
-	return action, nil
+	return nil, nil
+}
+
+// DispatchApprovedTaskRun re-dispatches a parked task run after its
+// approval was granted (the approvals engine's task.run dispatcher). The
+// signed decision (bound to the approval id) rides the run down; the agent
+// guardrail's approval path honors it.
+func (c *Controller) DispatchApprovedTaskRun(req *store.ApprovalRequest, dec *pb.Decision) error {
+	var p struct {
+		TaskID      string `json:"task_id"`
+		TaskVersion int    `json:"task_version"`
+	}
+	if err := json.Unmarshal([]byte(req.PayloadJSON), &p); err != nil {
+		return fmt.Errorf("tasks: approval %s: bad payload: %w", req.ID, err)
+	}
+	run, err := c.st.TaskRun(req.RunID)
+	if err != nil || run == nil {
+		return fmt.Errorf("tasks: approval %s: run %s not found", req.ID, req.RunID)
+	}
+	if run.State != "awaiting_approval" {
+		return fmt.Errorf("tasks: approval %s: run %s is %s, not awaiting_approval", req.ID, req.RunID, run.State)
+	}
+	ver, err := c.st.TaskVersion(p.TaskID, p.TaskVersion)
+	if err != nil || ver == nil {
+		return fmt.Errorf("tasks: approval %s: task %s v%d not found", req.ID, p.TaskID, p.TaskVersion)
+	}
+	storeSteps, err := store.DecodeTaskSteps(ver.StepsJSON)
+	if err != nil {
+		return fmt.Errorf("tasks: approval %s: decode steps: %w", req.ID, err)
+	}
+	pbSteps := make([]*pb.TaskStep, 0, len(storeSteps))
+	for _, s := range storeSteps {
+		pbSteps = append(pbSteps, &pb.TaskStep{
+			Kind: s.Kind, Name: s.Name, When: s.When,
+			Command: s.Command, Args: s.Args, Env: s.Env,
+			Path: s.Path, Content: s.Content, Template: s.Template, Vars: s.Vars,
+			Mode: s.Mode, Package: s.Package, State: s.State,
+			Service: s.Service, User: s.User, Group: s.Group, Expr: s.Expr,
+		})
+	}
+	actor := Actor{Principal: req.Actor, Role: req.ActorRole}
+	_, err = c.dispatchRun(context.Background(), req.RunID, p.TaskID, p.TaskVersion, pbSteps, req.AgentID, dec, actor)
+	return err
+}
+
+// RunPlaybook runs a playbook's pinned task version on every host its
+// selector matches (fan-out; per-host outcomes are the returned runs —
+// succeeded/failed/awaiting_approval). Policy gates apply per host: a
+// parked host's run is returned in awaiting_approval state with its
+// approval request surfaced via the error list.
+func (c *Controller) RunPlaybook(ctx context.Context, playbookID string, actor Actor) ([]*store.TaskRun, []string, error) {
+	pbRow, err := c.st.Playbook(playbookID)
+	if err != nil || pbRow == nil {
+		return nil, nil, fmt.Errorf("tasks: playbook %s not found", playbookID)
+	}
+	ver, err := c.st.TaskVersion(pbRow.TaskID, pbRow.TaskVersion)
+	if err != nil || ver == nil {
+		return nil, nil, fmt.Errorf("tasks: playbook %s: task %s v%d not found", playbookID, pbRow.TaskID, pbRow.TaskVersion)
+	}
+	storeSteps, err := store.DecodeTaskSteps(ver.StepsJSON)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tasks: playbook %s: decode steps: %w", playbookID, err)
+	}
+	pbSteps := make([]*pb.TaskStep, 0, len(storeSteps))
+	for _, s := range storeSteps {
+		pbSteps = append(pbSteps, &pb.TaskStep{
+			Kind: s.Kind, Name: s.Name, When: s.When,
+			Command: s.Command, Args: s.Args, Env: s.Env,
+			Path: s.Path, Content: s.Content, Template: s.Template, Vars: s.Vars,
+			Mode: s.Mode, Package: s.Package, State: s.State,
+			Service: s.Service, User: s.User, Group: s.Group, Expr: s.Expr,
+		})
+	}
+	agents, err := store.NewResolver(c.st).ResolveSelector(pbRow.Selector)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tasks: playbook %s: resolve selector %q: %w", playbookID, pbRow.Selector, err)
+	}
+	runs := make([]*store.TaskRun, 0, len(agents))
+	var errs []string
+	for _, a := range agents {
+		run, rerr := c.Run(ctx, a.ID, pbRow.TaskID, pbRow.TaskVersion, pbSteps, actor)
+		if rerr != nil {
+			var apprErr *ApprovalRequiredError
+			if !errors.As(rerr, &apprErr) {
+				errs = append(errs, fmt.Sprintf("%s: %s", a.ID, rerr.Error()))
+				continue
+			}
+		}
+		if run != nil {
+			runs = append(runs, run)
+		}
+	}
+	return runs, errs, nil
 }
 
 // OnLateResult records a task run result that arrived without a live

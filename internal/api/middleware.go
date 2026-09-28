@@ -78,8 +78,14 @@ func (a *auth) roleFor(tok string) role {
 }
 
 // roleFromToken maps a bearer token to its role (roleNone if unknown).
-// Local-user session tokens are checked first, then static env tokens.
+// OAuth2 (PKCE) access tokens (MCP, A20), local-user session tokens, and
+// static env tokens are checked in that order.
 func (h *Handler) roleFromToken(tok string) role {
+	if h.oauthC != nil {
+		if _, roleStr, ok := h.oauthC.Lookup(tok); ok {
+			return roleFromString(roleStr)
+		}
+	}
 	if h.authC != nil {
 		if _, roleStr, ok := h.authC.RoleFor(tok); ok {
 			return roleFromString(roleStr)
@@ -107,6 +113,11 @@ func (h *Handler) authRequired() bool {
 // mode → ("local", "admin"); unauthenticated → ("unknown", "none").
 func (h *Handler) actorFor(r *http.Request) (string, string) {
 	tok := bearerToken(r)
+	if tok != "" && h.oauthC != nil {
+		if u, roleStr, ok := h.oauthC.Lookup(tok); ok {
+			return u, roleStr
+		}
+	}
 	if tok != "" && h.authC != nil {
 		if u, roleStr, ok := h.authC.RoleFor(tok); ok {
 			return u, roleStr
