@@ -46,8 +46,9 @@ partout/
 │   │   ├── guardrail/      # cached policy bundle, re-check, staleness
 │   │   ├── exec/           # command/session/script runner, pty, output chunking
 │   │   ├── fs/             # transfers, stat, edit (CAS), path safety
-│   │   ├── jobsched/       # agent-side cron, overlap/failure policies, spool of runs
-│   │   ├── taskrun/        # step runner, when-evaluator, reboot continuation
+│   │   ├── jobs/           # agent-side cron scheduler, overlap/failure policies, persisted assignments
+│   │   ├── task/           # ordered step runner, when-evaluator, reboot-step orchestration
+│   │   ├── resume/         # post-reboot continuations: resume markers, boot check, resume + report
 │   │   ├── pkg/            # apt/dnf/apk backends, journals
 │   │   └── facts/          # collectors (os-release, init, pkg hash, units, ifaces…)
 │   │   └── factscollect/   # observe-layer collectors: service/config/cert facts
@@ -100,8 +101,8 @@ Rules:
                           ┌────────────────────┼────────────────────┐
                           ▼                    ▼                    ▼
                      agent (host A)       agent (host B)       agent (host C)
-                     exec·fs·jobsched·    …                   …
-                     taskrun·pkg·facts·
+                     exec·fs·jobs·        …                   …
+                     task·pkg·facts·
                      guardrail·spool
 ```
 
@@ -521,7 +522,7 @@ Rule (one declarative object, stored in `policies`):
 - Steps: 9 kinds — `command` (exec.CommandContext), `file` (idempotent write), `package` (apt/dnf
   by distro fact), `service` (systemctl), `user` (id + useradd), `group` (getent + groupadd),
   `template` (Go text/template with facts + vars), `assert` (when-evaluator expression),
-  `reboot` (returns "reboot requested", stub for resume-after-reboot).
+  `reboot` (post-reboot continuation handshake — see **task** above).
 - **`when` guards**: constrained fact-based guard grammar — tokenizer + recursive-descent parser
   + evaluator. Supports: `==`, `!=`, `in [list]`, `!`, `and`, `or`, parentheses, string/number/bool
   literals, dotted fact refs (e.g. `host.distro`), `file.exists('path')` predicate. Fail-closed
@@ -651,15 +652,22 @@ group:webservers               # a saved group (named selector)
   (graceful, deliberate → state `closed`); `KillAll` (stream drop, D2) kills immediately
   (state `interrupted`). Only one goroutine ever calls `cmd.Wait()`, so exit is reported
   exactly once.
-- **jobsched** — in-process cron on the agent's clock; stores resolved schedules + run state +
+- **jobs** — in-process cron on the agent's clock; stores resolved schedules + run state +
   overlap locks in agent-local state; overlap policy (allow/skip/replace) and failure
   retry-with-backoff executed here; results spool offline.
-- **taskrun** — ordered step runner; each step checks-then-changes and reports
+- **task** — ordered step runner; each step checks-then-changes and reports
   `ok|changed|failed|skipped`; `when` evaluated agent-side against live facts;
-  **reboot continuation**: before reboot the agent persists
-  `resume-after-reboot.json {task_run_id, step_index, ts}` in its state dir; on boot, if a
-  marker exists and is within its validity window (10 min **(proposed)**), the run resumes and
-  reports `rebooting → resumed`.
+  **reboot continuation** (implemented): at a `reboot` step the runner persists a
+  per-run marker `<data>/resume/<run_id>.json` (remaining steps, results so far, the
+  signed `Decision`, creation time), waits `PARTOUT_REBOOT_FLUSH_S` (default 5 s) so the
+  `rebooting` report flushes, then reboots (`systemctl reboot` → `shutdown -r now` →
+  `reboot`). On agent start, after the first policy bundle loads, the resumer (`internal/agent/resume`)
+  verifies the host actually booted after the marker (uptime < marker age — a host that
+  never rebooted is stale: run reported `failed`, marker discarded), re-checks the signed
+  decision via the guardrail (fail-closed), runs the remaining steps, reports the final
+  state with `trigger: resume` (`JOB_RUN_RESULT` for job runs, `TASK_RUN_RESULT` for manual
+  runs — a late task result with no waiter finalizes the row via the stream's
+  `TaskResultHook`), and deletes the marker.
 - **when grammar** (constrained, agent-side, never free-form — PRD Decision 4):
   comparisons over facts (`fact.os == 'debian'`, `host.distro in ['debian','ubuntu']`),
   state predicates (`!file.exists('/x')`, `pkg.installed('nginx')`,

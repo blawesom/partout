@@ -451,6 +451,7 @@ never connects.
 | "secret key missing" at startup | `PARTOUT_SECRET_KEY_FILE` or `PARTOUT_SECRET_KEY` not configured | Set the key; the secrets feature is disabled until then |
 | `apply-updates` fails on `ended` host | EOL gate (host is past end-of-support, defaults to require-approval) | Approve manually or remove the EOL gate from the rule |
 | Policy stale → jobs fail closed | Agent hasn't received a fresh bundle in >48 h (A8), server unreachable | Restore server; agents will fetch the bundle on reconnect |
+| A rebooted host's task run stays `rebooting` (never resumes) | The `resume-after-reboot` marker (`<data dir>/resume/<run_id>.json`) is only processed after the first policy bundle loads post-boot; a stale marker (host never actually rebooted, or reboot command lacked permission) is discarded and the run reported `failed` | Check agent logs for `resume:` lines; verify the agent user can reboot (root/sudo/polkit); confirm the marker file exists until processed, then check `job_runs`/`task_runs` for the final `trigger: resume` report |
 | Empty selector → no hosts affected | No hosts match the selector predicates | Check the live resolution preview in the UI before dispatch |
 | Output too large → UI hangs | Command producing >16 MB output (PARTOUT_MAX_OUTPUT_MB) | Reduce output or increase the limit |
 

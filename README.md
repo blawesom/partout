@@ -130,7 +130,7 @@ off and the docs become the implementation contract.
 | **M0 — Spine** | ✅ Complete | Single Go binary, all 3 modes, enrollment, Ed25519 auth, gRPC stream, SQLite storage, SSE broker, restart resilience |
 | **M1 — First write path** | ✅ Complete | Command execution + streamed output + audit + RBAC + `partout ctl` CLI + systemd deploy + **TLS/mTLS bootstrap** + **policy deny-list** + **host provisioning (fleet SSH)** + **offline spool**. (Postgres backend deferred to a later phase) |
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI: files browser + sessions list/replay built; live PTY (xterm.js) terminal deferred to a later V1 phase |
-| **M3 — Automation** | ✅ Features, ⚠ 2 gaps | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). **Known gaps:** (a) ~~scheduled job steps run without a policy decision or agent guardrail~~ ✅ **fixed** — job create/update/RunNow now gated under `task.run`, per-host signed `Decision` in `JOB_ASSIGN`, agent re-checks guardrail before every fire (fail-closed); (b) **reboot continuation** (PRD §5.5 acceptance criterion) unimplemented; (c) job dispatch path (`JOB_ASSIGN` → agent) has no live E2E test |
+| **M3 — Automation** | ✅ Complete | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). Former gaps all closed: (a) ~~scheduled job steps without policy~~ ✅ gated under `task.run` with per-host signed `Decision` + agent guardrail re-check (fail-closed); (b) **reboot continuation** ✅ — `reboot` step persists a resume marker, reboots, and resumes after boot (PRD §5.5); (c) job dispatch E2E ✅ — live bufconn test drives `JOB_ASSIGN` → real agent scheduler → `JOB_RUN_RESULT` → `job_runs` row |
 | **M4 — Governance** | 🚧 In progress | **Local user auth ✅** (login/logout, session tokens, admin user management, first-run bootstrap) + **SSE stream auth-gated ✅**; remaining: approvals engine, full policy surface, MCP server (R11) + write tools |
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
 | **M7 — Observe: Web UI pages** | ✅ Built (v0.5) | S0 shell + data pages for M1–M5 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, Provision, Users, Services, Certificates, Configs). Remaining: cert→config→service cross-links, config drift, task actions, live PTY; Alerts page is a labeled M6 placeholder. |
@@ -154,7 +154,7 @@ off and the docs become the implementation contract.
 - ✅ `internal/api` — REST v1: 26 API routes (25 JSON + SSE), RBAC (viewer/operator/admin), structured errors, cursor pagination, `/healthz` + `/readyz`
 - ✅ `internal/control` — dispatch orchestration, cancel, finalize, audit
 - ✅ `internal/id` — opaque TEXT keys (`prefix_` + 12 hex)
-- ✅ 124 tests, race detector clean (+3 opt-in live-sshd tests under `-tags live`)
+- ✅ 378 test functions across 37 packages, race detector clean (+3 opt-in live-sshd tests under `-tags live`)
 
 ### M1 — First write path (complete)
 
@@ -195,7 +195,7 @@ Done (decisions D1–D5 per PRD review):
 - ✅ **CLI**: `partout ctl files stat|list|upload|edit|perm` and `partout ctl sessions open|close|list|replay`.
 - ✅ E2E tests: files over a live bufconn stream (stat/list/download/upload/edit-CAS/conflict/perm/symlink-rejection/policy-deny/audit) and sessions (open→data→close→result, recording+replay, policy deny, disconnect interruption).
 
-### M3 — Automation (features complete; known gaps documented in the status table)
+### M3 — Automation (complete)
 
 Done so far:
 - ✅ **Secrets** (PRD §5.7, arch §5.5): server-side encrypted store — master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`, per-secret keys = HKDF(master, secret_id), values AES-256-GCM at rest, versioned. **No master key → feature disabled with a clear message** (503 on the endpoints).
@@ -212,6 +212,8 @@ Done so far:
 - ✅ **REST** (`GET /packages/updates` viewer, `GET /packages/actions` viewer, `GET /packages/actions/:id` viewer, `POST /packages/apply` operator) and **CLI** (`ctl packages updates <agent> | apply <agent> [--dry-run] [--packages ...] | actions`).
 - ✅ **Tasks / Playbooks** (PRD §5.5, arch §4.5, §8.5): **versioned tasks** with 9 step kinds (`command`, `file`, `package`, `service`, `user`, `group`, `template`, `assert`, `reboot`), constrained **`when` guard** grammar (dotted fact refs, `==`/`!=`/`in [list]`, `and`/`or`, `!`, `file.exists(path)`), **task runs** recorded in `task_runs`/`task_run_steps` tables with per-step state (ok/changed/failed/skipped), **playbooks** bind a task + version + selector to hosts. Agent-side runner executes steps in order, stops on `failed`, reports aggregate state. Guardrail re-checks every run over the `task.run` action class. Server dispatches over the stream, waits for result, records audit events. CLI: `ctl tasks list|create|show|run|runs|run-show`, `ctl playbooks list|create`.
 - ✅ **Scheduled jobs** (PRD §5.4, arch §5.4.1): jobs = (selector, cron schedule, task). Server resolves the selector to concrete hosts at save/update time and pushes a per-host schedule (`JOB_ASSIGN` down). The agent runs each job on its own clock (robfig/cron), so a server outage does not stop scheduled work. Overlap policy (allow/skip/replace), failure policy (no_retry/retry with backoff). Job runs produce a `JobRunResult` (up) that the server records in `job_runs` (lineage) + audit. Assignments persist to disk (agent restart resumes schedules). **Policy-gated (security fix)**: create/update/`RunNow` evaluate the job's steps under the `task.run` action class per host BEFORE persisting (denied → `403 policy_denied`, nothing written); each `JOB_ASSIGN` carries a server-signed `Decision` (run_id = job id, bound to the policy bundle version); the agent re-checks it via the guardrail before **every** cron fire and fails closed (missing/stale/unsigned decision → run reported `denied`, no retry). **Selector edits reconcile assignments**: hosts that fall out of a narrowed selector are unassigned (`JOB_UNASSIGN`) so they stop firing with a stale decision. REST: `GET/POST /api/v1/jobs`, `PUT/DELETE /api/v1/jobs/:id`, `GET /api/v1/jobs/:id/runs`, `POST /api/v1/jobs/:id/run`, `GET /api/v1/jobs/runs`. CLI: `ctl jobs list|create|show|delete|run|runs|list-runs`.
+- ✅ **Reboot continuation** (PRD §5.5, the `reboot` step kind): a task run that hits a `reboot` step persists a `resume-after-reboot` marker (`<data>/resume/<run_id>.json`, 0600 — remaining steps, results so far, the signed `Decision`, creation time), waits `PARTOUT_REBOOT_FLUSH_S` (default 5 s) so the `rebooting` report flushes, then reboots (`systemctl reboot` → `shutdown -r now` → `reboot`; the agent needs host reboot permission). The run reports `rebooting` and stops. After the host comes back and the first policy bundle loads, the agent verifies the reboot actually happened (system uptime < marker age — a host that never rebooted yields a stale marker: run reported `failed`, marker discarded), re-checks the run's signed decision via the guardrail (fail-closed on missing/stale/denied), runs the remaining steps, reports the final state with `trigger: resume`, and deletes the marker. Job runs report `JOB_RUN_RESULT` (the server finalizes the `rebooting` row in place); manual task runs report `TASK_RUN_RESULT` (a late result with no waiter finalizes the `task_runs` row via the stream's `TaskResultHook`). The reboot command is injectable for tests (no test reboots a machine); `internal/agent/resume` + `internal/agent/task` cover the flow, and `internal/server/jobs` covers the `rebooting → resume` row upsert.
+- ✅ **Job dispatch E2E** (wire path, was the last untested M3 gap): `internal/server/jobs/jobs_dispatch_e2e_test.go` drives a live bufconn stream with the **real** agent-side scheduler (real task executor + real policy guardrail): `JOB_ASSIGN` → fire → `JOB_RUN_RESULT` → `job_runs` row + assignment state, then selector edits re-push a fresh `JOB_ASSIGN` and narrow to a zero-match selector to unassign every host (reconciliation, PRD §5.4).
 
 ### M5 — Observe: fact collectors (complete)
 
@@ -227,7 +229,6 @@ Done (R18–R20, the read side of the observe→act→verify loop):
 ### Not started
 
 - Live PTY terminal in the web UI (xterm.js) — backend input/resize exist; the interactive terminal frontend is deferred
-- M3 known gaps (from the verification audit, tracked in Next steps): job dispatch E2E, reboot continuation
 - M4: approvals engine, full policy surface, MCP server (R11) + write tools
 - M6: alert engine; M7 remaining: cross-links, drift, task actions; M8: installers, cloud-init, Helm, status page
 - MCP read tools (ship with the R11 MCP server; the M5 REST endpoints are their backing surface)
@@ -244,18 +245,14 @@ Done (R18–R20, the read side of the observe→act→verify loop):
 8. ~~**Review PRD R5** (spool storage)~~ ✅ Done — PRD updated to the per-run `.sp` log design (R5 table + §6.2)
 9. ~~**M2**: files & sessions~~ ✅ Done — see M2 Done list
 10. **Finish M1**: Postgres backend — deferred to a later phase (after M2)
-11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; two known gaps tracked below
+11. ~~**M3**: secrets, external data, packages, tasks/playbooks, scheduled jobs~~ ✅ Done — features complete, CI green; former gaps (reboot continuation, job dispatch E2E) closed — see items 14–15
 12. ~~**Web UI**~~ ✅ Done (v0.5) — buildless Vue 3 SPA in `internal/api/webui/`, served same-origin via `go:embed`; S0 shell + data pages for M1–M5; capability-gated; UI↔API shape tests + `scripts/ui-smoke.sh` headless render check. Remaining: live PTY (xterm.js), cert→config→service cross-links, config drift, task actions, Active Alerts (M6). See ui-guidelines §13–18.
 
 ### Next (priority order, from the M3 verification audit)
 
 13. ~~**Enforce policy on scheduled job steps** (security, M3/§5.4+§5.5)~~ ✅ Done — job create/update/RunNow gated under `task.run`; per-host signed `Decision` in `JOB_ASSIGN`; agent guardrail re-check before every fire (fail-closed). **Upgrade note:** after upgrading, re-save each job (or delete + recreate) so the server re-issues signed decisions; until then, fires fail closed with state `denied`.
-14. **E2E test the job dispatch path** — `JOB_ASSIGN` → connected agent → cron fire →
-    `JOB_RUN_RESULT` → `job_runs` row. Current tests stop at store/selector level and use a
-    nil stream handler, so the real wire path is unverified.
-15. **Reboot continuation** (PRD §5.5 acceptance criterion) — the `reboot` step kind is a
-    stub (returns "reboot requested"); no `resume-after-reboot` marker exists. Implement or
-    explicitly defer in the PRD.
+14. ~~**E2E test the job dispatch path**~~ ✅ Done — `internal/server/jobs/jobs_dispatch_e2e_test.go`: `JOB_ASSIGN` over a live bufconn stream → real agent-side scheduler (real task executor + real policy guardrail) fires → `JOB_RUN_RESULT` over the wire → `job_runs` row + assignment state; selector edits re-push and unassign over the wire.
+15. ~~**Reboot continuation**~~ ✅ Done (PRD §5.5) — the `reboot` step persists a `resume-after-reboot` marker (`<data>/resume/<run_id>.json`), reboots the host, and after boot the agent verifies the reboot happened (uptime check), re-checks the signed decision (fail-closed), runs the remaining steps, and reports `trigger: resume`. Stale markers (host never rebooted) fail the run and are discarded. `PARTOUT_REBOOT_FLUSH_S` (default 5 s) is the pre-reboot report-flush grace.
 16. **M4 — Governance** (local user auth ✅ done — see below): approvals engine (`require_approval` currently fails closed with
     "not yet available — M4"), full policy surface, MCP server (R11) + write tools.
 17. ~~**Observe layer (§6)**~~ ✅ Done (M5) — fact collectors + `host_facts` merge + read APIs + Web UI pages. Remaining: M6 alert engine, MCP read tools (with the R11 server).

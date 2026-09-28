@@ -286,7 +286,7 @@ A **task** is a small, idempotent, ordered list of steps. Steps are **intent**, 
 | `user` / `group` | Ensure user/group exists with declared attrs. |
 | `template` | Render a small template (values from task vars or a secret ref) then `file`. |
 | `assert` | Run a check; fail the task if false (drives convergence). |
-| `reboot` | Reboot with a post-reboot continuation handshake. The agent persists task-run state and a `resume-after-reboot` marker in its local spool; on start it resumes any pending continuation and reports `rebooting → resumed`. |
+| `reboot` | Reboot with a post-reboot continuation handshake. The agent persists task-run state and a `resume-after-reboot` marker in its local data dir (`<data>/resume/<run_id>.json`, 0600); on start — after the first policy bundle loads — it verifies the host actually booted after the marker (uptime check), re-checks the run's signed policy decision via the guardrail (fail-closed), resumes the pending continuation, and reports `rebooting → resumed` (final report carries `trigger: resume`). A host that never rebooted yields a stale marker → the run is reported `failed` and the marker discarded. The reboot command needs host reboot permission (root/sudo/polkit); `PARTOUT_REBOOT_FLUSH_S` (default 5 s) is the grace between marker persistence and the reboot command so the `rebooting` report flushes. |
 
 - Tasks are **declarative and re-runnable**: each step states the desired end-state; the agent
   checks before changing and reports `changed|ok|failed`.
@@ -734,6 +734,12 @@ feature paywall (R14). Consequences that follow from "everything free":
   safety floor (RBAC, policy evaluation, full-fidelity audit) rather than bolting it on.
 - **M2 — Files & sessions:** file browser, transfers, PTY terminal, recording.
 - **M3 — Automation:** jobs, tasks/playbooks, packages, secrets, external data refresh (§6.3).
+  *Shipped complete, including the last two verification-audit gaps: (b) reboot continuation
+  (PRD §5.5 — `reboot` step persists a `resume-after-reboot` marker, reboots, and resumes the
+  remaining steps after boot with `trigger: resume`, fail-closed policy re-check, uptime-based
+  stale-marker detection) and (c) the job-dispatch wire E2E (`JOB_ASSIGN` over a live stream →
+  real agent-side scheduler + guardrail → `JOB_RUN_RESULT` → `job_runs` row, plus selector
+  re-push/unassign reconciliation).*
 - **M4 — Governance:** approvals, full policy, MCP write tools.
 - **M5 — Observe: fact collectors (`R18`–`R20`).** The read side of the loop.
   Agent-side collectors: `factscollect/service.go` (systemd unit state, deps, labels),

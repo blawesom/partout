@@ -295,6 +295,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |
+| `PARTOUT_REBOOT_FLUSH_S` | **5** | (M3) pre-reboot grace for a task `reboot` step (PRD §5.5): the agent waits this long after persisting the resume marker, so the `rebooting` report flushes up the stream before the host goes down |
 
 ### 4.3 `partout ctl` — wired
 
