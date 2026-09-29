@@ -46,6 +46,10 @@ sudo systemctl enable --now partout-server.service
 
 ```bash
 sudo cp partout-agent.service /etc/systemd/system/
+# M8.1: boot guard that supervises the agent's signed self-update
+# (rolls a failed swap back to N-1 before the agent starts).
+sudo cp partout-update-guard.sh /usr/local/sbin/partout-update-guard
+sudo chmod 0755 /usr/local/sbin/partout-update-guard
 sudo mkdir -p /etc/partout
 sudo cp agent.env.example /etc/partout/agent.env
 
@@ -69,6 +73,12 @@ sudo sed -i "s|^PARTOUT_TOKEN=.*|PARTOUT_TOKEN=$TOK|" \
 Start the agent.  After the first enrollment completes (agent.log shows
 "enrolled as ag_…"), **remove the token** from agent.env so the service
 never leaks it.
+
+# Optional (M8.1 self-update): provision the release signing public key so
+# the agent will accept signed self-update directives. Without it the agent
+# refuses every update (fails closed).
+#   sudo sed -i '/^PARTOUT_RELEASE_KEY=/d' /etc/partout/agent.env
+#   echo 'PARTOUT_RELEASE_KEY=<base64 release public key>' >> /etc/partout/agent.env
 
 ```bash
 sudo systemctl daemon-reload

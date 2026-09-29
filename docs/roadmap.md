@@ -217,7 +217,29 @@ Ordering (each step is independently shippable):
      `PARTOUT_RELEASE_KEY` (agent unit env); a locally provisioned key always wins
      over anything server-delivered. `partout ctl update verify` validates a signed
      artifact offline.
-2. **Agent self-swap with rollback** (canary on one host proves it).
+2. **Agent self-swap with rollback** (canary on one host proves it) — ✅ **shipped**
+   (`UPDATE_DIRECTIVE`/`UPDATE_RESULT` stream envelopes; `POST /api/v1/updates/apply`
+   canary dispatch, admin+, audited `update.apply`/`update.result`, SSE
+   `update.result`). Settled deviation from the draft: the artifact transfers
+   over HTTP with a **one-time, TTL-bound, single-use download grant**
+   (`GET /api/v1/updates/grants/{token}`) instead of in-stream chunking — the
+   ~19 MB binary stays off the control stream (no head-of-line blocking), and
+   the grant only grants *access*; the agent still verifies the release
+   signature + sha256 before executing anything. Agent flow: verify signature
+   against `PARTOUT_RELEASE_KEY` (fail-closed when unset) → download → sha256
+   check → `partout.old` N-1 retention → `partout.new` fsync → atomic rename
+   over the running binary → boot marker (`update.json`) → restart
+   (`PARTOUT_UPDATE_RESTART_CMD`, default `systemctl restart partout-agent`).
+   Rollback is double-supervised: a systemd **boot guard**
+   (`deploy/systemd/partout-update-guard.sh`, new `ExecStart`) restores N-1
+   when the marker goes stale or the on-disk binary/target mismatch (a
+   crashlooping N+1 never reaches agent code); the agent re-checks the marker
+   at boot and clears it + reports `phase=verified` on its first stream
+   connect as the target version. Live-verified: no-key refusal, bad-key
+   parse error, wrong-key signature failure (all audited); swap/marker/
+   rollback + guard logic in unit tests (`TestSwapAndRestore`,
+   `TestPostBootCheck`, `TestUpdateGuardScript`). Full systemd swap+restart
+   E2E remains an ops-checklist item (needs a unit-managed host).
    - New `UPDATE` stream envelope (version, artifact reference, signature) → agent:
      verify signature → fetch artifact → write `partout.new` → fsync → `rename` over
      the unit's binary → keep `partout.old` (N-1) → `systemctl restart partout-agent`.

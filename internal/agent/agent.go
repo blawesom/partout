@@ -5,13 +5,19 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +34,7 @@ import (
 	"github.com/blawesom/partout/internal/agent/session"
 	"github.com/blawesom/partout/internal/agent/stream"
 	"github.com/blawesom/partout/internal/agent/task"
+	agentupdate "github.com/blawesom/partout/internal/agent/update"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/spool"
@@ -256,6 +263,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.spoolErr != nil {
 		return fmt.Errorf("agent: offline spool unavailable: %w", a.spoolErr)
 	}
+	// M8.1: resolve the in-flight update marker BEFORE connecting (once per
+	// process). A version mismatch here means the boot guard already rolled
+	// the binary back; the marker is stale and is cleared (+ N-1 restored,
+	// defensively).
+	if a.cfg.DataDir != "" {
+		if _, _, err := agentupdate.PostBootCheck(agentupdate.MarkerPath(a.cfg.DataDir), facts.Version); err != nil {
+			a.log.Printf("agent: update boot marker check: %v", err)
+		}
+	}
 	if a.spool != nil {
 		defer a.spool.Close()
 	}
@@ -307,6 +323,10 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	}
 	defer a.streamC.Close()
 	a.log.Printf("agent: connected to %s", a.cfg.ServerURL)
+
+	// M8.1: a healthy connect as the update's target version means the swap
+	// survived the restart: clear the marker and report phase=verified.
+	a.postConnectUpdateCheck()
 
 	// If the mTLS leaf is expired or within the renewal window, ask the server
 	// for a fresh one (rotation). No-op in plaintext mode or when the leaf is
@@ -706,10 +726,181 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
 			Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_OK, Detail: tc.Serial}}})
 
+	case env.GetUpdateDirective() != nil:
+		dir := env.GetUpdateDirective()
+		// ACK delivery; the update runs off the envelope loop (download +
+		// swap are slow, and the process exits on success).
+		_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
+			Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_OK}}})
+		go a.execUpdate(dir)
+
 	default:
 		return nil
 	}
 	return nil
+}
+
+// maxUpdateArtifact bounds the download (the server enforces the same cap on
+// upload; this is the agent-side guard).
+const maxUpdateArtifact = 100 << 20
+
+// execUpdate (M8.1 step 2) executes a signed self-update directive:
+// verify → download → integrity check → swap (with N-1 retention) → marker →
+// restart. Any failure reports phase=failed and leaves the running binary
+// untouched. On success the process exits and the restart command (systemd)
+// brings up the new version, which clears the marker on first connect.
+func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
+	a.log.Printf("agent: update directive release=%s version=%s arch=%s", dir.ReleaseId, dir.Version, dir.Arch)
+	fail := func(stage, detail string) {
+		a.log.Printf("agent: update %s: %s", stage, detail)
+		a.sendUpEnvelopeNoSpool(&pb.Envelope{
+			Kind: pb.EnvelopeKind_UPDATE_RESULT,
+			Payload: &pb.Envelope_UpdateResult{UpdateResult: &pb.UpdateResult{
+				ReleaseId: dir.ReleaseId, Phase: "failed", Error: stage + ": " + detail,
+			}},
+		})
+	}
+
+	// 1. Signature check against the locally provisioned release key
+	//    (fails closed when no key is set).
+	if err := agentupdate.Verify(dir, a.cfg.ReleaseKey); err != nil {
+		fail("verify", err.Error())
+		return
+	}
+
+	// 2. Download the artifact with the one-time grant (off the stream).
+	ctx, cancel := context.WithTimeout(a.rootCtx, 10*time.Minute)
+	defer cancel()
+	art, err := a.downloadUpdateArtifact(ctx, dir.Grant)
+	if err != nil {
+		fail("download", err.Error())
+		return
+	}
+
+	// 3. The signature binds the sha256; check the bytes we actually got.
+	sum := sha256.Sum256(art)
+	if hex.EncodeToString(sum[:]) != strings.ToLower(dir.Sha256) {
+		fail("integrity", "artifact sha256 mismatch")
+		return
+	}
+
+	// 4. Swap with N-1 retention.
+	bin, err := agentupdate.CurrentBinary()
+	if err != nil {
+		fail("swap", err.Error())
+		return
+	}
+	prevPath, prevSize, err := agentupdate.Swap(bin, art)
+	if err != nil {
+		fail("swap", err.Error())
+		return
+	}
+	if prevSize == 0 {
+		fail("swap", "N-1 retention copy is empty; refusing to restart without a rollback target")
+		return
+	}
+
+	// 5. Marker for the boot guard + the post-boot check on restart.
+	if a.cfg.DataDir != "" {
+		if err := agentupdate.WriteMarker(agentupdate.MarkerPath(a.cfg.DataDir), agentupdate.Marker{
+			TargetVersion: dir.Version, ReleaseID: dir.ReleaseId,
+			PrevBinary: prevPath, StartedAt: time.Now().Unix(),
+		}); err != nil {
+			fail("marker", err.Error())
+			return
+		}
+	}
+
+	a.sendUpEnvelopeNoSpool(&pb.Envelope{
+		Kind: pb.EnvelopeKind_UPDATE_RESULT,
+		Payload: &pb.Envelope_UpdateResult{UpdateResult: &pb.UpdateResult{
+			ReleaseId: dir.ReleaseId, Phase: "swapped",
+		}},
+	})
+	a.log.Printf("agent: update swapped to %s (N-1 kept at %s); restarting via %q", dir.Version, prevPath, a.cfg.UpdateRestartCmd)
+
+	// 6. Restart, then exit. The restart command is issued asynchronously
+	//    (systemctl returns after signaling); systemd kills this process as
+	//    part of the restart. A short sleep lets the command go out first.
+	if a.cfg.UpdateRestartCmd != "" {
+		go func() {
+			if err := osexec.CommandContext(context.Background(), "sh", "-c", a.cfg.UpdateRestartCmd).Run(); err != nil {
+				a.log.Printf("agent: update restart command failed: %v", err)
+			}
+		}()
+	}
+	time.Sleep(250 * time.Millisecond)
+	os.Exit(0)
+}
+
+// downloadUpdateArtifact fetches the release artifact using a one-time
+// download grant. The grant is the credential (no RBAC role); the server
+// validates it is unexpired, unused, and bound to this agent + release.
+func (a *Agent) downloadUpdateArtifact(ctx context.Context, grant string) ([]byte, error) {
+	base := a.cfg.ServerURL
+	if !strings.Contains(base, "://") {
+		scheme := "http"
+		if a.cfg.TLSCAFile != "" {
+			scheme = "https"
+		}
+		base = scheme + "://" + base
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/v1/updates/grants/"+grant, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 10 * time.Minute}
+	if a.cfg.TLSCAFile != "" {
+		t, err := newTLSTransport(a.cfg.TLSCAFile)
+		if err != nil {
+			return nil, err
+		}
+		client.Transport = t
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("artifact download: HTTP %d", resp.StatusCode)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxUpdateArtifact+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxUpdateArtifact {
+		return nil, fmt.Errorf("artifact exceeds %d MiB cap", maxUpdateArtifact>>20)
+	}
+	return b, nil
+}
+
+// postConnectUpdateCheck (M8.1): on a healthy stream connect, if we booted as
+// the update's target version the swap survived the restart — clear the
+// marker and report phase=verified.
+func (a *Agent) postConnectUpdateCheck() {
+	if a.cfg.DataDir == "" {
+		return
+	}
+	markerPath := agentupdate.MarkerPath(a.cfg.DataDir)
+	m, ok, err := agentupdate.ReadMarker(markerPath)
+	if err != nil || !ok {
+		return
+	}
+	if m.TargetVersion != facts.Version {
+		return // the Run() boot check handles the mismatch case
+	}
+	if err := agentupdate.RemoveMarker(markerPath); err != nil {
+		a.log.Printf("agent: update: remove marker: %v", err)
+		return
+	}
+	a.log.Printf("agent: update verified %s (release %s) after restart", facts.Version, m.ReleaseID)
+	a.sendUpEnvelopeNoSpool(&pb.Envelope{
+		Kind: pb.EnvelopeKind_UPDATE_RESULT,
+		Payload: &pb.Envelope_UpdateResult{UpdateResult: &pb.UpdateResult{
+			ReleaseId: m.ReleaseID, Phase: "verified", Version: facts.Version,
+		}},
+	})
 }
 
 // execCommand runs a command, streaming output chunks, then the result.

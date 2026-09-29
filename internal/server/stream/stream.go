@@ -54,6 +54,11 @@ type Handler struct {
 	pkgMu      sync.Mutex
 	pkgPending map[string]chan *pb.PkgResult
 
+	// updateMu guards updateGrants: one-time artifact download grants
+	// (M8.1, PRD §11).
+	updateMu     sync.Mutex
+	updateGrants map[string]updateGrant
+
 	// taskMu guards taskPending: run_id -> result channel for synchronous
 	// task request/response over the stream (M3, PRD §5.5).
 	taskMu      sync.Mutex
@@ -476,6 +481,22 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 			h.log.Printf("stream: tls renew %s: %v", sess.AgentID, err)
 		} else {
 			h.log.Printf("stream: tls renewed %s (serial %s)", sess.AgentID, serial)
+		}
+	case msg.GetUpdateResult() != nil:
+		// M8.1 update outcome (step 2). Audit + SSE so the control plane and
+		// UI can watch the canary; the step-3 run state machine consumes the
+		// same event.
+		ur := msg.GetUpdateResult()
+		h.log.Printf("stream: update result %s (release %s, error=%q)", ur.Phase, ur.ReleaseId, ur.Error)
+		_ = h.st.AppendAudit(store.AuditEvent{
+			TS: time.Now().Unix(), Kind: "update.result", Actor: "agent", AgentID: sess.AgentID,
+			Payload: fmt.Sprintf(`{"release_id":%q,"phase":%q,"error":%q,"version":%q}`,
+				ur.ReleaseId, ur.Phase, ur.Error, ur.Version),
+		})
+		if h.sse != nil {
+			h.sse.Emit("update.result", map[string]string{
+				"agent_id": sess.AgentID, "release_id": ur.ReleaseId, "phase": ur.Phase,
+			})
 		}
 	case msg.GetFileOpResult() != nil:
 		fr := msg.GetFileOpResult()

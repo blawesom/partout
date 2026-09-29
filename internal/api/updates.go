@@ -18,7 +18,9 @@ import (
 	"strings"
 
 	"github.com/blawesom/partout/internal/id"
+	"github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/release"
+	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -33,6 +35,9 @@ func (h *Handler) RegisterUpdates(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/updates/releases/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetRelease)))
 	mux.Handle("GET /api/v1/updates/releases/{id}/artifact", h.requireRole(roleOperator)(http.HandlerFunc(h.handleReleaseArtifact)))
 	mux.Handle("DELETE /api/v1/updates/releases/{id}", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleDeleteRelease)))
+	// M8.1 step 2: canary apply + one-time artifact download grants.
+	mux.Handle("POST /api/v1/updates/apply", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleApplyUpdate)))
+	mux.Handle("GET /api/v1/updates/grants/{token}", http.HandlerFunc(h.handleGrantArtifact))
 }
 
 // releaseEntry is the wire shape (never includes the artifact).
@@ -211,4 +216,106 @@ func (h *Handler) handleDeleteRelease(w http.ResponseWriter, r *http.Request) {
 	actor, _ := h.actorFor(r)
 	h.audit("update.release.deleted", actor, map[string]string{"id": id})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ---- M8.1 step 2: canary apply + artifact download grants ------------------
+
+type applyUpdateBody struct {
+	AgentID   string `json:"agent_id"`
+	ReleaseID string `json:"release_id"`
+}
+
+// handleApplyUpdate dispatches a signed update directive to one connected
+// agent (the canary path). The agent verifies the release signature against
+// its own provisioned key before downloading or executing anything.
+func (h *Handler) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
+	var body applyUpdateBody
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body", nil)
+		return
+	}
+	body.AgentID = strings.TrimSpace(body.AgentID)
+	body.ReleaseID = strings.TrimSpace(body.ReleaseID)
+	if body.AgentID == "" || body.ReleaseID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "agent_id and release_id are required", nil)
+		return
+	}
+	rel, err := h.st.GetRelease(body.ReleaseID)
+	if errors.Is(err, store.ErrNoRelease) {
+		writeError(w, http.StatusNotFound, "not_found", "release not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to get release", nil)
+		return
+	}
+	if rel.Kind != string(release.KindAgent) {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"only agent-kind releases can be applied to a host (got kind="+rel.Kind+")", nil)
+		return
+	}
+	if _, err := h.st.Agent(body.AgentID); err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to get host", nil)
+		return
+	}
+	grant, err := h.streamH.IssueUpdateGrant(body.AgentID, rel.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to mint update grant", nil)
+		return
+	}
+	dir := &proto.UpdateDirective{
+		ReleaseId: rel.ID, Version: rel.Version, Arch: rel.Arch, Kind: rel.Kind,
+		Sha256: rel.SHA256, Signature: rel.Signature, Grant: grant,
+	}
+	if err := h.streamH.SendUpdateDirective(body.AgentID, dir); err != nil {
+		if errors.Is(err, stream.ErrAgentOffline) {
+			writeError(w, http.StatusConflict, "agent_offline",
+				"host is not connected (queued rollout delivery lands in M8.1 step 3)", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to dispatch update", nil)
+		return
+	}
+	actor, _ := h.actorFor(r)
+	h.audit("update.apply", actor, map[string]string{
+		"agent_id": body.AgentID, "release_id": rel.ID, "version": rel.Version,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "dispatched", "agent_id": body.AgentID, "release_id": rel.ID})
+}
+
+// handleGrantArtifact streams a release artifact to the holder of a valid
+// one-time grant. The grant is the credential (no RBAC role); it is
+// single-use, TTL-bound, and minted only for a specific agent+release. This
+// keeps the ~19 MB binary off the control stream.
+func (h *Handler) handleGrantArtifact(w http.ResponseWriter, r *http.Request) {
+	tok := r.PathValue("token")
+	agentID, releaseID, ok := h.streamH.RedeemUpdateGrant(tok)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "invalid_grant", "grant unknown, expired, or already used", nil)
+		return
+	}
+	rel, err := h.st.GetRelease(releaseID)
+	if errors.Is(err, store.ErrNoRelease) {
+		writeError(w, http.StatusNotFound, "not_found", "release not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to get release", nil)
+		return
+	}
+	_ = agentID // bound at mint; the stream already delivered the directive to this agent
+	h.audit("update.artifact.grant", agentID, map[string]string{
+		"release_id": rel.ID, "version": rel.Version, "kind": rel.Kind,
+	})
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(rel.Artifact)))
+	w.Header().Set("X-Partout-Sha256", rel.SHA256)
+	w.Header().Set("X-Partout-Version", rel.Version)
+	w.Header().Set("X-Partout-Signature", rel.Signature)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(rel.Artifact)
 }

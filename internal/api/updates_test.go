@@ -43,6 +43,125 @@ func releaseUploadBody(m release.Manifest, sigB64 string, artifact []byte) strin
 		`","artifact_b64":"` + base64.StdEncoding.EncodeToString(artifact) + `"}`
 }
 
+func updateTestServer(t *testing.T) (*store.Store, *stream.Handler, *httptest.Server) {
+	t.Helper()
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sseB := sse.New()
+	sh := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	apiH := api.New(st, sh, sseB, log.New(io.Discard, "api: ", 0))
+	srv := httptest.NewServer(apiH)
+	t.Cleanup(srv.Close)
+	return st, sh, srv
+}
+
+// TestUpdateApplyOffline verifies the canary apply endpoint: dispatch to a
+// not-connected agent is 409 (queued delivery lands in step 3), unknown
+// release is 404, and a server-kind release is refused for host apply.
+func TestUpdateApplyOffline(t *testing.T) {
+	st, _, srv := updateTestServer(t)
+
+	if err := st.UpsertAgent(store.Agent{ID: "ag_up", UUID: "u-up"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	artifact := []byte("fake binary")
+	sum := sha256.Sum256(artifact)
+	if err := st.InsertRelease(store.Release{
+		ID: "rel_a", Version: "v1", Arch: "linux-amd64", Kind: "agent",
+		SHA256: hex.EncodeToString(sum[:]), Signature: strings.Repeat("A", 88),
+		Artifact: artifact, UploadedBy: "admin",
+	}); err != nil {
+		t.Fatalf("InsertRelease: %v", err)
+	}
+	if err := st.InsertRelease(store.Release{
+		ID: "rel_s", Version: "v1", Arch: "linux-amd64", Kind: "server",
+		SHA256: hex.EncodeToString(sum[:]), Signature: strings.Repeat("A", 88),
+		Artifact: artifact, UploadedBy: "admin",
+	}); err != nil {
+		t.Fatalf("InsertRelease: %v", err)
+	}
+
+	// Offline agent → 409.
+	code, e := labelsReq(t, "POST", srv.URL+"/api/v1/updates/apply",
+		`{"agent_id":"ag_up","release_id":"rel_a"}`)
+	if code != http.StatusConflict {
+		t.Errorf("apply offline = %d (%v), want 409", code, e)
+	}
+	// Unknown release → 404.
+	if code, _ := labelsReq(t, "POST", srv.URL+"/api/v1/updates/apply",
+		`{"agent_id":"ag_up","release_id":"rel_nope"}`); code != http.StatusNotFound {
+		t.Errorf("apply unknown release = %d, want 404", code)
+	}
+	// Unknown host → 404.
+	if code, _ := labelsReq(t, "POST", srv.URL+"/api/v1/updates/apply",
+		`{"agent_id":"ag_nope","release_id":"rel_a"}`); code != http.StatusNotFound {
+		t.Errorf("apply unknown host = %d, want 404", code)
+	}
+	// Server-kind release → 400 (never applied to a host).
+	if code, _ := labelsReq(t, "POST", srv.URL+"/api/v1/updates/apply",
+		`{"agent_id":"ag_up","release_id":"rel_s"}`); code != http.StatusBadRequest {
+		t.Errorf("apply server-kind = %d, want 400", code)
+	}
+}
+
+// TestUpdateGrantArtifact verifies the one-time artifact download: a minted
+// grant streams the exact artifact with integrity headers, and the grant
+// cannot be reused.
+func TestUpdateGrantArtifact(t *testing.T) {
+	st, sh, srv := updateTestServer(t)
+
+	artifact := []byte("grant artifact bytes")
+	sum := sha256.Sum256(artifact)
+	if err := st.InsertRelease(store.Release{
+		ID: "rel_g", Version: "v2", Arch: "linux-amd64", Kind: "agent",
+		SHA256: hex.EncodeToString(sum[:]), Signature: strings.Repeat("B", 88),
+		Artifact: artifact, UploadedBy: "admin",
+	}); err != nil {
+		t.Fatalf("InsertRelease: %v", err)
+	}
+
+	tok, err := sh.IssueUpdateGrant("ag_up", "rel_g")
+	if err != nil {
+		t.Fatalf("IssueUpdateGrant: %v", err)
+	}
+
+	req, _ := http.NewRequest("GET", srv.URL+"/api/v1/updates/grants/"+tok, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("grant download: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, artifact) {
+		t.Fatalf("grant download = %d, %d bytes (want %d)", resp.StatusCode, len(got), len(artifact))
+	}
+	if resp.Header.Get("X-Partout-Sha256") != hex.EncodeToString(sum[:]) {
+		t.Error("X-Partout-Sha256 header missing/incorrect")
+	}
+
+	// Single-use: the same grant 401s on reuse.
+	req2, _ := http.NewRequest("GET", srv.URL+"/api/v1/updates/grants/"+tok, nil)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("grant reuse = %d, want 401", resp2.StatusCode)
+	}
+
+	// Unknown grant → 401.
+	req3, _ := http.NewRequest("GET", srv.URL+"/api/v1/updates/grants/deadbeef", nil)
+	resp3, _ := http.DefaultClient.Do(req3)
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unknown grant = %d, want 401", resp3.StatusCode)
+	}
+}
+
 // TestUpdateReleaseLifecycle verifies the M8.1 release store: upload (with
 // sha256 + signature checks), list, get, artifact download with integrity
 // headers, duplicate conflict, and delete.

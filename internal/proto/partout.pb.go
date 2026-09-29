@@ -70,6 +70,9 @@ const (
 	// TLS rotation (v1.x)
 	EnvelopeKind_TLS_CERT  EnvelopeKind = 28 // down: server delivers a freshly signed mTLS leaf
 	EnvelopeKind_TLS_RENEW EnvelopeKind = 29 // up: agent requests a fresh leaf (expired/near-expiry)
+	// M8.1 updates
+	EnvelopeKind_UPDATE_DIRECTIVE EnvelopeKind = 30 // down: signed update directive (metadata + download grant)
+	EnvelopeKind_UPDATE_RESULT    EnvelopeKind = 31 // up: update outcome (failed | swapped | verified)
 	// Handshake (per stream)
 	EnvelopeKind_CHALLENGE  EnvelopeKind = 40 // down: server issues
 	EnvelopeKind_AUTH_PROOF EnvelopeKind = 41 // up: agent replies
@@ -108,6 +111,8 @@ var (
 		27: "OBSERVE_FACTS",
 		28: "TLS_CERT",
 		29: "TLS_RENEW",
+		30: "UPDATE_DIRECTIVE",
+		31: "UPDATE_RESULT",
 		40: "CHALLENGE",
 		41: "AUTH_PROOF",
 	}
@@ -142,6 +147,8 @@ var (
 		"OBSERVE_FACTS":             27,
 		"TLS_CERT":                  28,
 		"TLS_RENEW":                 29,
+		"UPDATE_DIRECTIVE":          30,
+		"UPDATE_RESULT":             31,
 		"CHALLENGE":                 40,
 		"AUTH_PROOF":                41,
 	}
@@ -419,6 +426,8 @@ type Envelope struct {
 	//	*Envelope_JobAssign
 	//	*Envelope_JobRunResult
 	//	*Envelope_JobUnassign
+	//	*Envelope_UpdateDirective
+	//	*Envelope_UpdateResult
 	//	*Envelope_ObserveFacts
 	//	*Envelope_Command
 	//	*Envelope_PolicyBundle
@@ -647,6 +656,24 @@ func (x *Envelope) GetJobUnassign() *JobUnassignment {
 	return nil
 }
 
+func (x *Envelope) GetUpdateDirective() *UpdateDirective {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_UpdateDirective); ok {
+			return x.UpdateDirective
+		}
+	}
+	return nil
+}
+
+func (x *Envelope) GetUpdateResult() *UpdateResult {
+	if x != nil {
+		if x, ok := x.Payload.(*Envelope_UpdateResult); ok {
+			return x.UpdateResult
+		}
+	}
+	return nil
+}
+
 func (x *Envelope) GetObserveFacts() *ObserveFacts {
 	if x != nil {
 		if x, ok := x.Payload.(*Envelope_ObserveFacts); ok {
@@ -856,6 +883,15 @@ type Envelope_JobUnassign struct {
 	JobUnassign *JobUnassignment `protobuf:"bytes,45,opt,name=job_unassign,json=jobUnassign,proto3,oneof"` // down: job unassignment
 }
 
+type Envelope_UpdateDirective struct {
+	// M8.1 updates
+	UpdateDirective *UpdateDirective `protobuf:"bytes,47,opt,name=update_directive,json=updateDirective,proto3,oneof"` // down: signed update directive
+}
+
+type Envelope_UpdateResult struct {
+	UpdateResult *UpdateResult `protobuf:"bytes,48,opt,name=update_result,json=updateResult,proto3,oneof"` // up: update outcome
+}
+
 type Envelope_ObserveFacts struct {
 	// Up: observe facts
 	ObserveFacts *ObserveFacts `protobuf:"bytes,46,opt,name=observe_facts,json=observeFacts,proto3,oneof"` // up: structured facts (services, configs, certs)
@@ -953,6 +989,10 @@ func (*Envelope_JobAssign) isEnvelope_Payload() {}
 func (*Envelope_JobRunResult) isEnvelope_Payload() {}
 
 func (*Envelope_JobUnassign) isEnvelope_Payload() {}
+
+func (*Envelope_UpdateDirective) isEnvelope_Payload() {}
+
+func (*Envelope_UpdateResult) isEnvelope_Payload() {}
 
 func (*Envelope_ObserveFacts) isEnvelope_Payload() {}
 
@@ -2775,6 +2815,173 @@ func (x *JobRunResult) GetRetryOf() int32 {
 	return 0
 }
 
+// UpdateDirective instructs an agent to update itself to a signed release
+// (M8.1). It carries the release manifest + signature and a one-time
+// download grant for the artifact. The agent verifies the Ed25519 signature
+// over "version|arch|kind|sha256" against its locally provisioned release
+// public key BEFORE downloading or executing anything; the grant only grants
+// access, the signature establishes trust.
+type UpdateDirective struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ReleaseId     string                 `protobuf:"bytes,1,opt,name=release_id,json=releaseId,proto3" json:"release_id,omitempty"` // update_releases id (correlation + grant target)
+	Version       string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`                      // target version
+	Arch          string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`                            // e.g. linux-amd64 (agent must match)
+	Kind          string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`                            // "agent" (a server-kind artifact is never dispatched)
+	Sha256        string                 `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`                        // hex, of the artifact
+	Signature     string                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"`                  // base64 Ed25519 over the canonical manifest
+	Grant         string                 `protobuf:"bytes,7,opt,name=grant,proto3" json:"grant,omitempty"`                          // one-time, TTL-bound artifact download grant
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateDirective) Reset() {
+	*x = UpdateDirective{}
+	mi := &file_partout_partout_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateDirective) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateDirective) ProtoMessage() {}
+
+func (x *UpdateDirective) ProtoReflect() protoreflect.Message {
+	mi := &file_partout_partout_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateDirective.ProtoReflect.Descriptor instead.
+func (*UpdateDirective) Descriptor() ([]byte, []int) {
+	return file_partout_partout_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *UpdateDirective) GetReleaseId() string {
+	if x != nil {
+		return x.ReleaseId
+	}
+	return ""
+}
+
+func (x *UpdateDirective) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *UpdateDirective) GetArch() string {
+	if x != nil {
+		return x.Arch
+	}
+	return ""
+}
+
+func (x *UpdateDirective) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *UpdateDirective) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *UpdateDirective) GetSignature() string {
+	if x != nil {
+		return x.Signature
+	}
+	return ""
+}
+
+func (x *UpdateDirective) GetGrant() string {
+	if x != nil {
+		return x.Grant
+	}
+	return ""
+}
+
+// UpdateResult is the agent's report for an update directive (up).
+type UpdateResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ReleaseId     string                 `protobuf:"bytes,1,opt,name=release_id,json=releaseId,proto3" json:"release_id,omitempty"` // from the directive
+	Phase         string                 `protobuf:"bytes,2,opt,name=phase,proto3" json:"phase,omitempty"`                          // failed | swapped | verified
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`                          // failure reason (empty on success)
+	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`                      // version running (phase=verified: after restart)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateResult) Reset() {
+	*x = UpdateResult{}
+	mi := &file_partout_partout_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateResult) ProtoMessage() {}
+
+func (x *UpdateResult) ProtoReflect() protoreflect.Message {
+	mi := &file_partout_partout_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateResult.ProtoReflect.Descriptor instead.
+func (*UpdateResult) Descriptor() ([]byte, []int) {
+	return file_partout_partout_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *UpdateResult) GetReleaseId() string {
+	if x != nil {
+		return x.ReleaseId
+	}
+	return ""
+}
+
+func (x *UpdateResult) GetPhase() string {
+	if x != nil {
+		return x.Phase
+	}
+	return ""
+}
+
+func (x *UpdateResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *UpdateResult) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
 // ---- Observe layer (M5, R18–R20) ---------------------------------------------
 // Structured fact uploads from the agent to the server. The server merges the
 // JSON blob into the host's host_facts document, alongside the flat
@@ -2796,7 +3003,7 @@ type ObserveFacts struct {
 
 func (x *ObserveFacts) Reset() {
 	*x = ObserveFacts{}
-	mi := &file_partout_partout_proto_msgTypes[22]
+	mi := &file_partout_partout_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2808,7 +3015,7 @@ func (x *ObserveFacts) String() string {
 func (*ObserveFacts) ProtoMessage() {}
 
 func (x *ObserveFacts) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[22]
+	mi := &file_partout_partout_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2821,7 +3028,7 @@ func (x *ObserveFacts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObserveFacts.ProtoReflect.Descriptor instead.
 func (*ObserveFacts) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{22}
+	return file_partout_partout_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ObserveFacts) GetKind() string {
@@ -2866,7 +3073,7 @@ type FileOpResult struct {
 
 func (x *FileOpResult) Reset() {
 	*x = FileOpResult{}
-	mi := &file_partout_partout_proto_msgTypes[23]
+	mi := &file_partout_partout_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2878,7 +3085,7 @@ func (x *FileOpResult) String() string {
 func (*FileOpResult) ProtoMessage() {}
 
 func (x *FileOpResult) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[23]
+	mi := &file_partout_partout_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2891,7 +3098,7 @@ func (x *FileOpResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileOpResult.ProtoReflect.Descriptor instead.
 func (*FileOpResult) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{23}
+	return file_partout_partout_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *FileOpResult) GetOpId() string {
@@ -2994,7 +3201,7 @@ type FileStat struct {
 
 func (x *FileStat) Reset() {
 	*x = FileStat{}
-	mi := &file_partout_partout_proto_msgTypes[24]
+	mi := &file_partout_partout_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3006,7 +3213,7 @@ func (x *FileStat) String() string {
 func (*FileStat) ProtoMessage() {}
 
 func (x *FileStat) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[24]
+	mi := &file_partout_partout_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3019,7 +3226,7 @@ func (x *FileStat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileStat.ProtoReflect.Descriptor instead.
 func (*FileStat) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{24}
+	return file_partout_partout_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *FileStat) GetSize() int64 {
@@ -3092,7 +3299,7 @@ type FileEntry struct {
 
 func (x *FileEntry) Reset() {
 	*x = FileEntry{}
-	mi := &file_partout_partout_proto_msgTypes[25]
+	mi := &file_partout_partout_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3104,7 +3311,7 @@ func (x *FileEntry) String() string {
 func (*FileEntry) ProtoMessage() {}
 
 func (x *FileEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[25]
+	mi := &file_partout_partout_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3117,7 +3324,7 @@ func (x *FileEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileEntry.ProtoReflect.Descriptor instead.
 func (*FileEntry) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{25}
+	return file_partout_partout_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *FileEntry) GetName() string {
@@ -3177,7 +3384,7 @@ type Decision struct {
 
 func (x *Decision) Reset() {
 	*x = Decision{}
-	mi := &file_partout_partout_proto_msgTypes[26]
+	mi := &file_partout_partout_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3189,7 +3396,7 @@ func (x *Decision) String() string {
 func (*Decision) ProtoMessage() {}
 
 func (x *Decision) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[26]
+	mi := &file_partout_partout_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3202,7 +3409,7 @@ func (x *Decision) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Decision.ProtoReflect.Descriptor instead.
 func (*Decision) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{26}
+	return file_partout_partout_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Decision) GetRunId() string {
@@ -3272,7 +3479,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_partout_partout_proto_msgTypes[27]
+	mi := &file_partout_partout_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3284,7 +3491,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[27]
+	mi := &file_partout_partout_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3297,7 +3504,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{27}
+	return file_partout_partout_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *Command) GetRunId() string {
@@ -3385,7 +3592,7 @@ type PolicyBundle struct {
 
 func (x *PolicyBundle) Reset() {
 	*x = PolicyBundle{}
-	mi := &file_partout_partout_proto_msgTypes[28]
+	mi := &file_partout_partout_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3397,7 +3604,7 @@ func (x *PolicyBundle) String() string {
 func (*PolicyBundle) ProtoMessage() {}
 
 func (x *PolicyBundle) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[28]
+	mi := &file_partout_partout_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3410,7 +3617,7 @@ func (x *PolicyBundle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyBundle.ProtoReflect.Descriptor instead.
 func (*PolicyBundle) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{28}
+	return file_partout_partout_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *PolicyBundle) GetVersion() uint64 {
@@ -3471,7 +3678,7 @@ type Revoke struct {
 
 func (x *Revoke) Reset() {
 	*x = Revoke{}
-	mi := &file_partout_partout_proto_msgTypes[29]
+	mi := &file_partout_partout_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3483,7 +3690,7 @@ func (x *Revoke) String() string {
 func (*Revoke) ProtoMessage() {}
 
 func (x *Revoke) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[29]
+	mi := &file_partout_partout_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3496,7 +3703,7 @@ func (x *Revoke) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Revoke.ProtoReflect.Descriptor instead.
 func (*Revoke) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{29}
+	return file_partout_partout_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *Revoke) GetReason() string {
@@ -3517,7 +3724,7 @@ type Cancel struct {
 
 func (x *Cancel) Reset() {
 	*x = Cancel{}
-	mi := &file_partout_partout_proto_msgTypes[30]
+	mi := &file_partout_partout_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3529,7 +3736,7 @@ func (x *Cancel) String() string {
 func (*Cancel) ProtoMessage() {}
 
 func (x *Cancel) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[30]
+	mi := &file_partout_partout_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3542,7 +3749,7 @@ func (x *Cancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cancel.ProtoReflect.Descriptor instead.
 func (*Cancel) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{30}
+	return file_partout_partout_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Cancel) GetRunId() string {
@@ -3571,7 +3778,7 @@ type SessionOpen struct {
 
 func (x *SessionOpen) Reset() {
 	*x = SessionOpen{}
-	mi := &file_partout_partout_proto_msgTypes[31]
+	mi := &file_partout_partout_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3583,7 +3790,7 @@ func (x *SessionOpen) String() string {
 func (*SessionOpen) ProtoMessage() {}
 
 func (x *SessionOpen) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[31]
+	mi := &file_partout_partout_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3596,7 +3803,7 @@ func (x *SessionOpen) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionOpen.ProtoReflect.Descriptor instead.
 func (*SessionOpen) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{31}
+	return file_partout_partout_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *SessionOpen) GetSessionId() string {
@@ -3672,7 +3879,7 @@ type SessionInput struct {
 
 func (x *SessionInput) Reset() {
 	*x = SessionInput{}
-	mi := &file_partout_partout_proto_msgTypes[32]
+	mi := &file_partout_partout_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3684,7 +3891,7 @@ func (x *SessionInput) String() string {
 func (*SessionInput) ProtoMessage() {}
 
 func (x *SessionInput) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[32]
+	mi := &file_partout_partout_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3697,7 +3904,7 @@ func (x *SessionInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionInput.ProtoReflect.Descriptor instead.
 func (*SessionInput) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{32}
+	return file_partout_partout_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *SessionInput) GetSessionId() string {
@@ -3725,7 +3932,7 @@ type SessionResize struct {
 
 func (x *SessionResize) Reset() {
 	*x = SessionResize{}
-	mi := &file_partout_partout_proto_msgTypes[33]
+	mi := &file_partout_partout_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3737,7 +3944,7 @@ func (x *SessionResize) String() string {
 func (*SessionResize) ProtoMessage() {}
 
 func (x *SessionResize) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[33]
+	mi := &file_partout_partout_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3750,7 +3957,7 @@ func (x *SessionResize) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionResize.ProtoReflect.Descriptor instead.
 func (*SessionResize) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{33}
+	return file_partout_partout_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *SessionResize) GetSessionId() string {
@@ -3783,7 +3990,7 @@ type SessionClose struct {
 
 func (x *SessionClose) Reset() {
 	*x = SessionClose{}
-	mi := &file_partout_partout_proto_msgTypes[34]
+	mi := &file_partout_partout_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3795,7 +4002,7 @@ func (x *SessionClose) String() string {
 func (*SessionClose) ProtoMessage() {}
 
 func (x *SessionClose) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[34]
+	mi := &file_partout_partout_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3808,7 +4015,7 @@ func (x *SessionClose) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionClose.ProtoReflect.Descriptor instead.
 func (*SessionClose) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{34}
+	return file_partout_partout_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *SessionClose) GetSessionId() string {
@@ -3829,7 +4036,7 @@ type Challenge struct {
 
 func (x *Challenge) Reset() {
 	*x = Challenge{}
-	mi := &file_partout_partout_proto_msgTypes[35]
+	mi := &file_partout_partout_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3841,7 +4048,7 @@ func (x *Challenge) String() string {
 func (*Challenge) ProtoMessage() {}
 
 func (x *Challenge) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[35]
+	mi := &file_partout_partout_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3854,7 +4061,7 @@ func (x *Challenge) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Challenge.ProtoReflect.Descriptor instead.
 func (*Challenge) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{35}
+	return file_partout_partout_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *Challenge) GetNonce() []byte {
@@ -3883,7 +4090,7 @@ type AuthProof struct {
 
 func (x *AuthProof) Reset() {
 	*x = AuthProof{}
-	mi := &file_partout_partout_proto_msgTypes[36]
+	mi := &file_partout_partout_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3895,7 +4102,7 @@ func (x *AuthProof) String() string {
 func (*AuthProof) ProtoMessage() {}
 
 func (x *AuthProof) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[36]
+	mi := &file_partout_partout_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3908,7 +4115,7 @@ func (x *AuthProof) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthProof.ProtoReflect.Descriptor instead.
 func (*AuthProof) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{36}
+	return file_partout_partout_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *AuthProof) GetAgentUuid() string {
@@ -3948,7 +4155,7 @@ type TlsCert struct {
 
 func (x *TlsCert) Reset() {
 	*x = TlsCert{}
-	mi := &file_partout_partout_proto_msgTypes[37]
+	mi := &file_partout_partout_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3960,7 +4167,7 @@ func (x *TlsCert) String() string {
 func (*TlsCert) ProtoMessage() {}
 
 func (x *TlsCert) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[37]
+	mi := &file_partout_partout_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3973,7 +4180,7 @@ func (x *TlsCert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TlsCert.ProtoReflect.Descriptor instead.
 func (*TlsCert) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{37}
+	return file_partout_partout_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *TlsCert) GetLeafCert() string {
@@ -4009,7 +4216,7 @@ type TlsRenew struct {
 
 func (x *TlsRenew) Reset() {
 	*x = TlsRenew{}
-	mi := &file_partout_partout_proto_msgTypes[38]
+	mi := &file_partout_partout_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4021,7 +4228,7 @@ func (x *TlsRenew) String() string {
 func (*TlsRenew) ProtoMessage() {}
 
 func (x *TlsRenew) ProtoReflect() protoreflect.Message {
-	mi := &file_partout_partout_proto_msgTypes[38]
+	mi := &file_partout_partout_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4034,7 +4241,7 @@ func (x *TlsRenew) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TlsRenew.ProtoReflect.Descriptor instead.
 func (*TlsRenew) Descriptor() ([]byte, []int) {
-	return file_partout_partout_proto_rawDescGZIP(), []int{38}
+	return file_partout_partout_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *TlsRenew) GetReason() string {
@@ -4049,7 +4256,7 @@ var File_partout_partout_proto protoreflect.FileDescriptor
 const file_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"\x15partout/partout.proto\x12\n" +
-	"partout.v1\"\x89\x0f\n" +
+	"partout.v1\"\x94\x10\n" +
 	"\bEnvelope\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12,\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x18.partout.v1.EnvelopeKindR\x04kind\x12\x10\n" +
@@ -4072,7 +4279,9 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"job_assign\x18+ \x01(\v2\x19.partout.v1.JobAssignmentH\x00R\tjobAssign\x12@\n" +
 	"\x0ejob_run_result\x18, \x01(\v2\x18.partout.v1.JobRunResultH\x00R\fjobRunResult\x12@\n" +
-	"\fjob_unassign\x18- \x01(\v2\x1b.partout.v1.JobUnassignmentH\x00R\vjobUnassign\x12?\n" +
+	"\fjob_unassign\x18- \x01(\v2\x1b.partout.v1.JobUnassignmentH\x00R\vjobUnassign\x12H\n" +
+	"\x10update_directive\x18/ \x01(\v2\x1b.partout.v1.UpdateDirectiveH\x00R\x0fupdateDirective\x12?\n" +
+	"\rupdate_result\x180 \x01(\v2\x18.partout.v1.UpdateResultH\x00R\fupdateResult\x12?\n" +
 	"\robserve_facts\x18. \x01(\v2\x18.partout.v1.ObserveFactsH\x00R\fobserveFacts\x12/\n" +
 	"\acommand\x18\x1e \x01(\v2\x13.partout.v1.CommandH\x00R\acommand\x12?\n" +
 	"\rpolicy_bundle\x18\x1f \x01(\v2\x18.partout.v1.PolicyBundleH\x00R\fpolicyBundle\x12,\n" +
@@ -4266,7 +4475,22 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\vfinished_at\x18\a \x01(\x03R\n" +
 	"finishedAt\x12\x18\n" +
 	"\atrigger\x18\b \x01(\tR\atrigger\x12\x19\n" +
-	"\bretry_of\x18\t \x01(\x05R\aretryOf\"O\n" +
+	"\bretry_of\x18\t \x01(\x05R\aretryOf\"\xbe\x01\n" +
+	"\x0fUpdateDirective\x12\x1d\n" +
+	"\n" +
+	"release_id\x18\x01 \x01(\tR\treleaseId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\tR\aversion\x12\x12\n" +
+	"\x04arch\x18\x03 \x01(\tR\x04arch\x12\x12\n" +
+	"\x04kind\x18\x04 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06sha256\x18\x05 \x01(\tR\x06sha256\x12\x1c\n" +
+	"\tsignature\x18\x06 \x01(\tR\tsignature\x12\x14\n" +
+	"\x05grant\x18\a \x01(\tR\x05grant\"s\n" +
+	"\fUpdateResult\x12\x1d\n" +
+	"\n" +
+	"release_id\x18\x01 \x01(\tR\treleaseId\x12\x14\n" +
+	"\x05phase\x18\x02 \x01(\tR\x05phase\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\tR\aversion\"O\n" +
 	"\fObserveFacts\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x12\n" +
 	"\x04json\x18\x02 \x01(\tR\x04json\x12\x17\n" +
@@ -4387,7 +4611,7 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\aca_cert\x18\x02 \x01(\tR\x06caCert\x12\x16\n" +
 	"\x06serial\x18\x03 \x01(\tR\x06serial\"\"\n" +
 	"\bTlsRenew\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason*\xb7\x04\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason*\xe0\x04\n" +
 	"\fEnvelopeKind\x12\x1d\n" +
 	"\x19ENVELOPE_KIND_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tHEARTBEAT\x10\x01\x12\x0f\n" +
@@ -4424,7 +4648,9 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\x0eJOB_RUN_RESULT\x10\x1a\x12\x11\n" +
 	"\rOBSERVE_FACTS\x10\x1b\x12\f\n" +
 	"\bTLS_CERT\x10\x1c\x12\r\n" +
-	"\tTLS_RENEW\x10\x1d\x12\r\n" +
+	"\tTLS_RENEW\x10\x1d\x12\x14\n" +
+	"\x10UPDATE_DIRECTIVE\x10\x1e\x12\x11\n" +
+	"\rUPDATE_RESULT\x10\x1f\x12\r\n" +
 	"\tCHALLENGE\x10(\x12\x0e\n" +
 	"\n" +
 	"AUTH_PROOF\x10)*I\n" +
@@ -4469,7 +4695,7 @@ func file_partout_partout_proto_rawDescGZIP() []byte {
 }
 
 var file_partout_partout_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_partout_partout_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
 var file_partout_partout_proto_goTypes = []any{
 	(EnvelopeKind)(0),         // 0: partout.v1.EnvelopeKind
 	(AckStatus)(0),            // 1: partout.v1.AckStatus
@@ -4498,30 +4724,32 @@ var file_partout_partout_proto_goTypes = []any{
 	(*JobAssignment)(nil),     // 24: partout.v1.JobAssignment
 	(*JobUnassignment)(nil),   // 25: partout.v1.JobUnassignment
 	(*JobRunResult)(nil),      // 26: partout.v1.JobRunResult
-	(*ObserveFacts)(nil),      // 27: partout.v1.ObserveFacts
-	(*FileOpResult)(nil),      // 28: partout.v1.FileOpResult
-	(*FileStat)(nil),          // 29: partout.v1.FileStat
-	(*FileEntry)(nil),         // 30: partout.v1.FileEntry
-	(*Decision)(nil),          // 31: partout.v1.Decision
-	(*Command)(nil),           // 32: partout.v1.Command
-	(*PolicyBundle)(nil),      // 33: partout.v1.PolicyBundle
-	(*Revoke)(nil),            // 34: partout.v1.Revoke
-	(*Cancel)(nil),            // 35: partout.v1.Cancel
-	(*SessionOpen)(nil),       // 36: partout.v1.SessionOpen
-	(*SessionInput)(nil),      // 37: partout.v1.SessionInput
-	(*SessionResize)(nil),     // 38: partout.v1.SessionResize
-	(*SessionClose)(nil),      // 39: partout.v1.SessionClose
-	(*Challenge)(nil),         // 40: partout.v1.Challenge
-	(*AuthProof)(nil),         // 41: partout.v1.AuthProof
-	(*TlsCert)(nil),           // 42: partout.v1.TlsCert
-	(*TlsRenew)(nil),          // 43: partout.v1.TlsRenew
-	nil,                       // 44: partout.v1.FactsBatch.FactsEntry
-	nil,                       // 45: partout.v1.Event.AttrsEntry
-	nil,                       // 46: partout.v1.TaskStep.EnvEntry
-	nil,                       // 47: partout.v1.TaskStep.VarsEntry
-	nil,                       // 48: partout.v1.Command.EnvEntry
-	nil,                       // 49: partout.v1.PolicyBundle.HostTagsEntry
-	nil,                       // 50: partout.v1.SessionOpen.EnvEntry
+	(*UpdateDirective)(nil),   // 27: partout.v1.UpdateDirective
+	(*UpdateResult)(nil),      // 28: partout.v1.UpdateResult
+	(*ObserveFacts)(nil),      // 29: partout.v1.ObserveFacts
+	(*FileOpResult)(nil),      // 30: partout.v1.FileOpResult
+	(*FileStat)(nil),          // 31: partout.v1.FileStat
+	(*FileEntry)(nil),         // 32: partout.v1.FileEntry
+	(*Decision)(nil),          // 33: partout.v1.Decision
+	(*Command)(nil),           // 34: partout.v1.Command
+	(*PolicyBundle)(nil),      // 35: partout.v1.PolicyBundle
+	(*Revoke)(nil),            // 36: partout.v1.Revoke
+	(*Cancel)(nil),            // 37: partout.v1.Cancel
+	(*SessionOpen)(nil),       // 38: partout.v1.SessionOpen
+	(*SessionInput)(nil),      // 39: partout.v1.SessionInput
+	(*SessionResize)(nil),     // 40: partout.v1.SessionResize
+	(*SessionClose)(nil),      // 41: partout.v1.SessionClose
+	(*Challenge)(nil),         // 42: partout.v1.Challenge
+	(*AuthProof)(nil),         // 43: partout.v1.AuthProof
+	(*TlsCert)(nil),           // 44: partout.v1.TlsCert
+	(*TlsRenew)(nil),          // 45: partout.v1.TlsRenew
+	nil,                       // 46: partout.v1.FactsBatch.FactsEntry
+	nil,                       // 47: partout.v1.Event.AttrsEntry
+	nil,                       // 48: partout.v1.TaskStep.EnvEntry
+	nil,                       // 49: partout.v1.TaskStep.VarsEntry
+	nil,                       // 50: partout.v1.Command.EnvEntry
+	nil,                       // 51: partout.v1.PolicyBundle.HostTagsEntry
+	nil,                       // 52: partout.v1.SessionOpen.EnvEntry
 }
 var file_partout_partout_proto_depIdxs = []int32{
 	0,  // 0: partout.v1.Envelope.kind:type_name -> partout.v1.EnvelopeKind
@@ -4533,64 +4761,66 @@ var file_partout_partout_proto_depIdxs = []int32{
 	6,  // 6: partout.v1.Envelope.ack:type_name -> partout.v1.Ack
 	13, // 7: partout.v1.Envelope.session_data:type_name -> partout.v1.SessionData
 	14, // 8: partout.v1.Envelope.session_result:type_name -> partout.v1.SessionResult
-	28, // 9: partout.v1.Envelope.file_op_result:type_name -> partout.v1.FileOpResult
+	30, // 9: partout.v1.Envelope.file_op_result:type_name -> partout.v1.FileOpResult
 	19, // 10: partout.v1.Envelope.pkg_result:type_name -> partout.v1.PkgResult
 	23, // 11: partout.v1.Envelope.task_run_result:type_name -> partout.v1.TaskRunResult
 	21, // 12: partout.v1.Envelope.task_run:type_name -> partout.v1.TaskRun
 	24, // 13: partout.v1.Envelope.job_assign:type_name -> partout.v1.JobAssignment
 	26, // 14: partout.v1.Envelope.job_run_result:type_name -> partout.v1.JobRunResult
 	25, // 15: partout.v1.Envelope.job_unassign:type_name -> partout.v1.JobUnassignment
-	27, // 16: partout.v1.Envelope.observe_facts:type_name -> partout.v1.ObserveFacts
-	32, // 17: partout.v1.Envelope.command:type_name -> partout.v1.Command
-	33, // 18: partout.v1.Envelope.policy_bundle:type_name -> partout.v1.PolicyBundle
-	34, // 19: partout.v1.Envelope.revoke:type_name -> partout.v1.Revoke
-	35, // 20: partout.v1.Envelope.cancel:type_name -> partout.v1.Cancel
-	36, // 21: partout.v1.Envelope.session_open:type_name -> partout.v1.SessionOpen
-	37, // 22: partout.v1.Envelope.session_input:type_name -> partout.v1.SessionInput
-	38, // 23: partout.v1.Envelope.session_resize:type_name -> partout.v1.SessionResize
-	39, // 24: partout.v1.Envelope.session_close:type_name -> partout.v1.SessionClose
-	15, // 25: partout.v1.Envelope.file_op:type_name -> partout.v1.FileOp
-	16, // 26: partout.v1.Envelope.secret_materialize:type_name -> partout.v1.SecretMaterialize
-	18, // 27: partout.v1.Envelope.pkg_op:type_name -> partout.v1.PkgOp
-	40, // 28: partout.v1.Envelope.challenge:type_name -> partout.v1.Challenge
-	41, // 29: partout.v1.Envelope.auth_proof:type_name -> partout.v1.AuthProof
-	42, // 30: partout.v1.Envelope.tls_cert:type_name -> partout.v1.TlsCert
-	43, // 31: partout.v1.Envelope.tls_renew:type_name -> partout.v1.TlsRenew
-	1,  // 32: partout.v1.Ack.status:type_name -> partout.v1.AckStatus
-	44, // 33: partout.v1.FactsBatch.facts:type_name -> partout.v1.FactsBatch.FactsEntry
-	10, // 34: partout.v1.EventsBatch.events:type_name -> partout.v1.Event
-	45, // 35: partout.v1.Event.attrs:type_name -> partout.v1.Event.AttrsEntry
-	2,  // 36: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
-	3,  // 37: partout.v1.FileOp.kind:type_name -> partout.v1.FileOpKind
-	31, // 38: partout.v1.FileOp.decision:type_name -> partout.v1.Decision
-	4,  // 39: partout.v1.PkgOp.kind:type_name -> partout.v1.PkgOpKind
-	31, // 40: partout.v1.PkgOp.decision:type_name -> partout.v1.Decision
-	4,  // 41: partout.v1.PkgResult.kind:type_name -> partout.v1.PkgOpKind
-	17, // 42: partout.v1.PkgResult.updates:type_name -> partout.v1.PkgUpdate
-	17, // 43: partout.v1.PkgResult.before:type_name -> partout.v1.PkgUpdate
-	17, // 44: partout.v1.PkgResult.after:type_name -> partout.v1.PkgUpdate
-	46, // 45: partout.v1.TaskStep.env:type_name -> partout.v1.TaskStep.EnvEntry
-	47, // 46: partout.v1.TaskStep.vars:type_name -> partout.v1.TaskStep.VarsEntry
-	20, // 47: partout.v1.TaskRun.steps:type_name -> partout.v1.TaskStep
-	31, // 48: partout.v1.TaskRun.decision:type_name -> partout.v1.Decision
-	22, // 49: partout.v1.TaskRunResult.steps:type_name -> partout.v1.TaskStepResult
-	20, // 50: partout.v1.JobAssignment.steps:type_name -> partout.v1.TaskStep
-	31, // 51: partout.v1.JobAssignment.decision:type_name -> partout.v1.Decision
-	3,  // 52: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
-	29, // 53: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
-	30, // 54: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
-	48, // 55: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
-	31, // 56: partout.v1.Command.decision:type_name -> partout.v1.Decision
-	49, // 57: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
-	50, // 58: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
-	31, // 59: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
-	5,  // 60: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
-	5,  // 61: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
-	61, // [61:62] is the sub-list for method output_type
-	60, // [60:61] is the sub-list for method input_type
-	60, // [60:60] is the sub-list for extension type_name
-	60, // [60:60] is the sub-list for extension extendee
-	0,  // [0:60] is the sub-list for field type_name
+	27, // 16: partout.v1.Envelope.update_directive:type_name -> partout.v1.UpdateDirective
+	28, // 17: partout.v1.Envelope.update_result:type_name -> partout.v1.UpdateResult
+	29, // 18: partout.v1.Envelope.observe_facts:type_name -> partout.v1.ObserveFacts
+	34, // 19: partout.v1.Envelope.command:type_name -> partout.v1.Command
+	35, // 20: partout.v1.Envelope.policy_bundle:type_name -> partout.v1.PolicyBundle
+	36, // 21: partout.v1.Envelope.revoke:type_name -> partout.v1.Revoke
+	37, // 22: partout.v1.Envelope.cancel:type_name -> partout.v1.Cancel
+	38, // 23: partout.v1.Envelope.session_open:type_name -> partout.v1.SessionOpen
+	39, // 24: partout.v1.Envelope.session_input:type_name -> partout.v1.SessionInput
+	40, // 25: partout.v1.Envelope.session_resize:type_name -> partout.v1.SessionResize
+	41, // 26: partout.v1.Envelope.session_close:type_name -> partout.v1.SessionClose
+	15, // 27: partout.v1.Envelope.file_op:type_name -> partout.v1.FileOp
+	16, // 28: partout.v1.Envelope.secret_materialize:type_name -> partout.v1.SecretMaterialize
+	18, // 29: partout.v1.Envelope.pkg_op:type_name -> partout.v1.PkgOp
+	42, // 30: partout.v1.Envelope.challenge:type_name -> partout.v1.Challenge
+	43, // 31: partout.v1.Envelope.auth_proof:type_name -> partout.v1.AuthProof
+	44, // 32: partout.v1.Envelope.tls_cert:type_name -> partout.v1.TlsCert
+	45, // 33: partout.v1.Envelope.tls_renew:type_name -> partout.v1.TlsRenew
+	1,  // 34: partout.v1.Ack.status:type_name -> partout.v1.AckStatus
+	46, // 35: partout.v1.FactsBatch.facts:type_name -> partout.v1.FactsBatch.FactsEntry
+	10, // 36: partout.v1.EventsBatch.events:type_name -> partout.v1.Event
+	47, // 37: partout.v1.Event.attrs:type_name -> partout.v1.Event.AttrsEntry
+	2,  // 38: partout.v1.CommandOutput.stream:type_name -> partout.v1.OutputStream
+	3,  // 39: partout.v1.FileOp.kind:type_name -> partout.v1.FileOpKind
+	33, // 40: partout.v1.FileOp.decision:type_name -> partout.v1.Decision
+	4,  // 41: partout.v1.PkgOp.kind:type_name -> partout.v1.PkgOpKind
+	33, // 42: partout.v1.PkgOp.decision:type_name -> partout.v1.Decision
+	4,  // 43: partout.v1.PkgResult.kind:type_name -> partout.v1.PkgOpKind
+	17, // 44: partout.v1.PkgResult.updates:type_name -> partout.v1.PkgUpdate
+	17, // 45: partout.v1.PkgResult.before:type_name -> partout.v1.PkgUpdate
+	17, // 46: partout.v1.PkgResult.after:type_name -> partout.v1.PkgUpdate
+	48, // 47: partout.v1.TaskStep.env:type_name -> partout.v1.TaskStep.EnvEntry
+	49, // 48: partout.v1.TaskStep.vars:type_name -> partout.v1.TaskStep.VarsEntry
+	20, // 49: partout.v1.TaskRun.steps:type_name -> partout.v1.TaskStep
+	33, // 50: partout.v1.TaskRun.decision:type_name -> partout.v1.Decision
+	22, // 51: partout.v1.TaskRunResult.steps:type_name -> partout.v1.TaskStepResult
+	20, // 52: partout.v1.JobAssignment.steps:type_name -> partout.v1.TaskStep
+	33, // 53: partout.v1.JobAssignment.decision:type_name -> partout.v1.Decision
+	3,  // 54: partout.v1.FileOpResult.kind:type_name -> partout.v1.FileOpKind
+	31, // 55: partout.v1.FileOpResult.stat:type_name -> partout.v1.FileStat
+	32, // 56: partout.v1.FileOpResult.entries:type_name -> partout.v1.FileEntry
+	50, // 57: partout.v1.Command.env:type_name -> partout.v1.Command.EnvEntry
+	33, // 58: partout.v1.Command.decision:type_name -> partout.v1.Decision
+	51, // 59: partout.v1.PolicyBundle.host_tags:type_name -> partout.v1.PolicyBundle.HostTagsEntry
+	52, // 60: partout.v1.SessionOpen.env:type_name -> partout.v1.SessionOpen.EnvEntry
+	33, // 61: partout.v1.SessionOpen.decision:type_name -> partout.v1.Decision
+	5,  // 62: partout.v1.AgentStream.Stream:input_type -> partout.v1.Envelope
+	5,  // 63: partout.v1.AgentStream.Stream:output_type -> partout.v1.Envelope
+	63, // [63:64] is the sub-list for method output_type
+	62, // [62:63] is the sub-list for method input_type
+	62, // [62:62] is the sub-list for extension type_name
+	62, // [62:62] is the sub-list for extension extendee
+	0,  // [0:62] is the sub-list for field type_name
 }
 
 func init() { file_partout_partout_proto_init() }
@@ -4614,6 +4844,8 @@ func file_partout_partout_proto_init() {
 		(*Envelope_JobAssign)(nil),
 		(*Envelope_JobRunResult)(nil),
 		(*Envelope_JobUnassign)(nil),
+		(*Envelope_UpdateDirective)(nil),
+		(*Envelope_UpdateResult)(nil),
 		(*Envelope_ObserveFacts)(nil),
 		(*Envelope_Command)(nil),
 		(*Envelope_PolicyBundle)(nil),
@@ -4637,7 +4869,7 @@ func file_partout_partout_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_partout_partout_proto_rawDesc), len(file_partout_partout_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   46,
+			NumMessages:   48,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

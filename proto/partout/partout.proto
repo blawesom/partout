@@ -63,6 +63,10 @@ enum EnvelopeKind {
   TLS_CERT  = 28;           // down: server delivers a freshly signed mTLS leaf
   TLS_RENEW = 29;           // up: agent requests a fresh leaf (expired/near-expiry)
 
+  // M8.1 updates
+  UPDATE_DIRECTIVE = 30;    // down: signed update directive (metadata + download grant)
+  UPDATE_RESULT = 31;       // up: update outcome (failed | swapped | verified)
+
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
   AUTH_PROOF = 41;  // up: agent replies
@@ -92,6 +96,9 @@ message Envelope {
     JobAssignment job_assign = 43; // down: job assignment
     JobRunResult job_run_result = 44; // up: job run result
     JobUnassignment job_unassign = 45; // down: job unassignment
+    // M8.1 updates
+    UpdateDirective update_directive = 47; // down: signed update directive
+    UpdateResult update_result = 48;       // up: update outcome
     // Up: observe facts
     ObserveFacts observe_facts = 46; // up: structured facts (services, configs, certs)
     // Down
@@ -377,6 +384,30 @@ message JobRunResult {
   int64 finished_at = 7;
   string trigger = 8;      // cron | manual | resume
   int32 retry_of = 9;      // 0 = first attempt; >0 = retry N
+}
+
+// UpdateDirective instructs an agent to update itself to a signed release
+// (M8.1). It carries the release manifest + signature and a one-time
+// download grant for the artifact. The agent verifies the Ed25519 signature
+// over "version|arch|kind|sha256" against its locally provisioned release
+// public key BEFORE downloading or executing anything; the grant only grants
+// access, the signature establishes trust.
+message UpdateDirective {
+  string release_id = 1;   // update_releases id (correlation + grant target)
+  string version = 2;      // target version
+  string arch = 3;         // e.g. linux-amd64 (agent must match)
+  string kind = 4;         // "agent" (a server-kind artifact is never dispatched)
+  string sha256 = 5;       // hex, of the artifact
+  string signature = 6;    // base64 Ed25519 over the canonical manifest
+  string grant = 7;        // one-time, TTL-bound artifact download grant
+}
+
+// UpdateResult is the agent's report for an update directive (up).
+message UpdateResult {
+  string release_id = 1;   // from the directive
+  string phase = 2;        // failed | swapped | verified
+  string error = 3;        // failure reason (empty on success)
+  string version = 4;      // version running (phase=verified: after restart)
 }
 
 // ---- Observe layer (M5, R18–R20) ---------------------------------------------

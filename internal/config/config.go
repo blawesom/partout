@@ -69,6 +69,19 @@ type Config struct {
 	// CertCA: trust bundle used to verify certificate chains (M5, R20).
 	// Empty = resolve from the standard system locations.
 	CertCA string
+	// --- M8.1 updates (agent side) ---
+	// ReleaseKey is the base64 Ed25519 release public key this agent trusts
+	// for self-update artifacts (PARTOUT_RELEASE_KEY). A locally provisioned
+	// key always wins over anything server-delivered; with none set the agent
+	// refuses every update directive (fails closed).
+	ReleaseKey string
+	// UpdateHealthS is the post-swap health window in seconds
+	// (PARTOUT_UPDATE_HEALTH_S): the new version must boot and connect within
+	// it or the boot guard rolls back to N-1.
+	UpdateHealthS int
+	// UpdateRestartCmd is executed after a successful binary swap
+	// (PARTOUT_UPDATE_RESTART_CMD); default is the systemd unit restart.
+	UpdateRestartCmd string
 	// TLSCAFile: path to the server root CA (PEM); enables HTTPS
 	// enrollment + mTLS stream.
 	TLSCAFile string
@@ -110,6 +123,9 @@ func Load() (*Config, error) {
 		CertPaths:            os.Getenv("PARTOUT_CERT_PATHS"),
 		CertCA:               os.Getenv("PARTOUT_CERT_CA"),
 		TLSCAFile:            os.Getenv("PARTOUT_TLS_CA"),
+		ReleaseKey:           os.Getenv("PARTOUT_RELEASE_KEY"),
+		UpdateHealthS:        envInt("PARTOUT_UPDATE_HEALTH_S", 60),
+		UpdateRestartCmd:     envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -151,6 +167,14 @@ func envInt(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+	}
+	return def
+}
+
+// envOrStr returns the env var value, or def when unset/empty.
+func envOrStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
 	return def
 }

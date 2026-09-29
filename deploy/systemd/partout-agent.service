@@ -8,7 +8,12 @@ Type=simple
 User=partout
 # Server address + (first-run only) enrollment token come from agent.env.
 EnvironmentFile=-/etc/partout/agent.env
-ExecStart=/usr/local/bin/partout --mode=agent --data-dir=/var/lib/partout/agent
+# M8.1: the boot guard supervises the binary swap (rolls a failed
+# self-update back to N-1 before the agent starts), then execs the real
+# binary with the same args. Its health window must match the agent's
+# PARTOUT_UPDATE_HEALTH_S (agent.env).
+Environment=PARTOUT_AGENT_DATA_DIR=/var/lib/partout/agent
+ExecStart=/usr/local/sbin/partout-update-guard --mode=agent --data-dir=/var/lib/partout/agent
 Restart=always
 RestartSec=3
 # Hardening: the agent only opens outbound connections.
