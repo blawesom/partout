@@ -450,7 +450,7 @@
                   <td class="muted">{{ fmtDate(a.ts) }}</td>
                   <td><span class="chip brand">{{ a.kind }}</span></td>
                   <td class="mono">{{ a.actor || '—' }}</td>
-                  <td class="mono">{{ hostNameById(a.agent_id) || '—' }}</td>
+                  <td class="mono">{{ a.agent_id ? (hostNameById(a.agent_id) || a.agent_id) : 'server' }}</td>
                   <td class="mono small" style="max-width:420px;overflow:hidden;text-overflow:ellipsis">{{ typeof a.payload==='string'? a.payload : (a.payload && a.payload.message) || JSON.stringify(a.payload||{}) }}</td>
                 </tr>
                 <tr v-if="!audit.length"><td colspan="5"><div class="empty">No audit events.</div></td></tr>
@@ -1348,6 +1348,7 @@
                       <option value="cert_expiring">cert_expiring — certificate expiry window</option>
                       <option value="config_invalid">config_invalid — haproxy/nginx native validation</option>
                       <option value="config_drift">config_drift — cross-host config hash divergence (R22)</option>
+                      <option value="update_run">update_run — rollout stuck: paused/failed (M8.1, server-level)</option>
                     </select>
                   </label>
                   <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
@@ -1366,6 +1367,9 @@
                 <label class="fld" v-if="ruleForm.kind==='config_drift'" style="max-width:240px"><span>Tolerance (extra distinct hashes)</span>
                   <input type="number" v-model.number="ruleForm.thresh" min="0" /></label>
                 <p class="cap" v-if="ruleForm.kind==='config_invalid'" style="margin:8px 0 0">No threshold — fires whenever a haproxy/nginx config fails native validation.</p>
+                <label class="fld" v-if="ruleForm.kind==='update_run'" style="max-width:320px"><span>Statuses (comma-separated)</span>
+                  <input v-model="ruleForm.status" class="mono" placeholder="paused_failure,failed" /></label>
+                <p class="cap" v-if="ruleForm.kind==='update_run'" style="margin:8px 0 0">Server-level: the selector is ignored. One alert per stuck run; auto-resolves when the run leaves those statuses (retry/skip/abort/completed).</p>
                 <div class="toolbar" style="margin-top:10px">
                   <label class="lbl" style="margin:0"><input type="checkbox" v-model="ruleForm.enabled" /> enabled</label>
                   <div class="spacer"></div>
@@ -2261,7 +2265,7 @@
       ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0 })[kind] || 0; },
       newRuleForm() {
         this.ruleErr = "";
-        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, enabled: true };
+        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", enabled: true };
       },
       editRule(r) {
         this.ruleErr = "";
@@ -2271,6 +2275,7 @@
           id: r.id, name: r.name, kind: r.kind, selector: r.selector,
           severity: r.severity, enabled: r.enabled,
           thresh: (key && t[key] != null) ? t[key] : this.ruleDefaultThresh(r.kind),
+          status: (t.status != null) ? t.status : "paused_failure,failed",
         };
       },
       thresholdsFor(kind) {
@@ -2280,6 +2285,7 @@
           case "service_restarting": return { service_restart_rate_per_hour: v };
           case "cert_expiring": return { cert_days_remaining: v };
           case "config_drift": return { config_drift_tolerance: v };
+          case "update_run": return { status: (this.ruleForm && this.ruleForm.status) || "paused_failure,failed" };
           default: return {};
         }
       },

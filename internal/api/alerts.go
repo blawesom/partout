@@ -41,6 +41,7 @@ var validRuleKinds = map[string]bool{
 	observe.KindCertExpiring:      true,
 	observe.KindConfigInvalid:     true,
 	observe.KindConfigDrift:       true,
+	observe.KindUpdateRun:         true,
 }
 
 var validSeverities = map[string]bool{"info": true, "warning": true, "critical": true}
@@ -153,7 +154,7 @@ func (b *ruleBody) validate() error {
 		return errors.New("name is required")
 	}
 	if !validRuleKinds[b.Kind] {
-		return errors.New("kind must be one of: service_failed, service_restarting, cert_expiring, config_invalid, config_drift")
+		return errors.New("kind must be one of: service_failed, service_restarting, cert_expiring, config_invalid, config_drift, update_run")
 	}
 	if b.Selector == "" {
 		b.Selector = "all"

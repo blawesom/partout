@@ -30,6 +30,7 @@ const (
 	KindCertExpiring      = "cert_expiring"
 	KindConfigInvalid     = "config_invalid"
 	KindConfigDrift       = "config_drift" // M7: cross-host hash divergence
+	KindUpdateRun         = "update_run"   // M8.1: rollout stuck (server-level, no host scope)
 )
 
 // Controller evaluates alert rules on a tick.
@@ -157,12 +158,18 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 	restartRates := c.sampleRestartRates(docs, now)
 
 	for _, r := range enabled {
-		hosts, err := c.resolveHosts(resolver, r.Selector)
-		if err != nil {
-			if c.log != nil {
-				c.log.Printf("observe/alerts: rule %s selector %q: %v", r.ID, r.Selector, err)
+		// update_run is server-level: no host scope to resolve (a fleet
+		// rollout is not a host fact), so selector errors are irrelevant.
+		var hosts []string
+		if r.Kind != KindUpdateRun {
+			var err error
+			hosts, err = c.resolveHosts(resolver, r.Selector)
+			if err != nil {
+				if c.log != nil {
+					c.log.Printf("observe/alerts: rule %s selector %q: %v", r.ID, r.Selector, err)
+				}
+				continue
 			}
-			continue
 		}
 		switch r.Kind {
 		case KindServiceFailed:
@@ -181,6 +188,11 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 			hits := c.driftHits(r, hosts, docs)
 			res.Fired += c.fireDrift(r, hits)
 			res.Resolved += c.resolveByDedupDiff(r, hosts, c.driftConditionKeys(r, hits))
+		case KindUpdateRun:
+			// Server-level: the host scope is irrelevant (an update run is a
+			// fleet operation, not a host fact).
+			res.Fired += c.evalUpdateRun(r)
+			res.Resolved += c.resolveUpdateRun(r)
 		default:
 			if c.log != nil {
 				c.log.Printf("observe/alerts: rule %s: unsupported kind %q (skipped)", r.ID, r.Kind)
@@ -627,6 +639,89 @@ func shortHash(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// --- update_run (M8.1): server-level rollout stuck-alarm ---
+
+// updateRunStatuses returns the run statuses this rule alerts on
+// (thresholds {"status": "paused_failure,failed"}; default both).
+func updateRunStatuses(r *store.AlertRule) map[string]bool {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(r.Thresholds), &m); err != nil || m == nil {
+		m = map[string]any{}
+	}
+	v, _ := m["status"].(string)
+	if v == "" {
+		v = "paused_failure,failed"
+	}
+	out := map[string]bool{}
+	for _, st := range strings.Split(v, ",") {
+		if st = strings.TrimSpace(st); st != "" {
+			out[st] = true
+		}
+	}
+	return out
+}
+
+// runStatusByID looks up a run's current status ("", absent).
+func (c *Controller) runStatusByID(runID string) string {
+	r, err := c.st.GetUpdateRun(runID)
+	if err != nil || r == nil {
+		return ""
+	}
+	return r.Status
+}
+
+// evalUpdateRun fires one server-level alert per run currently in an
+// alerted status (dedup subject = run id, so each run alerts once; a later
+// run gets its own alert).
+func (c *Controller) evalUpdateRun(r *store.AlertRule) int {
+	wanted := updateRunStatuses(r)
+	runs, err := c.st.ListUpdateRuns(50)
+	if err != nil {
+		if c.log != nil {
+			c.log.Printf("observe/alerts: update_run: list runs: %v", err)
+		}
+		return 0
+	}
+	fired := 0
+	for _, run := range runs {
+		if !wanted[run.Status] {
+			continue
+		}
+		msg := fmt.Sprintf("update run %s -> %s (v%s, selector %q)",
+			run.ID, run.Status, run.Version, run.Selector)
+		if run.Error != "" {
+			msg += ": " + run.Error
+		}
+		if c.fire(r, "", r.ID+"|run:"+run.ID, msg) {
+			fired++
+		}
+	}
+	return fired
+}
+
+// resolveUpdateRun resolves the rule's firing alerts whose run has left the
+// alerted statuses (retry/skip/abort/completed — or the run row is gone).
+func (c *Controller) resolveUpdateRun(r *store.AlertRule) int {
+	wanted := updateRunStatuses(r)
+	firing, err := c.st.FiringAlertKeys(r.ID)
+	if err != nil {
+		return 0
+	}
+	var stale []string
+	for _, a := range firing {
+		prefix := r.ID + "|run:"
+		if !strings.HasPrefix(a.DedupKey, prefix) {
+			continue // not an update-run alert
+		}
+		runID := strings.TrimPrefix(a.DedupKey, prefix)
+		if st := c.runStatusByID(runID); st != "" && wanted[st] {
+			continue // still in an alerted status
+		}
+		stale = append(stale, a.DedupKey)
+	}
+	return c.resolve(stale)
 }
 
 // --- shared fire/resolve ---

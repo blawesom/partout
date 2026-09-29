@@ -549,3 +549,101 @@ func TestServiceRestartingCollectorFailureNoSpike(t *testing.T) {
 		t.Fatalf("recovery after a collector failure produced a spurious spike: %+v", res)
 	}
 }
+
+// TestUpdateRunFireResolve: a rollout stuck in an alerted status fires a
+// server-level alert (no host scope), dedups while stuck, and resolves when
+// the run leaves the alerted status.
+func TestUpdateRunFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindUpdateRun, "all", `{"status":"paused_failure"}`, "critical", true)
+
+	now := time.Now().Unix()
+	run := &store.UpdateRun{
+		ID: "run_1", Version: "v2.0.0", ReleaseID: "rel_t", Arch: "linux-amd64",
+		Selector: "all", Status: "paused_failure", TotalHosts: 4, DoneHosts: 3,
+		FailedHosts: 1, Error: "wave failed; operator must retry/skip/abort",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := st.CreateUpdateRun(run); err != nil {
+		t.Fatalf("CreateUpdateRun: %v", err)
+	}
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("stuck run tick: %+v, want 1 fired", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 {
+		t.Fatalf("firing alerts = %d, want 1", len(alerts))
+	}
+	a := alerts[0]
+	if a.AgentID != "" {
+		t.Errorf("update_run alert agent_id = %q, want empty (server-level)", a.AgentID)
+	}
+	if a.Kind != KindUpdateRun {
+		t.Errorf("kind = %q, want %q", a.Kind, KindUpdateRun)
+	}
+	if !contains(a.Message, "run_1") || !contains(a.Message, "paused_failure") {
+		t.Errorf("message %q should name the run and its status", a.Message)
+	}
+
+	// Still stuck: dedup (no second alert).
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("still-stuck tick: %+v, want 0 fired (dedup)", res)
+	}
+
+	// Operator retries the wave -> run leaves the alerted status -> resolves.
+	if err := st.SetUpdateRunStatus("run_1", "rolling", ""); err != nil {
+		t.Fatalf("SetUpdateRunStatus: %v", err)
+	}
+	res, _ = c.EvaluateOnce()
+	if res.Resolved != 1 {
+		t.Fatalf("recovered tick: %+v, want 1 resolved", res)
+	}
+	alerts, _ = st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 0 {
+		t.Errorf("firing alerts after resolve = %d, want 0", len(alerts))
+	}
+}
+
+// TestUpdateRunDefaultStatuses: without an explicit status threshold the
+// rule alerts on paused_failure AND failed; completed/rolling are quiet.
+func TestUpdateRunDefaultStatuses(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindUpdateRun, "all", `{}`, "warning", true)
+
+	now := time.Now().Unix()
+	for _, r := range []struct {
+		id, status string
+	}{
+		{"run_ok", "completed"},
+		{"run_live", "rolling"},
+		{"run_dead", "failed"},
+	} {
+		_ = st.CreateUpdateRun(&store.UpdateRun{
+			ID: r.id, Version: "v1", ReleaseID: "rel_t", Arch: "linux-amd64",
+			Selector: "all", Status: r.status, CreatedAt: now, UpdatedAt: now,
+		})
+	}
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("default-status tick: %+v, want exactly 1 fired (the failed run)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 || !contains(alerts[0].Message, "run_dead") {
+		t.Fatalf("firing alerts = %+v, want only run_dead", alerts)
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(sub) > 0 && len(s) >= len(sub) && (s == sub || len(s) > 0 && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	})())
+}
