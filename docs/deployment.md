@@ -1,10 +1,13 @@
 # Partout — Deployment
 
-**Status:** v0.7.1 — reflects the current implementation (M0–M7 complete, Web UI
-shipped, M4 approvals engine + MCP server + OAuth2 shipped, M6.1 alert rule kinds,
-v0.7.1: in-stream mTLS rotation, offline down-queue dispatch, provisioning fresh/join
-modes + version-diff check, `partout --version`). Sections marked *proposed* describe planned work
-that is not yet wired into the binary.
+**Status:** v0.8.0 — reflects the current implementation (M0–M8.1 complete: Web UI,
+M4 approvals + MCP + OAuth2, M6.1 alert rule kinds, v0.7.x in-stream mTLS rotation /
+offline down-queue dispatch / provisioning fresh+join modes / `partout --version`,
+and **M8.1 signed fleet updates**: release store + Ed25519 signatures, agent
+self-swap with auto-rollback, canary→wave rollout orchestration, supervised server
+update via `partout selftest` + `scripts/update-server.sh`, and the one-command
+`partout update`). Sections marked *proposed* describe planned work that is not yet
+wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
 
