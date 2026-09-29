@@ -893,7 +893,7 @@
           <div class="card">
             <div class="head"><h2>Runs</h2><div class="spacer"></div><button class="btn sm" @click="loadProvRuns">Refresh</button></div>
             <table class="tbl">
-              <thead><tr><th>ID</th><th>Host</th><th>Mode</th><th>State</th><th>Key fingerprint</th><th></th></tr></thead>
+              <thead><tr><th>ID</th><th>Host</th><th>Mode</th><th>State</th><th>Key fingerprint</th><th>Started</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="r in provRuns" :key="r.id" class="click" @click="showProvRun(r.id)">
                   <td class="mono">{{ r.id }}</td>
@@ -901,6 +901,7 @@
                   <td class="mono">{{ r.mode }}</td>
                   <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span></td>
                   <td class="mono small">{{ r.fingerprint || '—' }}</td>
+                  <td class="muted" :title="new Date(r.created * 1000).toLocaleString()">{{ fmtAgo(r.created) }}</td>
                   <td style="white-space:nowrap">
                     <template v-if="r.state==='key_confirm' && isAdmin">
                       <button class="btn ok sm" @click.stop="decideProvKey(r.id,'confirm')">Confirm key</button>
@@ -910,7 +911,7 @@
                     <span v-else class="muted small">{{ provDetail && provDetail.run && provDetail.run.id===r.id ? 'hide ▴' : 'steps ▸' }}</span>
                   </td>
                 </tr>
-                <tr v-if="!provRuns.length"><td colspan="6"><div class="empty">No provision runs.</div></td></tr>
+                <tr v-if="!provRuns.length"><td colspan="7"><div class="empty">No provision runs.</div></td></tr>
               </tbody>
             </table>
             <template v-if="provDetail">

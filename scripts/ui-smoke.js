@@ -178,6 +178,7 @@ async function main() {
   check("provision: new-run card", d.body.textContent.includes("New run"), "new-run card missing");
   check("provision: seeded run row", rowsWithText(d, "nobody@127.0.0.1") > 0, "run row missing");
   check("provision: fingerprint column", d.body.textContent.includes("Key fingerprint"), "fingerprint column missing");
+  check("provision: started column", d.body.textContent.includes("Started") && /(now|\d+\w+ ago)/.test(d.body.textContent), "Started column or relative time missing");
 
   await visit("#/obs-services", 1600);
   check("observe services: real unit",
