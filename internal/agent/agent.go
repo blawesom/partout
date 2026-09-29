@@ -798,31 +798,44 @@ func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 		return
 	}
 
-	// 4. Swap with N-1 retention.
+	// 4. Boot marker BEFORE the swap. With the marker written first, every
+	//    crash window is covered: after the marker but before the rename the
+	//    on-disk version still != target, so the boot guard aborts the update
+	//    and runs the old binary; after the rename the guard sees
+	//    version == target and runs the new one, rolling back once the marker
+	//    goes stale. (Writing it after the rename would leave a swapped
+	//    binary with no supervision if the process died in between.)
 	bin, err := agentupdate.CurrentBinary()
 	if err != nil {
 		fail("swap", err.Error())
 		return
 	}
-	prevPath, prevSize, err := agentupdate.Swap(bin, art)
-	if err != nil {
-		fail("swap", err.Error())
-		return
-	}
-	if prevSize == 0 {
-		fail("swap", "N-1 retention copy is empty; refusing to restart without a rollback target")
-		return
-	}
-
-	// 5. Marker for the boot guard + the post-boot check on restart.
+	prevPath := agentupdate.PrevBinaryPath(bin)
+	markerPath := agentupdate.MarkerPath(a.cfg.DataDir)
+	markerWritten := false
 	if a.cfg.DataDir != "" {
-		if err := agentupdate.WriteMarker(agentupdate.MarkerPath(a.cfg.DataDir), agentupdate.Marker{
+		if err := agentupdate.WriteMarker(markerPath, agentupdate.Marker{
 			TargetVersion: dir.Version, ReleaseID: dir.ReleaseId,
 			PrevBinary: prevPath, StartedAt: time.Now().Unix(),
 		}); err != nil {
 			fail("marker", err.Error())
 			return
 		}
+		markerWritten = true
+	}
+
+	// 5. Swap with N-1 retention.
+	prevPath, prevSize, err := agentupdate.Swap(bin, art)
+	if err != nil {
+		if markerWritten {
+			_ = agentupdate.RemoveMarker(markerPath)
+		}
+		fail("swap", err.Error())
+		return
+	}
+	if prevSize == 0 {
+		fail("swap", "N-1 retention copy is empty; refusing to restart without a rollback target")
+		return
 	}
 
 	a.sendUpEnvelopeNoSpool(&pb.Envelope{

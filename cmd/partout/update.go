@@ -339,7 +339,12 @@ func publishAgentRelease(client *http.Client, base, token, version, arch, file, 
 		}
 		return out.ID, nil
 	}
-	// Conflict: the release already exists — look it up.
+	if res.StatusCode != http.StatusConflict {
+		// Anything else (400 bad signature/sha, 413 too large, 5xx) is a real
+		// failure — do not paper over it by reusing some existing row.
+		return "", fmt.Errorf("release upload: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	// 409: the release already exists — reuse that row (converged re-run).
 	req2, _ := http.NewRequest("GET", base+"/api/v1/updates/releases", nil)
 	req2.Header.Set("Authorization", "Bearer "+token)
 	res2, err := client.Do(req2)

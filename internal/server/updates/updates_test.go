@@ -149,6 +149,11 @@ func TestRolloutCanaryWaves(t *testing.T) {
 	if r.DoneHosts != 4 || r.TotalHosts != 4 || r.FailedHosts != 0 {
 		t.Errorf("counters = done:%d total:%d failed:%d, want 4/4/0", r.DoneHosts, r.TotalHosts, r.FailedHosts)
 	}
+	// CurrentWave tracks waves actually dispatched: canary(1) then two
+	// waves of 50% of 4 = 2 hosts, then the remaining 1.
+	if r.CurrentWave < 3 {
+		t.Errorf("current_wave = %d, want >= 3 (canary + 2 waves)", r.CurrentWave)
+	}
 }
 
 // TestRolloutCanaryFailureHardGate: a failed canary fails the whole run.

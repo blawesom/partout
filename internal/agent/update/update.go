@@ -164,9 +164,16 @@ func CurrentBinary() (string, error) {
 //
 // It returns the N-1 path (for the marker) and the previous binary's size
 // (sanity: a zero-byte "old" means the swap source was unreadable).
+// PrevBinaryPath is where the retained N-1 binary lives for binPath. The
+// boot guard hardcodes the same name (`partout.old`), so the agent can
+// record it in the marker before the swap actually happens.
+func PrevBinaryPath(binPath string) string {
+	return filepath.Join(filepath.Dir(binPath), "partout.old")
+}
+
 func Swap(binPath string, artifact []byte) (prevPath string, prevSize int64, err error) {
+	prevPath = PrevBinaryPath(binPath)
 	dir := filepath.Dir(binPath)
-	prevPath = filepath.Join(dir, "partout.old")
 	staging := filepath.Join(dir, "partout.new")
 
 	// N-1 retention: keep the current binary so the boot guard can roll

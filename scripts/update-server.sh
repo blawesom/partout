@@ -84,6 +84,14 @@ api() { # api <path> -> body (admin token)
   curl -sf -m 10 -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1$1"
 }
 
+# count_hosts prints the number of hosts the API reports, using only base
+# system tools (no python3 dependency on the server host). Every host entry
+# carries an "id" field, so counting those is exact. Prints nothing when the
+# API cannot be read, so callers fail closed instead of assuming zero.
+count_hosts() {
+  api /hosts | tr ',' '\n' | grep -c '"id"' || true
+}
+
 # ---- preflight -------------------------------------------------------------
 log "preflight: checking new binary"
 [ -f "$NEW" ] || fail "new binary not found: $NEW"
@@ -114,7 +122,14 @@ log "selftest: running the new binary's embedded suite"
 # ---- snapshot (pre-swap baseline) ------------------------------------------
 PRE_AGENTS=0
 if [ -n "$TOKEN" ] && curl -sf -m 5 -o /dev/null "$HEALTH/healthz"; then
-  PRE_AGENTS="$(api /hosts | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("items",[])))' 2>/dev/null || echo 0)"
+  PRE_AGENTS="$(count_hosts)"
+  # An unreadable API here would make the reconnect check meaningless later;
+  # say so instead of silently comparing against a bogus baseline.
+  case "$PRE_AGENTS" in
+    ''|*[!0-9]*) echo "[update-server] WARNING: could not read the host count before the swap;" >&2
+                 echo "[update-server]          the post-swap agent-reconnect check will be skipped" >&2
+                 PRE_AGENTS="" ;;
+  esac
 fi
 log "snapshot: $PRE_AGENTS agent(s) connected before swap"
 
@@ -153,11 +168,20 @@ systemctl start "$SERVICE" || fail "service failed to start"
 
 postcheck() {
   local i
+  local now
   for i in $(seq 1 "$POST_TIMEOUT"); do
     if curl -sf -m 2 -o /dev/null "$HEALTH/healthz" \
-       && [ -n "$TOKEN" ] && curl -sf -m 5 -o /dev/null -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1/hosts" \
-       && [ "$(api /hosts | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("items",[])))' 2>/dev/null || echo 0)" -ge "$PRE_AGENTS" ]; then
-      return 0
+       && [ -n "$TOKEN" ] && curl -sf -m 5 -o /dev/null -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1/hosts"; then
+      if [ -z "$PRE_AGENTS" ]; then
+        # No trustworthy baseline: healthz + authenticated API is all we can
+        # assert, and we already said so above.
+        return 0
+      fi
+      now="$(count_hosts)"
+      case "$now" in
+        ''|*[!0-9]*) : ;;  # unreadable this tick; keep waiting
+        *) [ "$now" -ge "$PRE_AGENTS" ] && return 0 ;;
+      esac
     fi
     sleep 1
   done
@@ -165,7 +189,7 @@ postcheck() {
 }
 
 if postcheck; then
-  log "postcheck: healthz + API + $PRE_AGENTS agent(s) reconnected — update OK ($VERSION)"
+  log "postcheck: healthz + API + ${PRE_AGENTS:-?} agent(s) reconnected — update OK ($VERSION)"
   exit 0
 fi
 

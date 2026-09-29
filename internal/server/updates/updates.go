@@ -750,7 +750,9 @@ func (m *Manager) step(runID string) error {
 				m.audit("update.run.completed", "system", map[string]any{"run": runID, "verified": done, "skipped": skipped, "failed": failed})
 				return nil
 			}
-			// Dispatch the next wave.
+			// Dispatch the next wave. CurrentWave counts waves dispatched
+			// (the canary phase seeds it at 1), so bump before dispatching:
+			// the UI/CLI then always shows the wave actually in flight.
 			wave := waveSize(len(hosts), run.WavePct)
 			if wave > len(queued) {
 				wave = len(queued)
@@ -759,6 +761,9 @@ func (m *Manager) step(runID string) error {
 			if err != nil {
 				return err
 			}
+			nextWave := run.CurrentWave + 1
+			_ = m.st.SetUpdateRunCounters(run.ID, nextWave, run.TotalHosts, done, 0, skipped)
+			run.CurrentWave = nextWave
 			for i := 0; i < wave; i++ {
 				h := queued[i]
 				if err := m.dispatchHost(run, h, rel); err != nil {

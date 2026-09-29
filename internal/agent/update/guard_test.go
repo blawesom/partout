@@ -125,6 +125,30 @@ func TestUpdateGuardScript(t *testing.T) {
 		}
 	})
 
+	// The agent writes the marker BEFORE the swap, so a crash between the
+	// two leaves: fresh marker, on-disk still the OLD version, and no N-1
+	// copy yet. The guard must abort the update and run the old binary
+	// (this is the window that would otherwise run an unsupervised N+1).
+	t.Run("marker written but swap not applied aborts and runs the old binary", func(t *testing.T) {
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "partout")
+		data := filepath.Join(dir, "data")
+		ran := filepath.Join(dir, "ran")
+		os.MkdirAll(data, 0o755)
+		writeFakeBinary(t, bin, "v8") // swap never happened
+		marker := filepath.Join(data, "update.json")
+		// prev_binary points at a path that does not exist yet.
+		writeMarkerFile(t, marker, "v9", 5, filepath.Join(dir, "partout.old"))
+		out := runGuard(t, script, bin, data, ran)
+		b, _ := os.ReadFile(ran)
+		if !strings.Contains(string(b), "RAN v8") {
+			t.Fatalf("old binary did not run: %q (guard: %s)", b, out)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Error("marker should be cleared after aborting the incomplete update")
+		}
+	})
+
 	t.Run("version mismatch rolls back even when fresh", func(t *testing.T) {
 		dir := t.TempDir()
 		bin := filepath.Join(dir, "partout")
