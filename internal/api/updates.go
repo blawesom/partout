@@ -21,6 +21,7 @@ import (
 	"github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/release"
 	"github.com/blawesom/partout/internal/server/stream"
+	"github.com/blawesom/partout/internal/server/updates"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -38,6 +39,13 @@ func (h *Handler) RegisterUpdates(mux *http.ServeMux) {
 	// M8.1 step 2: canary apply + one-time artifact download grants.
 	mux.Handle("POST /api/v1/updates/apply", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleApplyUpdate)))
 	mux.Handle("GET /api/v1/updates/grants/{token}", http.HandlerFunc(h.handleGrantArtifact))
+	// M8.1 step 3: rollout runs (canary -> waves, operator retry/skip/abort).
+	mux.Handle("POST /api/v1/updates/runs", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleCreateUpdateRun)))
+	mux.Handle("GET /api/v1/updates/runs", h.requireRole(roleViewer)(http.HandlerFunc(h.handleListUpdateRuns)))
+	mux.Handle("GET /api/v1/updates/runs/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetUpdateRun)))
+	mux.Handle("POST /api/v1/updates/runs/{id}/retry", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
+	mux.Handle("POST /api/v1/updates/runs/{id}/skip", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
+	mux.Handle("POST /api/v1/updates/runs/{id}/abort", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
 }
 
 // releaseEntry is the wire shape (never includes the artifact).
@@ -318,4 +326,167 @@ func (h *Handler) handleGrantArtifact(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Partout-Signature", rel.Signature)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(rel.Artifact)
+}
+
+// ---- M8.1 step 3: rollout runs --------------------------------------------
+
+// runEntry is the wire shape of a run (no artifact).
+type runEntry struct {
+	ID           string `json:"id"`
+	Version      string `json:"version"`
+	ReleaseID    string `json:"release_id"`
+	Arch         string `json:"arch"`
+	Selector     string `json:"selector"`
+	CanaryHosts  string `json:"canary_hosts,omitempty"`
+	CanaryCount  int    `json:"canary_count"`
+	WavePct      int    `json:"wave_pct"`
+	Status       string `json:"status"`
+	CurrentWave  int    `json:"current_wave"`
+	TotalHosts   int    `json:"total_hosts"`
+	DoneHosts    int    `json:"done_hosts"`
+	FailedHosts  int    `json:"failed_hosts"`
+	SkippedHosts int    `json:"skipped_hosts"`
+	Error        string `json:"error,omitempty"`
+	ApprovalID   string `json:"approval_id,omitempty"`
+	CreatedBy    string `json:"created_by"`
+	Created      int64  `json:"created"`
+}
+
+func runEntryFrom(r *store.UpdateRun) runEntry {
+	return runEntry{
+		ID: r.ID, Version: r.Version, ReleaseID: r.ReleaseID, Arch: r.Arch,
+		Selector: r.Selector, CanaryHosts: r.CanaryHosts, CanaryCount: r.CanaryCount,
+		WavePct: r.WavePct, Status: r.Status, CurrentWave: r.CurrentWave,
+		TotalHosts: r.TotalHosts, DoneHosts: r.DoneHosts, FailedHosts: r.FailedHosts,
+		SkippedHosts: r.SkippedHosts, Error: r.Error, ApprovalID: r.ApprovalID,
+		CreatedBy: r.CreatedBy, Created: r.CreatedAt,
+	}
+}
+
+type runHostEntry struct {
+	ID      string `json:"id"`
+	HostID  string `json:"host_id"`
+	Status  string `json:"status"`
+	Version string `json:"version,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Updated int64  `json:"updated"`
+}
+
+func runHostEntryFrom(hh *store.UpdateHost) runHostEntry {
+	return runHostEntry{ID: hh.ID, HostID: hh.HostID, Status: hh.Status, Version: hh.Version, Error: hh.Error, Updated: hh.UpdatedAt}
+}
+
+type createRunBody struct {
+	ReleaseID   string   `json:"release_id"`
+	Version     string   `json:"version"`
+	Selector    string   `json:"selector"`
+	Canary      int      `json:"canary"`
+	WavePct     int      `json:"wave_pct"`
+	CanaryHosts []string `json:"canary_hosts"`
+}
+
+func (h *Handler) handleCreateUpdateRun(w http.ResponseWriter, r *http.Request) {
+	if h.updatesMgr == nil {
+		writeError(w, http.StatusServiceUnavailable, "not_configured", "update rollout not configured", nil)
+		return
+	}
+	var b createRunBody
+	if err := decodeJSON(r, &b); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid body: "+err.Error(), nil)
+		return
+	}
+	actor, actorRole := h.actorFor(r)
+	p := updates.Params{
+		ReleaseID: b.ReleaseID, Version: b.Version, Selector: b.Selector,
+		Canary: b.Canary, WavePct: b.WavePct, CanaryHosts: b.CanaryHosts,
+		Actor: actor, ActorRole: actorRole,
+	}
+	run, req, err := h.updatesMgr.StartRun(p)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNoRelease):
+			writeError(w, http.StatusNotFound, "no_release", err.Error(), nil)
+		default:
+			writeError(w, http.StatusBadRequest, "run_rejected", err.Error(), nil)
+		}
+		return
+	}
+	if req != nil {
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"run_id": run.ID, "state": "pending_approval", "approval_id": req.ID,
+		})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"run_id": run.ID, "state": run.Status})
+}
+
+func (h *Handler) handleListUpdateRuns(w http.ResponseWriter, r *http.Request) {
+	if h.updatesMgr == nil {
+		writeError(w, http.StatusServiceUnavailable, "not_configured", "update rollout not configured", nil)
+		return
+	}
+	limit := 50
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = n
+	}
+	runs, err := h.st.ListUpdateRuns(limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
+	items := make([]runEntry, 0, len(runs))
+	for _, rr := range runs {
+		items = append(items, runEntryFrom(rr))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"count": len(items), "items": items})
+}
+
+func (h *Handler) handleGetUpdateRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run, err := h.st.GetUpdateRun(id)
+	if err != nil || run == nil {
+		writeError(w, http.StatusNotFound, "no_run", "no such run: "+id, nil)
+		return
+	}
+	hosts, err := h.st.ListUpdateHosts(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error(), nil)
+		return
+	}
+	items := make([]runHostEntry, 0, len(hosts))
+	for _, hh := range hosts {
+		items = append(items, runHostEntryFrom(hh))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"run": runEntryFrom(run), "hosts": items})
+}
+
+func (h *Handler) handleUpdateRunAction(w http.ResponseWriter, r *http.Request) {
+	if h.updatesMgr == nil {
+		writeError(w, http.StatusServiceUnavailable, "not_configured", "update rollout not configured", nil)
+		return
+	}
+	id := r.PathValue("id")
+	actor, _ := h.actorFor(r)
+	action := ""
+	if strings.HasSuffix(r.URL.Path, "/retry") {
+		action = "retry"
+	} else if strings.HasSuffix(r.URL.Path, "/skip") {
+		action = "skip"
+	} else if strings.HasSuffix(r.URL.Path, "/abort") {
+		action = "abort"
+	}
+	var err error
+	switch action {
+	case "retry":
+		err = h.updatesMgr.Retry(id, actor)
+	case "skip":
+		err = h.updatesMgr.Skip(id, actor)
+	case "abort":
+		err = h.updatesMgr.Abort(id, actor)
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, "run_action_failed", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"run_id": id, "action": action})
 }

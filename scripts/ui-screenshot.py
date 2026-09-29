@@ -106,6 +106,43 @@ try:
         page.screenshot(path=out, full_page=False)
         print(f"  saved {out}")
 
+        # M8.1 step 3: show the Runs tab with a live rollout. The harness
+        # agent has no release key, so the run reaches paused_failure — a
+        # realistic operational state for the screenshot.
+        try:
+            import base64 as _b64
+            rels = curl("GET", "/updates/releases", token="shot-token")
+            rel = [r for r in rels.get("items", []) if r.get("version") == "v0.9.0"]
+            if rel:
+                run = curl("POST", "/updates/runs", {
+                    "release_id": rel[0]["id"], "selector": "all",
+                    "canary": 0, "wave_pct": 100,
+                }, token="shot-token")
+                run_id = run.get("run_id", "")
+                for _ in range(24):
+                    time.sleep(0.5)
+                    try:
+                        st = curl("GET", "/updates/runs/" + run_id, token="shot-token")
+                        if st.get("run", {}).get("status") in ("paused_failure", "completed", "failed"):
+                            break
+                    except Exception:
+                        pass
+                page.goto(f"http://127.0.0.1:{PORT}/#/updates")
+                page.wait_for_timeout(1000)
+                page.click("div.tab:has-text('Runs')")
+                page.wait_for_timeout(1500)
+                if run_id:
+                    try:
+                        page.click(f"tr:has-text('{run_id[:14]}')", timeout=2000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(900)
+                out = os.path.join(OUT, "updates-runs.png")
+                page.screenshot(path=out, full_page=False)
+                print(f"  saved {out}")
+        except Exception as e:
+            print(f"  runs screenshot skipped: {e}")
+
         browser.close()
     print("screenshots done")
     sys.exit(0)

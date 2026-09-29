@@ -84,3 +84,20 @@ func (h *Handler) SendUpdateDirective(agentID string, dir *pb.UpdateDirective) e
 	}
 	return sess.send(env)
 }
+
+// QueueUpdateDirective delivers a signed update directive to a connected
+// agent, or queues it for an offline one (delivered on reconnect, like
+// commands). This is the M8.1 step-3 rollout path: fleet hosts may be
+// unreachable at dispatch time and must not be dropped.
+func (h *Handler) QueueUpdateDirective(agentID string, dir *pb.UpdateDirective) error {
+	if err := h.SendUpdateDirective(agentID, dir); err == nil {
+		return nil
+	}
+	env := &pb.Envelope{
+		Kind:    pb.EnvelopeKind_UPDATE_DIRECTIVE,
+		Payload: &pb.Envelope_UpdateDirective{UpdateDirective: dir},
+	}
+	h.queueOffline(agentID, env)
+	h.log.Printf("stream: update directive for %s queued (agent offline)", agentID)
+	return nil
+}

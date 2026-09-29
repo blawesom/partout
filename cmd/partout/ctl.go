@@ -539,13 +539,20 @@ func (c *ctl) hostsDelete(id string) {
 // upload/list talk to the server.
 func (c *ctl) cmdUpdate(args []string) {
 	usage := func() {
-		fmt.Fprintln(os.Stderr, `usage: partout ctl update <keygen|sign|verify|upload|list>
+		fmt.Fprintln(os.Stderr, `usage: partout ctl update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
 
   keygen                     generate a release signing key pair (Ed25519)
   sign     --version V --arch A --kind K --file F [--key PRIV_B64]
   verify   --version V --arch A --kind K --file F --signature SIG_B64 [--pubkey PUB_B64]
   upload   --version V --arch A --kind K --file F --signature SIG_B64
-  list                                       list releases in the server store`)
+  list                                       list releases in the server store
+  run      --release ID | --version V --selector S [--canary N] [--wave N]
+           [--canary-host H]...             start a fleet rollout
+  runs                                       list rollout runs
+  show     <runID>                          run detail (per-host states)
+  retry    <runID>                          re-dispatch failed hosts (paused run)
+  skip     <runID>                          skip failed hosts, continue (paused run)
+  abort    <runID>                          abort the run`)
 		os.Exit(2)
 	}
 	if len(args) == 0 {
@@ -563,6 +570,14 @@ func (c *ctl) cmdUpdate(args []string) {
 		c.updateUpload(rest)
 	case "list":
 		c.updateList()
+	case "run":
+		c.updateRun(rest)
+	case "runs":
+		c.updateRuns()
+	case "show":
+		c.updateShow(rest)
+	case "retry", "skip", "abort":
+		c.updateRunAction(sub, rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: unknown update command %q\n", sub)
 		usage()
@@ -699,6 +714,95 @@ func (c *ctl) updateList() {
 	}
 	w.Flush()
 	fmt.Printf("\n%d release(s)\n", len(items))
+}
+
+func (c *ctl) updateRun(args []string) {
+	fs := flag.NewFlagSet("update run", flag.ExitOnError)
+	release := fs.String("release", "", "release id (or use --version)")
+	version := fs.String("version", "", "release version (looked up as an agent release)")
+	selector := fs.String("selector", "all", "fleet selector")
+	canary := fs.Int("canary", 1, "canary cohort size (0 = no canary phase)")
+	wave := fs.Int("wave", 25, "per-wave percentage of the fleet")
+	var canaryHosts []string
+	fs.Func("canary-host", "explicit canary host id (repeatable)", func(v string) error {
+		canaryHosts = append(canaryHosts, v)
+		return nil
+	})
+	fs.Parse(args)
+	body := map[string]any{
+		"release_id": *release, "version": *version, "selector": *selector,
+		"canary": *canary, "wave_pct": *wave, "canary_hosts": canaryHosts,
+	}
+	var res map[string]any
+	if err := c.do("POST", "/api/v1/updates/runs", body, &res); err != nil {
+		fatal(err)
+	}
+	state := strval(res["state"])
+	fmt.Printf("run %s started (state=%s, version=%s, selector=%s)\n",
+		strval(res["run_id"]), state, *version, *selector)
+	if state == "pending_approval" {
+		fmt.Printf("parked on approval %s — approve it, then the run starts\n", strval(res["approval_id"]))
+	}
+}
+
+func (c *ctl) updateRuns() {
+	var page map[string]any
+	if err := c.do("GET", "/api/v1/updates/runs", nil, &page); err != nil {
+		fatal(err)
+	}
+	items, _ := page["items"].([]any)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "RUN\tVERSION\tSELECTOR\tSTATUS\tWAVE\tDONE/FAILED/TOTAL\tCREATED")
+	for _, it := range items {
+		r, _ := it.(map[string]any)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d/%d/%d\t%s\n",
+			strval(r["id"]), strval(r["version"]), strval(r["selector"]), strval(r["status"]),
+			int64(num(r["current_wave"])), int64(num(r["done_hosts"])),
+			int64(num(r["failed_hosts"])), int64(num(r["total_hosts"])),
+			unixTime(int64(num(r["created"]))))
+	}
+	w.Flush()
+	fmt.Printf("\n%d run(s)\n", len(items))
+}
+
+func (c *ctl) updateShow(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl update show <runID>")
+		os.Exit(2)
+	}
+	var res map[string]any
+	if err := c.do("GET", "/api/v1/updates/runs/"+args[0], nil, &res); err != nil {
+		fatal(err)
+	}
+	run, _ := res["run"].(map[string]any)
+	fmt.Printf("run %s  version=%s  selector=%s  status=%s  wave=%v  done=%v failed=%v skipped=%v total=%v\n",
+		strval(run["id"]), strval(run["version"]), strval(run["selector"]), strval(run["status"]),
+		num(run["current_wave"]), num(run["done_hosts"]), num(run["failed_hosts"]),
+		num(run["skipped_hosts"]), num(run["total_hosts"]))
+	if errStr := strval(run["error"]); errStr != "" {
+		fmt.Printf("error: %s\n", errStr)
+	}
+	hosts, _ := res["hosts"].([]any)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "HOST\tSTATUS\tVERSION\tERROR")
+	for _, it := range hosts {
+		hh, _ := it.(map[string]any)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			strval(hh["host_id"]), strval(hh["status"]), strval(hh["version"]), strval(hh["error"]))
+	}
+	w.Flush()
+}
+
+func (c *ctl) updateRunAction(action string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "usage: partout ctl update %s <runID>\n", action)
+		os.Exit(2)
+	}
+	var res map[string]any
+	if err := c.do("POST", "/api/v1/updates/runs/"+args[0]+"/"+action, map[string]any{}, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("run %s: %s applied\n", args[0], action)
 }
 
 func (c *ctl) cmdRun(args []string) {

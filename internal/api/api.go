@@ -24,6 +24,7 @@ import (
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/server/tasks"
+	"github.com/blawesom/partout/internal/server/updates"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -52,6 +53,7 @@ type Handler struct {
 	usersActive bool                   // true once the principals table is non-empty
 	ca          *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
 	streamH     *stream.Handler        // stream handler (for mTLS leaf rotation)
+	updatesMgr  *updates.Manager       // M8.1 rollout orchestrator
 }
 
 // New builds the REST handler and its router.
@@ -266,6 +268,9 @@ func (h *Handler) SetTasks(tc *tasks.Controller) { h.tasks = tc }
 
 // SetJobs installs the jobs controller (M3, PRD §5.4).
 func (h *Handler) SetJobs(jc *jobs.Controller) { h.jobs = jc }
+
+// SetUpdates installs the M8.1 rollout orchestrator.
+func (h *Handler) SetUpdates(m *updates.Manager) { h.updatesMgr = m }
 
 // SetSessions installs the sessions manager (M2, PRD §5.2.2).
 func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }

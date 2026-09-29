@@ -768,6 +768,20 @@ func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 		return
 	}
 
+	// 1b. Convergence (idempotent re-run): already at the target version ->
+	// verified, no download or swap. A rollout targeting the current version
+	// therefore completes without touching the binary.
+	if dir.Version == facts.Version {
+		a.log.Printf("agent: already at target version %v; no update needed", dir.Version)
+		a.sendUpEnvelopeNoSpool(&pb.Envelope{
+			Kind: pb.EnvelopeKind_UPDATE_RESULT,
+			Payload: &pb.Envelope_UpdateResult{UpdateResult: &pb.UpdateResult{
+				ReleaseId: dir.ReleaseId, Phase: "verified", Version: facts.Version,
+			}},
+		})
+		return
+	}
+
 	// 2. Download the artifact with the one-time grant (off the stream).
 	ctx, cancel := context.WithTimeout(a.rootCtx, 10*time.Minute)
 	defer cancel()

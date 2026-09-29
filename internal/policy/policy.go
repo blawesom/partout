@@ -46,6 +46,9 @@ const (
 
 	// M3 tasks (PRD §5.5).
 	ActionTaskRun = "task.run"
+
+	// M8.1 fleet update rollout (a run of signed agent self-updates).
+	ActionUpdateApply = "update.apply"
 )
 
 // Priority ordering for precedence: lower number = higher priority.

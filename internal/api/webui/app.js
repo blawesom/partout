@@ -747,6 +747,7 @@
           <div class="tabs">
             <div class="tab" :class="{active: updTab==='packages'}" @click="updTab='packages'">Packages</div>
             <div class="tab" :class="{active: updTab==='releases'}" @click="updTab='releases'; loadReleases()">Releases</div>
+            <div class="tab" :class="{active: updTab==='runs'}" @click="updTab='runs'; loadRuns()">Runs</div>
           </div>
           <template v-if="updTab==='packages'">
           <p class="page-sub">Package updates for the selected host (M3). Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
@@ -805,7 +806,7 @@
             <div v-if="pkgActionDetail" class="console" style="margin-top:8px;max-height:220px;white-space:pre-wrap">{{ pkgActionDetail.dry_summary || pkgActionDetail.error || '(no summary)' }}</div>
           </div>
           </template>
-          <template v-else>
+          <template v-else-if="updTab==='releases'">
             <p class="page-sub">Signed Partout release artifacts (M8.1). The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. Upload requires admin; downloading the artifact requires operator.</p>
             <div class="card">
               <div class="head"><h2>Releases</h2><div class="spacer"></div><button class="btn sm" @click="loadReleases">Refresh</button></div>
@@ -837,6 +838,59 @@
                 <button class="btn primary" :disabled="!isAdmin || !relForm.version || !relForm.arch || !relForm.signature || !relForm.file || relBusy" @click="uploadRelease"><span v-if="relBusy" class="spin"></span> Upload</button>
               </div>
               <p class="muted small" style="margin-top:8px">Sign locally first: <span class="mono">partout ctl update sign --version … --arch … --kind … --file …</span>. The server stores the signature as-is and checks the artifact sha256 (declared, or computed from the bytes).</p>
+            </div>
+          </template>
+          <template v-else-if="updTab==='runs'">
+            <p class="page-sub">Fleet rollouts (M8.1): canary, then waves of the resolved selector. The server dispatches signed directives; each agent verifies the release signature before swapping its binary, and rolls back to N-1 automatically on failure. <span class="mono">partout ctl update run …</span> does the same.</p>
+            <div class="card">
+              <div class="head"><h2>New rollout</h2><div class="spacer"></div><button class="btn sm" @click="loadRuns">Refresh runs</button></div>
+              <div class="form-row" style="align-items:flex-end">
+                <label class="fld" style="flex:1"><span>Release</span><select v-model="runForm.release_id"><option value="" disabled>choose…</option><option v-for="r in releases.filter(x => x.kind==='agent')" :key="r.id" :value="r.id">{{ r.version }} ({{ r.arch }})</option></select></label>
+                <label class="fld" style="flex:1"><span>Selector</span><input v-model="runForm.selector" class="mono" placeholder="all" /></label>
+                <label class="fld"><span>Canary</span><input v-model.number="runForm.canary" type="number" min="0" style="width:70px" /></label>
+                <label class="fld"><span>Wave %</span><input v-model.number="runForm.wave" type="number" min="1" max="100" style="width:70px" /></label>
+                <button class="btn primary" :disabled="!isAdmin || !runForm.release_id || !runForm.selector || runBusy" @click="createRun"><span v-if="runBusy" class="spin"></span> Start run</button>
+              </div>
+              <p v-if="runNotice" class="muted small" style="margin-top:8px">{{ runNotice }}</p>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="head"><h2>Runs</h2></div>
+              <table class="tbl">
+                <thead><tr><th>Version</th><th>Selector</th><th>Status</th><th>Wave</th><th>Done</th><th>Failed</th><th>Skipped</th><th>Total</th><th>Created</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-for="r in runs" :key="r.id" style="cursor:pointer" @click="openRun(r.id)">
+                    <td class="mono">{{ r.version }}</td>
+                    <td class="mono">{{ r.selector }}</td>
+                    <td><span class="badge" :class="runStatusKind(r.status)">{{ r.status }}</span></td>
+                    <td class="muted">{{ r.current_wave }}</td>
+                    <td class="muted">{{ r.done_hosts }}</td>
+                    <td class="muted" :style="r.failed_hosts ? 'color:#d66' : ''">{{ r.failed_hosts }}</td>
+                    <td class="muted">{{ r.skipped_hosts }}</td>
+                    <td class="muted">{{ r.total_hosts }}</td>
+                    <td class="muted">{{ fmtAgo(r.created) }}</td>
+                    <td class="row-actions"><button class="btn sm" @click.stop="openRun(r.id)">Detail</button></td>
+                  </tr>
+                  <tr v-if="!runs.length"><td colspan="10"><div class="empty">No rollout runs yet.</div></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="runDetail" class="card" style="margin-top:12px">
+              <div class="head"><h2>Run {{ runDetail.run.id }} — {{ runDetail.run.version }}</h2><div class="spacer"></div>
+                <button v-if="runDetail.run.status==='paused_failure'" class="btn sm" :disabled="!isAdmin || runBusy" @click="runAction('retry')">Retry failed</button>
+                <button v-if="runDetail.run.status==='paused_failure'" class="btn sm" :disabled="!isAdmin || runBusy" @click="runAction('skip')">Skip failed</button>
+                <button v-if="!runTerminal(runDetail.run.status)" class="btn danger sm" :disabled="!isAdmin || runBusy" @click="runAction('abort')">Abort</button>
+              </div>
+              <table class="tbl">
+                <thead><tr><th>Host</th><th>Status</th><th>Version</th><th>Error</th></tr></thead>
+                <tbody>
+                  <tr v-for="h in runDetail.hosts" :key="h.id">
+                    <td><div class="hostcell"><span>{{ hostNameById(h.host_id) }}</span><span class="hostid mono">{{ h.host_id }}</span></div></td>
+                    <td><span class="badge" :class="runStatusKind(h.status)">{{ h.status }}</span></td>
+                    <td class="mono muted">{{ h.version || '—' }}</td>
+                    <td class="muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="h.error">{{ h.error || '' }}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </template>
         </section>
@@ -1379,6 +1433,7 @@
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
         updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
+        runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
         tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], users: [],
@@ -1718,7 +1773,7 @@
           opened = true;
         };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
-        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "job.run-parked", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved", "provision.start", "provision.step", "provision.key_confirm", "provision.connected", "provision.failed", "provision.cancelled", "provision.handoff"];
+        const kinds = ["host.state", "execution.state", "audit.event", "job.run", "job.run-parked", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved", "provision.start", "provision.step", "provision.key_confirm", "provision.connected", "provision.failed", "provision.cancelled", "provision.handoff", "update.run", "update.host"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
@@ -1729,6 +1784,7 @@
         else if ((kind === "job.run" || kind === "job.run-parked") && this.page === "jobs") { this.loadJobs(); if (this.jobRunsDetail) this.loadJobRuns(this.jobRunsDetail.job_id); }
         else if (kind === "task.run" && this.page === "tasks") { this.loadTasks(); this.loadPlaybooks(); this.loadTaskRuns(); }
         else if (kind === "package.action" && this.page === "updates") { this.loadUpdates(); this.loadPkgActions(); }
+        else if ((kind === "update.run" || kind === "update.host") && this.page === "updates") { this.loadRuns(); if (this.runDetailId) this.openRun(this.runDetailId); }
         else if (kind.startsWith("provision.") && this.page === "provision") { this.loadProvRuns(); if (this.provDetail) this.loadProvDetail(this.provDetail.run.id); }
         else if (kind === "file.action" && this.page === "files") this.listFiles();
         else if (kind === "session.data") { if (this.page === "session") this._onSessionData(p); }
@@ -1769,7 +1825,7 @@
           case "files": await this.listFiles(); break;
           case "jobs": await this.loadJobs(); break;
           case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
-          case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); this.loadReleases(); break;
+          case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); this.loadReleases(); this.loadRuns(); break;
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
@@ -2017,6 +2073,55 @@
           this.notify("ok", "release deleted");
           this.loadReleases();
         } catch (e) { /* toast shown by api() */ }
+      },
+      runStatusKind(st) {
+        if (st === "verified" || st === "completed") return "ok";
+        if (st === "failed" || st === "failed_rollback" || st === "aborted") return "bad";
+        if (st === "skipped" || st === "timed_out" || st === "pending") return "warn";
+        if (st === "queued" || st === "canary" || st === "rolling" || st === "paused_failure" || st === "dispatching" || st === "restarting") return "info";
+        return "neutral";
+      },
+      runTerminal(st) { return ["completed", "failed", "aborted"].includes(st); },
+      async loadRuns() {
+        try {
+          const d = await this.api("/updates/runs");
+          this.runs = d.items || [];
+        } catch (e) { this.runs = []; }
+      },
+      async openRun(id) {
+        this.runDetailId = id;
+        try {
+          const d = await this.api("/updates/runs/" + encodeURIComponent(id));
+          this.runDetail = d;
+          const run = this.runs.find(r => r.id === id);
+          if (run && d.run) { run.status = d.run.status; run.done_hosts = d.run.done_hosts; run.failed_hosts = d.run.failed_hosts; run.skipped_hosts = d.run.skipped_hosts; }
+        } catch (e) { /* toast shown by api() */ }
+      },
+      async createRun() {
+        this.runBusy = true; this.runNotice = "";
+        try {
+          const d = await this.api("/updates/runs", { body: {
+            release_id: this.runForm.release_id, selector: this.runForm.selector,
+            canary: this.runForm.canary || 0, wave_pct: this.runForm.wave || 25,
+          } });
+          this.runNotice = d.state === "pending_approval"
+            ? "Run " + d.run_id + " parked on approval " + d.approval_id + " — approve it in Approvals to start."
+            : "Run " + d.run_id + " started (" + d.state + ").";
+          this.notify("ok", this.runNotice);
+          await this.loadRuns();
+          this.openRun(d.run_id);
+        } catch (e) { /* toast shown by api() */ } finally { this.runBusy = false; }
+      },
+      async runAction(action) {
+        if (!this.runDetail) return;
+        const id = this.runDetail.run.id;
+        this.runBusy = true;
+        try {
+          await this.api("/updates/runs/" + encodeURIComponent(id) + "/" + action, { body: {} });
+          this.notify("ok", "run " + id + ": " + action + " applied");
+          await this.loadRuns();
+          this.openRun(id);
+        } catch (e) { /* toast shown by api() */ } finally { this.runBusy = false; }
       },
       async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.secrets || d.items || []; } catch (e) { this.secrets = []; } },
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },

@@ -488,7 +488,46 @@ CREATE TABLE IF NOT EXISTS update_releases (
   created_at  INTEGER NOT NULL,
   UNIQUE (version, arch, kind)
 );
+
+-- M8.1 rollout orchestration: one row per fleet rollout (run), one row per
+-- (run, host). The per-host row is the state machine; the run row carries
+-- the wave plan + counters.
+CREATE TABLE IF NOT EXISTS update_runs (
+  id           TEXT PRIMARY KEY,
+  version      TEXT NOT NULL,
+  release_id   TEXT NOT NULL,
+  arch         TEXT NOT NULL,
+  selector     TEXT NOT NULL DEFAULT 'all',
+  canary_hosts TEXT NOT NULL DEFAULT '',      -- comma-joined canary cohort
+  canary_count INTEGER NOT NULL DEFAULT 1,
+  wave_pct     INTEGER NOT NULL DEFAULT 25,
+  status       TEXT NOT NULL DEFAULT 'pending',
+  current_wave INTEGER NOT NULL DEFAULT 0,
+  total_hosts  INTEGER NOT NULL DEFAULT 0,
+  done_hosts   INTEGER NOT NULL DEFAULT 0,
+  failed_hosts INTEGER NOT NULL DEFAULT 0,
+  skipped_hosts INTEGER NOT NULL DEFAULT 0,
+  error        TEXT NOT NULL DEFAULT '',
+  approval_id  TEXT NOT NULL DEFAULT '',
+  created_by   TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_update_runs_status ON update_runs(status);
+
+CREATE TABLE IF NOT EXISTS update_hosts (
+  id         TEXT PRIMARY KEY,
+  run_id     TEXT NOT NULL,
+  host_id    TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'queued',
+  version    TEXT NOT NULL DEFAULT '',
+  error      TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  UNIQUE (run_id, host_id)
+);
+CREATE INDEX IF NOT EXISTS idx_update_hosts_run ON update_hosts(run_id);
+CREATE INDEX IF NOT EXISTS idx_update_hosts_host ON update_hosts(host_id);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 15
+const currentSchemaVersion = 16

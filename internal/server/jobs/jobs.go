@@ -514,6 +514,98 @@ func (c *Controller) List() ([]*store.Job, error) {
 	return c.st.ListJobs()
 }
 
+// ReissueForHost re-signs + re-pushes the job assignment for one host whose
+// version just changed (M8.1: an agent that self-updated reports new facts).
+// Every enabled job whose selector matches the host gets a fresh signed
+// Decision (bound to the current policy bundle version), so the agent
+// re-evaluates its jobs against the new version instead of holding a
+// decision signed under the old one. A host that is now denied is
+// unassigned so it stops firing under the stale decision.
+func (c *Controller) ReissueForHost(hostID string) error {
+	if c.h == nil {
+		return nil
+	}
+	jobs, err := c.List()
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if !job.Enabled {
+			continue
+		}
+		r := store.NewResolver(c.st)
+		agents, err := r.ResolveSelector(job.Selector)
+		if err != nil && !errors.Is(err, sel.ErrNoMatch) {
+			continue
+		}
+		matches := false
+		for _, a := range agents {
+			if a.ID == hostID {
+				matches = true
+				break
+			}
+		}
+		if !matches {
+			continue
+		}
+
+		// Fresh signed decision for this host (current bundle version).
+		decision, reason := c.hostTaskRunDecision(job.ID, hostID)
+		if decision == nil {
+			c.log.Printf("jobs: reissue %s for %s: denied (%s)", job.ID, hostID, reason)
+			_ = c.st.UnassignJob(job.ID, hostID)
+			if err := c.h.SendJobUnassign(hostID, job.ID); err != nil {
+				c.log.Printf("jobs: unassign %s -> %s: %v", job.ID, hostID, err)
+			}
+			continue
+		}
+
+		if err := c.st.AssignJob(&store.JobAssignment{JobID: job.ID, AgentID: hostID}); err != nil {
+			c.log.Printf("jobs: reissue assign %s -> %s: %v", job.ID, hostID, err)
+			continue
+		}
+		ver, err := c.st.TaskVersion(job.TaskID, job.TaskVersion)
+		if err != nil || ver == nil {
+			continue
+		}
+		steps, _ := store.DecodeTaskSteps(ver.StepsJSON)
+		tz := "UTC"
+		ja := &pb.JobAssignment{
+			JobId:       job.ID,
+			Name:        job.Name,
+			Cron:        job.Cron,
+			Timezone:    tz,
+			TaskId:      job.TaskID,
+			TaskVersion: int32(job.TaskVersion),
+			Steps:       toPBSteps(steps),
+			MaxRunS:     int32(job.MaxRunSeconds),
+			Decision:    decision,
+		}
+		if err := c.h.SendJobAssign(hostID, ja); err != nil {
+			c.log.Printf("jobs: reissue push %s -> %s: %v", job.ID, hostID, err)
+		} else {
+			c.log.Printf("jobs: reissued %s for %s (fresh decision)", job.ID, hostID)
+		}
+	}
+	return nil
+}
+
+// hostTaskRunDecision signs a fresh task.run decision for one host against
+// the current policy bundle (or returns the denial reason).
+func (c *Controller) hostTaskRunDecision(jobID, hostID string) (*pb.Decision, string) {
+	act := policy.Action{HostID: hostID, ActionClass: policy.ActionTaskRun}
+	if host, _ := c.st.Agent(hostID); host != nil {
+		if tags, _ := c.st.Tags(hostID); len(tags) > 0 {
+			act.HostTags = tags
+		}
+		if roles, _ := c.st.Roles(hostID); len(roles) > 0 {
+			act.HostRoles = roles
+		}
+	}
+	decision, _, reason := c.signTaskRunDecision(jobID, "system", act)
+	return decision, reason
+}
+
 // RunsForJob returns the runs for one job.
 func (c *Controller) RunsForJob(jobID string, limit int) ([]*store.JobRun, error) {
 	return c.st.JobRunsForJob(jobID, limit)

@@ -250,7 +250,32 @@ Ordering (each step is independently shippable):
    - Version-skew safety already exists (agent N ↔ server N/N+1), so a restarted
      agent on the new version re-connects cleanly to the still-old server and
      vice versa.
-3. **Rollout orchestration** (waves, SSE, audit).
+3. **Rollout orchestration** — ✅ **shipped** (`update_runs` + `update_hosts`
+   tables, schema v16; `internal/server/updates` manager). One run = one
+   rollout: server-side selector resolution → per-host `update.apply`
+   policy gate (deny excludes the host, `require_approval` parks the run on
+   an approval request — the approvals controller re-dispatches on approve)
+   → canary cohort (explicit or first-N, hard gate) → waves of
+   `wave_pct`% of the fleet. The store is the source of truth; an
+   in-memory driver ticks the FSM and `ResumeAll` re-attaches non-terminal
+   runs after a server restart. Per host: queued → dispatching (fresh
+   one-time grant + queued directive — offline hosts are delivered on
+   reconnect, not dropped) → restarting → verified | failed_rollback |
+   timed_out (15 min) | skipped. Wave failure → `paused_failure` with
+   operator **retry** (re-dispatch failed hosts; a failed canary is not
+   retryable — abort) / **skip** (mark skipped, continue) / **abort**.
+   Verified host → its job decisions are re-signed + re-pushed against the
+   current policy bundle (jobs re-evaluate against the new version).
+   API: `POST/GET /api/v1/updates/runs[/{id}]` + `/retry|/skip|/abort`
+   (admin), SSE `update.run` / `update.host`, audits `update.run.*`,
+   `update.dispatch`. UI: Runs tab on Updates (rollout form, live run
+   board with per-host badges, operator actions). CLI: `partout ctl
+   update run|runs|show|retry|skip|abort`. Convergence: an agent already
+   at the target version answers `verified` without downloading (an
+   idempotent re-run of the one-command completes without touching
+   binaries). Tests: `TestRollout*` FSM suite (canary/waves/hard-gate/
+   skip/retry/approval/deny/abort), live E2E (canary hard-gate +
+   pause→skip→completed against a real embedded server).
    - `partout ctl update run --version v0.8.0 --selector all --canary 1 --waves 25`
      → `update_runs` (plan: version, selector, canary count, wave size, state)
      + per-host `update_run_hosts` rows (state machine: queued → transferring →

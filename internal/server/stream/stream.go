@@ -107,6 +107,11 @@ type Handler struct {
 	// observe facts (M5). It receives the agent ID and the raw JSON blob
 	// (already merged into host_facts).
 	ObserveFactsHook func(agentID string)
+
+	// UpdateResultHook, if set, is called when an agent reports a self-update
+	// result (M8.1). The updates rollout manager maps the phase onto the
+	// per-host run state machine.
+	UpdateResultHook func(agentID string, r *pb.UpdateResult)
 }
 
 // queuedEnvelope is one down envelope held for an offline agent.
@@ -485,8 +490,11 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 	case msg.GetUpdateResult() != nil:
 		// M8.1 update outcome (step 2). Audit + SSE so the control plane and
 		// UI can watch the canary; the step-3 run state machine consumes the
-		// same event.
+		// same event via UpdateResultHook.
 		ur := msg.GetUpdateResult()
+		if h.UpdateResultHook != nil {
+			h.UpdateResultHook(sess.AgentID, ur)
+		}
 		h.log.Printf("stream: update result %s (release %s, error=%q)", ur.Phase, ur.ReleaseId, ur.Error)
 		_ = h.st.AppendAudit(store.AuditEvent{
 			TS: time.Now().Unix(), Kind: "update.result", Actor: "agent", AgentID: sess.AgentID,

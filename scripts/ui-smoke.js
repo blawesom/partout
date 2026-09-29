@@ -251,6 +251,42 @@ async function main() {
   if (relTab) { relTab.click(); await sleep(600); }
   check("releases: uploaded row renders", rowsWithText(d, "v0.9.0-smoke") > 0, "no release row");
   check("releases: upload form", d.body.textContent.includes("Upload a release"), "upload form missing");
+  // M8.1 step 3: rollout runs tab. Start a run at the smoke release via the
+  // API; the embedded agent (no release key) refuses, so the run lands on
+  // paused_failure — a real live state to assert.
+  const runsTab = [...d.querySelectorAll(".tab")].find((t) => t.textContent.trim() === "Runs");
+  check("updates: Runs tab", !!runsTab, "Runs tab missing");
+  if (runsTab) { runsTab.click(); await sleep(600); }
+  check("runs: new-rollout form", d.body.textContent.includes("New rollout"), "rollout form missing");
+  let smokeRunId = "";
+  {
+    const rels = await (await realFetch(base + "/api/v1/updates/releases", { headers: { Authorization: "Bearer " + token } })).json();
+    const rel = rels.items.find((r) => r.version === "v0.9.0-smoke");
+    const runRes = await realFetch(base + "/api/v1/updates/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ release_id: rel.id, selector: "all", canary: 0, wave_pct: 100 }),
+    });
+    check("runs: create via API", runRes.status === 201, "status=" + runRes.status);
+    if (runRes.status === 201) smokeRunId = (await runRes.json()).run_id;
+  }
+  // Let the server FSM tick: dispatch -> agent refusal (no release key in
+  // the harness) -> paused_failure. Poll the real API for the state.
+  let smokeRunStatus = "";
+  for (let i = 0; i < 30 && smokeRunStatus !== "paused_failure"; i++) {
+    await sleep(500);
+    try {
+      const rr = await (await realFetch(base + "/api/v1/updates/runs/" + smokeRunId, { headers: { Authorization: "Bearer " + token } })).json();
+      smokeRunStatus = rr.run.status;
+    } catch (e) { /* not ready yet */ }
+  }
+  check("runs: FSM reached paused_failure (live)", smokeRunStatus === "paused_failure", "status=" + smokeRunStatus);
+  // The harness stubs SSE by design; drive the same refresh it would.
+  if (w.__partout) { w.__partout.loadRuns(); w.__partout.openRun(smokeRunId); }
+  await sleep(700);
+  check("runs: run row renders", rowsWithText(d, "v0.9.0-smoke") > 0, "no run row");
+  check("runs: paused_failure badge", d.body.textContent.includes("paused_failure"), "status badge missing");
+  check("runs: per-host failed_rollback row", d.body.textContent.includes("failed_rollback"), "host state missing");
 
   await visit("#/secrets");
   check("secrets: row rendered", rowsWithText(d, "dbpass") > 0, "secret not rendered");

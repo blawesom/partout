@@ -55,6 +55,7 @@ import (
 	"github.com/blawesom/partout/internal/server/sessions"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/server/tasks"
+	"github.com/blawesom/partout/internal/server/updates"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
@@ -323,6 +324,20 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	h.JobRunResultHook = func(agentID string, r *pb.JobRunResult) {
 		jobC.OnRunResult(agentID, r)
 	}
+
+	// M8.1 step 3: rollout orchestrator (canary -> waves over signed
+	// self-update directives). Its policy class is update.apply; a
+	// require_approval match parks the run on an approval request, and
+	// approval re-dispatches it.
+	updMgr := updates.New(st, h, sseB, lg)
+	updMgr.SetApprovals(apr)
+	updMgr.SetJobs(jobC)
+	h.UpdateResultHook = func(agentID string, r *pb.UpdateResult) {
+		updMgr.OnResult(agentID, r)
+	}
+	apiH.SetUpdates(updMgr)
+	updMgr.ResumeAll(context.Background())
+
 	// Post-reboot task resumes: a TaskRunResult with no live waiter
 	// finalizes the existing run row in place (PRD §5.5).
 	h.TaskResultHook = func(agentID, runID string, tr *pb.TaskRunResult) {
