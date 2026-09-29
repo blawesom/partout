@@ -145,13 +145,68 @@ entry on the bind line. Bind the server loopback-only behind the edge:
 
 ## 2. Artifacts
 
-- **One static Go binary** `partout`. The Web frontend (embedded `embed.FS`) is
-  *proposed* — the current build is API + agent only; operators use REST/SSE or
-  `partout ctl`.
-- **Release matrix** (*proposed*): `linux/amd64`, `linux/arm64`, `darwin/arm64`+`amd64`;
-  optional musl build. Current: build from source (`go build ./cmd/partout`).
-- **Per release** (*proposed*): binary tarballs, SHA-256SUMS, Docker image, Helm chart.
+- **One static Go binary** `partout` (CGO-free; `go build` with `CGO_ENABLED=0`).
+  The Web frontend is embedded (`embed.FS`) and served by the server — no
+  separate artifact, no Node build step.
+- **Release matrix** (current): GitHub Releases ship prebuilt
+  `partout_<version>_linux_{amd64,arm64}.tar.gz` + `SHA-256SUMS` (layout:
+  `partout_linux_<arch>/partout`). Version is injected at build time:
+  `-ldflags "-X …/internal/agent/facts.Version=<version>"`.
+- **M8.1 signed release repo** (for `partout update`): separate from the
+  GitHub tarballs — `partout-<version>-<arch>-{server,agent}` binaries +
+  `.sig` (Ed25519 over `version|arch|kind|sha256`) under `<repo>/<version>/`
+  plus a `<repo>/latest` text file. See §2.1.
 - **Images are distro-agnostic**: no OS packages required on hosts (agent is the binary).
+
+### 2.1 Upgrading from v0.7.x (manual, one-time)
+
+The signed-update feature is forward, not backward, compatible: a v0.7.x
+host cannot run `partout update` (it has no release repo, no signature
+checks, no `/api/v1/version`). The hop to v0.8.0 is a **manual binary swap**;
+every release after that is the one-command.
+
+**Per host:**
+
+```sh
+# 1. Get + verify (GitHub auth + checksum are the trust path for this hop;
+#    the tarballs are not Ed25519-signed releases)
+curl -LO https://github.com/blawesom/partout/releases/download/v0.8.0/partout_0.8.0_linux_amd64.tar.gz
+curl -LO https://github.com/blawesom/partout/releases/download/v0.8.0/SHA-256SUMS
+sha256sum -c <(grep amd64 SHA-256SUMS)
+tar xzf partout_0.8.0_linux_amd64.tar.gz
+
+# 2. Server (keep N-1 + optional DB snapshot)
+cp /usr/local/bin/partout /usr/local/bin/partout.prev
+sqlite3 /var/lib/partout/partout.db "VACUUM INTO '/var/lib/partout/pre-upgrade.db'"   # optional
+install -m 0755 partout_linux_amd64/partout /usr/local/bin/partout
+systemctl restart partout-server
+curl -fsS localhost:8443/healthz && curl -fsS localhost:8443/readyz
+
+# 3. Agent (skip in embedded mode — step 2 already replaced it)
+install -m 0755 partout_linux_amd64/partout /usr/local/bin/partout
+systemctl restart partout-agent
+```
+
+- **Rollback**: restore `partout.prev` and restart. Schema migrations are
+  additive (v15→v16 adds tables only) and v0.7.x is forward-compatible with
+  newer schemas, so the DB does not need restoring.
+- **Guard (recommended)**: point the agent unit's `ExecStart` at
+  `deploy/systemd/partout-update-guard.sh` (see `deploy/systemd/README.md`) so
+  future one-command updates get crashloop rollback; set `PARTOUT_RELEASE_KEY`
+  in the agent env from the start.
+
+**Enabling the one-command afterwards** (operator side): `partout update`
+fetches from `PARTOUT_RELEASE_REPO` and refuses anything not signed with
+`PARTOUT_RELEASE_KEY` — the GitHub tarballs are *not* signed releases, so run
+the one-command only after you have published signed artifacts for the next
+release (build → `partout ctl update sign` → publish under `<repo>/<version>/`
++ `latest`). Then, on the upgraded server:
+
+```sh
+export PARTOUT_RELEASE_KEY=<pub> PARTOUT_RELEASE_REPO=https://releases.example.com/partout
+partout update --check   # report-only first
+partout update           # server + fleet, from here on
+```
 
 ---
 
