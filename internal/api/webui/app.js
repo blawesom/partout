@@ -74,6 +74,58 @@
       <button class="toast-x" @click="dismissToast(t.id)" aria-label="dismiss">×</button>
     </div>
   </div>
+  <!-- ============ ADD HOST DIALOG (Fleet) ============ -->
+  <div class="overlay" v-if="addHostOpen && loggedIn" @click.self="closeAddHost()">
+    <div class="dialog card">
+      <div class="head">
+        <h2>Add host</h2>
+        <p class="cap">Two ways to bring a host under management. Pick the one that fits your access.</p>
+        <div class="spacer"></div>
+        <button class="btn sm" @click="closeAddHost()" aria-label="close">✕</button>
+      </div>
+      <div class="tabs">
+        <div class="tab" :class="{active: addHostTab==='manual'}" @click="addHostTab='manual'">Run on the host</div>
+        <div class="tab" :class="{active: addHostTab==='ssh'}" @click="addHostTab='ssh'" :title="isAdmin ? '' : 'requires admin role'">Onboard over SSH</div>
+      </div>
+
+      <!-- Option A: manual install with a one-time enrollment token -->
+      <div v-if="addHostTab==='manual'">
+        <p class="cap">For hosts you can shell into that the server should not SSH into. Mint a
+          one-time token, run the command on the host — it appears in the fleet the moment it connects.</p>
+        <div v-if="!ahToken">
+          <button class="btn primary sm" :disabled="!isOperator || ahTokenBusy" @click="mintAddHostToken()">Mint one-time token (15 min)</button>
+          <span v-if="!isOperator" class="muted small" style="margin-left:8px">requires operator role</span>
+        </div>
+        <div v-else>
+          <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahCmd }}</div>
+          <div class="toolbar" style="margin-top:8px">
+            <button class="btn sm" @click="copyAhCmd">Copy command</button>
+            <span class="muted small">shown once — expires in {{ ahTtlLeft }} s</span>
+          </div>
+          <p class="muted small" style="margin-top:8px">The <span class="mono">partout</span> binary ships as a static
+            linux build in each release. If this UI is behind a proxy, replace
+            <span class="mono">{{ locationHost }}</span> with an address the host can actually reach.</p>
+        </div>
+      </div>
+
+      <!-- Option B: server-side provisioning over the operator's fleet SSH -->
+      <div v-else>
+        <p class="cap">The server installs the agent over your existing fleet SSH — the
+          <b>server's own</b> <span class="mono">~/.ssh</span> must reach <span class="mono">user@host</span>.
+          A new host key pauses the run at <span class="mono">key_confirm</span> until you confirm its fingerprint.</p>
+        <div class="toolbar">
+          <input v-model="provHost" class="mono" placeholder="user@host" style="max-width:200px" />
+          <select v-model="provMode">
+            <option value="fresh" title="fresh: clean slate — stops and removes any existing partout agent + identity on the host, then enrolls a brand-new agent">fresh</option>
+            <option value="join" title="join: non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved)">join</option>
+          </select>
+          <button class="btn primary sm" :disabled="!isAdmin || !provHost || !!provBusy" @click="createProvRun()">Start</button>
+          <span v-if="!isAdmin" class="muted small">requires admin role</span>
+        </div>
+        <p class="muted small" style="margin-top:8px">{{ provModeHint }}</p>
+      </div>
+    </div>
+  </div>
   <!-- ============ LOGIN ============ -->
   <div v-if="!loggedIn" class="login-wrap">
     <div class="login-card">
@@ -165,6 +217,7 @@
           <div class="card">
             <div class="head"><h2>Hosts</h2><div class="spacer"></div>
               <button class="btn sm" @click="createGroup" :disabled="!isOperator">+ Group</button>
+              <button class="btn primary sm" @click="openAddHost" :disabled="!isOperator">+ Add host</button>
             </div>
             <table class="tbl">
               <thead><tr><th>Host</th><th>State</th><th>Version</th><th>Last seen</th></tr></thead>
@@ -175,7 +228,7 @@
                   <td class="mono">{{ h.version || '—' }}</td>
                   <td class="muted">{{ fmtAgo(h.last_seen) }}</td>
                 </tr>
-                <tr v-if="!hostsLoading && !scopedHosts.length"><td colspan="4"><div class="empty"><div class="big">▦</div>No hosts enrolled yet.</div></td></tr>
+                <tr v-if="!hostsLoading && !scopedHosts.length"><td colspan="4"><div class="empty"><div class="big">▦</div>No hosts enrolled yet.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="openAddHost">Add your first host</button></div></div></td></tr>
               </tbody>
             </table>
           </div>
@@ -827,10 +880,14 @@
             <div class="head"><h2>New run</h2><p class="cap">Uses the operator's existing <span class="mono">~/.ssh</span>; no credentials are created or persisted.</p></div>
             <div class="toolbar">
               <input v-model="provHost" class="mono" placeholder="user@host" style="max-width:240px" />
-              <select v-model="provMode"><option value="fresh">fresh</option><option value="join">join</option></select>
+              <select v-model="provMode">
+                <option value="fresh" title="fresh: clean slate — stops and removes any existing partout agent + identity on the host, then enrolls a brand-new agent">fresh</option>
+                <option value="join" title="join: non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved)">join</option>
+              </select>
               <button class="btn primary sm" :disabled="!isAdmin || !provHost || !!provBusy" @click="createProvRun()">Start provisioning</button>
               <span v-if="!isAdmin" class="muted small">requires admin role</span>
             </div>
+            <p class="muted small" style="margin-top:8px">{{ provModeHint }}</p>
             <div v-if="provMsg" class="info-box" style="margin-top:8px">{{ provMsg }}</div>
           </div>
           <div class="card">
@@ -1200,6 +1257,8 @@
         secretForm: { name: "", value: "", selector: "all" }, secretBusy: false,
         userForm: { username: "", password: "", role: "operator" }, userBusy: false,
         provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false,
+        addHostOpen: false, addHostTab: "manual",
+        ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
         provRuns: [],
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
@@ -1244,6 +1303,20 @@
       p2() { return this.parts[2] || ""; },
       isOperator() { return ["operator", "admin"].includes(this.me?.role); },
       isAdmin() { return this.me?.role === "admin"; },
+      locationHost() { return (typeof location !== "undefined" && location.host) ? location.host : "server:8443"; },
+      ahCmd() {
+        if (!this.ahToken) return "";
+        return "PARTOUT_SERVER=" + this.locationHost + " PARTOUT_TOKEN=" + this.ahToken + " partout --mode=agent";
+      },
+      ahTtlLeft() {
+        if (!this.ahTokenExpiry) return "—";
+        return Math.max(0, this.ahTokenExpiry - Math.floor(this.ahNow / 1000));
+      },
+      provModeHint() {
+        return this.provMode === "fresh"
+          ? "fresh: clean slate — stops and removes any existing partout agent + identity on the host, then enrolls a brand-new agent. Use for new hosts or a reset."
+          : "join: non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved). Use for upgrades.";
+      },
       initials() { return (this.me?.username || "?").slice(0, 2).toUpperCase(); },
       port() { return location.port || (location.protocol === "https:" ? "443" : "80"); },
       sseDot() { return this.sseStatus === "connected" ? "ok" : this.sseStatus === "reconnecting" ? "warn" : "down"; },
@@ -1957,6 +2030,34 @@
       },
       fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },
       pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.listFiles(); },
+      // ---- Add-host dialog (Fleet) ------------------------------------
+      openAddHost() {
+        if (!this.isOperator) return;
+        this.addHostOpen = true;
+        this.addHostTab = "manual";
+        this.startAhTicker();
+      },
+      closeAddHost() {
+        this.addHostOpen = false;
+        this.ahToken = null;
+        this.ahTokenExpiry = 0;
+        this.stopAhTicker();
+      },
+      startAhTicker() { this.stopAhTicker(); this.ahTickInt = setInterval(() => { this.ahNow = Date.now(); }, 1000); },
+      stopAhTicker() { if (this.ahTickInt) { clearInterval(this.ahTickInt); this.ahTickInt = null; } },
+      async mintAddHostToken() {
+        if (!this.isOperator) return;
+        this.ahTokenBusy = true;
+        try {
+          const d = await this.api("/agents/enrollment-tokens", { body: { ttl_s: 900 } });
+          this.ahToken = d.token; this.ahTokenExpiry = d.expires;
+          this.notify("ok", "enrollment token created — shown once, 15 min TTL");
+        } catch (e) { /* toast shown by api() */ } finally { this.ahTokenBusy = false; }
+      },
+      async copyAhCmd() {
+        try { await navigator.clipboard.writeText(this.ahCmd); this.notify("ok", "copied to clipboard"); }
+        catch (e) { this.notify("err", "copy failed — select the text manually"); }
+      },
       async createGroup() {
         const name = prompt("Group name:"); if (!name) return;
         const selector = prompt("Selector (all | host:ag_x | group:db):", "all"); if (!selector) return;
@@ -1991,7 +2092,7 @@
         });
       }
     },
-    beforeUnmount() { this.stopSSE(); },
+    beforeUnmount() { this.stopSSE(); this.stopAhTicker(); },
     watch: {
       page() { if (this.page !== "session") this._destroyTerm(); this.loadPageData(); },
       p1() { if (["host", "exec", "session"].includes(this.page)) this.loadPageData(); },

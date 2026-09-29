@@ -590,3 +590,35 @@ compile-time link to the API, so a handler rename or a loader reading the wrong 
 blanks a page silently. It found the `/secrets` `{secrets:[...]}` wrapper, `/files/list`
 requiring `agent_id`, `/hosts/{id}/facts` not carrying the overview fields, and the per-host
 `/packages/updates` requirement.
+
+## 19. Add-host dialog (Fleet)
+
+The Fleet page is the onboarding entry point: **+ Add host** in the hosts card header
+(operator+) and **Add your first host** in the empty state. It opens a dialog
+(`.overlay` / `.dialog card`, first dialog in the SPA; click-outside or ✕ closes)
+with two explicitly framed options, because a new user with an *existing* deployment
+has two valid paths and the old UI only exposed one (SSH provision, admin-only):
+
+- **Run on the host** (primary; operator+): mint a one-time enrollment token
+  (`POST /agents/enrollment-tokens`, 15-min TTL) and render one copy-pasteable
+  command block — `PARTOUT_SERVER=<host:port> PARTOUT_TOKEN=par_enr_… partout
+  --mode=agent` — with a Copy button and a live TTL countdown. The token is shown
+  **once** (server-side one-time + hashed; the UI must not re-fetch or persist it).
+  A note covers the proxy case (replace the browser-visible host with an address
+  the host can reach). The host row appears on connect — the existing
+  `host.state` SSE already reloads the fleet table; no extra wiring.
+- **Onboard over SSH** (admin+): the existing provision flow (`user@host` +
+  fresh/join), with the **precondition stated up front** ("the server's own
+  `~/.ssh` must reach `user@host`") — it used to surface only as a mid-run
+  failure. Non-admins see the tab with a tooltip "requires admin role".
+
+**fresh/join mode semantics** (tooltips on the `<option>`s + a visible hint line
+`provModeHint` below the select, on both the Provision page and the dialog):
+- `fresh` — clean slate: stops and removes any existing partout agent + identity on
+  the host, enrolls a brand-new agent. For new hosts or a reset.
+- `join` — non-destructive in-place binary update for an already-enrolled agent
+  (identity preserved). For upgrades.
+
+Guards: `TestUIShape_AddHostSurface` (entry points, both tabs, token call, tooltips)
++ `scripts/ui-smoke.js` (open dialog → mint token → command block embeds
+`par_enr_` → tooltips → close).

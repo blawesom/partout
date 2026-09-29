@@ -490,6 +490,37 @@ func TestUIShape_ChangePasswordContract(t *testing.T) {
 	}
 }
 
+func TestUIShape_AddHostSurface(t *testing.T) {
+	appJS, err := os.ReadFile(filepath.Join(repoRoot(t), "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	s := string(appJS)
+	// The add-host entry point, both onboarding options, the token mint call,
+	// and the fresh/join mode tooltips must all be present.
+	for _, want := range []string{
+		"+ Add host",
+		"Add your first host",
+		"addHostOpen",
+		"mintAddHostToken",
+		"/agents/enrollment-tokens",
+		"Onboard over SSH",
+		"Run on the host",
+		// fresh/join tooltips (title attrs) on both the Provision page and the dialog
+		"title=\"fresh: clean slate",
+		"title=\"join: non-destructive",
+		"provModeHint",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("app.js missing add-host surface %q", want)
+		}
+	}
+	// The token is shown once: the command block must be gated on ahToken.
+	if !strings.Contains(s, "PARTOUT_TOKEN=\" + this.ahToken") {
+		t.Error("app.js: add-host command does not embed the one-time token")
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

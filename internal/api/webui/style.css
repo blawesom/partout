@@ -348,3 +348,7 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 .ext-status { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
 .ext-status.ext-err { color: var(--critical); }
 .ext-status.ext-stale { color: var(--warning); }
+
+/* Add-host dialog (Fleet): two onboarding options. */
+.overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.dialog { width: 660px; max-width: calc(100vw - 32px); max-height: calc(100vh - 64px); overflow: auto; }

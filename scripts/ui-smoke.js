@@ -69,6 +69,30 @@ async function main() {
   check("fleet: host row", rowsWithText(d, "ag_") > 0);
   check("fleet: group scope rendered", !!d.querySelector(".nav-scope"));
 
+  // Add-host dialog: entry point, both tabs, real token mint -> command block.
+  check("fleet: add-host entry", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("+ Add host")));
+  if (w.__partout) {
+    w.__partout.openAddHost();
+    await sleep(250);
+    check("add-host: dialog renders", !!d.querySelector(".overlay .dialog"));
+    check("add-host: both tabs", [...d.querySelectorAll(".overlay .tab")].map((x) => x.textContent).join("|").includes("Run on the host") && [...d.querySelectorAll(".overlay .tab")].map((x) => x.textContent).join("|").includes("Onboard over SSH"));
+    w.__partout.mintAddHostToken();
+    await sleep(900);
+    const cmd = (d.querySelector(".overlay .console") || {}).textContent || "";
+    check("add-host: command embeds one-time token", cmd.includes("PARTOUT_TOKEN=par_enr_") && cmd.includes("--mode=agent"), "cmd=" + cmd.slice(0, 120));
+    check("add-host: ttl countdown rendered", /expires in \d+ s/.test((d.querySelector(".overlay") || {}).textContent || ""));
+    // fresh/join tooltips live in the SSH tab's select: switch tabs first.
+    w.__partout.addHostTab = "ssh";
+    await sleep(250);
+    const optTitles = [...d.querySelectorAll(".overlay select option")].map((o) => o.getAttribute("title") || "").join("|");
+    check("add-host: fresh/join tooltips", optTitles.includes("fresh: clean slate") && optTitles.includes("join: non-destructive"), "titles=" + optTitles);
+    w.__partout.closeAddHost();
+    await sleep(250);
+    check("add-host: dialog closed", !d.querySelector(".overlay"));
+  } else {
+    check("add-host: app instance exposed", false, "no window.__partout");
+  }
+
   const hostId = [...d.querySelectorAll("table.tbl tr td.mono")]
     .map((t) => t.textContent.trim()).find((s) => s.startsWith("ag_"));
   await visit("#/host/" + hostId);
