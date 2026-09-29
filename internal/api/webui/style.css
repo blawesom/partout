@@ -221,6 +221,9 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 .toolbar .grow { flex: 1; }
+.prov-inline { padding: 10px 8px 6px; background: var(--surface-app); border-top: 1px solid var(--border); }
+.prov-inline .toolbar { margin-bottom: 0; }
+.prov-inline .tbl { margin-top: 8px; }
 
 .empty {
   text-align: center; padding: 40px 20px; color: var(--text-faint);

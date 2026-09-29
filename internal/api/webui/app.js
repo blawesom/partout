@@ -895,7 +895,8 @@
             <table class="tbl">
               <thead><tr><th>ID</th><th>Host</th><th>Mode</th><th>State</th><th>Key fingerprint</th><th>Started</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="r in provRuns" :key="r.id" class="click" @click="showProvRun(r.id)">
+                <template v-for="r in provRuns" :key="r.id">
+                <tr class="click" @click="showProvRun(r.id)">
                   <td class="mono">{{ r.id }}</td>
                   <td class="mono">{{ r.host }}</td>
                   <td class="mono">{{ r.mode }}</td>
@@ -911,29 +912,32 @@
                     <span v-else class="muted small">{{ provDetail && provDetail.run && provDetail.run.id===r.id ? 'hide ▴' : 'steps ▸' }}</span>
                   </td>
                 </tr>
+                <tr v-if="provDetail && provDetail.run && provDetail.run.id===r.id">
+                  <td colspan="7"><div class="prov-inline">
+                    <div class="toolbar">
+                      <span class="muted mono small">run {{ provDetail.run.id }} · {{ provDetail.run.host }} · {{ provDetail.run.state }}</span>
+                      <span class="err-box" style="margin:0" v-if="provDetail.run.error">{{ provDetail.run.error }}</span>
+                      <span class="muted mono small" v-if="provDetail.run.agent_id">agent {{ provDetail.run.agent_id }}</span>
+                      <div class="spacer"></div>
+                      <button class="btn sm" @click="provDetail=null">Close</button>
+                    </div>
+                    <table class="tbl">
+                      <thead><tr><th>#</th><th>Step</th><th>State</th><th>Output excerpt</th></tr></thead>
+                      <tbody>
+                        <tr v-for="s in provDetail.steps" :key="s.seq">
+                          <td class="mono">{{ s.seq }}</td><td class="mono">{{ s.name }}</td>
+                          <td><span class="badge" :class="provStepBadge(s.state)">{{ s.state }}</span></td>
+                          <td class="mono small" style="max-width:440px;overflow:hidden;text-overflow:ellipsis">{{ s.stderr_excerpt || s.stdout_excerpt || '—' }}</td>
+                        </tr>
+                        <tr v-if="!(provDetail.steps||[]).length"><td colspan="4" class="muted">No steps recorded yet.</td></tr>
+                      </tbody>
+                    </table>
+                  </div></td>
+                </tr>
+                </template>
                 <tr v-if="!provRuns.length"><td colspan="7"><div class="empty">No provision runs.</div></td></tr>
               </tbody>
             </table>
-            <template v-if="provDetail">
-              <div class="toolbar" style="margin-top:8px">
-                <span class="muted mono small">run {{ provDetail.run.id }} · {{ provDetail.run.host }} · {{ provDetail.run.state }}</span>
-                <span class="err-box" style="margin:0" v-if="provDetail.run.error">{{ provDetail.run.error }}</span>
-                <span class="muted mono small" v-if="provDetail.run.agent_id">agent {{ provDetail.run.agent_id }}</span>
-                <div class="spacer"></div>
-                <button class="btn sm" @click="provDetail=null">Close</button>
-              </div>
-              <table class="tbl" style="margin-top:8px">
-                <thead><tr><th>#</th><th>Step</th><th>State</th><th>Output excerpt</th></tr></thead>
-                <tbody>
-                  <tr v-for="s in provDetail.steps" :key="s.seq">
-                    <td class="mono">{{ s.seq }}</td><td class="mono">{{ s.name }}</td>
-                    <td><span class="badge" :class="provStepBadge(s.state)">{{ s.state }}</span></td>
-                    <td class="mono small" style="max-width:440px;overflow:hidden;text-overflow:ellipsis">{{ s.stderr_excerpt || s.stdout_excerpt || '—' }}</td>
-                  </tr>
-                  <tr v-if="!(provDetail.steps||[]).length"><td colspan="4" class="muted">No steps recorded yet.</td></tr>
-                </tbody>
-              </table>
-            </template>
           </div>
         </section>
 

@@ -179,6 +179,17 @@ async function main() {
   check("provision: seeded run row", rowsWithText(d, "nobody@127.0.0.1") > 0, "run row missing");
   check("provision: fingerprint column", d.body.textContent.includes("Key fingerprint"), "fingerprint column missing");
   check("provision: started column", d.body.textContent.includes("Started") && /(now|\d+\w+ ago)/.test(d.body.textContent), "Started column or relative time missing");
+  {
+    // Clicking a run must expand the step detail INLINE, directly under that
+    // row (not in a block after the table).
+    const trs = [...d.body.querySelectorAll("section table.tbl tbody tr")];
+    const row = trs.find((tr) => tr.textContent.includes("nobody@127.0.0.1"));
+    if (row) { row.click(); await sleep(900); }
+    const after = [...d.body.querySelectorAll("section table.tbl tbody tr")];
+    const iRow = after.findIndex((tr) => tr.textContent.includes("nobody@127.0.0.1"));
+    const inline = iRow >= 0 && after[iRow + 1] && after[iRow + 1].querySelector(".prov-inline");
+    check("provision: inline step detail under row", !!inline && d.body.textContent.includes("Output excerpt"), "step detail not rendered directly below the clicked row");
+  }
 
   await visit("#/obs-services", 1600);
   check("observe services: real unit",
