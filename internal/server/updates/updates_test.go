@@ -2,6 +2,7 @@ package updates
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"testing"
@@ -413,5 +414,78 @@ func TestAbortClearsPendingAndTerminatesHosts(t *testing.T) {
 	}
 	if p, _ := e.st.GetPendingUpdate("ag_1"); p != nil {
 		t.Errorf("pending row not cleared on abort: %+v", p)
+	}
+}
+
+// TestRolloutScale100: a 100-host rollout (canary 1, waves of 10%) completes
+// cleanly — the FSM, store, and dispatch path at fleet scale (1.0 prep).
+func TestRolloutScale100(t *testing.T) {
+	t.Helper()
+	const N = 100
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	for i := 0; i < N; i++ {
+		id := fmt.Sprintf("ag_s100_%03d", i)
+		if err := st.UpsertAgent(store.Agent{ID: id, UUID: "u" + id}); err != nil {
+			t.Fatalf("UpsertAgent: %v", err)
+		}
+	}
+	rel := store.Release{
+		ID: "rel_s100", Version: "v2.0.0", Arch: "linux-amd64", Kind: "agent",
+		SHA256: "aa", Signature: "sig", Artifact: []byte("x"),
+	}
+	if err := st.InsertRelease(rel); err != nil {
+		t.Fatalf("InsertRelease: %v", err)
+	}
+	h := stream.NewHandler(st, nil, log.New(io.Discard, "", 0))
+	m := New(st, h, nil, log.New(io.Discard, "", 0))
+	m.SetPollInterval(10 * time.Millisecond)
+
+	run, _, err := m.StartRun(Params{
+		ReleaseID: rel.ID, Selector: "all", Canary: 1, WavePct: 10,
+		Actor: "scale", ActorRole: "admin",
+	})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+
+	// Verify hosts as they are dispatched (a real fleet reports promptly).
+	done := 0
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ := st.GetUpdateRun(run.ID)
+		if r == nil {
+			t.Fatal("run row gone")
+		}
+		if r.Status == StatusCompleted {
+			break
+		}
+		if r.Status == StatusFailed || r.Status == StatusPausedFailure {
+			t.Fatalf("run ended in %s: %s", r.Status, r.Error)
+		}
+		hosts, err := st.ListUpdateHosts(run.ID)
+		if err != nil {
+			t.Fatalf("ListUpdateHosts: %v", err)
+		}
+		for _, hh := range hosts {
+			if hh.Status == HostDispatching {
+				m.OnResult(hh.HostID, &pb.UpdateResult{ReleaseId: rel.ID, Phase: "verified", Version: "v2.0.0"})
+			}
+		}
+		if r.DoneHosts > done {
+			done = r.DoneHosts
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r, _ := st.GetUpdateRun(run.ID)
+	if r.Status != StatusCompleted {
+		t.Fatalf("run status = %s (done=%d/%d), want completed", r.Status, r.DoneHosts, r.TotalHosts)
+	}
+	if r.DoneHosts != N || r.TotalHosts != N || r.FailedHosts != 0 {
+		t.Fatalf("counters = done:%d total:%d failed:%d, want %d/%d/0", r.DoneHosts, r.TotalHosts, r.FailedHosts, N, N)
 	}
 }
