@@ -22,6 +22,7 @@
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
+| **M8 — Distribution & self-update** | 📋 Planned | **M8.1 signed fleet updates**: release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server self-update optional & last. **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
 
 ### M0 — Spine (complete)
 
@@ -169,9 +170,88 @@ Done (PRD §5.8 — the approval path of the guardrail system):
 - ✅ **Playbook run** (`POST /api/v1/playbooks/{id}/run`, operator): runs the playbook's pinned task version on every host its selector matches; per-host outcomes come back as runs (the `run_playbook` MCP tool wraps it).
 - ✅ **Tests**: store CRUD/expiry, controller approve/deny/expiry/no-dispatcher, guardrail approved/forged/hard-deny decisions, E2E park→no-wire-traffic→approve→signed re-dispatch for **every surface** (control/exec, packages, files upload, sessions, tasks, jobs), OAuth PKCE flow + failure paths + full HTTP E2E (token works on `/mcp`), playbook fan-out, API RBAC + error paths, UI shape + headless render.
 
-### Not started
+### M8 — Distribution & self-update (planned)
 
-- **M8 — Distribution & polish**: installers, cloud-init, Helm, status page.
+#### M8.1 — Signed fleet updates (self-update + propagation)
+
+Goal: one command (`partout ctl update run`) takes the fleet from "new release tag" to
+"fleet uniform" under the same safety rails as every other write — and the update itself is
+auditable, approval-able, and reversible. The agent **never decides** to update; it executes a
+signed, policy-gated directive and re-verifies the artifact against its **own** trust anchor.
+
+Ordering (each step is independently shippable):
+
+1. **Release store + signatures** (foundation, no behavior change).
+   - The **operator uploads** the release to the server (`partout ctl update upload
+     v0.8.0 --binary … --signature …`); the server stores it in an `update_releases`
+     table (version, arch, sha256, Ed25519 signature, uploaded_by, ts). The server
+     **never fetches releases from the internet** — the artifact crosses the trust
+     boundary in the operator's hands, and a compromised server cannot become a
+     binary-delivery vector because the agent verifies against the release public key,
+     not the server's word (a hash alone is insufficient).
+   - Release-signing key is operator-managed (Ed25519, same family as the identity
+     keys); the public key is provisioned with the agent (env var or the server CA
+     bootstrap bundle). `partout ctl update verify` validates a signed artifact
+     offline.
+2. **Agent self-swap with rollback** (canary on one host proves it).
+   - New `UPDATE` stream envelope (version, artifact reference, signature) → agent:
+     verify signature → fetch artifact → write `partout.new` → fsync → `rename` over
+     the unit's binary → keep `partout.old` (N-1) → `systemctl restart partout-agent`.
+   - Boot health-check (self-enroll + first heartbeat within `PARTOUT_UPDATE_HEALTH_S`,
+     default 60 s) fails → **auto-rollback to N-1** + report; the run for that host
+     is `failed(rollback)` and the **wave halts** (no auto-continue past a failed
+     host).
+   - Version-skew safety already exists (agent N ↔ server N/N+1), so a restarted
+     agent on the new version re-connects cleanly to the still-old server and
+     vice versa.
+3. **Rollout orchestration** (waves, SSE, audit).
+   - `partout ctl update run --version v0.8.0 --selector all --canary 1 --waves 25`
+     → `update_runs` (plan: version, selector, canary count, wave size, state)
+     + per-host `update_run_hosts` rows (state machine: queued → transferring →
+     verifying → swapping → restarted → verified / failed(rollback) /
+     skipped(same-version)).
+   - **`update.apply` is a new policy action class**: admin-only by default,
+     policy-gateable (`deny` / `require_approval` like every other surface), fully
+     audit-logged (`update.upload`, `update.run.created`, `update.host.*` per
+     transition), SSE `update.*` events.
+   - Per-host verification after swap: stream reconnected **and** the version fact
+     (`partout.version`) equals the target — not just "process restarted".
+   - **Offline-tolerant**: directives for hosts that are down queue in the existing
+     offline down-queue and apply on reconnect (same Phase-2 machinery as command
+     dispatch), subject to the plan's TTL.
+   - Reuses the provisioning `join` transfer path where fleet SSH is available;
+     for stream-only hosts the artifact transfers over the existing stream (chunked
+     file envelope, size-capped like the Files surface).
+   - **Automatic re-issue of signed job decisions on version change** — removes the
+     current manual "re-save all jobs or cron fires fail closed with `denied`"
+     step: when a host's verified version changes, the server re-signs and re-pushes
+     `JOB_ASSIGN` decisions for its jobs.
+4. **Server self-update — optional, last.** Lowest value, highest blast radius
+   (the control plane rewriting itself has no independent supervisor). Same
+   signed-swap mechanism + N-1 retention + a watchdog that reverts after repeated
+   failed health checks. Deliberate non-goal alternative: keep the documented manual
+   path (stop → swap → start, backup = rollback) as the *only* server update path.
+   Decision deferred to implementation time; the fleet-side work above does not
+   depend on it.
+
+Non-goals: agent-initiated/auto-scheduled updates (no "check GitHub nightly"),
+parallel multi-version rollouts, partial/binary-diff updates (full binary only —
+~19 MB, simpler and safer), control-plane HA (out of scope for M8).
+
+Tests: signature verify/reject (wrong key, tampered artifact), swap + auto-rollback
+E2E (broken N → agent serves N-1 within the health window), wave halt on failed
+host, canary-then-wave ordering, offline host pickup on reconnect, `update.apply`
+policy-deny / approval-park E2E, job-decision re-issue on version change (fire
+succeeds without manual re-save), UI shape for the Updates-page rollout view.
+
+#### M8.2 — Distribution artifacts
+
+Carried from the original M8 scope: Docker image + compose (server; the per-host
+agent stays a bare binary on systemd — containerizing it is a non-goal),
+cloud-init user-data for new VMs, Helm chart (server), status page (per-component
+readiness beyond `/healthz`/`/readyz`). All remain *proposed* in
+`docs/deployment.md` until shipped.
+
 
 ## Next steps
 
@@ -198,7 +278,7 @@ Done (PRD §5.8 — the approval path of the guardrail system):
 17a. ~~**M6 — Alert engine**~~ ✅ Done (v0.6.5) — see the M6 section above (rules, evaluation, dedup, SSE, API/CLI/MCP, live Alerts page).
 17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit over the real interval between counter movements (not the 30 s alert tick, which inflated the rate ~10×), holds the rate while a loop continues (no firing/resolved flapping between facts uploads), folds counter resets, and ignores units whose collector failed; fires ≥ `service_restart_rate_per_hour` (default 10), resolves after 10 min quiet.
 17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js), and write actions (jobs CRUD, package apply/dry-run, provision start/key-confirm/cancel). See the M7 section above.
-18. Postgres backend; then **M8 — Distribution & polish** (installers, cloud-init, Helm, status page).
+18. Postgres backend; then **M8 — Distribution & self-update** (M8.1 signed fleet updates: release store + signatures, agent self-swap with rollback, rollout orchestration, auto job-decision re-issue; M8.2 Docker/compose, cloud-init, Helm, status page). See the M8 section.
 
 ### Polish items (closed this cycle)
 
