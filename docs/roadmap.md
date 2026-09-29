@@ -22,7 +22,7 @@
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
-| **M8 — Distribution & self-update** | 📋 Planned | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
+| **M8 — Distribution & self-update** | 🚧 M8.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
 
 ### M0 — Spine (complete)
 
@@ -297,8 +297,9 @@ Ordering (each step is independently shippable):
      current manual "re-save all jobs or cron fires fail closed with `denied`"
      step: when a host's verified version changes, the server re-signs and re-pushes
      `JOB_ASSIGN` decisions for its jobs.
-4. **Server update — supervised script (settled; replaces "self-update optional
-   & last")**. `scripts/update-server.sh` (installed to `/usr/local/sbin`) is *the*
+4. **Server update — supervised script** — ✅ **shipped** (`partout selftest`
+   + `scripts/update-server.sh`). Replaces "self-update optional & last":
+   `scripts/update-server.sh` (installed to `/usr/local/sbin`) is *the*
    server update path: the control plane rewriting itself has no independent
    supervisor, so an **external process** supervises the swap. Phases:
    - **Preflight** (no downtime): unit active, `/healthz` + `/readyz`, disk space;
@@ -318,7 +319,41 @@ Ordering (each step is independently shippable):
      reconnected (count ≥ pre-swap), functional smoke via `partout ctl`. Any failure
      → **automatic rollback** (restore `partout.prev`; the verified backup if the DB
      is the cause), restart, re-verify, exit non-zero with a report.
-   Idempotent, fully logged, exit-code driven → composable into change management.
+   Idempotent, fully logged, exit-code driven → composable into change
+   management. Shipped behavior: sha256 preflight, local signature verify
+   (via the current binary's `ctl update verify`), **`partout selftest` on
+   the new binary on this host before install** (config, store migrate to
+   current schema + `integrity_check`, crypto + release-signature
+   round-trip, real API round-trip — all throwaway temp files), proven
+   backup (VACUUM INTO via `ctl db-backup`, retried past shutdown
+   lock-wins, SQLite-magic check — proven before the swap), `.prev`
+   one-generation retention, post-check window (healthz + authenticated
+   API + agents reconnected ≥ pre-swap), automatic rollback that
+   preserves the pre-swap backup outside the temp dir. E2E-tested:
+   `scripts/update-server-test.sh` (12 checks: signature gate, selftest
+   gate, success, idempotent re-run, full rollback with binary restore +
+   preserved backup).
+
+5. **One-command `partout update`** — ✅ **shipped** (`cmd/partout/update.go`).
+   "Server + fleet at N" → "all at N+1": resolves the target (`--version`
+   or the repo's `latest`), fetches server + agent artifacts and
+   signatures from `PARTOUT_RELEASE_REPO` (layout:
+   `<repo>/latest` text file; per version
+   `<repo>/<version>/partout-<version>-<arch>-{server,agent}` + `.sig`
+   files), verifies BOTH against
+   `PARTOUT_RELEASE_KEY` (fail closed), runs the supervised server swap,
+   publishes the agent artifact to the (new) server's release store
+   (409-conflict → reuse existing row), starts the fleet rollout
+   (canary → waves), and watches the run to a stop. Ends with one status
+   line: `update: server v2 ok; fleet 3 verified, 0 failed, 1 skipped
+   (run_…) — DONE`. `--check` is report-only; `--server-only` is the
+   two-phase mode; an approval-parked run reports the approval id and
+   stops (no auto-approve). Convergent: re-run at latest = server swap
+   skipped, fleet re-dispatch converges via the agent's
+   already-at-target short-circuit. The operator's `partout update` is
+   the only component that ever fetches from the internet. E2E-tested:
+   `scripts/update-e2e.sh` (12 checks: v1→v2 full path, converged
+   re-run, tampered-repo-artifact refusal).
 
 Settled decisions: server update = supervised script (not self-swap, not bare manual)
 · trust anchor = `PARTOUT_RELEASE_KEY` env in the agent unit file · UI = "Updates"

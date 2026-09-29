@@ -531,3 +531,6 @@ CREATE INDEX IF NOT EXISTS idx_update_hosts_host ON update_hosts(host_id);
 
 // currentSchemaVersion is applied on first migrate.
 const currentSchemaVersion = 16
+
+// CurrentSchemaVersion exposes the constant (selftest, ops tooling).
+func CurrentSchemaVersion() int { return currentSchemaVersion }

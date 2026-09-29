@@ -68,6 +68,24 @@ func main() {
 		return
 	}
 
+	// `partout selftest` runs the embedded pre-install suite (M8.1 step 4):
+	// config, store migration + integrity, crypto, API round-trip — all on
+	// throwaway temp files. The supervised update script gates install on it.
+	if len(os.Args) > 1 && os.Args[1] == "selftest" {
+		if err := runSelfTest(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "partout:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `partout update` is the M8.1 one-command: fetch the signed release,
+	// verify both artifacts, supervised server swap, fleet rollout.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		runUpdate(os.Args[2:])
+		return
+	}
+
 	// Config: env vars + defaults (config.Load), CLI flags override
 	// (fs.Changed), validated again after overrides.
 	cfg, err := config.Load()

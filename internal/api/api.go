@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
 	serverapprovals "github.com/blawesom/partout/internal/server/approvals"
@@ -80,6 +81,12 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// GET /healthz — health check.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	// GET /api/v1/version — server version (same value `partout --version`
+	// prints). Public metadata, like /healthz.
+	mux.HandleFunc("GET /api/v1/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"version": facts.Version})
 	})
 
 	// GET /readyz — readiness check.
