@@ -22,7 +22,7 @@
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
-| **M8 — Distribution & self-update** | 📋 Planned | **M8.1 signed fleet updates**: release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server self-update optional & last. **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
+| **M8 — Distribution & self-update** | 📋 Planned | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
 
 ### M0 — Spine (complete)
 
@@ -154,6 +154,9 @@ Done (ui-guidelines S7 — the last open M7 slice; all remainders closed in v0.7
 - ✅ **Live PTY terminal (xterm.js)**: the **Sessions** page gains *Open terminal* (host + command, operator-gated, record-on) and the session page renders a live xterm.js terminal when the session is `open` — input via `POST /sessions/{id}/input` (base64), output via the `session.data` SSE stream (pre-mount chunks are buffered and replayed on attach), resize via `POST /sessions/{id}/resize`, close via `POST /sessions/{id}/close`. Closed sessions fall back to the recorded replay. Vendored offline in `internal/api/webui/lib/` (no CDN). Verified end-to-end against a real embedded server in a headless browser (`scripts/pty-e2e.py`: mount → type command → output round-trips → close → replay).
 - ✅ **Write actions** (previously read-only surfaces are now drivable from the browser): the **Provision** page can **start a run** (host + mode, admin-gated), **confirm/deny the host key** at the `key_confirm` security gate (fingerprint shown), **cancel** a run, and shows live **step detail** (SSE-refreshed on `provision.*`); the **Updates** page can **apply packages** (package list, **dry-run** toggle, operator-gated, parks on approvals, shows the action history with expandable `dry_summary`) and shows **EOL external-data status + refresh** (admin); the **Jobs** page can **create/edit/delete** jobs (task + cron + selector + enabled form, `policy_denied` surfaced) and inspect **run history**; the **Tasks** page can **create a task** (versioned multi-step form: command/file/package/service steps); the **Secrets** page can **create + rotate** secrets (values stay write-only, never displayed); the **Users** page can **create a user** and **change role / enable / disable** (self-protection: you can't demote/disable/delete yourself); the **Files** page can **download** a host file; the **MCP** page lists **registered OAuth2 clients**. All are exercised by `scripts/ui-smoke.sh` (headless render checks).
 - ✅ **Services page** now shows the `NRestarts` counter (feeds the `service_restarting` rule).
+- ✅ **Sidebar IA rework** (UI/UX): the flat 14-item "Fleet" list is regrouped into collapsible sections ordered common → advanced — **Fleet** (Hosts, Execute, Sessions, Files, Updates), **Automation** (Jobs, Tasks & Playbooks), **Observe** (Alerts, Services, Configs, Certificates), **Governance** (Approvals, Policies, Secrets, Audit), **Admin** (Provision, Users, MCP). Section collapse state persists in `localStorage`; Admin is collapsed by default and the active page's section auto-expands. **Attention badges** show live counts of pending approvals (red) and firing alerts (amber) on both the item and its (possibly collapsed) section header — loaded at sign-in and refreshed on `approval.*` / `alert.*` SSE events (no polling). **Scope** (host groups) is now a distinct block, resolved **server-authoritatively** via `GET /hosts?selector=` so `role:`/`tag:`/multi-host selectors filter correctly (the old client-side `host:`-only regex silently showed the whole fleet); stat cards + empty-state are scope-aware. A **command palette** (`⌘K` / `Ctrl-K`, topbar button) jumps to any enabled page or host, keyboard-driven. All exercised by `scripts/ui-smoke.sh`.
+- ✅ **Host identity & lifecycle follow-ups**: fleet table gains an **OS** column (composed from os-release facts) and a **free-text filter** (name/id/hostname/OS/role/tag); the **host overview** shows the OS and an admin-only **Remove host** action backed by `DELETE /api/v1/hosts/{id}` (admin-gated, audited `host.deleted`; a deleted agent can never re-authenticate since the handshake looks the UUID up in the store — removal doubles as revocation, cascaded rows via schema). Every historical table (exec runs, sessions, job/task runs, package actions, audit, approvals, provision detail, services/certs/configs/alerts) now shows the **friendly host name** instead of the raw `ag_` id (falls back to the id when the host list is absent).
+- ✅ **Host identity CLI + MCP parity**: `partout ctl hosts` is now `list|get <id>|tag <set|rm> <id> <key> [value]|role <add|rm> <id> <role>|delete <id>`; five new MCP write tools (`set_host_tag`, `delete_host_tag`, `add_host_role`, `remove_host_role`, `delete_host`) — so tags/roles/removal are reachable from the UI, the REST API, the CLI, and MCP (PRD §5.2/§10.3), all sharing the same server-side validation + RBAC + audit.
 
 ### M4 — Governance: approvals + MCP (shipped)
 
@@ -174,25 +177,43 @@ Done (PRD §5.8 — the approval path of the guardrail system):
 
 #### M8.1 — Signed fleet updates (self-update + propagation)
 
-Goal: one command (`partout ctl update run`) takes the fleet from "new release tag" to
-"fleet uniform" under the same safety rails as every other write — and the update itself is
-auditable, approval-able, and reversible. The agent **never decides** to update; it executes a
-signed, policy-gated directive and re-verifies the artifact against its **own** trust anchor.
+Goal: one command (`partout update`) takes a deployment from "server + fleet all at N"
+to "server + fleet all at N+1" — under the same safety rails as every other write,
+auditable, approval-able, reversible, and **idempotent/convergent** (re-run at latest =
+"up to date", no changes). The agent **never decides** to update; it executes a signed,
+policy-gated directive and re-verifies the artifact against its **own** trust anchor.
+
+One-command flow (operator view):
+
+1. Fetch latest release from the repo (`--version` pins; `--check` = report-only).
+2. Verify both artifacts (server + agent) against the release public key.
+3. Supervised **server swap** (step 4 below) → server N+1, fleet N — safe (skew
+   supported) and **required ordering**: the N+1 server holds the rollout machinery.
+4. Hand the verified N+1 agent artifact to the running server (release store).
+5. **Fleet rollout** (step 3 below): canary first (hard gate), then waves; per-host
+   signature check, self-swap with N-1 retention, health window, auto-rollback;
+   wave failure pauses for operator choice (retry/skip/abort).
+6. One status line back: `server N → N+1 (backup …, health ok) · fleet: 41 verified,
+   2 skipped (already current), 0 failed` (+ live run board in the UI).
 
 Ordering (each step is independently shippable):
 
 1. **Release store + signatures** (foundation, no behavior change).
-   - The **operator uploads** the release to the server (`partout ctl update upload
-     v0.8.0 --binary … --signature …`); the server stores it in an `update_releases`
-     table (version, arch, sha256, Ed25519 signature, uploaded_by, ts). The server
-     **never fetches releases from the internet** — the artifact crosses the trust
-     boundary in the operator's hands, and a compromised server cannot become a
-     binary-delivery vector because the agent verifies against the release public key,
-     not the server's word (a hash alone is insufficient).
+   - Releases are published to the **repo** (GitHub release: server + agent binaries
+     per arch, each with an Ed25519 signature + sha256 manifest). `partout update`
+     fetches "latest" (or `--version`) **on the operator side** and hands the verified
+     artifact to the server (`update_releases` table: version, arch,
+     kind=server|agent, sha256, signature, uploaded_by, ts); `partout ctl update
+     upload` remains for manual hand-off. The **server itself never fetches from the
+     internet** — the artifact crosses the trust boundary in the operator's hands, and
+     a compromised server cannot become a binary-delivery vector because the agent
+     verifies against the release public key, not the server's word (a hash alone is
+     insufficient).
    - Release-signing key is operator-managed (Ed25519, same family as the identity
-     keys); the public key is provisioned with the agent (env var or the server CA
-     bootstrap bundle). `partout ctl update verify` validates a signed artifact
-     offline.
+     keys). **Settled:** the public key is provisioned with the agent via
+     `PARTOUT_RELEASE_KEY` (agent unit env); a locally provisioned key always wins
+     over anything server-delivered. `partout ctl update verify` validates a signed
+     artifact offline.
 2. **Agent self-swap with rollback** (canary on one host proves it).
    - New `UPDATE` stream envelope (version, artifact reference, signature) → agent:
      verify signature → fetch artifact → write `partout.new` → fsync → `rename` over
@@ -226,13 +247,35 @@ Ordering (each step is independently shippable):
      current manual "re-save all jobs or cron fires fail closed with `denied`"
      step: when a host's verified version changes, the server re-signs and re-pushes
      `JOB_ASSIGN` decisions for its jobs.
-4. **Server self-update — optional, last.** Lowest value, highest blast radius
-   (the control plane rewriting itself has no independent supervisor). Same
-   signed-swap mechanism + N-1 retention + a watchdog that reverts after repeated
-   failed health checks. Deliberate non-goal alternative: keep the documented manual
-   path (stop → swap → start, backup = rollback) as the *only* server update path.
-   Decision deferred to implementation time; the fleet-side work above does not
-   depend on it.
+4. **Server update — supervised script (settled; replaces "self-update optional
+   & last")**. `scripts/update-server.sh` (installed to `/usr/local/sbin`) is *the*
+   server update path: the control plane rewriting itself has no independent
+   supervisor, so an **external process** supervises the swap. Phases:
+   - **Preflight** (no downtime): unit active, `/healthz` + `/readyz`, disk space;
+     record current version + connected-agent count.
+   - **Verify**: sha256 + Ed25519 against the release key.
+   - **Tests on the new binary, on this host, before install**: `partout selftest`
+     — a new subcommand running an embedded in-process suite (store migrations
+     v1→latest + `integrity_check`, config parse, identity/crypto sign-verify, API
+     round-trip: fake-agent enroll → run command → read audit). Zero Go toolchain
+     required; non-zero exit = abort, server untouched.
+   - **Backup + prove it**: hot `partout ctl db-backup` (VACUUM INTO) into the
+     existing retention dir, then open the backup read-only: `integrity_check`,
+     schema version, row-count sanity. An unverified backup doesn't count.
+   - **Swap** (seconds of downtime): `systemctl stop` → install (keep
+     `partout.prev`) → `start`.
+   - **Post checks** (~60 s window): healthz/readyz, schema migration clean, agents
+     reconnected (count ≥ pre-swap), functional smoke via `partout ctl`. Any failure
+     → **automatic rollback** (restore `partout.prev`; the verified backup if the DB
+     is the cause), restart, re-verify, exit non-zero with a report.
+   Idempotent, fully logged, exit-code driven → composable into change management.
+
+Settled decisions: server update = supervised script (not self-swap, not bare manual)
+· trust anchor = `PARTOUT_RELEASE_KEY` env in the agent unit file · UI = "Updates"
+page with two tabs (**Packages** = existing OS-package updates, **Releases** = release
+store + live run board + run detail with retry/skip/abort) · waves = % of selector
+(default 25%), no default soak delay (halt-on-failure is the human gate) ·
+server-first ordering · `--server-only` for a two-phase run.
 
 Non-goals: agent-initiated/auto-scheduled updates (no "check GitHub nightly"),
 parallel multi-version rollouts, partial/binary-diff updates (full binary only —
@@ -242,7 +285,13 @@ Tests: signature verify/reject (wrong key, tampered artifact), swap + auto-rollb
 E2E (broken N → agent serves N-1 within the health window), wave halt on failed
 host, canary-then-wave ordering, offline host pickup on reconnect, `update.apply`
 policy-deny / approval-park E2E, job-decision re-issue on version change (fire
-succeeds without manual re-save), UI shape for the Updates-page rollout view.
+succeeds without manual re-save), UI shape for the Updates-page rollout view,
+`partout selftest` (green on a good build; non-zero on a tampered build),
+`update-server.sh` E2E (broken N+1 → automatic rollback to N within the window +
+non-zero exit; DB-cause failure → verified backup restored), repo fetch + signature
+verify (tampered release rejected), one-command convergence (re-run at latest =
+no-op; fleet at target = `skipped`), server-first mixed state (server N+1 + fleet N
+healthy, agents reconnected).
 
 #### M8.2 — Distribution artifacts
 

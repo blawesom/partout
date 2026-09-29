@@ -91,6 +91,12 @@ done
 echo "==> seeding data"
 AG=$(curl -s "$B/hosts" -H "$H" | python3 -c 'import sys,json;print(json.load(sys.stdin)["items"][0]["id"])')
 seed POST /groups  '{"name":"web","selector":"all"}' >/dev/null
+# A host role + two single-host groups: one host: selector and one role:
+# selector, so the scope resolution test proves server-side resolution of a
+# selector class the old client-side regex could not handle.
+seed PUT "/hosts/$AG/roles/smoke" >/dev/null
+seed POST /groups "{\"name\":\"solo\",\"selector\":\"host:$AG\"}" >/dev/null
+seed POST /groups '{"name":"roled","selector":"role:smoke"}' >/dev/null
 seed POST /policies '{"name":"deny-rm","effect":"deny","priority":10,"match":{"command_regex":"^rm"}}' >/dev/null
 seed POST /policies '{"name":"needs-approval","effect":"require_approval","priority":20,"match":{"command_regex":"needsapproval"}}' >/dev/null
 # Park a command on an approval request so the Approvals page has a live row.

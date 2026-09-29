@@ -165,6 +165,11 @@ var writeTools = map[string]bool{
 	"upload_file":      true,
 	"create_secret":    true,
 	"decide_approval":  true,
+	"set_host_tag":     true,
+	"delete_host_tag":  true,
+	"add_host_role":    true,
+	"remove_host_role": true,
+	"delete_host":      true,
 }
 
 // ToolCatalog returns the tool set with its read/write classification
@@ -547,6 +552,73 @@ func DefaultTools() []*Tool {
 				}
 				return doCall(ctx, api, token, "POST",
 					"/api/v1/approvals/"+url.PathEscape(argStr(args, "request_id"))+"/"+decision, body)
+			},
+		},
+		// ---- host identity (tags / roles / lifecycle) ----
+		{
+			Name: "set_host_tag",
+			Description: "Set (or replace) a tag on a host (operator+). Tags drive selectors (tag:key=value) " +
+				"and display naming: the \"name\" tag is the operator-assigned display name, \"service\" the service label.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host id (ag_…)"),
+				"key":      strProp("tag key (no ',', '=' or spaces)"),
+				"value":    strProp("tag value; omit or empty for a key-only tag"),
+			}, "agent_id", "key"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				body := map[string]any{}
+				if v := argStr(args, "value"); v != "" {
+					body["value"] = v
+				}
+				return doCall(ctx, api, token, "PUT",
+					"/api/v1/hosts/"+url.PathEscape(argStr(args, "agent_id"))+"/tags/"+url.PathEscape(argStr(args, "key")), body)
+			},
+		},
+		{
+			Name:        "delete_host_tag",
+			Description: "Remove a tag from a host (operator+).",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host id (ag_…)"),
+				"key":      strProp("tag key"),
+			}, "agent_id", "key"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "DELETE",
+					"/api/v1/hosts/"+url.PathEscape(argStr(args, "agent_id"))+"/tags/"+url.PathEscape(argStr(args, "key")), nil)
+			},
+		},
+		{
+			Name:        "add_host_role",
+			Description: "Add a role to a host (operator+). Roles drive role:name selectors and the host display name fallback.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host id (ag_…)"),
+				"role":     strProp("role name (no ',', '=' or spaces)"),
+			}, "agent_id", "role"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "PUT",
+					"/api/v1/hosts/"+url.PathEscape(argStr(args, "agent_id"))+"/roles/"+url.PathEscape(argStr(args, "role")), nil)
+			},
+		},
+		{
+			Name:        "remove_host_role",
+			Description: "Remove a role from a host (operator+).",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host id (ag_…)"),
+				"role":     strProp("role name"),
+			}, "agent_id", "role"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "DELETE",
+					"/api/v1/hosts/"+url.PathEscape(argStr(args, "agent_id"))+"/roles/"+url.PathEscape(argStr(args, "role")), nil)
+			},
+		},
+		{
+			Name: "delete_host",
+			Description: "Remove a host and all its data (admin+). The agent can never re-authenticate with its " +
+				"current identity after deletion (re-enrollment required) — removal doubles as revocation.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host id (ag_…)"),
+			}, "agent_id"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "DELETE",
+					"/api/v1/hosts/"+url.PathEscape(argStr(args, "agent_id")), nil)
 			},
 		},
 	}

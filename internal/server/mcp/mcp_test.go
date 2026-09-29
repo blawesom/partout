@@ -15,8 +15,11 @@ import (
 
 // fakeAPI returns canned responses keyed by "METHOD path".
 type fakeAPI struct {
-	mu  atomic.Pointer[map[string]fakeResp]
-	log *log.Logger
+	mu         atomic.Pointer[map[string]fakeResp]
+	lastMethod string
+	lastPath   string
+	lastBody   string
+	log        *log.Logger
 }
 
 type fakeResp struct {
@@ -30,6 +33,13 @@ func (f *fakeAPI) set(method, path, body string, code int) {
 }
 
 func (f *fakeAPI) Call(ctx context.Context, method, path, token string, body any) (int, []byte, error) {
+	f.lastMethod = method
+	f.lastPath = path
+	if body != nil {
+		if b, err := json.Marshal(body); err == nil {
+			f.lastBody = string(b)
+		}
+	}
 	m := f.mu.Load()
 	if m == nil {
 		return 500, []byte(`{"code":"internal","message":"fake: no canned response"}`), nil
@@ -98,7 +108,7 @@ func TestMCPToolsList(t *testing.T) {
 	}
 	for _, want := range []string{"list_hosts", "get_host_facts", "get_audit", "list_approvals",
 		"run_command", "apply_updates", "create_secret", "decide_approval", "list_services", "list_certificates",
-		"list_alerts"} {
+		"list_alerts", "set_host_tag", "delete_host_tag", "add_host_role", "remove_host_role", "delete_host"} {
 		if _, ok := byName[want]; !ok {
 			t.Fatalf("missing tool %q", want)
 		}
@@ -196,6 +206,59 @@ func TestMCPParseError(t *testing.T) {
 	_ = json.Unmarshal(resp, &rr)
 	if rr.Error == nil || rr.Error.Code != codeParseError {
 		t.Fatalf("want -32700, got %+v", rr.Error)
+	}
+}
+
+func TestMCPHostIdentityTools(t *testing.T) {
+	api := &fakeAPI{}
+	s := testServer(api)
+
+	// set_host_tag: PUT with the value in the body.
+	api.set("PUT", "/api/v1/hosts/ag_x/tags/name", `{"id":"ag_x","tags":{"name":"web-01"}}`, 200)
+	r := rpc(t, s, "tools/call", map[string]any{
+		"name":      "set_host_tag",
+		"arguments": map[string]any{"agent_id": "ag_x", "key": "name", "value": "web-01"},
+	}, 10)
+	if r.Error != nil {
+		t.Fatalf("set_host_tag rpc error: %v", r.Error)
+	}
+	if api.lastMethod != "PUT" || api.lastPath != "/api/v1/hosts/ag_x/tags/name" {
+		t.Fatalf("set_host_tag routed to %s %s", api.lastMethod, api.lastPath)
+	}
+	if !strings.Contains(api.lastBody, `"web-01"`) {
+		t.Fatalf("set_host_tag body missing value: %s", api.lastBody)
+	}
+
+	// add_host_role: PUT, no body.
+	api.set("PUT", "/api/v1/hosts/ag_x/roles/web", `{"id":"ag_x","roles":["web"]}`, 200)
+	api.lastMethod, api.lastPath, api.lastBody = "", "", ""
+	r = rpc(t, s, "tools/call", map[string]any{
+		"name":      "add_host_role",
+		"arguments": map[string]any{"agent_id": "ag_x", "role": "web"},
+	}, 11)
+	if r.Error != nil {
+		t.Fatalf("add_host_role rpc error: %v", r.Error)
+	}
+	if api.lastMethod != "PUT" || api.lastPath != "/api/v1/hosts/ag_x/roles/web" {
+		t.Fatalf("add_host_role routed to %s %s", api.lastMethod, api.lastPath)
+	}
+
+	// delete_host: DELETE the bare host path.
+	api.set("DELETE", "/api/v1/hosts/ag_x", `{"status":"deleted"}`, 200)
+	api.lastMethod, api.lastPath, api.lastBody = "", "", ""
+	r = rpc(t, s, "tools/call", map[string]any{
+		"name":      "delete_host",
+		"arguments": map[string]any{"agent_id": "ag_x"},
+	}, 12)
+	if r.Error != nil {
+		t.Fatalf("delete_host rpc error: %v", r.Error)
+	}
+	res, _ := r.Result.(map[string]any)
+	if res["isError"] == true {
+		t.Fatalf("delete_host tool error: %+v", res)
+	}
+	if api.lastMethod != "DELETE" || api.lastPath != "/api/v1/hosts/ag_x" {
+		t.Fatalf("delete_host routed to %s %s", api.lastMethod, api.lastPath)
 	}
 }
 

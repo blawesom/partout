@@ -69,6 +69,58 @@ async function main() {
   check("fleet: host row", rowsWithText(d, "ag_") > 0);
   check("fleet: group scope rendered", !!d.querySelector(".nav-scope"));
 
+  // Nav IA: grouped, collapsible sections ordered common → advanced.
+  const navSections = [...d.querySelectorAll("nav.nav .nav-section")].map((s) => s.textContent.trim());
+  check("nav: grouped sections (common→advanced)",
+    navSections.join("|").includes("Fleet") && navSections.join("|").includes("Automation") &&
+    navSections.join("|").includes("Observe") && navSections.join("|").includes("Governance") &&
+    navSections.join("|").includes("Admin"),
+    "sections=" + navSections.join("|"));
+  check("nav: renamed Hosts item", [...d.querySelectorAll("nav.nav .nav-item")].some((x) => x.textContent.trim().endsWith("Hosts")), "no Hosts nav item");
+  check("nav: palette button in topbar", !!d.querySelector(".palette-btn"), "no ⌘K button");
+  if (w.__partout) {
+    const jobsVisible = () => [...d.querySelectorAll("nav.nav .nav-item")].some((x) => x.textContent.includes("Jobs"));
+    check("nav: automation items visible pre-collapse", jobsVisible(), "Jobs item missing");
+    w.__partout.toggleNavGroup("automation");
+    await sleep(250);
+    check("nav: collapse hides section items", !jobsVisible(), "Jobs still visible after collapse");
+    w.__partout.toggleNavGroup("automation");
+    await sleep(250);
+    check("nav: re-expand restores section items", jobsVisible(), "Jobs missing after re-expand");
+  }
+
+  // Scope: a role: group must resolve server-side (1 host) and filter the
+  // fleet table — the old local host:-only regex showed the whole fleet.
+  if (w.__partout) {
+    w.__partout.setScope("roled");
+    await sleep(1500);
+    const hint = (d.querySelector(".nav-scope-hint") || {}).textContent || "";
+    check("scope: role: selector resolves server-side", hint.includes("1 host(s) in scope"), "hint=" + hint);
+    check("scope: fleet table filtered", ((d.querySelector(".page-sub") || {}).textContent || "").includes("1 host"), "sub=" + ((d.querySelector(".page-sub") || {}).textContent || ""));
+    w.__partout.clearScope();
+    await sleep(400);
+  }
+
+  // OS column + free-text fleet filter.
+  const fleetHead = (d.querySelector("section thead") || {}).textContent || "";
+  check("fleet: OS column", fleetHead.includes("OS"), "head=" + fleetHead);
+  if (w.__partout) {
+    w.__partout.fleetFilter = "zzz-no-match";
+    await sleep(400);
+    check("fleet: filter hides non-matching rows", d.querySelectorAll("section table.tbl tbody tr.click").length === 0, "rows still visible");
+    check("fleet: filter empty-state", ((d.querySelector(".empty") || {}).textContent || "").includes("zzz-no-match"), "no filter empty-state");
+    const hostname = ((w.__partout.hosts[0] || {}).hostname || "");
+    if (hostname) {
+      w.__partout.fleetFilter = hostname.slice(0, 4);
+      await sleep(400);
+      check("fleet: filter matches hostname", d.querySelectorAll("section table.tbl tbody tr.click").length === 1, "expected exactly 1 row");
+    } else {
+      check("fleet: filter matches hostname", false, "host has no hostname fact");
+    }
+    w.__partout.fleetFilter = "";
+    await sleep(300);
+  }
+
   // Add-host dialog: entry point, both tabs, real token mint -> command block.
   check("fleet: add-host entry", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("+ Add host")));
   if (w.__partout) {
@@ -93,8 +145,9 @@ async function main() {
     check("add-host: app instance exposed", false, "no window.__partout");
   }
 
-  const hostId = [...d.querySelectorAll("table.tbl tr td.mono")]
-    .map((t) => t.textContent.trim()).find((s) => s.startsWith("ag_"));
+  const hostId = (w.__partout && w.__partout.hosts && w.__partout.hosts[0] && w.__partout.hosts[0].id) ||
+    [...d.querySelectorAll("table.tbl tr td .host-id")].map((t) => t.textContent.trim()).find((s) => s.startsWith("ag_"));
+  check("fleet: host id resolvable", !!hostId, "no host id on the fleet page");
   await visit("#/host/" + hostId);
   const overview = d.querySelector("section");
   const ovText = overview ? overview.textContent : "";
@@ -103,8 +156,42 @@ async function main() {
   check("host overview: EOL status rendered", /(supported|ending soon|end-of-life|unknown)/.test(ovText));
   check("host overview: EOL date rendered", /\d{4}-\d{2}-\d{2}/.test(ovText), "no YYYY-MM-DD date");
 
+  // Labels & roles (operator surface): a saved display name must drive the
+  // overview heading; a role added inline must render as a removable chip.
+  check("host: labels card rendered", d.body.textContent.includes("Labels & roles"), "labels card missing");
+  check("host: OS row in overview", [...d.querySelectorAll("section dt")].some((x) => x.textContent.trim() === "OS"), "no OS dt in overview kv");
+  check("host: remove button (admin)", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Remove host")), "no Remove host button");
+  if (w.__partout) {
+    w.__partout.labelDraft.name = "smoke-web-01";
+    w.__partout.saveHostLabels();
+    await sleep(1500);
+    check("host: saved display name in heading", (d.querySelector("section h2") || {}).textContent === "smoke-web-01", "h2=" + ((d.querySelector("section h2") || {}).textContent || ""));
+    w.__partout.roleDraft = "smoke-role";
+    w.__partout.addRole();
+    await sleep(1500);
+    check("host: role chip rendered", [...d.querySelectorAll(".chip")].some((c) => c.textContent.includes("smoke-role")), "no role chip");
+  } else {
+    check("host: app instance exposed", false, "no window.__partout");
+  }
+
   await visit("#/host/" + hostId + "/facts");
   check("host facts: JSON console", !!d.querySelector(".console") && d.querySelector(".console").textContent.includes("{"));
+
+  // Command palette: opens, filters, and jumps to a page.
+  if (w.__partout) {
+    w.__partout.openPalette();
+    await sleep(350);
+    check("palette: overlay renders", !!d.querySelector(".palette"), "no palette overlay");
+    w.__partout.paletteQ = "audit";
+    await sleep(350);
+    const first = (w.__partout.paletteItems || [])[0];
+    check("palette: query filters to Audit page", !!first && first.label === "Audit", "items=" + (w.__partout.paletteItems || []).map((x) => x.label).join("|"));
+    w.__partout.paletteRun();
+    await sleep(1300);
+    check("palette: enter jumps to the page", w.location.hash === "#/audit", "hash=" + w.location.hash);
+  } else {
+    check("palette: app instance exposed", false, "no window.__partout");
+  }
 
   await visit("#/execute");
   check("execute: run button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Run command")));
@@ -156,7 +243,7 @@ async function main() {
   await visit("#/approvals");
   check("approvals: page renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Approvals"));
   check("approvals: pending request row", rowsWithText(d, "apr_") > 0, "no approval row");
-  check("approvals: agent on the row", rowsWithText(d, "ag_") > 0, "agent missing");
+  check("approvals: agent on the row (friendly name)", rowsWithText(d, (w.__partout.hosts[0] || {}).name || (w.__partout.hosts[0] || {}).hostname || "ag_") > 0, "agent missing");
   check("approvals: approve button (admin)", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Approve")), "no Approve button");
   check("approvals: pending badge", !!d.querySelector(".badge.warn") && d.querySelector(".badge.warn").textContent.includes("pending"), "no pending badge");
 
@@ -166,7 +253,7 @@ async function main() {
   check("mcp: run_command tool row", rowsWithText(d, "run_command") > 0, "tool row missing");
   check("mcp: write badge", rowsWithText(d, "write") > 0, "no write badge");
   check("mcp: mcp.json snippet", d.body.textContent.includes("mcpServers"), "snippet missing");
-  check("mcp: 22 tools", (d.body.textContent.match(/list_hosts|get_host_facts|decide_approval/g) || []).length >= 3, "tool names missing");
+  check("mcp: identity write tools", (d.body.textContent.match(/set_host_tag|add_host_role|delete_host/g) || []).length >= 3, "new identity tools missing");
   check("mcp: oauth2 clients card", d.body.textContent.includes("OAuth2 clients"), "clients card missing");
 
   await visit("#/users");

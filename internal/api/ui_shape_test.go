@@ -105,7 +105,7 @@ func TestUIShape_HostsWrappedItems(t *testing.T) {
 	if len(items.Items) == 0 {
 		t.Fatal("expected the seeded agent in /hosts")
 	}
-	for _, k := range []string{"id", "uuid", "state", "version", "first_seen", "last_seen"} {
+	for _, k := range []string{"id", "uuid", "state", "version", "first_seen", "last_seen", "name"} {
 		if _, ok := items.Items[0][k]; !ok {
 			t.Errorf("host entry missing %q (fleet table + overview read it); got %v", k, keysOf(items.Items[0]))
 		}

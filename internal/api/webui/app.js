@@ -9,6 +9,7 @@
 (function () {
   const { createApp } = Vue;
   const LS_TOKEN = "partout_token";
+  const LS_NAV_COLLAPSED = "partout_nav_collapsed";
 
   // ---------------- formatting + state vocab (exposed to template) --------
   function fmtAgo(ts) {
@@ -63,6 +64,22 @@
   function joinPath(a, b) { if (!a || a === "/") return "/" + b; if (a.endsWith("/")) return a + b; return a + "/" + b; }
   function parentPath(p) { const s = (p || "/").replace(/\/+$/, ""); const i = s.lastIndexOf("/"); return i <= 0 ? "/" : s.slice(0, i); }
   function obj(v) { try { return v ? JSON.parse(v) : null; } catch (e) { return v; } }
+  // Human-friendly host label: the server already computes h.name, but these
+  // fallbacks keep the UI correct for older/partial host objects (e.g. the
+  // selector preview shape, which has no name field).
+  function hostName(h) {
+    if (!h) return "";
+    if (h.name) return h.name;
+    if (h.hostname) return h.hostname;
+    if (h.tags && h.tags.name) return h.tags.name;
+    if (h.roles && h.roles.length) return h.roles[0];
+    return h.id || "";
+  }
+  function hostOption(h) {
+    if (!h) return "";
+    const n = hostName(h);
+    return n && n !== h.id ? n + " (" + h.id + ")" : (h.id || "");
+  }
 
   class ApiError extends Error { constructor(status, message, code, data) { super(message); this.status = status; this.code = code; this.data = data; } }
 
@@ -126,6 +143,23 @@
       </div>
     </div>
   </div>
+  <!-- ============ COMMAND PALETTE (⌘K / Ctrl-K) ============ -->
+  <div class="overlay palette-overlay" v-if="paletteOpen && loggedIn" @click.self="closePalette()">
+    <div class="dialog card palette">
+      <input ref="paletteInput" v-model="paletteQ" class="palette-input" placeholder="Jump to a page or host…"
+             @keydown.down.prevent="paletteMove(1)" @keydown.up.prevent="paletteMove(-1)"
+             @keydown.enter.prevent="paletteRun()" @keydown.esc.prevent="closePalette()" />
+      <div class="palette-list">
+        <div v-for="(it, i) in paletteItems" :key="it.kind + ':' + it.key" class="palette-item"
+             :class="{active: i===paletteIdx}" @click="paletteGo(it)" @mousemove="paletteIdx=i">
+          <span class="palette-kind">{{ it.kind === 'host' ? 'Host' : it.group }}</span>
+          <span class="palette-label">{{ it.icon }} {{ it.label }}</span>
+          <span v-if="it.sub" class="palette-sub mono">{{ it.sub }}</span>
+        </div>
+        <div v-if="!paletteItems.length" class="palette-empty">No matches</div>
+      </div>
+    </div>
+  </div>
   <!-- ============ LOGIN ============ -->
   <div v-if="!loggedIn" class="login-wrap">
     <div class="login-card">
@@ -152,27 +186,34 @@
         <div class="port">:{{ port }}</div>
       </div>
       <nav class="nav">
-        <div class="nav-section">Fleet</div>
-        <div v-for="n in fleetNav()" :key="n.key"
-             :class="['nav-item', {active: page===n.key, disabled: !navEnabled(n)}]"
-             :title="navTitle(n)" @click="navClick(n)">
-          <span class="icon">{{ n.icon }}</span>{{ n.label }}
-          <span v-if="!navEnabled(n)" class="chip-ms">{{ navTag(n) }}</span>
-        </div>
+        <template v-for="g in navGroups()" :key="g.key">
+          <div class="nav-section" @click="toggleNavGroup(g.key)" :title="isNavCollapsed(g.key) ? 'Expand' : 'Collapse'">
+            <span class="nav-caret">{{ isNavCollapsed(g.key) ? '▸' : '▾' }}</span>{{ g.label }}
+            <span v-if="navGroupBadge(g) > 0" class="nav-badge">{{ navGroupBadge(g) }}</span>
+          </div>
+          <template v-if="!isNavCollapsed(g.key)">
+            <div v-for="n in g.items" :key="n.key"
+                 :class="['nav-item', {active: page===n.key, disabled: !navEnabled(n)}]"
+                 :title="navTitle(n)" @click="navClick(n)">
+              <span class="icon">{{ n.icon }}</span>{{ n.label }}
+              <span v-if="n.badge && navBadge(n) > 0" class="nav-badge" :class="n.badge">{{ navBadge(n) }}</span>
+              <span v-else-if="!navEnabled(n)" class="chip-ms">{{ navTag(n) }}</span>
+            </div>
+          </template>
+        </template>
 
-        <div class="nav-section">Observe</div>
-        <div v-for="n in obsNav()" :key="n.key"
-             :class="['nav-item', {active: page===n.key, disabled: !!n.placeholder || !capOn('observe')}]"
-             :title="n.placeholder ? ('Not yet available — ' + n.placeholder) : ''"
-             @click="!n.placeholder && capOn('observe') && go(n.key)">
-          <span class="icon">{{ n.icon }}</span>{{ n.label }}
-          <span v-if="n.placeholder" class="chip-ms">{{ n.placeholder }}</span>
-        </div>
-
-        <div v-if="groups.length" class="nav-section">Groups</div>
-        <div v-for="g in groups" :key="g.name" class="nav-scope" :class="{active: scope===g.name}" @click="setScope(g.name)">
-          <span class="mono">#{{ g.name }}</span>
-        </div>
+        <template v-if="groups.length">
+          <div class="nav-section nav-section-plain">Scope</div>
+          <div v-for="g in groups" :key="g.name" class="nav-scope" :class="{active: scope===g.name}"
+               :title="'Filter the fleet to group #' + g.name + (scope === g.name ? ' (click to clear)' : '')"
+               @click="setScope(g.name)">
+            <span class="mono">#{{ g.name }}</span>
+            <span v-if="scope === g.name" class="nav-clear">×</span>
+          </div>
+          <div v-if="scope" class="nav-scope-hint muted small" :class="{'scope-err': !!scopeErr}">
+            {{ scopeErr ? scopeErr : (scopeHostIds ? scopeHostIds.length + ' host(s) in scope' : 'resolving…') }}
+          </div>
+        </template>
       </nav>
 
       <div class="usercard" @click="userMenu=!userMenu">
@@ -192,6 +233,9 @@
           <template v-if="crumbPage"><span class="sep">›</span><span class="cur">{{ crumbPage }}</span></template>
         </div>
         <div class="spacer"></div>
+        <button class="btn sm ghost palette-btn" @click="openPalette" title="Jump to a page or host (⌘K / Ctrl-K)">
+          <span class="kbd">⌘K</span> Jump to…
+        </button>
         <div class="sse-dot" :title="'stream: /api/v1/events — ' + sseStatus">
           <span class="dot" :class="sseDot"></span>{{ sseStatus }}
         </div>
@@ -208,27 +252,34 @@
         <!-- ============ FLEET ============ -->
         <section v-if="page==='fleet'">
           <h1 class="page">Fleet Management</h1>
-          <p class="page-sub">{{ scopedHosts.length }} host{{ scopedHosts.length===1?'':'s' }}<template v-if="scope"> · scoped to <b>#{{ scope }}</b></template></p>
+          <p class="page-sub">{{ visibleHosts.length }} host{{ visibleHosts.length===1?'':'s' }}<template v-if="scope"> · scoped to <b>#{{ scope }}</b></template><template v-if="fleetFilter.trim()"> · filtered</template></p>
           <div class="grid cols-3" style="margin-bottom:16px">
             <div class="stat ok"><div class="lbl">🛡 Connected</div><div class="num">{{ health.connected }}</div></div>
             <div class="stat bad"><div class="lbl">✕ Disconnected</div><div class="num">{{ health.disconnected }}</div></div>
             <div class="stat info"><div class="lbl">◷ Pending</div><div class="num">{{ health.pending }}</div></div>
           </div>
           <div class="card">
-            <div class="head"><h2>Hosts</h2><div class="spacer"></div>
+            <div class="head"><h2>Hosts</h2>
+              <input v-model="fleetFilter" class="fleet-filter" placeholder="Filter by name, id, role…" />
+              <div class="spacer"></div>
               <button class="btn sm" @click="createGroup" :disabled="!isOperator">+ Group</button>
               <button class="btn primary sm" @click="openAddHost" :disabled="!isOperator">+ Add host</button>
             </div>
             <table class="tbl">
-              <thead><tr><th>Host</th><th>State</th><th>Version</th><th>Last seen</th></tr></thead>
+              <thead><tr><th>Host</th><th>State</th><th>OS</th><th>Version</th><th>Last seen</th></tr></thead>
               <tbody>
-                <tr v-for="h in scopedHosts" :key="h.id" class="click" @click="go('host/'+h.id)">
-                  <td class="mono">{{ h.id }}</td>
+                <tr v-for="h in visibleHosts" :key="h.id" class="click" @click="go('host/'+h.id)">
+                  <td>
+                    <div class="host-name">{{ hostName(h) }}</div>
+                    <div class="host-id mono muted" v-if="hostName(h) !== h.id">{{ h.id }}</div>
+                    <div v-if="h.roles && h.roles.length" class="host-roles"><span class="chip" v-for="r in h.roles" :key="r">{{ r }}</span></div>
+                  </td>
                   <td><span class="badge" :class="agentBadge(h.state).cls">{{ agentBadge(h.state).label }}</span></td>
+                  <td class="muted">{{ h.os || '—' }}</td>
                   <td class="mono">{{ h.version || '—' }}</td>
                   <td class="muted">{{ fmtAgo(h.last_seen) }}</td>
                 </tr>
-                <tr v-if="!hostsLoading && !scopedHosts.length"><td colspan="4"><div class="empty"><div class="big">▦</div>No hosts enrolled yet.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="openAddHost">Add your first host</button></div></div></td></tr>
+                <tr v-if="!hostsLoading && !visibleHosts.length"><td colspan="5"><div class="empty"><div class="big">▦</div><template v-if="fleetFilter.trim()">No hosts match <b>{{ fleetFilter }}</b>.</template><template v-else-if="scope">No hosts in <b>#{{ scope }}</b>.</template><template v-else>No hosts enrolled yet.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="openAddHost">Add your first host</button></div></template></div></td></tr>
               </tbody>
             </table>
           </div>
@@ -243,12 +294,18 @@
           <template v-if="p2!=='facts'">
             <div class="grid cols-2">
               <div class="card">
-                <h2>{{ p1 }}</h2>
+                <div class="head" style="margin-bottom:6px">
+                  <h2 style="margin:0">{{ hostName(host) || p1 }}</h2>
+                  <div class="spacer"></div>
+                  <button v-if="isAdmin" class="btn danger sm" :disabled="!host" @click="removeHost()" title="Delete the agent and all its data; the host can never rejoin with its current identity">Remove host</button>
+                </div>
+                <p class="cap mono muted" v-if="hostName(host) && hostName(host) !== p1">{{ p1 }}</p>
                 <p class="cap">Host overview</p>
                 <dl class="kv">
                   <dt>State</dt><dd><span class="badge" :class="agentBadge((host && host.state) || 'disconnected').cls">{{ agentBadge((host && host.state) || 'disconnected').label }}</span></dd>
                   <dt>UUID</dt><dd class="mono">{{ (host && host.uuid) || '—' }}</dd>
                   <dt>Version</dt><dd class="mono">{{ (host && host.version) || '—' }}</dd>
+                  <dt>OS</dt><dd>{{ (host && host.os) || '—' }}</dd>
                   <dt>First seen</dt><dd>{{ host ? fmtDate(host.first_seen) : '—' }}</dd>
                   <dt>Last seen</dt><dd>{{ host ? fmtAgo(host.last_seen) : '—' }}</dd>
                   <dt v-if="host && host.roles && host.roles.length">Roles</dt>
@@ -270,6 +327,27 @@
                 </template>
                 <p v-else class="muted">No EOL data (external data not wired or distro unknown).</p>
               </div>
+            </div>
+            <div class="card" v-if="isOperator">
+              <h2>Labels &amp; roles</h2>
+              <p class="cap">Operator-assigned identity: the display name and service tags drive the fleet
+                display name; roles feed <span class="mono">role:</span> selectors. Saving an empty field clears it.</p>
+              <div class="grid cols-2">
+                <label class="fld"><span>Display name (tag <span class="mono">name</span>)</span>
+                  <input v-model="labelDraft.name" placeholder="e.g. web-01-prod — falls back to hostname" /></label>
+                <label class="fld"><span>Service (tag <span class="mono">service</span>)</span>
+                  <input v-model="labelDraft.service" placeholder="e.g. haproxy" /></label>
+              </div>
+              <label class="fld"><span>Roles</span>
+                <div class="toolbar">
+                  <span class="muted small" v-if="!(host && host.roles && host.roles.length)">none</span>
+                  <span class="chip" v-for="r in (host && host.roles) || []" :key="r">{{ r }}<a href="#" @click.prevent="removeRole(r)" title="remove role">×</a></span>
+                  <input v-model="roleDraft" class="mono" placeholder="add role…" style="max-width:150px" @keyup.enter="addRole()" />
+                </div>
+              </label>
+              <button class="btn primary sm" :disabled="labelBusy" @click="saveHostLabels()">
+                <span v-if="labelBusy" class="spin"></span> Save name &amp; service
+              </button>
             </div>
           </template>
           <div v-else class="card">
@@ -335,7 +413,7 @@
               <thead><tr><th>Host</th><th>State</th><th>Exit</th><th>Duration</th><th>Output</th></tr></thead>
               <tbody>
                 <tr v-for="r in (execDetail.runs||[])" :key="r.run_id">
-                  <td class="mono">{{ r.agent_id }}</td>
+                  <td class="mono">{{ hostNameById(r.agent_id) }}</td>
                   <td><span class="badge" :class="runBadge(r.state)">{{ r.state }}</span></td>
                   <td class="mono">{{ r.state==='succeeded' ? (r.exit_code||0) : '—' }}</td>
                   <td class="mono">{{ r.duration_ms ? (r.duration_ms/1000).toFixed(2)+'s' : '—' }}</td>
@@ -372,7 +450,7 @@
                   <td class="muted">{{ fmtDate(a.ts) }}</td>
                   <td><span class="chip brand">{{ a.kind }}</span></td>
                   <td class="mono">{{ a.actor || '—' }}</td>
-                  <td class="mono">{{ a.agent_id || '—' }}</td>
+                  <td class="mono">{{ hostNameById(a.agent_id) || '—' }}</td>
                   <td class="mono small" style="max-width:420px;overflow:hidden;text-overflow:ellipsis">{{ typeof a.payload==='string'? a.payload : (a.payload && a.payload.message) || JSON.stringify(a.payload||{}) }}</td>
                 </tr>
                 <tr v-if="!audit.length"><td colspan="5"><div class="empty">No audit events.</div></td></tr>
@@ -390,7 +468,7 @@
             <div class="toolbar">
               <select v-model="ptyHost" style="max-width:200px">
                 <option value="">host…</option>
-                <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+                <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
               </select>
               <input v-model="ptyCmd" class="mono" placeholder="bash" style="max-width:160px" />
               <button class="btn primary sm" :disabled="!isOperator || !ptyHost || !ptyCmd || ptyBusy" @click="openSession">
@@ -405,7 +483,7 @@
               <tbody>
                 <tr v-for="s in sessions" :key="s.id || s.session_id">
                   <td class="mono">{{ s.id || s.session_id }}</td>
-                  <td class="mono">{{ s.agent_id || s.host_id }}</td>
+                  <td class="mono">{{ hostNameById(s.agent_id || s.host_id) }}</td>
                   <td class="mono">{{ (s.cmd || (s.args && s.args.join(' '))) || 'shell' }}</td>
                   <td><span class="badge neutral">{{ s.state || '—' }}</span></td>
                   <td><button class="btn sm" @click="go('session/'+(s.id||s.session_id))">{{ (s.id||s.session_id)===p1 ? 'Open' : (s.state==='open' ? 'Attach' : 'Replay') }}</button></td>
@@ -423,7 +501,7 @@
             <div class="toolbar" style="margin-bottom:8px">
               <span class="badge info">live</span>
               <span class="mono small">{{ sessionLive.cmd }}<template v-if="sessionLive.args && sessionLive.args.length"> {{ sessionLive.args.join(' ') }}</template></span>
-              <span class="muted mono small">on {{ sessionLive.agent_id }}</span>
+              <span class="muted mono small">on {{ hostNameById(sessionLive.agent_id) }}</span>
               <div class="spacer"></div>
               <button class="btn danger sm" :disabled="!isOperator" @click="closeSession">Close session</button>
             </div>
@@ -444,7 +522,7 @@
           <p class="page-sub">Host file browser (M2).</p>
           <div class="toolbar">
             <select :value="fileHost" style="max-width:260px" @change="pickFileHost($event.target.value)">
-              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
             </select>
             <input v-model="fileDir" class="mono" style="flex:1" @keyup.enter="listFiles" />
             <button class="btn sm" @click="fileUp">↑</button>
@@ -533,7 +611,7 @@
                 <tbody>
                   <tr v-for="r in jobRunsDetail.runs" :key="r.id">
                     <td class="mono">{{ r.id }}</td>
-                    <td class="mono">{{ r.agent_id }}</td>
+                    <td class="mono">{{ hostNameById(r.agent_id) }}</td>
                     <td><span class="badge" :class="runBadge(r.state)">{{ r.state }}</span></td>
                     <td class="mono">{{ r.trigger || '—' }}</td>
                     <td class="muted">{{ r.scheduled_at ? new Date(r.scheduled_at*1000).toLocaleString() : '—' }}</td>
@@ -633,7 +711,7 @@
                 <tr v-for="r in taskRuns" :key="r.id" class="click" @click="showTaskRun(r.id)">
                   <td class="mono">{{ r.id }}</td>
                   <td class="mono">{{ r.task_id }}<template v-if="r.task_version">@{{ r.task_version }}</template></td>
-                  <td class="mono">{{ r.agent_id }}</td>
+                  <td class="mono">{{ hostNameById(r.agent_id) }}</td>
                   <td><span class="badge" :class="taskRunBadge(r.state)">{{ r.state }}</span></td>
                   <td class="muted">{{ r.started ? new Date(r.started*1000).toLocaleString() : '—' }}</td>
                   <td class="muted small">{{ taskRunDetail && taskRunDetail.id===r.id ? 'hide ▴' : 'steps ▸' }}</td>
@@ -643,7 +721,7 @@
             </table>
             <template v-if="taskRunDetail">
               <div class="toolbar" style="margin-top:8px">
-                <span class="muted mono small">run {{ taskRunDetail.id }} · {{ taskRunDetail.agent_id }}</span>
+                <span class="muted mono small">run {{ taskRunDetail.id }} · {{ hostNameById(taskRunDetail.agent_id) }}</span>
                 <span class="muted small" v-if="taskRunDetail.error">{{ taskRunDetail.error }}</span>
                 <div class="spacer"></div>
                 <button class="btn sm" @click="taskRunDetail=null">Close</button>
@@ -669,7 +747,7 @@
           <p class="page-sub">Package updates for the selected host (M3). Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
           <div class="toolbar">
             <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
-              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
             </select>
             <button class="btn sm" @click="loadUpdates">Refresh</button>
             <span class="ext-status" :class="{ 'ext-err': extStatus && extStatus.last_error, 'ext-stale': extStatus && !extStatus.last_error && (Date.now()/1000 - (extStatus.last_at||0) > 86400) }" :title="extStatus ? 'last refresh: ' + (extStatus.last_at ? new Date(extStatus.last_at*1000).toLocaleString() : 'never') + (extStatus.last_error ? ' — ' + extStatus.last_error : '') : 'unknown'">
@@ -709,7 +787,7 @@
               <tbody>
                 <tr v-for="a in pkgActions" :key="a.id" class="click" @click="showPkgAction(a.id)">
                   <td class="mono">{{ a.id }}</td>
-                  <td class="mono">{{ a.agent_id }}</td>
+                  <td class="mono">{{ hostNameById(a.agent_id) }}</td>
                   <td class="mono">{{ a.kind }}</td>
                   <td><span class="badge" :class="pkgActionBadge(a.status)">{{ a.status }}</span></td>
                   <td class="mono">{{ a.applied_count || '—' }}</td>
@@ -799,7 +877,7 @@
                 <tr v-for="a in approvals" :key="a.id">
                   <td class="mono">{{ a.id }}</td>
                   <td class="mono">{{ a.action_class }}</td>
-                  <td class="mono">{{ a.agent_id }}</td>
+                  <td class="mono">{{ hostNameById(a.agent_id) }}</td>
                   <td>{{ a.actor || "—" }} <span class="muted" v-if="a.actor_role">({{ a.actor_role }})</span></td>
                   <td><span class="chip" v-for="r in (a.matched_rules||'').split(',').filter(Boolean)" :key="r">{{ r }}</span><span v-if="!(a.matched_rules||'')" class="muted">—</span></td>
                   <td>{{ fmtAgo(a.created_unix) }}</td>
@@ -917,7 +995,7 @@
                     <div class="toolbar">
                       <span class="muted mono small">run {{ provDetail.run.id }} · {{ provDetail.run.host }} · {{ provDetail.run.state }}</span>
                       <span class="err-box" style="margin:0" v-if="provDetail.run.error">{{ provDetail.run.error }}</span>
-                      <span class="muted mono small" v-if="provDetail.run.agent_id">agent {{ provDetail.run.agent_id }}</span>
+                      <span class="muted mono small" v-if="provDetail.run.agent_id">agent {{ hostNameById(provDetail.run.agent_id) }}</span>
                       <div class="spacer"></div>
                       <button class="btn sm" @click="provDetail=null">Close</button>
                     </div>
@@ -984,7 +1062,7 @@
           <div class="toolbar">
             <select :value="svcHost" @change="svcHost=$event.target.value; loadServices()" style="max-width:180px">
               <option value="">all hosts</option>
-              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
             </select>
             <input v-model="svcName" placeholder="unit name" class="mono" @keyup.enter="loadServices" style="max-width:150px" />
             <input v-model="svcLabel" placeholder="filter by label" @keyup.enter="loadServices" style="max-width:150px" />
@@ -1000,7 +1078,7 @@
               <tbody>
                 <tr v-for="(row,i) in services" :key="i">
                   <td class="mono">{{ row.unit.name }}</td>
-                  <td class="mono">{{ row.host_id }}</td>
+                  <td class="mono">{{ hostNameById(row.host_id) }}</td>
                   <td><span class="badge" :class="svcBadge(row.unit).cls">{{ svcBadge(row.unit).label }}</span></td>
                   <td>{{ row.unit.enabled ? 'yes' : 'no' }}</td>
                   <td class="mono">{{ row.unit.restart_policy || '—' }}</td>
@@ -1022,7 +1100,7 @@
           <div class="toolbar">
             <select :value="certHost" @change="certHost=$event.target.value; loadCerts()" style="max-width:180px">
               <option value="">all hosts</option>
-              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
             </select>
             <input v-model="certQ" placeholder="subject / path" class="mono" @keyup.enter="loadCerts" style="max-width:220px" />
             <label class="fld" style="margin:0;display:flex;align-items:center;gap:8px">
@@ -1037,7 +1115,7 @@
               <tbody>
                 <tr v-for="(row,i) in certs" :key="i">
                   <td><div class="mono small">{{ row.cert.subject || row.cert.path }}</div></td>
-                  <td class="mono">{{ row.host_id }}</td>
+                  <td class="mono">{{ hostNameById(row.host_id) }}</td>
                   <td><span class="badge" :class="certBadge(row.cert).cls">{{ certBadge(row.cert).label }}</span></td>
                   <td><span class="badge" :class="!row.cert.chain_checked?'neutral':(row.cert.chain_valid?'ok':'bad')">{{ !row.cert.chain_checked?'unchecked':(row.cert.chain_valid?'valid':'broken') }}</span></td>
                   <td class="mono">{{ row.cert.key_type || '—' }}</td>
@@ -1060,7 +1138,7 @@
           <div class="toolbar">
             <select :value="cfgHost" @change="cfgHost=$event.target.value; loadConfigs()" style="max-width:180px">
               <option value="">all hosts</option>
-              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ h.id }}</option>
+              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
             </select>
             <select v-model="cfgKind" @change="loadConfigs">
               <option value="">any kind</option><option value="haproxy">haproxy</option><option value="nginx">nginx</option>
@@ -1073,7 +1151,7 @@
               <span class="badge" :class="((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'ok':'bad'">{{ ((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'valid':'invalid' }}</span>
               <a @click.prevent="go('obs/services?host='+c.host_id+'&name='+c.kind)" :title="c.kind + ' service'" style="font-size:12px">◈ {{ c.kind }} service</a>
               <div class="spacer"></div>
-              <span class="muted mono small">{{ c.host_id }}</span>
+              <span class="muted mono small">{{ hostNameById(c.host_id) }}</span>
             </div>
             <template v-if="c.haproxy">
               <p class="cap">{{ (c.haproxy.backends||[]).length }} backends · {{ (c.haproxy.listeners||[]).length }} listeners</p>
@@ -1127,7 +1205,7 @@
                   <tr v-for="a in alerts" :key="a.id">
                     <td><span class="tag" :class="a.severity">{{ a.severity }}</span></td>
                     <td>{{ a.kind }}</td>
-                    <td class="mono">{{ a.agent_id || '—' }}</td>
+                    <td class="mono">{{ hostNameById(a.agent_id) || '—' }}</td>
                     <td>{{ a.message }}</td>
                     <td><span class="badge" :class="a.state==='firing'?'warn':'ok'">{{ a.state }}</span></td>
                     <td>{{ a.started_at ? new Date(a.started_at*1000).toLocaleString() : '—' }}</td>
@@ -1246,8 +1324,12 @@
         loginErr: "", loginBusy: false, userMenu: false,
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
         sseStatus: "disconnected",
-        groups: [], scope: null,
+        groups: [], scope: null, scopeHostIds: null, scopeErr: "",
+        fleetFilter: "",
+        navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
+        paletteOpen: false, paletteQ: "", paletteIdx: 0,
         hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null,
+        labelDraft: { name: "", service: "" }, roleDraft: "", labelBusy: false,
         exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
@@ -1325,28 +1407,54 @@
       initials() { return (this.me?.username || "?").slice(0, 2).toUpperCase(); },
       port() { return location.port || (location.protocol === "https:" ? "443" : "80"); },
       sseDot() { return this.sseStatus === "connected" ? "ok" : this.sseStatus === "reconnecting" ? "warn" : "down"; },
-      crumbHost() { return this.page === "host" ? this.p1 : ""; },
+      crumbHost() { return this.page === "host" ? (this.hostName(this.host) || this.p1) : ""; },
       crumbPage() { if (this.page === "host") return this.p2 || "overview"; if (this.page === "exec") return "execution"; return ""; },
       health() {
         const c = { connected: 0, disconnected: 0, pending: 0 };
-        for (const h of this.hosts) if (c[h.state] !== undefined) c[h.state]++;
+        for (const h of this.scopedHosts) if (c[h.state] !== undefined) c[h.state]++;
         return c;
       },
+      // Scope is a host-group filter. Resolution is server-authoritative
+      // (the /hosts?selector= preview endpoint), so role:/tag:/multi-host
+      // selectors resolve exactly as at dispatch time — the old local
+      // host:-only regex silently showed the whole fleet for those.
       scopedHosts() {
         if (!this.scope) return this.hosts;
-        const g = this.groups.find(g => g.name === this.scope);
-        if (!g) return this.hosts;
-        const sel = (g.selector || "").trim();
-        if (sel === "all") return this.hosts;
-        const m = sel.match(/^host:(.+)$/);
-        if (m) return this.hosts.filter(h => h.id === m[1]);
-        return this.hosts;
+        if (!this.scopeHostIds) return [];
+        const ids = new Set(this.scopeHostIds);
+        return this.hosts.filter(h => ids.has(h.id));
+      },
+      // Fleet table rows: the scope subset, further narrowed by the free-text
+      // filter (matches name, id, hostname, OS, roles, tag keys).
+      visibleHosts() {
+        const q = this.fleetFilter.trim().toLowerCase();
+        if (!q) return this.scopedHosts;
+        return this.scopedHosts.filter(h => {
+          const hay = [this.hostName(h), h.id, h.hostname || "", h.os || "",
+            (h.roles || []).join(" "), Object.keys(h.tags || {}).join(" ")].join(" ").toLowerCase();
+          return hay.includes(q);
+        });
+      },
+      paletteItems() {
+        const q = this.paletteQ.trim().toLowerCase();
+        const out = [];
+        for (const g of this.navGroups()) {
+          for (const n of g.items) {
+            if (!this.navEnabled(n)) continue;
+            out.push({ kind: "page", group: g.label, key: n.key, label: n.label, icon: n.icon, sub: "" });
+          }
+        }
+        for (const h of this.hosts) {
+          out.push({ kind: "host", group: "Host", key: h.id, label: this.hostName(h), icon: "▦", sub: h.id });
+        }
+        const f = q ? out.filter(x => (x.label + " " + x.sub + " " + x.group).toLowerCase().includes(q)) : out;
+        return f.slice(0, 40);
       },
       auditKinds() { return [...new Set(this.audit.map(a => a.kind))]; },
       meName() { return (this.me && this.me.username) || ""; },
     },
     methods: {
-      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, pkgActionBadge, provBadge, provStepBadge, certBadge, svcBadge, eolBadge,
+      fmtAgo, fmtDate, fmtBytes, agentBadge, execBadge, runBadge, taskRunBadge, stepBadge, pkgActionBadge, provBadge, provStepBadge, certBadge, svcBadge, eolBadge, hostName, hostOption,
       // Global toast notifications (consistent success/error feedback across
       // every page). kind: ok|err|info. ttl ms (default 4000).
       notify(kind, msg, ttl = 4000) {
@@ -1404,35 +1512,43 @@
         }
         return out;
       },
-      fleetNav() {
+      // Navigation IA: grouped by task, ordered common → advanced. Sections
+      // are collapsible (state persisted); capability + role gating stays
+      // per-item so disabled/admin entries remain discoverable.
+      navGroups() {
         return [
-          { key: "fleet", label: "Fleet Management", icon: "▦", cap: "hosts" },
-          { key: "execute", label: "Execute", icon: "❯", cap: "exec" },
-          { key: "audit", label: "Audit Log", icon: "≡", cap: "audit" },
-          { key: "sessions", label: "Sessions", icon: "▤", cap: "sessions" },
-          { key: "files", label: "Files", icon: "🗀", cap: "files" },
-          { key: "jobs", label: "Jobs", icon: "◷", cap: "jobs" },
-          { key: "tasks", label: "Tasks & Playbooks", icon: "⚙", cap: "tasks" },
-          { key: "updates", label: "Updates", icon: "⇪", cap: "packages" },
-          { key: "secrets", label: "Secrets", icon: "🔒", cap: "secrets" },
-          { key: "policies", label: "Policies", icon: "§", cap: "policies" },
-          { key: "approvals", label: "Approvals", icon: "☑", cap: "approvals" },
-          { key: "mcp", label: "MCP", icon: "⟨⟩", cap: "mcp" },
-          { key: "provision", label: "Provision", icon: "➕", cap: "provision", admin: true },
-          { key: "users", label: "Users", icon: "👤", cap: "users", admin: true },
-        ];
-      },
-      obsNav() {
-        return [
-          { key: "obs-services", label: "Services", icon: "◈" },
-          { key: "obs-certs", label: "Certificates", icon: "✦" },
-          { key: "obs-configs", label: "Configs", icon: "⌘" },
-          { key: "obs-alerts", label: "Alerts", icon: "⚠" },
+          { key: "fleet", label: "Fleet", items: [
+            { key: "fleet", label: "Hosts", icon: "▦", cap: "hosts" },
+            { key: "execute", label: "Execute", icon: "❯", cap: "exec" },
+            { key: "sessions", label: "Sessions", icon: "▤", cap: "sessions" },
+            { key: "files", label: "Files", icon: "🗀", cap: "files" },
+            { key: "updates", label: "Updates", icon: "⇪", cap: "packages" },
+          ] },
+          { key: "automation", label: "Automation", items: [
+            { key: "jobs", label: "Jobs", icon: "◷", cap: "jobs" },
+            { key: "tasks", label: "Tasks & Playbooks", icon: "⚙", cap: "tasks" },
+          ] },
+          { key: "observe", label: "Observe", items: [
+            { key: "obs-alerts", label: "Alerts", icon: "⚠", cap: "alerts", badge: "alerts" },
+            { key: "obs-services", label: "Services", icon: "◈", cap: "observe" },
+            { key: "obs-configs", label: "Configs", icon: "⌘", cap: "observe" },
+            { key: "obs-certs", label: "Certificates", icon: "✦", cap: "observe" },
+          ] },
+          { key: "governance", label: "Governance", items: [
+            { key: "approvals", label: "Approvals", icon: "☑", cap: "approvals", badge: "approvals" },
+            { key: "policies", label: "Policies", icon: "§", cap: "policies" },
+            { key: "secrets", label: "Secrets", icon: "🔒", cap: "secrets" },
+            { key: "audit", label: "Audit", icon: "≡", cap: "audit" },
+          ] },
+          { key: "admin", label: "Admin", items: [
+            { key: "provision", label: "Provision", icon: "➕", cap: "provision", admin: true },
+            { key: "users", label: "Users", icon: "👤", cap: "users", admin: true },
+            { key: "mcp", label: "MCP", icon: "⟨⟩", cap: "mcp" },
+          ] },
         ];
       },
       navEnabled(n) { return this.capOn(n.cap) && (!n.admin || this.isAdmin); },
       navTitle(n) {
-        if (n.placeholder) return "Not yet available — " + n.placeholder;
         if (n.admin && !this.isAdmin) return "Requires admin role";
         if (!this.capOn(n.cap)) return "Not yet available — " + n.cap + " not in this build";
         return "";
@@ -1444,7 +1560,76 @@
       },
       navClick(n) { if (this.navEnabled(n)) this.go(n.key); },
       go(path) { location.hash = "/" + path; },
-      setScope(name) { this.scope = this.scope === name ? null : name; },
+      // Attention badges (pending approvals / firing alerts): loaded once at
+      // sign-in, then refreshed on the matching SSE events — live, no
+      // polling. A 403 (feature off for this role/build) leaves 0.
+      navBadge(n) { return (n.badge && this.navBadges[n.badge]) || 0; },
+      navGroupBadge(g) { return g.items.reduce((s, n) => s + this.navBadge(n), 0); },
+      async loadNavBadges() {
+        try { const d = await this.api("/approvals?state=pending", { silent: true }); this.navBadges.approvals = (d.approvals || []).length; } catch (e) { /* no badge */ }
+        try { const d = await this.api("/alerts", { silent: true }); this.navBadges.alerts = (d.alerts || []).length; } catch (e) { /* no badge */ }
+      },
+      // Collapsible sections: persisted in localStorage, Admin collapsed by
+      // default; the section holding the active page auto-expands.
+      isNavCollapsed(key) { return !!this.navCollapsed[key]; },
+      toggleNavGroup(key) {
+        this.navCollapsed = { ...this.navCollapsed, [key]: !this.navCollapsed[key] };
+        this.saveNavCollapsed();
+      },
+      ensureNavExpanded() {
+        const g = this.navGroups().find(x => x.items.some(n => n.key === this.page));
+        if (g && this.navCollapsed[g.key]) {
+          this.navCollapsed = { ...this.navCollapsed, [g.key]: false };
+          this.saveNavCollapsed();
+        }
+      },
+      loadNavCollapsed() {
+        try {
+          const raw = localStorage.getItem(LS_NAV_COLLAPSED);
+          this.navCollapsed = raw ? (JSON.parse(raw) || {}) : { admin: true };
+        } catch (e) { this.navCollapsed = { admin: true }; }
+      },
+      saveNavCollapsed() {
+        try { localStorage.setItem(LS_NAV_COLLAPSED, JSON.stringify(this.navCollapsed)); } catch (e) { }
+      },
+      // Scope: a host group acts as a fleet filter (server-resolved).
+      async setScope(name) {
+        if (this.scope === name) { this.clearScope(); return; }
+        this.scope = name; this.scopeHostIds = null; this.scopeErr = "";
+        if (this.page !== "fleet") this.go("fleet");
+        await this.resolveScope();
+      },
+      clearScope() { this.scope = null; this.scopeHostIds = null; this.scopeErr = ""; },
+      async resolveScope() {
+        if (!this.scope) return;
+        const g = this.groups.find(x => x.name === this.scope);
+        if (!g) { this.scopeHostIds = []; this.scopeErr = "group not found"; return; }
+        const sel = (g.selector || "").trim() || "all";
+        try {
+          const d = await this.api("/hosts?selector=" + encodeURIComponent(sel), { silent: true });
+          this.scopeHostIds = (d.items || []).map(i => i.id);
+          this.scopeErr = "";
+        } catch (e) { this.scopeHostIds = []; this.scopeErr = e.message || "unresolved selector"; }
+      },
+      // Command palette (⌘K / Ctrl-K): jump to any enabled page or host.
+      openPalette() {
+        this.paletteOpen = true; this.paletteQ = ""; this.paletteIdx = 0;
+        this.$nextTick(() => { const el = this.$refs.paletteInput; if (el) el.focus(); });
+      },
+      closePalette() { this.paletteOpen = false; },
+      paletteMove(d) {
+        const n = this.paletteItems.length;
+        if (!n) return;
+        this.paletteIdx = (this.paletteIdx + d + n) % n;
+      },
+      paletteRun() { const it = this.paletteItems[this.paletteIdx]; if (it) this.paletteGo(it); },
+      paletteGo(it) { this.closePalette(); this.go(it.kind === "host" ? "host/" + it.key : it.key); },
+      onGlobalKey(e) {
+        if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+          e.preventDefault();
+          if (this.paletteOpen) this.closePalette(); else this.openPalette();
+        }
+      },
       async refreshCaps() { try { this.caps = await this.api("/capabilities"); } catch (e) { this.caps = {}; } },
       async loadMe() { try { this.me = await this.api("/auth/me"); } catch (e) { } },
       async loadGroups() { try { this.groups = (await this.api("/groups")) || []; } catch (e) { this.groups = []; } },
@@ -1522,14 +1707,14 @@
           if (this.page === "session") { this._destroyTerm(); this.loadSessionReplay(); }
           else if (this.page === "sessions") this.loadSessions();
         }
-        else if ((kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") && this.page === "approvals") this.loadApprovals();
-        else if ((kind === "alert.firing" || kind === "alert.resolved") && this.page === "obs-alerts") this.loadAlerts();
+        else if (kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") { this.loadNavBadges(); if (this.page === "approvals") this.loadApprovals(); }
+        else if (kind === "alert.firing" || kind === "alert.resolved") { this.loadNavBadges(); if (this.page === "obs-alerts") this.loadAlerts(); }
       },
       async loadPageData() {
         // Files, Updates, Jobs and the Observe pages need the host list (default
         // host selection, per-host run target, host filter dropdowns). Load it
         // first if a deep link lands here before the fleet page ever ran.
-        if (["files", "updates", "jobs", "sessions", "obs-services", "obs-certs", "obs-configs"].includes(this.page) && !this.hosts.length) {
+        if (["exec", "audit", "approvals", "files", "updates", "jobs", "tasks", "sessions", "provision", "obs-services", "obs-certs", "obs-configs", "obs-alerts"].includes(this.page) && !this.hosts.length) {
           await this.loadHosts();
         }
         switch (this.page) {
@@ -1556,13 +1741,17 @@
           case "obs-configs": this.syncObserveQuery(); await this.loadConfigs(); break;
         }
       },
-      async loadHosts() { this.hostsLoading = true; try { const d = await this.api("/hosts"); this.hosts = d.items || []; } catch (e) { this.hosts = []; } finally { this.hostsLoading = false; } },
+      async loadHosts() { this.hostsLoading = true; try { const d = await this.api("/hosts"); this.hosts = d.items || []; } catch (e) { this.hosts = []; } finally { this.hostsLoading = false; } if (this.scope) this.resolveScope(); },
       async loadHostDetail() {
         // Overview comes from GET /hosts/{id} (state/uuid/version/timestamps);
         // GET /hosts/{id}/facts only returns {host_id, ts, facts}.
         this.host = null; this.hostFacts = null; this.hostEol = null;
         if (!this.p1) return; // id-less route: nothing to load (never GET /hosts/)
         try { this.host = await this.api("/hosts/" + encodeURIComponent(this.p1)); } catch (e) { this.host = null; }
+        this.labelDraft = {
+          name: (this.host && this.host.tags && this.host.tags.name) || "",
+          service: (this.host && this.host.tags && this.host.tags.service) || "",
+        };
         try { this.hostFacts = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/facts"); } catch (e) { this.hostFacts = null; }
         try { this.hostEol = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/eol"); } catch (e) { this.hostEol = null; }
       },
@@ -1574,6 +1763,56 @@
         try { this.execOutput = (await this.api("/executions/" + encodeURIComponent(this.p1) + "/output")) || []; } catch (e) { this.execOutput = []; }
       },
       outFor(runId) { return this.execOutput.filter(o => o.run_id === runId); },
+      async saveHostLabels() {
+        const id = this.p1;
+        this.labelBusy = true;
+        try {
+          for (const [key, val] of [["name", this.labelDraft.name.trim()], ["service", this.labelDraft.service.trim()]]) {
+            const url = `/hosts/${encodeURIComponent(id)}/tags/${encodeURIComponent(key)}`;
+            if (val) await this.api(url, { method: "PUT", body: { value: val }, silent: true });
+            else await this.api(url, { method: "DELETE", silent: true });
+          }
+          await this.loadHostDetail();
+          this.notify("ok", "labels saved");
+        } catch (e) { /* toast shown by api() */ } finally { this.labelBusy = false; }
+      },
+      // Friendly name for a raw agent id (historical rows that only carry the
+      // id). Falls back to the id itself when the host list hasn't loaded or
+      // the agent is gone.
+      hostNameById(id) {
+        if (!id) return "";
+        const h = this.hosts.find(x => x.id === id);
+        return h ? this.hostName(h) : id;
+      },
+      async removeHost() {
+        const id = this.p1;
+        const label = this.hostNameById(id);
+        if (!confirm("Remove host " + label + " (" + id + ")?\n\nThis deletes the agent and all its data (runs, facts, tags, roles). The host can never rejoin with its current identity.")) return;
+        try {
+          await this.api("/hosts/" + encodeURIComponent(id), { method: "DELETE" });
+          this.notify("ok", "host removed");
+          this.host = null;
+          this.go("fleet");
+          this.loadHosts();
+        } catch (e) { /* toast shown by api() */ }
+      },
+      async addRole() {
+        const role = this.roleDraft.trim();
+        if (!role) return;
+        try {
+          await this.api(`/hosts/${encodeURIComponent(this.p1)}/roles/${encodeURIComponent(role)}`, { method: "PUT" });
+          this.roleDraft = "";
+          await this.loadHostDetail();
+          this.notify("ok", `role "${role}" added`);
+        } catch (e) { /* toast shown by api() */ }
+      },
+      async removeRole(role) {
+        try {
+          await this.api(`/hosts/${encodeURIComponent(this.p1)}/roles/${encodeURIComponent(role)}`, { method: "DELETE" });
+          await this.loadHostDetail();
+          this.notify("ok", `role "${role}" removed`);
+        } catch (e) { /* toast shown by api() */ }
+      },
       async loadAudit() { const q = this.auditKind ? "?kind=" + encodeURIComponent(this.auditKind) : ""; try { const d = await this.api("/audit" + q); this.audit = d.items || []; } catch (e) { this.audit = []; } },
       async loadSessions() { try { const d = await this.api("/sessions"); this.sessions = d.sessions || d.items || []; } catch (e) { this.sessions = []; } },
       async loadSessionReplay() {
@@ -2090,17 +2329,21 @@
     },
     mounted() {
       if (typeof window !== "undefined") window.__partout = this; // test hook: component instance
+      this.loadNavCollapsed();
+      window.addEventListener("keydown", this.onGlobalKey);
       if (this.token) {
         Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups()]).then(() => {
           if (!this.me) { this.signOut(); return; }
-          this.startSSE(); this.loadPageData();
+          this.ensureNavExpanded();
+          this.startSSE(); this.loadPageData(); this.loadNavBadges();
         });
       }
     },
-    beforeUnmount() { this.stopSSE(); this.stopAhTicker(); },
+    beforeUnmount() { this.stopSSE(); this.stopAhTicker(); window.removeEventListener("keydown", this.onGlobalKey); },
     watch: {
-      page() { if (this.page !== "session") this._destroyTerm(); this.loadPageData(); },
+      page() { if (this.page !== "session") this._destroyTerm(); this.ensureNavExpanded(); this.loadPageData(); },
       p1() { if (["host", "exec", "session"].includes(this.page)) this.loadPageData(); },
+      paletteQ() { this.paletteIdx = 0; },
       // Same-page query change (cross-link, e.g. obs/certs → obs/certs?host=x):
       // the page/p1 watchers don't fire, so re-sync filters and reload.
       route(nv, ov) {

@@ -392,6 +392,38 @@ func (c *ctl) cmdEnrollToken(args []string) {
 }
 
 func (c *ctl) cmdHosts(args []string) {
+	if len(args) == 0 {
+		c.hostsList()
+		return
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		c.hostsList()
+	case "get":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl hosts get <id>")
+			os.Exit(2)
+		}
+		c.hostsGet(rest[0])
+	case "tag":
+		c.hostsTag(rest)
+	case "role":
+		c.hostsRole(rest)
+	case "delete":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl hosts delete <id>")
+			os.Exit(2)
+		}
+		c.hostsDelete(rest[0])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown hosts command %q\n", sub)
+		fmt.Fprintln(os.Stderr, "usage: partout ctl hosts [list|get <id>|tag <set|rm> <id> <key> [value]|role <add|rm> <id> <role>|delete <id>]")
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) hostsList() {
 	var page map[string]any
 	if err := c.do("GET", "/api/v1/hosts", nil, &page); err != nil {
 		fatal(err)
@@ -408,6 +440,90 @@ func (c *ctl) cmdHosts(args []string) {
 	}
 	w.Flush()
 	fmt.Printf("\n%d host(s)\n", len(items))
+}
+
+func (c *ctl) hostsGet(id string) {
+	var h map[string]any
+	if err := c.do("GET", "/api/v1/hosts/"+url.PathEscape(id), nil, &h); err != nil {
+		fatal(err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "name\t%s\n", strval(h["name"]))
+	fmt.Fprintf(w, "id\t%s\n", strval(h["id"]))
+	fmt.Fprintf(w, "hostname\t%s\n", strval(h["hostname"]))
+	fmt.Fprintf(w, "os\t%s\n", strval(h["os"]))
+	fmt.Fprintf(w, "state\t%s\n", strval(h["state"]))
+	fmt.Fprintf(w, "version\t%s\n", strval(h["version"]))
+	fmt.Fprintf(w, "uuid\t%s\n", strval(h["uuid"]))
+	fmt.Fprintf(w, "tags\t%s\n", joinKVs(h["tags"]))
+	fmt.Fprintf(w, "roles\t%s\n", strings.Join(strs(h["roles"]), ","))
+	w.Flush()
+}
+
+func (c *ctl) hostsTag(args []string) {
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl hosts tag <set|rm> <id> <key> [value]")
+		os.Exit(2)
+	}
+	op, id, key := args[0], args[1], args[2]
+	tagPath := "/api/v1/hosts/" + url.PathEscape(id) + "/tags/" + url.PathEscape(key)
+	var res map[string]any
+	switch op {
+	case "set":
+		var body any
+		if len(args) >= 4 {
+			body = map[string]string{"value": args[3]}
+		}
+		if err := c.do("PUT", tagPath, body, &res); err != nil {
+			fatal(err)
+		}
+		if len(args) >= 4 {
+			fmt.Printf("tag %s=%s set on %s\n", key, args[3], id)
+		} else {
+			fmt.Printf("tag %q set on %s (key-only)\n", key, id)
+		}
+	case "rm":
+		if err := c.do("DELETE", tagPath, nil, &res); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("tag %q removed from %s\n", key, id)
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown tag command %q (set|rm)\n", op)
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) hostsRole(args []string) {
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl hosts role <add|rm> <id> <role>")
+		os.Exit(2)
+	}
+	op, id, role := args[0], args[1], args[2]
+	rolePath := "/api/v1/hosts/" + url.PathEscape(id) + "/roles/" + url.PathEscape(role)
+	var res map[string]any
+	switch op {
+	case "add":
+		if err := c.do("PUT", rolePath, nil, &res); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("role %q added to %s\n", role, id)
+	case "rm":
+		if err := c.do("DELETE", rolePath, nil, &res); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("role %q removed from %s\n", role, id)
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown role command %q (add|rm)\n", op)
+		os.Exit(2)
+	}
+}
+
+func (c *ctl) hostsDelete(id string) {
+	var res map[string]string
+	if err := c.do("DELETE", "/api/v1/hosts/"+url.PathEscape(id), nil, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("host %s deleted\n", id)
 }
 
 func (c *ctl) cmdRun(args []string) {

@@ -71,8 +71,45 @@ a:hover { text-decoration: underline; }
 }
 
 .nav { padding: 6px 10px; flex: 1; }
-.nav-section { font-size: 10.5px; letter-spacing: 0.08em; color: var(--text-faint);
-  text-transform: uppercase; padding: 12px 8px 4px; font-weight: 600; }
+.nav-section {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10.5px; letter-spacing: 0.08em; color: var(--text-faint);
+  text-transform: uppercase; padding: 12px 8px 4px; font-weight: 600;
+  cursor: pointer; user-select: none;
+}
+.nav-section:hover { color: var(--text-muted); }
+.nav-section-plain { cursor: default; }
+.nav-section-plain:hover { color: var(--text-faint); }
+.nav-caret { width: 9px; font-size: 9px; opacity: .8; }
+.nav-badge {
+  margin-left: auto; font-family: var(--mono); font-size: 10px; font-weight: 700;
+  background: var(--critical); color: #fff; padding: 0 6px; border-radius: 10px;
+}
+.nav-badge.alerts { background: var(--warning); }
+.nav-scope .nav-clear { margin-left: auto; font-weight: 700; font-size: 12px; }
+.nav-scope-hint { padding: 3px 10px 0 26px; }
+.nav-scope-hint.scope-err { color: var(--critical); }
+/* Command palette (⌘K / Ctrl-K). */
+.overlay.palette-overlay { align-items: flex-start; padding-top: 12vh; }
+.dialog.palette { width: 560px; padding: 10px; }
+.palette-input { width: 100%; font-size: 14px; padding: 10px 12px; }
+.palette-list { margin-top: 8px; max-height: 50vh; overflow-y: auto; }
+.palette-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; border-radius: var(--radius-ctrl); cursor: pointer;
+}
+.palette-item.active { background: var(--brand-subtle); }
+.palette-kind {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--text-faint); flex: 0 0 86px;
+}
+.palette-label { flex: 1; }
+.palette-sub { color: var(--text-faint); }
+.palette-empty { padding: 16px; text-align: center; color: var(--text-faint); }
+.kbd {
+  font-family: var(--mono); font-size: 11px; border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 4px; background: var(--surface-app);
+}
 .nav-item {
   display: flex; align-items: center; gap: 9px;
   padding: 7px 10px; border-radius: var(--radius-ctrl);
@@ -190,6 +227,16 @@ table.tbl tr.click:hover td { background: var(--brand-subtle); }
   padding: 1px 7px; border-radius: 5px; margin: 1px 3px 1px 0;
 }
 .chip.brand { background: var(--brand-subtle); color: var(--brand); }
+
+/* Host identity in fleet table: friendly name + partout id + roles. */
+.host-name { font-weight: 600; }
+.host-id { color: var(--text-faint); font-size: 11px; }
+.host-roles { margin-top: 3px; }
+/* Fleet table free-text filter (in the card head). */
+.fleet-filter { width: 220px; font-size: 12.5px; padding: 5px 9px; margin-left: 8px; }
+/* Removable chips (host roles): the × inside a chip. */
+.chip a { color: inherit; text-decoration: none; padding: 0 2px; cursor: pointer; font-weight: 700; }
+.chip a:hover { color: var(--critical); }
 
 .btn {
   display: inline-flex; align-items: center; gap: 7px;
