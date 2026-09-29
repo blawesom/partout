@@ -177,7 +177,21 @@ Flags:
 		if serverAtTarget {
 			state = "already current"
 		}
+		// Preflight: fetch and verify the artifacts the real run would use.
+		// --check still makes no system changes — it only downloads to temp.
+		artState := "no --repo configured (artifact preflight skipped)"
+		if *repo != "" {
+			if err := checkArtifacts(client, *repo, target, *arch, serverAtTarget); err != nil {
+				artState = "ARTIFACT PRECHECK FAILED: " + err.Error()
+			} else {
+				artState = "artifacts verified against release key"
+			}
+		}
 		fmt.Printf("update --check: server=%s target=%s hosts=%d (%s)\n", cur.Version, target, n, state)
+		fmt.Printf("update --check: %s\n", artState)
+		if artState != "artifacts verified against release key" && !strings.HasPrefix(artState, "no --repo") {
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -405,6 +419,21 @@ func fetchArtifact(client *http.Client, repo, version, arch, kind string) (file,
 	}
 	h := sha256.Sum256(readFileBytes(file))
 	return file, strings.TrimSpace(string(sb)), hex.EncodeToString(h[:])
+}
+
+// checkArtifacts fetches and signature-verifies the artifacts a real run
+// would use (both when the server is behind; agent-only when the server is
+// already at target). Fail closed: any fetch or signature error is
+// returned so --check exits non-zero.
+func checkArtifacts(client *http.Client, repo, version, arch string, serverAtTarget bool) error {
+	if !serverAtTarget {
+		srvFile, srvSig, srvSHA := fetchArtifact(client, repo, version, arch, "server")
+		if err := verifyArtifact(version, arch, "server", srvFile, srvSHA, srvSig); err != nil {
+			return fmt.Errorf("server artifact: %w", err)
+		}
+	}
+	agtFile, agtSig, agtSHA := fetchArtifact(client, repo, version, arch, "agent")
+	return verifyArtifact(version, arch, "agent", agtFile, agtSHA, agtSig)
 }
 
 // verifyArtifact checks the Ed25519 signature over the canonical manifest
