@@ -1,5 +1,9 @@
 # Partout
 
+> **Status: beta (v0.9.0)** — the full feature set (observe, execute, patch, update
+> rollouts, MCP) is available and self-hosted; expect the occasional rough edge and
+> occasional breaking change before 1.0. Back up your `partout.db` regularly.
+
 **Partout** is a remote host-management control plane: one Go binary to discover, observe,
 execute against, configure, patch, and orchestrate work across Linux hosts — safely,
 auditably, and verifiably — with a web UI and an MCP server for AI assistants.
@@ -156,14 +160,14 @@ partout ctl audit --kind policy.deny --limit 50
 
 The full command set: `auth · enroll-token · hosts · run · exec · audit · policy ·
 approvals · alerts · provision · ca · tls · files · sessions · jobs · tasks ·
-playbooks · packages · secrets · external-data`.
+playbooks · packages · secrets · update · selftest · db-backup · external-data`.
 
 ## Documentation
 
 | Doc | What it covers |
 |---|---|
 | [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions |
-| [docs/roadmap.md](docs/roadmap.md) | **Milestone plan & status** (M0–M7 done, M8 next) + shipped feature deep-dives |
+| [docs/roadmap.md](docs/roadmap.md) | **Milestone plan & status** (M0–M8.1 done; 1.0 in preparation) + shipped feature deep-dives |
 | [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, storage, security, testing |
 | [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, runbooks, troubleshooting, compliance |
