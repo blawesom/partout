@@ -249,8 +249,11 @@ succeeds without manual re-save), UI shape for the Updates-page rollout view.
 Carried from the original M8 scope: Docker image + compose (server; the per-host
 agent stays a bare binary on systemd — containerizing it is a non-goal),
 cloud-init user-data for new VMs, Helm chart (server), status page (per-component
-readiness beyond `/healthz`/`/readyz`). All remain *proposed* in
-`docs/deployment.md` until shipped.
+readiness beyond `/healthz`/`/readyz`). Also deferred from the v0.7.3 feedback
+triage (DEPLOYMENT_FEEDBACK.md C9): `scripts/install-server.sh` — idempotent
+day-1 bootstrap (user, data dir, env, units, backup timer, healthz verify);
+pairs with the shipped `partout-backup.timer` and the §6 bring-up checklist.
+All remain *proposed* in `docs/deployment.md` until shipped.
 
 
 ## Next steps
