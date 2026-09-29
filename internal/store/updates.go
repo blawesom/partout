@@ -371,3 +371,59 @@ func (s *Store) SetUpdateHostsStatusByHost(runID, hostID, status string) error {
 		status, time.Now().Unix(), runID, hostID)
 	return err
 }
+
+// ---------------------------------------------------------------------------
+// Pending update directives (v17) — durable offline queue for M8.1 rollouts
+// ---------------------------------------------------------------------------
+
+// PendingUpdate is the durable record of an update directive queued for an
+// offline host. It stores only the binding (agent, release); delivery
+// reconstructs the directive from the release row and mints a fresh grant.
+type PendingUpdate struct {
+	AgentID   string
+	ReleaseID string
+	CreatedAt int64
+}
+
+func (s *Store) UpsertPendingUpdate(agentID, releaseID string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO pending_updates (agent_id, release_id, created_at) VALUES (?,?,?)
+		 ON CONFLICT (agent_id) DO UPDATE SET release_id=excluded.release_id, created_at=excluded.created_at`,
+		agentID, releaseID, now())
+	return err
+}
+
+func (s *Store) GetPendingUpdate(agentID string) (*PendingUpdate, error) {
+	row := s.db.QueryRow(`SELECT agent_id, release_id, created_at FROM pending_updates WHERE agent_id=?`, agentID)
+	p := &PendingUpdate{}
+	err := row.Scan(&p.AgentID, &p.ReleaseID, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *Store) DeletePendingUpdate(agentID string) error {
+	_, err := s.db.Exec(`DELETE FROM pending_updates WHERE agent_id=?`, agentID)
+	return err
+}
+
+func (s *Store) ListPendingUpdates() ([]*PendingUpdate, error) {
+	rows, err := s.db.Query(`SELECT agent_id, release_id, created_at FROM pending_updates ORDER BY agent_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*PendingUpdate
+	for rows.Next() {
+		p := &PendingUpdate{}
+		if err := rows.Scan(&p.AgentID, &p.ReleaseID, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

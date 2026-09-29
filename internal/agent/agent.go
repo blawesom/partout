@@ -69,9 +69,16 @@ type Agent struct {
 	// a tick arriving while the previous collection is still running is
 	// skipped — systemctl probes can block for seconds.
 	obsCollecting atomic.Bool
-	policyDir     string
-	guard         *guardrail.Guard
-	spool         *spool.Spool
+
+	// updateBusy guards execUpdate: a second update directive arriving while
+	// the first is mid-swap is ignored (defense in depth — the server's
+	// drain logic already guarantees one directive per connection, but two
+	// concurrent swaps of the same binary path would corrupt N-1 retention).
+	// Released on the failure paths; on success the process exits.
+	updateBusy atomic.Bool
+	policyDir  string
+	guard      *guardrail.Guard
+	spool      *spool.Spool
 
 	// rootCtx is the top-level agent context (from Run). In-flight runs are
 	// derived from it — not from a per-stream session context — so a stream
@@ -732,6 +739,10 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 		// swap are slow, and the process exits on success).
 		_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
 			Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_OK}}})
+		if !a.beginUpdate() {
+			a.log.Printf("agent: update directive %s ignored — an update is already in flight", dir.ReleaseId)
+			return nil
+		}
 		go a.execUpdate(dir)
 
 	default:
@@ -749,9 +760,19 @@ const maxUpdateArtifact = 100 << 20
 // restart. Any failure reports phase=failed and leaves the running binary
 // untouched. On success the process exits and the restart command (systemd)
 // brings up the new version, which clears the marker on first connect.
+// beginUpdate claims the update slot for the current process lifetime.
+// Returns false when an update is already in flight (the caller must
+// ignore the duplicate directive).
+func (a *Agent) beginUpdate() bool { return a.updateBusy.CompareAndSwap(false, true) }
+
+// endUpdate releases the slot (failure paths only — success exits the
+// process, making the flag moot).
+func (a *Agent) endUpdate() { a.updateBusy.Store(false) }
+
 func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 	a.log.Printf("agent: update directive release=%s version=%s arch=%s", dir.ReleaseId, dir.Version, dir.Arch)
 	fail := func(stage, detail string) {
+		a.endUpdate()
 		a.log.Printf("agent: update %s: %s", stage, detail)
 		a.sendUpEnvelopeNoSpool(&pb.Envelope{
 			Kind: pb.EnvelopeKind_UPDATE_RESULT,
@@ -772,6 +793,9 @@ func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 	// verified, no download or swap. A rollout targeting the current version
 	// therefore completes without touching the binary.
 	if dir.Version == facts.Version {
+		// Convergence: report verified and free the slot (this path does
+		// not exit the process, unlike the swap path).
+		a.endUpdate()
 		a.log.Printf("agent: already at target version %v; no update needed", dir.Version)
 		a.sendUpEnvelopeNoSpool(&pb.Envelope{
 			Kind: pb.EnvelopeKind_UPDATE_RESULT,

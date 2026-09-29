@@ -403,11 +403,13 @@ func (m *Manager) OnResult(agentID string, r *pb.UpdateResult) {
 	switch r.Phase {
 	case "failed":
 		m.st.SetUpdateHostStatus(row.ID, HostFailedRollback, "", r.Error)
+		m.clearPending(agentID)
 	case "swapped":
 		m.st.SetUpdateHostStatus(row.ID, HostRestarting, "", "")
 	case "verified":
 		m.st.SetUpdateHostStatus(row.ID, HostVerified, r.Version, "")
 		m.reissueJobs(agentID)
+		m.clearPending(agentID)
 	default:
 		return
 	}
@@ -415,6 +417,17 @@ func (m *Manager) OnResult(agentID string, r *pb.UpdateResult) {
 		m.sse.Emit("update.host", map[string]string{
 			"run_id": row.RunID, "host_id": agentID, "phase": r.Phase,
 		})
+	}
+}
+
+// clearPending drops any durable queued-directive row for a host that just
+// reached a terminal update state: a stale directive must not be delivered
+// later (after a server restart) to a host the run has already finished
+// with. Idempotent; the row only exists if the host was offline when the
+// directive was dispatched.
+func (m *Manager) clearPending(agentID string) {
+	if err := m.st.DeletePendingUpdate(agentID); err != nil {
+		m.log.Printf("updates: clear pending %s: %v", agentID, err)
 	}
 }
 
@@ -506,6 +519,7 @@ func (m *Manager) Skip(runID, actor string) error {
 	for _, h := range hosts {
 		if h.Status == HostFailedRollback || h.Status == HostTimedOut {
 			if err := m.st.SetUpdateHostStatus(h.ID, HostSkipped, "", "skipped by operator"); err == nil {
+				m.clearPending(h.HostID)
 				n++
 			}
 		}
@@ -533,6 +547,18 @@ func (m *Manager) Abort(runID, actor string) error {
 	}
 	if err := m.st.SetUpdateRunStatus(runID, StatusAborted, "aborted by "+actor); err != nil {
 		return err
+	}
+	// Terminate the run's non-terminal hosts so the board is consistent and
+	// no queued directive for an aborted run is ever delivered.
+	hosts, err := m.st.ListUpdateHosts(runID)
+	if err == nil {
+		for _, h := range hosts {
+			if !store.TerminalRunHost(h.Status) {
+				if err := m.st.SetUpdateHostStatus(h.ID, HostSkipped, "", "run aborted"); err == nil {
+					m.clearPending(h.HostID)
+				}
+			}
+		}
 	}
 	m.stopLoop(runID)
 	m.audit("update.run.aborted", actor, map[string]any{"run": runID})
@@ -649,6 +675,7 @@ func (m *Manager) step(runID string) error {
 	for _, h := range hosts {
 		if inFlightStatus(h.Status) && now-h.UpdatedAt > int64(hostTimeoutS.Seconds()) {
 			_ = m.st.SetUpdateHostStatus(h.ID, HostTimedOut, "", "no result within "+hostTimeoutS.String())
+			m.clearPending(h.HostID)
 		}
 	}
 

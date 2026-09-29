@@ -527,10 +527,22 @@ CREATE TABLE IF NOT EXISTS update_hosts (
 );
 CREATE INDEX IF NOT EXISTS idx_update_hosts_run ON update_hosts(run_id);
 CREATE INDEX IF NOT EXISTS idx_update_hosts_host ON update_hosts(host_id);
+
+-- v17: update directives queued for offline hosts (M8.1). Persisted so a
+-- server restart between dispatch and reconnect does not lose them (the
+-- in-memory offline queue is the fast path; this is the durable one). One
+-- row per agent: the newest queued directive wins. Only (agent, release) is
+-- stored — the delivery side mints a fresh one-time grant, so a directive
+-- queued across a long outage never carries an expired grant.
+CREATE TABLE IF NOT EXISTS pending_updates (
+  agent_id   TEXT PRIMARY KEY,
+  release_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 16
+const currentSchemaVersion = 17
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

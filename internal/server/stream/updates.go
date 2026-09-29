@@ -3,10 +3,12 @@ package stream
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/store"
 )
 
 // Update artifact download grants (M8.1, step 2).
@@ -89,6 +91,12 @@ func (h *Handler) SendUpdateDirective(agentID string, dir *pb.UpdateDirective) e
 // agent, or queues it for an offline one (delivered on reconnect, like
 // commands). This is the M8.1 step-3 rollout path: fleet hosts may be
 // unreachable at dispatch time and must not be dropped.
+//
+// Offline delivery is two-layered: the in-memory queue (fast, lost on
+// restart) AND a durable row in pending_updates (survives a server restart).
+// On reconnect the drain reconciles the two (see drainOffline); the durable
+// row stores only (agent, release) so delivery can always mint a fresh
+// grant — a directive queued across a long outage never expires.
 func (h *Handler) QueueUpdateDirective(agentID string, dir *pb.UpdateDirective) error {
 	if err := h.SendUpdateDirective(agentID, dir); err == nil {
 		return nil
@@ -98,6 +106,62 @@ func (h *Handler) QueueUpdateDirective(agentID string, dir *pb.UpdateDirective) 
 		Payload: &pb.Envelope_UpdateDirective{UpdateDirective: dir},
 	}
 	h.queueOffline(agentID, env)
+	if h.st != nil {
+		if err := h.st.UpsertPendingUpdate(agentID, dir.ReleaseId); err != nil {
+			h.log.Printf("stream: persist pending update for %s: %v (in-memory copy still queued)", agentID, err)
+		}
+	}
 	h.log.Printf("stream: update directive for %s queued (agent offline)", agentID)
 	return nil
+}
+
+// deliverPendingUpdate sends the durable pending-update directive for
+// agentID, rebuilding it from the release row with a FRESH one-time grant
+// (the grant minted at dispatch may be long expired). Returns true when the
+// directive was sent. The pending row is deleted on success; on send failure
+// it is kept for the next reconnect.
+func (h *Handler) deliverPendingUpdate(agentID string, send func(*pb.Envelope) error) bool {
+	if h.st == nil {
+		return false
+	}
+	p, err := h.st.GetPendingUpdate(agentID)
+	if err != nil {
+		h.log.Printf("stream: pending update lookup %s: %v", agentID, err)
+		return false
+	}
+	if p == nil {
+		return false
+	}
+	rel, err := h.st.GetRelease(p.ReleaseID)
+	if err != nil {
+		if errors.Is(err, store.ErrNoRelease) {
+			h.log.Printf("stream: pending update %s: release %s deleted; dropping", agentID, p.ReleaseID)
+			_ = h.st.DeletePendingUpdate(agentID)
+		} else {
+			h.log.Printf("stream: pending update %s: release %s: %v; kept for next reconnect", agentID, p.ReleaseID, err)
+		}
+		return false
+	}
+	tok, err := h.IssueUpdateGrant(agentID, p.ReleaseID)
+	if err != nil {
+		h.log.Printf("stream: pending update %s: grant: %v; kept for next reconnect", agentID, err)
+		return false
+	}
+	dir := &pb.UpdateDirective{
+		ReleaseId: rel.ID, Version: rel.Version, Arch: rel.Arch,
+		Kind: rel.Kind, Sha256: rel.SHA256, Signature: rel.Signature, Grant: tok,
+	}
+	env := &pb.Envelope{
+		Kind:    pb.EnvelopeKind_UPDATE_DIRECTIVE,
+		Payload: &pb.Envelope_UpdateDirective{UpdateDirective: dir},
+	}
+	if err := send(env); err != nil {
+		h.log.Printf("stream: pending update %s: send: %v; kept for next reconnect", agentID, err)
+		return false
+	}
+	if err := h.st.DeletePendingUpdate(agentID); err != nil {
+		h.log.Printf("stream: pending update %s: delete after send: %v", agentID, err)
+	}
+	h.log.Printf("stream: delivered pending update %s (release %s) to reconnected %s", dir.Version, rel.ID, agentID)
+	return true
 }

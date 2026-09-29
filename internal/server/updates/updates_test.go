@@ -1,6 +1,7 @@
 package updates
 
 import (
+	"context"
 	"io"
 	"log"
 	"testing"
@@ -333,5 +334,84 @@ func TestRolloutAbort(t *testing.T) {
 	}
 	if got := e.runStatus(t, run.ID); got != StatusAborted {
 		t.Fatalf("status = %q, want aborted", got)
+	}
+}
+
+// TestRunSurvivesServerRestart: a directive dispatched to an offline host is
+// durable (pending_updates); a restart + ResumeAll re-attaches the run, and
+// the terminal result retires the pending row.
+func TestRunSurvivesServerRestart(t *testing.T) {
+	e := newTestEnv(t, 1)
+	run, _, err := e.m.StartRun(Params{
+		ReleaseID: e.rel.ID, Selector: "all", WavePct: 100, Actor: "t", ActorRole: "admin",
+	})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	runID := run.ID
+
+	// Host is offline (no session): dispatch queues the directive durably.
+	waitFor(t, "host dispatching", func() bool {
+		return e.hostStatus(t, runID, "ag_1") == HostDispatching
+	})
+	if p, _ := e.st.GetPendingUpdate("ag_1"); p == nil || p.ReleaseID != e.rel.ID {
+		t.Fatalf("pending row = %+v, want release %s", p, e.rel.ID)
+	}
+
+	// "Restart": new stream handler + manager on the same store.
+	h2 := stream.NewHandler(e.st, nil, log.New(io.Discard, "", 0))
+	m2 := New(e.st, h2, nil, log.New(io.Discard, "", 0))
+	m2.SetPollInterval(20 * time.Millisecond)
+	m2.ResumeAll(context.Background())
+	// The resumed run keeps driving (still rolling, host still in flight).
+	waitFor(t, "run re-attached after restart", func() bool {
+		st := e.runStatus(t, runID)
+		return st == StatusRolling || st == StatusCanary
+	})
+
+	// The host's (re)connect delivers the directive; it completes the update.
+	// (Drain delivery itself is covered by the stream whitebox tests; here we
+	// assert the manager bookkeeping: terminal result retires the row.)
+	m2.OnResult("ag_1", &pb.UpdateResult{ReleaseId: e.rel.ID, Phase: "verified", Version: "v2.0.0"})
+	waitFor(t, "host verified", func() bool {
+		return e.hostStatus(t, runID, "ag_1") == HostVerified
+	})
+	waitFor(t, "run completed", func() bool {
+		return e.runStatus(t, runID) == StatusCompleted
+	})
+	if p, _ := e.st.GetPendingUpdate("ag_1"); p != nil {
+		t.Errorf("pending row not retired after verified: %+v", p)
+	}
+}
+
+// TestAbortClearsPendingAndTerminatesHosts: aborting a run whose hosts are
+// still offline must terminate their host rows and retire the pending row.
+func TestAbortClearsPendingAndTerminatesHosts(t *testing.T) {
+	e := newTestEnv(t, 1)
+	run, _, err := e.m.StartRun(Params{
+		ReleaseID: e.rel.ID, Selector: "all", WavePct: 100, Actor: "t", ActorRole: "admin",
+	})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	runID := run.ID
+	waitFor(t, "host dispatching", func() bool {
+		return e.hostStatus(t, runID, "ag_1") == HostDispatching
+	})
+	if p, _ := e.st.GetPendingUpdate("ag_1"); p == nil {
+		t.Fatal("expected a pending row for the offline host")
+	}
+
+	if err := e.m.Abort(runID, "t"); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if st := e.runStatus(t, runID); st != StatusAborted {
+		t.Fatalf("run = %q, want aborted", st)
+	}
+	if st := e.hostStatus(t, runID, "ag_1"); st != HostSkipped {
+		t.Fatalf("host = %q, want skipped (terminated by abort)", st)
+	}
+	if p, _ := e.st.GetPendingUpdate("ag_1"); p != nil {
+		t.Errorf("pending row not cleared on abort: %+v", p)
 	}
 }
