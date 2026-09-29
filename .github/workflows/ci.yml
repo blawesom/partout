@@ -8,7 +8,9 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest migrates to Ubuntu 26 on 2026-10-19, which would
+    # silently change runner load characteristics under the test timeouts.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -33,15 +35,16 @@ jobs:
         run: go build ./...
 
       - name: Test (race)
-        # -count=2: the exec pipe-drain regression (output loss when c.Wait()
-        # precedes pump drain) only surfaces under load; a second pass raises
-        # the chance of catching a rescheduling flake.
-        run: go test ./... -race -count=2
+        # -count=1: the full second pass roughly doubled load and flake
+        # probability on the 2-core runner without adding regression
+        # coverage — the exec pipe-drain regression it was aimed at is
+        # hammer-covered by the dedicated stress job below (-count=20).
+        run: go test ./... -race -count=1
 
   stress:
     name: Stress (exec output race)
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +66,7 @@ jobs:
   live-ssh:
     name: Live sshd (manual)
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,19 +27,26 @@ import (
 // cannot collide with a lingering listener from a previous instance.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
+	// Allocate on :0, then confirm the wildcard bind (what runEmbedded uses)
+	// also succeeds. Between the close and the confirm-bind, a concurrent
+	// test (CI runs all packages in parallel) can steal the port; on
+	// EADDRINUSE retry with a fresh allocation instead of failing.
+	for attempt := 1; ; attempt++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("freePort: %v", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		l.Close()
+		wl, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+		if err == nil {
+			wl.Close()
+			return port
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) || attempt >= 10 {
+			t.Fatalf("freePort: wildcard bind :%d: %v", port, err)
+		}
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-	// Confirm the wildcard bind (what runEmbedded uses) also succeeds.
-	wl, err := net.Listen("tcp", ":"+strconv.Itoa(port))
-	if err != nil {
-		t.Fatalf("freePort: wildcard bind :%d: %v", port, err)
-	}
-	wl.Close()
-	return port
 }
 
 // runEmbeddedOnce starts embedded mode on the given port/tmp dir, waits for

@@ -457,9 +457,12 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		// Look up the execution and notify the control plane to finalize it.
 		if h.ResultHook != nil {
 			if execID, err := h.st.ExecutionIDForRun(r.RunId); err == nil {
+				h.log.Printf("stream: run %s result recorded (state=%s, exit=%d), finalizing execution %s", r.RunId, r.State, r.ExitCode, execID)
 				h.ResultHook(execID)
 			} else {
-				h.log.Printf("stream: execution for run %s: %v", r.RunId, err)
+				// A skipped hook strands the execution aggregate in a
+				// non-terminal state, so this is load-bearing: log it loudly.
+				h.log.Printf("stream: execution for run %s: %v (execution aggregate will NOT be finalized)", r.RunId, err)
 			}
 		}
 	case msg.GetAck() != nil:

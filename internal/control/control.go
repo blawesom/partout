@@ -469,6 +469,7 @@ func (c *Control) FinalizeExecution(execID string) error {
 			state = "partial"
 		}
 	}
+	c.log.Printf("control: execution %s finalize: %s (succeeded=%d failed=%d other=%d)", execID, state, succeeded, failed, other)
 	if err := c.st.UpdateExecutionState(execID, state); err != nil {
 		return err
 	}
@@ -499,6 +500,7 @@ func (c *Control) onAgentDisconnect(agentID string) {
 		c.log.Printf("control: interrupt runs %s: %v", agentID, err)
 		return
 	}
+	c.log.Printf("control: agent %s disconnected; interrupted runs in execution(s) %v", agentID, execs)
 	if len(execs) == 0 {
 		return
 	}

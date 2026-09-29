@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,6 +152,32 @@ func TestAgentRunLoop(t *testing.T) {
 	}
 }
 
+// testLogWriter is an io.Writer that feeds *testing.T: log output is
+// buffered by the testing package and printed only when the test fails, so
+// these logs cost nothing in the passing case but give a full timeline for
+// the next flake. Writes after the test ends (a lingering goroutine) are
+// dropped to avoid the "Log in goroutine after test completed" panic.
+type testLogWriter struct {
+	t      *testing.T
+	closed atomic.Bool
+}
+
+func (w *testLogWriter) Write(p []byte) (int, error) {
+	if !w.closed.Load() {
+		w.t.Logf("%s", strings.TrimRight(string(p), "\n"))
+	}
+	return len(p), nil
+}
+
+func (w *testLogWriter) close() { w.closed.Store(true) }
+
+// newTestLogger returns a *log.Logger whose output lands in the test log
+// (visible on failure). The caller must call close on the writer once the
+// test is done, so a lingering goroutine cannot log post-test.
+func newTestLogger(w *testLogWriter, prefix string) *log.Logger {
+	return log.New(w, prefix, 0)
+}
+
 // TestOfflineSpoolReplay is the M1 E2E for offline spooling
 // (architecture §3.4: "Server down, agent up → results spool; replay on
 // reconnect"). A long-running command is dispatched; the server is stopped
@@ -166,8 +193,12 @@ func TestOfflineSpoolReplay(t *testing.T) {
 	defer st.Close()
 
 	sseB := sse.New()
-	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
-	ctl := control.New(st, h, sseB, log.New(io.Discard, "ctl: ", 0))
+	srvW := &testLogWriter{t: t}
+	ctlW := &testLogWriter{t: t}
+	agW := &testLogWriter{t: t}
+	t.Cleanup(func() { srvW.close(); ctlW.close(); agW.close() })
+	h := stream.NewHandler(st, sseB, newTestLogger(srvW, "srv: "))
+	ctl := control.New(st, h, sseB, newTestLogger(ctlW, "ctl: "))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -203,7 +234,7 @@ func TestOfflineSpoolReplay(t *testing.T) {
 		Elevate:       "none",
 		Root:          "/",
 	}
-	ag := agent.New(id, agentCfg, log.New(io.Discard, "agent: ", 0))
+	ag := agent.New(id, agentCfg, newTestLogger(agW, "agent: "))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
