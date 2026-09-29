@@ -470,7 +470,25 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_state ON alerts(state);
 CREATE INDEX IF NOT EXISTS idx_alerts_agent ON alerts(agent_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule_id);
+
+-- M8.1 release store: signed partout release artifacts (agent + server
+-- binaries). The server stores and serves artifacts but is NOT the trust
+-- anchor: every consumer verifies the Ed25519 signature (over
+-- "version|arch|kind|sha256") against the operator-provisioned release
+-- public key before executing anything.
+CREATE TABLE IF NOT EXISTS update_releases (
+  id          TEXT PRIMARY KEY,
+  version     TEXT NOT NULL,
+  arch        TEXT NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('agent','server')),
+  sha256      TEXT NOT NULL,          -- hex, of the artifact
+  signature   TEXT NOT NULL,          -- base64 Ed25519 over the canonical manifest
+  artifact    BLOB NOT NULL,
+  uploaded_by TEXT,
+  created_at  INTEGER NOT NULL,
+  UNIQUE (version, arch, kind)
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 14
+const currentSchemaVersion = 15

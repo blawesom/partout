@@ -186,6 +186,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// M3: packages (PRD §5.6).
 	handler.RegisterPackages(mux)
 
+	// M8.1: update release store (PRD §11).
+	handler.RegisterUpdates(mux)
+
 	// M3: tasks + playbooks (PRD §5.5).
 	handler.RegisterTasks(mux)
 

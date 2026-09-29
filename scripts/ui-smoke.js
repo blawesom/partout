@@ -230,6 +230,27 @@ async function main() {
   check("updates: apply button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Apply")), "no Apply button");
   check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
   check("updates: EOL data status + refresh", d.body.textContent.includes("EOL data:") && [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Refresh EOL data")), "ext-data controls missing");
+  // M8.1 release store: upload a signed release via the API, then show the
+  // Releases tab.
+  {
+    const nodeCrypto = require("crypto");
+    const { privateKey } = nodeCrypto.generateKeyPairSync("ed25519");
+    const artifact = Buffer.from("smoke release artifact bytes");
+    const sha = nodeCrypto.createHash("sha256").update(artifact).digest("hex");
+    const manifest = ["v0.9.0-smoke", "linux-amd64", "agent", sha].join("|");
+    const sig = nodeCrypto.sign(null, Buffer.from(manifest), privateKey).toString("base64");
+    const up = await realFetch(base + "/api/v1/updates/releases", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ version: "v0.9.0-smoke", arch: "linux-amd64", kind: "agent", signature: sig, artifact_b64: artifact.toString("base64") }),
+    });
+    check("releases: signed upload via API", up.status === 201, "status=" + up.status);
+  }
+  const relTab = [...d.querySelectorAll(".tab")].find((t) => t.textContent.trim() === "Releases");
+  check("updates: Packages/Releases tabs", !!relTab, "Releases tab missing");
+  if (relTab) { relTab.click(); await sleep(600); }
+  check("releases: uploaded row renders", rowsWithText(d, "v0.9.0-smoke") > 0, "no release row");
+  check("releases: upload form", d.body.textContent.includes("Upload a release"), "upload form missing");
 
   await visit("#/secrets");
   check("secrets: row rendered", rowsWithText(d, "dbpass") > 0, "secret not rendered");

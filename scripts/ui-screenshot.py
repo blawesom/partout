@@ -86,6 +86,26 @@ try:
             page.screenshot(path=out, full_page=False)
             print(f"  saved {out}")
 
+        # M8.1: seed a release in the store, then show the Releases tab.
+        # (The server does not validate signature content on upload — a dummy
+        # 64-byte signature is enough for the screenshot.)
+        import base64
+        try:
+            curl("POST", "/updates/releases", {
+                "version": "v0.9.0", "arch": "linux-amd64", "kind": "agent",
+                "signature": base64.b64encode(bytes(range(64))).decode(),
+                "artifact_b64": base64.b64encode(b"demo partout release artifact").decode(),
+            }, token="shot-token")
+        except Exception:
+            pass
+        page.goto(f"http://127.0.0.1:{PORT}/#/updates")
+        page.wait_for_timeout(1200)
+        page.click("div.tab:has-text('Releases')")
+        page.wait_for_timeout(1200)
+        out = os.path.join(OUT, "updates-releases.png")
+        page.screenshot(path=out, full_page=False)
+        print(f"  saved {out}")
+
         browser.close()
     print("screenshots done")
     sys.exit(0)

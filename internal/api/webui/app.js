@@ -744,6 +744,11 @@
         <!-- ============ UPDATES ============ -->
         <section v-else-if="page==='updates'">
           <h1 class="page">Updates</h1>
+          <div class="tabs">
+            <div class="tab" :class="{active: updTab==='packages'}" @click="updTab='packages'">Packages</div>
+            <div class="tab" :class="{active: updTab==='releases'}" @click="updTab='releases'; loadReleases()">Releases</div>
+          </div>
+          <template v-if="updTab==='packages'">
           <p class="page-sub">Package updates for the selected host (M3). Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
           <div class="toolbar">
             <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
@@ -799,6 +804,41 @@
             </table>
             <div v-if="pkgActionDetail" class="console" style="margin-top:8px;max-height:220px;white-space:pre-wrap">{{ pkgActionDetail.dry_summary || pkgActionDetail.error || '(no summary)' }}</div>
           </div>
+          </template>
+          <template v-else>
+            <p class="page-sub">Signed Partout release artifacts (M8.1). The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. Upload requires admin; downloading the artifact requires operator.</p>
+            <div class="card">
+              <div class="head"><h2>Releases</h2><div class="spacer"></div><button class="btn sm" @click="loadReleases">Refresh</button></div>
+              <table class="tbl">
+                <thead><tr><th>Version</th><th>Arch</th><th>Kind</th><th>SHA256</th><th>Size</th><th>Uploaded</th><th>By</th><th></th></tr></thead>
+                <tbody>
+                  <tr v-for="r in releases" :key="r.id">
+                    <td class="mono">{{ r.version }}</td>
+                    <td class="mono">{{ r.arch }}</td>
+                    <td>{{ r.kind }}</td>
+                    <td class="mono" :title="r.sha256">{{ (r.sha256 || '').slice(0, 12) }}…</td>
+                    <td class="muted">{{ fmtBytes(r.size) }}</td>
+                    <td class="muted">{{ fmtAgo(r.created) }}</td>
+                    <td class="muted">{{ r.uploaded_by || '—' }}</td>
+                    <td class="row-actions"><button class="btn danger sm" :disabled="!isAdmin" @click="deleteRelease(r)">Delete</button></td>
+                  </tr>
+                  <tr v-if="!releases.length"><td colspan="8"><div class="empty">No releases uploaded yet (<span class="mono">partout ctl update upload …</span>).</div></td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="head"><h2>Upload a release</h2></div>
+              <div class="form-row" style="align-items:flex-end">
+                <label class="fld"><span>Version</span><input v-model="relForm.version" class="mono" placeholder="v0.9.0" /></label>
+                <label class="fld"><span>Arch</span><input v-model="relForm.arch" class="mono" placeholder="linux-amd64" /></label>
+                <label class="fld"><span>Kind</span><select v-model="relForm.kind"><option value="agent">agent</option><option value="server">server</option></select></label>
+                <label class="fld" style="flex:1"><span>Signature (base64)</span><input v-model="relForm.signature" class="mono" placeholder="64-byte Ed25519 signature" /></label>
+                <label class="fld"><span>Artifact</span><input type="file" @change="onRelFile" /></label>
+                <button class="btn primary" :disabled="!isAdmin || !relForm.version || !relForm.arch || !relForm.signature || !relForm.file || relBusy" @click="uploadRelease"><span v-if="relBusy" class="spin"></span> Upload</button>
+              </div>
+              <p class="muted small" style="margin-top:8px">Sign locally first: <span class="mono">partout ctl update sign --version … --arch … --kind … --file …</span>. The server stores the signature as-is and checks the artifact sha256 (declared, or computed from the bytes).</p>
+            </div>
+          </template>
         </section>
 
         <!-- ============ SECRETS ============ -->
@@ -1338,6 +1378,7 @@
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
         updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
+        updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
         tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], users: [],
@@ -1728,7 +1769,7 @@
           case "files": await this.listFiles(); break;
           case "jobs": await this.loadJobs(); break;
           case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
-          case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); break;
+          case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); this.loadReleases(); break;
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); break;
           case "approvals": await this.loadApprovals(); break;
@@ -1940,6 +1981,42 @@
         if (!this.updHost && this.hosts.length) this.updHost = this.hosts[0].id;
         if (!this.updHost) { this.updates = []; return; }
         try { const d = await this.api("/packages/updates?agent_id=" + encodeURIComponent(this.updHost)); this.updates = d.items || d || []; } catch (e) { this.updates = []; }
+      },
+      // --- Releases (M8.1 update store) ---
+      async loadReleases() {
+        try { const d = await this.api("/updates/releases"); this.releases = d.items || []; } catch (e) { this.releases = []; }
+      },
+      onRelFile(ev) {
+        const f = ev.target.files[0];
+        if (!f) { this.relForm.file = null; return; }
+        this.relForm.file = f.name;
+        const rd = new FileReader();
+        rd.onload = () => {
+          const dataUrl = String(rd.result);
+          this.relForm.fileB64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+        };
+        rd.readAsDataURL(f);
+      },
+      async uploadRelease() {
+        this.relBusy = true;
+        try {
+          const version = this.relForm.version;
+          await this.api("/updates/releases", { method: "POST", body: {
+            version: this.relForm.version, arch: this.relForm.arch, kind: this.relForm.kind,
+            signature: this.relForm.signature, artifact_b64: this.relForm.fileB64,
+          }});
+          this.notify("ok", "release " + version + " uploaded");
+          this.relForm = { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" };
+          await this.loadReleases();
+        } catch (e) { /* toast shown by api() */ } finally { this.relBusy = false; }
+      },
+      async deleteRelease(r) {
+        if (!confirm("Delete release " + r.version + " (" + r.arch + ", " + r.kind + ")?")) return;
+        try {
+          await this.api("/updates/releases/" + encodeURIComponent(r.id), { method: "DELETE" });
+          this.notify("ok", "release deleted");
+          this.loadReleases();
+        } catch (e) { /* toast shown by api() */ }
       },
       async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.secrets || d.items || []; } catch (e) { this.secrets = []; } },
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },

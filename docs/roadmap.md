@@ -198,7 +198,10 @@ One-command flow (operator view):
 
 Ordering (each step is independently shippable):
 
-1. **Release store + signatures** (foundation, no behavior change).
+1. **Release store + signatures** (foundation, no behavior change) — ✅ **shipped**
+   (`internal/release` sign/verify package, schema v15 `update_releases` table,
+   `GET/POST/DELETE /api/v1/updates/releases` + `{id}/artifact`, `partout ctl update
+   keygen|sign|verify|upload|list`, Updates page **Releases** tab with upload form).
    - Releases are published to the **repo** (GitHub release: server + agent binaries
      per arch, each with an Ed25519 signature + sha256 manifest). `partout update`
      fetches "latest" (or `--version`) **on the operator side** and hands the verified

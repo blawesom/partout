@@ -27,6 +27,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/blawesom/partout/internal/cryptoutil"
+	"github.com/blawesom/partout/internal/release"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -79,9 +81,11 @@ commands:
 		}
 	}
 
-	// db-backup is local (no server round-trip); every other command needs
-	// the server address.
-	if *server == "" && fs.Arg(0) != "db-backup" {
+	// db-backup and the local update subcommands (keygen/sign/verify) need no
+	// server round-trip; every other command needs the server address.
+	localOnly := fs.Arg(0) == "db-backup" ||
+		(fs.Arg(0) == "update" && (fs.Arg(1) == "keygen" || fs.Arg(1) == "sign" || fs.Arg(1) == "verify"))
+	if *server == "" && !localOnly {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
 		os.Exit(2)
 	}
@@ -150,6 +154,8 @@ commands:
 		c.cmdSessions(rest)
 	case "secrets":
 		c.cmdSecrets(rest)
+	case "update":
+		c.cmdUpdate(rest)
 	case "packages":
 		c.cmdPackages(rest)
 	case "tasks":
@@ -524,6 +530,175 @@ func (c *ctl) hostsDelete(id string) {
 		fatal(err)
 	}
 	fmt.Printf("host %s deleted\n", id)
+}
+
+// ---- update releases (M8.1, PRD §11) -----------------------------------------
+
+// cmdUpdate implements `partout ctl update`: release key management and
+// artifact signing/verification happen locally (no server round-trip); only
+// upload/list talk to the server.
+func (c *ctl) cmdUpdate(args []string) {
+	usage := func() {
+		fmt.Fprintln(os.Stderr, `usage: partout ctl update <keygen|sign|verify|upload|list>
+
+  keygen                     generate a release signing key pair (Ed25519)
+  sign     --version V --arch A --kind K --file F [--key PRIV_B64]
+  verify   --version V --arch A --kind K --file F --signature SIG_B64 [--pubkey PUB_B64]
+  upload   --version V --arch A --kind K --file F --signature SIG_B64
+  list                                       list releases in the server store`)
+		os.Exit(2)
+	}
+	if len(args) == 0 {
+		usage()
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "keygen":
+		c.updateKeygen()
+	case "sign":
+		c.updateSign(rest)
+	case "verify":
+		c.updateVerify(rest)
+	case "upload":
+		c.updateUpload(rest)
+	case "list":
+		c.updateList()
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown update command %q\n", sub)
+		usage()
+	}
+}
+
+func updateFlags(name string, args []string) (fs *flag.FlagSet, version, arch, kind, file, sig, key, pubkey *string) {
+	fs = flag.NewFlagSet(name, flag.ExitOnError)
+	version = fs.String("version", "", "release version (e.g. v0.9.0) (required)")
+	arch = fs.String("arch", "", "target architecture (e.g. linux-amd64) (required)")
+	kind = fs.String("kind", "", "agent | server (required)")
+	file = fs.String("file", "", "artifact file (required)")
+	sig = fs.String("signature", "", "signature, base64 of the 64-byte Ed25519 signature")
+	key = fs.String("key", envOr("PARTOUT_RELEASE_KEY_PRIV", ""), "release private key, base64 (or $PARTOUT_RELEASE_KEY_PRIV)")
+	pubkey = fs.String("pubkey", envOr("PARTOUT_RELEASE_KEY", ""), "release public key, base64 (or $PARTOUT_RELEASE_KEY)")
+	fs.Parse(args)
+	return
+}
+
+func updateManifest(version, arch, kind, file string) (release.Manifest, error) {
+	sha, err := release.FileSHA256(file)
+	if err != nil {
+		return release.Manifest{}, err
+	}
+	m := release.Manifest{Version: version, Arch: arch, Kind: kind, SHA256: sha}
+	return m, m.Valid()
+}
+
+func (c *ctl) updateKeygen() {
+	kp, err := cryptoutil.NewKeyPairEd25519()
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Println("release signing key pair (Ed25519):")
+	fmt.Println()
+	fmt.Printf("  public key (agent units, PARTOUT_RELEASE_KEY):\n    %s\n\n", release.PubKeyB64(kp.Pub))
+	fmt.Printf("  private key (KEEP SECRET — signs releases only):\n    %s\n\n", release.PrivKeyB64(kp.Priv))
+	fmt.Println("Store the private key outside the server box (secret manager, printed sheet).")
+	fmt.Println("Losing it means every already-published release stays trusted but new")
+	fmt.Println("releases need a key rotation (agents must be re-provisioned).")
+}
+
+func (c *ctl) updateSign(args []string) {
+	fs, version, arch, kind, file, _, key, _ := updateFlags("update sign", args)
+	_ = fs
+	if *version == "" || *arch == "" || *kind == "" || *file == "" || *key == "" {
+		fatal(fmt.Errorf("--version, --arch, --kind, --file and --key (or $PARTOUT_RELEASE_KEY_PRIV) are required"))
+	}
+	priv, err := release.PrivKeyFromB64(*key)
+	if err != nil {
+		fatal(err)
+	}
+	m, err := updateManifest(*version, *arch, *kind, *file)
+	if err != nil {
+		fatal(err)
+	}
+	sig := release.Sign(priv, m)
+	fmt.Printf("signed %s (%s, %s)\n", *file, m.Version, m.Arch)
+	fmt.Printf("sha256:    %s\n", m.SHA256)
+	fmt.Printf("signature: %s\n", base64.StdEncoding.EncodeToString(sig))
+	fmt.Println()
+	fmt.Println("publish with: partout ctl update upload \\ ")
+	fmt.Printf("  --version %s --arch %s --kind %s --file %s --signature <signature>\n",
+		m.Version, m.Arch, m.Kind, *file)
+}
+
+func (c *ctl) updateVerify(args []string) {
+	fs, version, arch, kind, file, sig, _, pubkey := updateFlags("update verify", args)
+	_ = fs
+	if *version == "" || *arch == "" || *kind == "" || *file == "" || *sig == "" || *pubkey == "" {
+		fatal(fmt.Errorf("--version, --arch, --kind, --file, --signature and --pubkey (or $PARTOUT_RELEASE_KEY) are required"))
+	}
+	pub, err := release.PubKeyFromB64(*pubkey)
+	if err != nil {
+		fatal(err)
+	}
+	s, err := base64.StdEncoding.DecodeString(strings.TrimSpace(*sig))
+	if err != nil {
+		fatal(fmt.Errorf("--signature is not valid base64: %w", err))
+	}
+	m, err := updateManifest(*version, *arch, *kind, *file)
+	if err != nil {
+		fatal(err)
+	}
+	if !release.Verify(pub, m, s) {
+		fmt.Println("INVALID: signature does not match the artifact")
+		os.Exit(1)
+	}
+	fmt.Printf("OK: %s verifies for %s (%s, %s)\n", *file, m.Version, m.Arch, m.Kind)
+}
+
+func (c *ctl) updateUpload(args []string) {
+	fs, version, arch, kind, file, sig, _, _ := updateFlags("update upload", args)
+	_ = fs
+	if *version == "" || *arch == "" || *kind == "" || *file == "" || *sig == "" {
+		fatal(fmt.Errorf("--version, --arch, --kind, --file and --signature are required"))
+	}
+	m, err := updateManifest(*version, *arch, *kind, *file)
+	if err != nil {
+		fatal(err)
+	}
+	data, err := os.ReadFile(*file)
+	if err != nil {
+		fatal(err)
+	}
+	body := map[string]any{
+		"version": m.Version, "arch": m.Arch, "kind": m.Kind, "sha256": m.SHA256,
+		"signature": strings.TrimSpace(*sig), "artifact_b64": base64.StdEncoding.EncodeToString(data),
+	}
+	var res map[string]string
+	if err := c.do("POST", "/api/v1/updates/releases", body, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("release %s stored as %s (%s, %s)\n", m.Version, res["id"], m.Arch, m.Kind)
+}
+
+func (c *ctl) updateList() {
+	var page map[string]any
+	if err := c.do("GET", "/api/v1/updates/releases", nil, &page); err != nil {
+		fatal(err)
+	}
+	items, _ := page["items"].([]any)
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tVERSION\tARCH\tKIND\tSHA256 (short)\tSIZE\tUPLOADED\tBY")
+	for _, it := range items {
+		r, _ := it.(map[string]any)
+		sha := strval(r["sha256"])
+		if len(sha) > 12 {
+			sha = sha[:12] + "…"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			strval(r["id"]), strval(r["version"]), strval(r["arch"]), strval(r["kind"]),
+			sha, int64(num(r["size"])), unixTime(int64(num(r["created"]))), strval(r["uploaded_by"]))
+	}
+	w.Flush()
+	fmt.Printf("\n%d release(s)\n", len(items))
 }
 
 func (c *ctl) cmdRun(args []string) {
