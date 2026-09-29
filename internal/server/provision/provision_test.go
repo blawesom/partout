@@ -423,6 +423,73 @@ exit 0
 	return bin
 }
 
+// TestPreflightAuthDeniedGetsHint: when the server user's SSH dir presents no
+// key the target accepts (the common first-run failure), the run error must
+// carry an actionable hint naming the SSH dir, not just raw ssh stderr.
+func TestPreflightAuthDeniedGetsHint(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+
+	bin := t.TempDir()
+	ssh := `#!/bin/sh
+echo "web-auth: Permission denied (publickey)." >&2
+exit 255
+`
+	keyscan := `#!/bin/sh
+echo "$3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyAuth"
+exit 0
+`
+	keygen := `#!/bin/sh
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
+case "$1" in
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -H) exit 0 ;;
+  -l) cat >/dev/null; echo "256 SHA256:FakeAuthFingerprint comment (ED25519)"; exit 0 ;;
+esac
+exit 0
+`
+	for name, body := range map[string]string{
+		"ssh": ssh, "scp": "#!/bin/sh\nexit 0\n", "ssh-keyscan": keyscan, "ssh-keygen": keygen,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+	if err := prov.ssh.AddKey(context.Background(), "web-auth ssh-ed25519 AAAApretrusted"); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	run, err := prov.Start("web-auth", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "failed")
+	if !strings.Contains(run.Error, "Permission denied") {
+		t.Errorf("expected Permission denied in error, got %q", run.Error)
+	}
+	if !strings.Contains(run.Error, "no usable SSH client key") || !strings.Contains(run.Error, sshDir) {
+		t.Errorf("expected actionable hint naming the SSH dir, got %q", run.Error)
+	}
+}
+
 // TestInstallScriptFreshWipe verifies fresh mode's install script includes the
 // destructive wipe (stop/disable unit + remove identity/env) and join mode's
 // does not, and that the env-file values are NOT shell-quoted (they sit in a

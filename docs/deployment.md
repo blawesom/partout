@@ -418,6 +418,16 @@ confirm|deny`; `cancel RUN_ID` aborts. States: `queued → connecting → key_co
 confirming → preflight → transferring → installing → enrolling → connected` (terminals
 `failed`/`handoff`/`cancelled`; `handoff` = non-systemd host, manual install).
 
+**First-run SSH precondition:** the *server process user* must already have
+key-based trust to the target — an identity file (conventional `id_ed25519`/
+`id_ecdsa`/`id_rsa`) in the SSH dir whose public key is in the target's
+`authorized_keys`. OpenSSH resolves `~/.ssh` from the passwd database, so for a
+service account (e.g. `partout` with home `/var/lib/partout`) the key belongs in
+*that* home — not the operator's `~/.ssh`, which the service user cannot read.
+`BatchMode=yes` makes password auth impossible: with no usable key the run
+fails at `preflight` with `Permission denied (publickey)` plus a hint naming the
+SSH dir to fix.
+
 A duplicate/racing `confirm` returns **409** (`not_pending`), an unknown run **404**, and
 `cancel` on a finished run reports `noop` with the current state. The `key_confirm` gate
 lives in memory only: if the server restarts while a run is paused, a later `confirm`

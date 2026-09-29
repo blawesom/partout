@@ -357,7 +357,7 @@ fi
 		return p.failStep(run, 2, fmt.Sprintf("ssh failed: %v", err))
 	}
 	if exit != 0 {
-		return p.failStep(run, 2, fmt.Sprintf("preflight exit %d: %s", exit, strings.TrimSpace(stderr)))
+		return p.failStep(run, 2, p.authHint(fmt.Sprintf("preflight exit %d: %s", exit, strings.TrimSpace(stderr))))
 	}
 
 	facts := parseKeyValues(out)
@@ -407,7 +407,7 @@ func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun)
 	}
 	remote := "/tmp/partout-" + hex.EncodeToString(sha[:])[:12]
 	if _, err := p.ssh.Copy(ctx, p.binaryPath, run.Host, remote); err != nil {
-		return p.failStep(run, 3, fmt.Sprintf("scp failed: %v", err))
+		return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp failed: %v", err)))
 	}
 	p.finishStep(run, 3)
 	return true
@@ -438,7 +438,7 @@ func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, 
 		return p.failStep(run, 4, fmt.Sprintf("ssh failed: %v", err))
 	}
 	if exit != 0 || !strings.Contains(out, "INSTALL_OK") {
-		return p.failStep(run, 4, fmt.Sprintf("install exit %d: %s", exit, strings.TrimSpace(stderr)))
+		return p.failStep(run, 4, p.authHint(fmt.Sprintf("install exit %d: %s", exit, strings.TrimSpace(stderr))))
 	}
 	p.finishStep(run, 4)
 	return true
@@ -587,6 +587,24 @@ func (p *Provisioner) finishStep(run *store.ProvisionRun, seq int) {
 
 // failStep marks step seq failed, transitions the run to failed, and returns
 // false (stop the state machine).
+// authHint augments ssh errors with an actionable hint for the most common
+// first-run failure: the server process user's SSH dir presents no key the
+// target accepts ("Permission denied (publickey)"). OpenSSH resolves ~/.ssh
+// from the passwd database, so a service user's home (e.g. /var/lib/partout)
+// is where the key must live — the operator's own ~/.ssh is not readable.
+func (p *Provisioner) authHint(msg string) string {
+	if !strings.Contains(msg, "Permission denied") {
+		return msg
+	}
+	dir := p.ssh.SSHDir
+	if dir == "" {
+		dir = "the server user's ~/.ssh"
+	}
+	return msg + " — no usable SSH client key: " + dir + " offers no key this host accepts; " +
+		"create one there as the server user (ssh-keygen -t ed25519) and add its public key " +
+		"to the target's authorized_keys, then re-run"
+}
+
 func (p *Provisioner) failStep(run *store.ProvisionRun, seq int, errMsg string) bool {
 	_ = p.store.FinishProvisionStep(run.ID, seq, "failed", "", errMsg)
 	p.emitStep(run, seq, stepNames[seq-1], "failed")
