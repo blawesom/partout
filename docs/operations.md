@@ -245,35 +245,64 @@ forward. If the server was down longer than the retention window, some output/se
 may be gone (by design; PRD §9). The audit log (the immutable record) is the recovery
 anchor for forensics.
 
-### 4.2 Upgrades
+### 4.2 Upgrades (M8.1: signed one-command)
 
-**Server upgrade**:
+**The standard path (v0.8.0+): `partout update`** — server + fleet to N+1 in one
+command, one status line at the end:
+
+```sh
+# operator env (the only component that ever touches the internet):
+export PARTOUT_RELEASE_KEY=<ed25519 pub> PARTOUT_RELEASE_REPO=https://releases.example.com/partout
+partout update --check     # report-only: current vs target, what would happen
+partout update             # fetch -> verify both artifacts -> supervised server
+                           # swap -> publish agent artifact -> canary -> waves -> DONE
+```
+
+How it supervises each hop:
+- **Artifacts** are verified against `PARTOUT_RELEASE_KEY` before anything is
+  touched (fail closed). The GitHub tarballs are *not* signed releases — the
+  release repo (`<repo>/latest` + `<repo>/<v>/partout-<v>-<arch>-{server,agent}[.sig]`)
+  is the update path.
+- **Server**: `scripts/update-server.sh` — signature verify, `partout selftest`
+  on the new binary *on this host*, proven `VACUUM INTO` backup, swap with
+  `.prev` retention, ~60 s post-check window, automatic rollback on any
+  failure (the backup is preserved outside the temp dir).
+- **Fleet**: canary cohort → waves (`--canary`, `--wave`). A canary failure is
+  a hard gate (run → `failed`); a wave failure pauses the run
+  (`paused_failure`) for retry/skip/abort. Hosts already at the target report
+  `verified` without touching the binary, so re-runs converge.
+- **Jobs**: when a host's verified version changes, the server re-signs and
+  re-pushes its job decisions automatically — the old "re-save all jobs"
+  step is gone.
+- **Offline hosts**: the directive is queued durably (survives a server
+  restart) and delivered on reconnect with a fresh artifact grant.
+- **Stuck runs**: an `update_run` alert rule (default statuses
+  `paused_failure,failed`) fires a server-level alert per stuck run.
+
+`--server-only` is the two-phase mode (fleet later); an approval-parked run
+reports the approval id and stops — approve it in the UI/CLI, then re-run
+`partout update` to continue.
+
+**First-time adoption (from v0.7.x)**: manual one-time swap — see
+`docs/deployment.md` §2.1 (the one-command cannot roll out v0.8.0 itself;
+a pre-0.8 agent ignores update directives by design).
+
+**Manual fallback** (no release repo / air gap / debugging):
 1. Download the new binary (verify SHA-256SUMS).
-2. `systemctl stop partout-server` (short downtime is unavoidable — single-writer, no
-   self-HA).
-3. Replace the binary, `systemctl start partout-server`. Migrations auto-run at boot.
-   *Note (this version):* the SQLite file is now exactly the `PARTOUT_DB_PATH` you set.
-   Pre-fix versions wrote a file named `<path>&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)`;
-   on first start it is **transparently renamed** to the clean path (data intact). If you
-   already had a clean-path file, the legacy one is left untouched — resolve manually.
-4. Verify: `GET /healthz` → 200; UI loads.
+2. Server: keep `partout.prev`, optional `VACUUM INTO` snapshot, replace,
+   `systemctl restart partout-server`. Migrations are additive and
+   auto-run at boot; v0.7.x is forward-compatible with newer schemas, so
+   rolling the binary back does not require restoring the DB.
+3. Verify: `GET /healthz` → 200; `GET /api/v1/version` → new version.
+4. Agents: replace + `systemctl restart partout-agent` per host (canary
+   first). With the boot guard wired (deployment §3.2), a crashlooping new
+   version rolls back to N-1 automatically.
 
-**Rollback**: restore the DB from backup + revert the binary + restart. Migrations are
-one-directional.
-
-**Agent upgrade**:
-1. Pick a canary group (non-prod, or `role=web` subset if prod).
-2. Deploy the new binary to canary hosts; restart the agent.
-3. Check: stream reconnected, facts flowing, a dry-run command succeeded.
-4. Roll out to remaining hosts in waves. Agent-side jobs continue uninterrupted during
-   upgrade (the stream drops and reconnects; spool buffers results).
-5. **Re-save scheduled jobs** after the fleet is on the new version: assignments saved
-   before the policy-gate change carry no signed decision, so cron fires fail closed with
-   state `denied` until each job is re-saved (`PUT /api/v1/jobs/:id` or `ctl jobs` delete
-   + create) to re-issue per-host signed decisions.
-
-**Version skew tolerance** (deployment §7): agent N works against server N and N+1, and vice
-versa. Rolling upgrades are safe in either order (server first is the standard path).
+**Version skew tolerance** (deployment §7): agent N works against server N
+and N+1, and vice versa — an updated agent against a rolled-back server just
+runs at N+1 unprompted. Rolling upgrades are safe in either order (server
+first is the standard path). One direction is *not* skew: a pre-0.8 agent
+cannot run an update (no directive handler) — the manual hop first.
 
 ### 4.3 External data
 
@@ -447,6 +476,52 @@ never connects.
 ```
 
 ---
+
+### 6.8 Update rollout stuck (M8.1)
+
+Symptom: `update.run` alert firing, or the Updates → Runs board shows a run in
+`failed` / `paused_failure` / a host stuck `dispatching` or `timed_out`.
+Inspect: `partout ctl update show <run_id>` (per-host status + error) and the
+host's agent log.
+
+Decision tree:
+
+- **Canary host `failed_rollback`** — the run is `failed` (hard gate); no
+  hosts beyond the canary were touched. Read the host error:
+  - `verify: ... signature verification FAILED` → key mismatch between the
+    release repo and the agent's `PARTOUT_RELEASE_KEY`. Fix the key (or the
+    release), `update abort`, re-run.
+  - `no release key provisioned` → the agent env is missing
+    `PARTOUT_RELEASE_KEY`. Fix env + restart the agent unit, then
+    `update abort` + re-run.
+  - host is unhealthy for unrelated reasons → exclude it (deny policy rule
+    `host:<id>` or a tag) and re-run; or fix the host, abort, re-run.
+- **Wave host `failed_rollback`, run `paused_failure`** — pick per host:
+  - transient (network blip, host rebooted mid-update) →
+    `partout ctl update retry <run_id>` (re-dispatches failed + timed-out
+    hosts with fresh grants).
+  - host has a real problem you want to work around →
+    `partout ctl update skip <run_id>` (marks it `skipped`, the next wave
+    proceeds) — then fix the host and update it later.
+  - artifact itself is bad → `partout ctl update abort <run_id>`. Do not
+    retry: every host will fail the same way. Delete/fix the release
+    (`ctl update list` + upload a corrected one) and start a new run.
+- **Host `timed_out` (no result within 15 min)** — usually the host was
+  offline at dispatch and has not reconnected. Verify connectivity + agent
+  state, then `update retry`. (If the host reconnected while the row was
+  still live, the queued directive would already have been delivered.)
+- **Run `pending_approval`** — a policy rule requires approval for
+  `update.apply`. Approve (UI → Approvals, or `ctl approvals`) — the run
+  resumes automatically once approved.
+- **Fleet-wide rollback to N-1** — start a new run against the N-1 release
+  (it must still be in the release store — releases are retained until you
+  delete them; there is no automatic GC). The server side is separate: if
+  the supervised server swap rolled back on its own, the binary is already
+  N-1; if you need the DB, restore the pre-swap backup it preserved
+  (`partout-backup-rollback-*.db` in the DB dir) or the scheduled backup.
+- **Server swapped but a fleet host is still N** — expected mid-rollout state
+  and safe: N agents against an N+1 server work fine (skew tolerance).
+  Finish or abort the run; the mixed state converges either way.
 
 ## 7. Troubleshooting table
 
