@@ -131,6 +131,14 @@ func (s *Store) MarkSeen(id string) error {
 }
 
 // SetState updates an agent's connection state.
+// SetAgentVersion updates the host's reported version (used by M8.1: a
+// verified update result should show in the fleet table immediately, not
+// wait for the next hourly facts collection).
+func (s *Store) SetAgentVersion(id, version string) error {
+	_, err := s.db.Exec(`UPDATE agents SET version=? WHERE id=?`, version, id)
+	return err
+}
+
 func (s *Store) SetAgentState(id, state string) error {
 	_, err := s.db.Exec(`UPDATE agents SET state=? WHERE id=?`, state, id)
 	return err

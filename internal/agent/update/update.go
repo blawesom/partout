@@ -12,6 +12,7 @@ package update
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -176,11 +177,23 @@ func Swap(binPath string, artifact []byte) (prevPath string, prevSize int64, err
 	dir := filepath.Dir(binPath)
 	staging := filepath.Join(dir, "partout.new")
 
-	// N-1 retention: keep the current binary so the boot guard can roll
-	// back. Skip the copy when the N-1 already exists AND is identical to
-	// the current binary (idempotent re-runs, e.g. the guard already
-	// restored it).
-	if _, err := os.Stat(prevPath); err != nil {
+	// N-1 retention: prev must always be a copy of the binary that is
+	// CURRENTLY running, because the boot guard restores prev when the new
+	// version fails. Consecutive updates (v1 -> v2 -> v3) must roll a
+	// failed v3 back to v2, not to the stale v1 left over from the first
+	// swap — so refresh prev whenever it differs from the current binary,
+	// and only skip the copy when it already matches (idempotent re-run
+	// after the guard already restored it).
+	needRefresh := true
+	if stPrev, err := os.Stat(prevPath); err == nil {
+		prevSize = stPrev.Size()
+		if cur, rerr := os.ReadFile(binPath); rerr == nil {
+			if p, perr := os.ReadFile(prevPath); perr == nil && bytes.Equal(p, cur) {
+				needRefresh = false
+			}
+		}
+	}
+	if needRefresh {
 		cur, rerr := os.ReadFile(binPath)
 		if rerr != nil {
 			return "", 0, fmt.Errorf("read current binary for N-1 retention: %w", rerr)
@@ -189,8 +202,6 @@ func Swap(binPath string, artifact []byte) (prevPath string, prevSize int64, err
 			return "", 0, fmt.Errorf("write N-1 retention copy: %w", werr)
 		}
 		prevSize = int64(len(cur))
-	} else if sz, serr := os.Stat(prevPath); serr == nil {
-		prevSize = sz.Size()
 	}
 
 	// Stage, fsync, rename. The rename is atomic on the same filesystem;

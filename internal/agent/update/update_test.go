@@ -136,10 +136,16 @@ func TestSwapAndRestore(t *testing.T) {
 		t.Error("staging file left behind")
 	}
 
-	// Idempotent re-swap: N-1 already exists (identical), must not fail.
+	// Second consecutive update (v1 -> v2 -> v3): N-1 must be refreshed to
+	// the binary that was CURRENTLY running (N+1), not the stale N left
+	// over from the first swap — a failed v3 rolls back to v2, not v1.
 	_, _, err = Swap(binPath, []byte("new binary N+1 again"))
 	if err != nil {
 		t.Fatalf("re-swap: %v", err)
+	}
+	prev, _ = os.ReadFile(prevPath)
+	if string(prev) != "new binary N+1" {
+		t.Errorf("N-1 after second swap = %q, want the previously running binary", prev)
 	}
 
 	// Restore N-1.
@@ -147,8 +153,20 @@ func TestSwapAndRestore(t *testing.T) {
 		t.Fatalf("restore: %v", err)
 	}
 	got, _ = os.ReadFile(binPath)
-	if string(got) != "current binary N" {
+	if string(got) != "new binary N+1" {
 		t.Errorf("binary after restore = %q, want the N-1", got)
+	}
+
+	// Idempotent re-swap with N-1 identical to the current binary must not
+	// clobber N-1 (the guard-already-rolled-back case).
+	_, _, err = Swap(binPath, []byte("attempt N+2"))
+	if err != nil {
+		t.Fatalf("third swap: %v", err)
+	}
+	// (N-1 now correctly = the running "new binary N+1".)
+	prev, _ = os.ReadFile(prevPath)
+	if string(prev) != "new binary N+1" {
+		t.Errorf("N-1 before identical case drifted: %q", prev)
 	}
 }
 

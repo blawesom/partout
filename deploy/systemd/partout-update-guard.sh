@@ -20,6 +20,9 @@ set -u
 BIN="${PARTOUT_GUARD_BIN:-/usr/local/bin/partout}"
 DATA_DIR="${PARTOUT_AGENT_DATA_DIR:-/var/lib/partout/agent}"
 HEALTH_S="${PARTOUT_UPDATE_HEALTH_S:-60}"
+# Grace beyond the health window before a "fresh" marker is declared stale.
+# 120 s covers a slow first boot of a big binary; tests shrink it.
+GRACE_S="${PARTOUT_UPDATE_GUARD_GRACE_S:-120}"
 MARKER="$DATA_DIR/update.json"
 
 # No marker → nothing to supervise; run the real binary directly.
@@ -37,7 +40,7 @@ now="$(date +%s)"
 age=$(( now - ${started:-$now} ))
 curver="$("$BIN" --version 2>/dev/null | awk '{print $NF}')"
 
-if [ "$curver" = "$target" ] && [ "$age" -le $(( HEALTH_S + 120 )) ]; then
+if [ "$curver" = "$target" ] && [ "$age" -le $(( HEALTH_S + GRACE_S )) ]; then
 	# New binary within the health window: first boot after the swap. The
 	# agent clears the marker on its first successful connect.
 	exec "$BIN" "$@"

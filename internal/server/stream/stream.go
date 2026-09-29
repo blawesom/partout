@@ -492,6 +492,15 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		// UI can watch the canary; the step-3 run state machine consumes the
 		// same event via UpdateResultHook.
 		ur := msg.GetUpdateResult()
+		// A verified result is authoritative for the host's version: write
+		// it now so the fleet table is current immediately (the next facts
+		// collection is an hour away). Independent of any run bookkeeping —
+		// direct-apply (canary path) results have no run rows at all.
+		if ur.Phase == "verified" && ur.Version != "" {
+			if err := h.st.SetAgentVersion(sess.AgentID, ur.Version); err != nil {
+				h.log.Printf("stream: set agent version %s: %v", sess.AgentID, err)
+			}
+		}
 		if h.UpdateResultHook != nil {
 			h.UpdateResultHook(sess.AgentID, ur)
 		}
@@ -626,12 +635,23 @@ func (h *Handler) drainOffline(agentID string, send func(*pb.Envelope) error) {
 	now := time.Now()
 	h.offlineMu.Lock()
 	q := h.offlineQueue[agentID]
+	h.offlineMu.Unlock()
 	if len(q) == 0 {
-		h.offlineMu.Unlock()
+		// No in-memory queue, but a durable pending update may exist (server
+		// restarted between dispatch and reconnect): deliver it with a fresh
+		// grant.
+		h.deliverPendingUpdate(agentID, send)
 		return
 	}
+	h.offlineMu.Lock()
 	delete(h.offlineQueue, agentID)
 	h.offlineMu.Unlock()
+
+	// Track an update directive delivered from the in-memory queue so the
+	// durable copy for the same release is retired (no double delivery); a
+	// durable row for a DIFFERENT release is kept for the next reconnect
+	// (the agent is about to restart into the first one).
+	var deliveredUpdateRel string
 
 	for i, qe := range q {
 		if now.After(qe.expiresAt) {
@@ -646,9 +666,27 @@ func (h *Handler) drainOffline(agentID string, send func(*pb.Envelope) error) {
 			h.requeueOffline(agentID, q[i:])
 			return
 		}
+		if u := qe.env.GetUpdateDirective(); u != nil {
+			deliveredUpdateRel = u.ReleaseId
+		}
 		if c := qe.env.GetCommand(); c != nil {
 			if err := h.st.UpdateRunState(c.RunId, "delivered", -1, 0); err != nil {
 				h.log.Printf("stream: mark delivered %s: %v", c.RunId, err)
+			}
+		}
+	}
+
+	// Reconcile the durable pending-update row against what was just
+	// delivered: same release -> retire (the in-memory copy was delivered);
+	// different release or none -> deliver from the store now (fresh grant).
+	if h.st != nil {
+		if p, err := h.st.GetPendingUpdate(agentID); err == nil && p != nil {
+			if p.ReleaseID == deliveredUpdateRel {
+				if err := h.st.DeletePendingUpdate(agentID); err != nil {
+					h.log.Printf("stream: retire pending update %s: %v", agentID, err)
+				}
+			} else {
+				h.deliverPendingUpdate(agentID, send)
 			}
 		}
 	}

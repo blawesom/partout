@@ -2,6 +2,12 @@
 Description=Partout agent (outbound-only host agent)
 After=network-online.target
 Wants=network-online.target
+# M8.1: a crashlooping post-update binary must keep restarting until the
+# boot guard's health window (PARTOUT_UPDATE_HEALTH_S + grace) declares the
+# marker stale and rolls back to N-1 (~180 s). systemd's default start
+# limit (5 starts / 10 s) would park the unit in `failed` first and the
+# rollback would never run. 0 disables the start rate limit.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
