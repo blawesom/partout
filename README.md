@@ -76,7 +76,10 @@ approvals, provisioning, users, and the Observe pages (Services, Certificates, C
 
 ## Quick start
 
-Build once, then run a server and an agent (or an all-in-one demo process).
+Build once (or grab the prebuilt static binary from the latest
+[release](https://github.com/blawesom/partout/releases) — `partout_<version>_linux_<arch>`,
+SHA-256SUMS included — if you don't have a Go toolchain), then run a server and an
+agent (or an all-in-one demo process).
 
 ```bash
 go build -o partout ./cmd/partout
@@ -148,9 +151,9 @@ partout ctl alerts list --state firing
 partout ctl audit --kind policy.deny --limit 50
 ```
 
-The full command set: `enroll-token · hosts · run · exec · audit · policy · approvals ·
-provision · ca · files · sessions · jobs · tasks · playbooks · packages · secrets ·
-external-data · alerts`.
+The full command set: `auth · enroll-token · hosts · run · exec · audit · policy ·
+approvals · alerts · provision · ca · tls · files · sessions · jobs · tasks ·
+playbooks · packages · secrets · external-data`.
 
 ## Documentation
 

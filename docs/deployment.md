@@ -1,7 +1,9 @@
 # Partout — Deployment
 
-**Status:** Draft v0.6 — reflects the current implementation (M0–M6 complete, Web UI
-shipped, M4 approvals engine + MCP server + OAuth2 shipped, M7-remainder in progress). Sections marked *proposed* describe planned work
+**Status:** v0.7.1 — reflects the current implementation (M0–M7 complete, Web UI
+shipped, M4 approvals engine + MCP server + OAuth2 shipped, M6.1 alert rule kinds,
+v0.7.1: in-stream mTLS rotation, offline down-queue dispatch, provisioning fresh/join
+modes + version-diff check, `partout --version`). Sections marked *proposed* describe planned work
 that is not yet wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
