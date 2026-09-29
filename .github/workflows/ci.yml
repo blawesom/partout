@@ -58,6 +58,54 @@ jobs:
       - name: Stress exec package
         run: go test -race -count=20 -run 'TestRun' ./internal/agent/exec/
 
+  security:
+    name: Security (vulns + licenses)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Known vulnerabilities
+        # govulncheck: Go vuln database over the actual call graph — a
+        # vulnerable function that is never called does not fail the build.
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Dependency licenses
+        run: bash scripts/check-licenses.sh
+
+  e2e:
+    name: E2E (update + systemd + backup-restore)
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # These drive REAL binaries against a real server: the supervised
+      # server swap (fake systemctl — the unit itself is covered by the
+      # systemd job below), the one-command v1->v2 with converged re-run,
+      # the REAL systemd agent self-update (live swap + crashloop rollback),
+      # and the backup-restore disaster drill.
+      - name: update-server.sh scenarios
+        run: bash scripts/update-server-test.sh
+
+      - name: one-command update E2E
+        run: bash scripts/update-e2e.sh
+
+      - name: real-systemd agent self-update E2E
+        run: bash scripts/systemd-e2e.sh
+
+      - name: backup-restore disaster drill
+        run: bash scripts/backup-restore-e2e.sh
+
   # Opt-in real-sshd tests. These exist because the fake-binary unit tests
   # implement ssh's *intended* semantics and therefore cannot catch the fact
   # that OpenSSH resolves ~/.ssh from the passwd database, not $HOME — which
