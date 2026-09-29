@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -32,10 +33,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// maxJSONBody bounds every JSON request body. The largest legitimate one
+// is a release artifact upload (100 MiB artifact ~ 134 MiB base64 in JSON);
+// 256 MiB leaves headroom while capping memory from a runaway client.
+const maxJSONBody = 256 << 20
+
 func decodeJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxJSONBody))
 	dec.DisallowUnknownFields()
-	return dec.Decode(v)
+	if err := dec.Decode(v); err != nil {
+		if _, ok := err.(*http.MaxBytesError); ok {
+			return fmt.Errorf("request body too large (max %d MiB)", maxJSONBody>>20)
+		}
+		return err
+	}
+	return nil
 }
 
 // ---- helpers -----------------------------------------------------------------
