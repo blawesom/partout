@@ -53,6 +53,9 @@ func TestDefaults(t *testing.T) {
 	if c.Port != 8443 {
 		t.Errorf("port = %d, want 8443", c.Port)
 	}
+	if c.Addr != "" {
+		t.Errorf("addr = %q, want empty (all interfaces) by default", c.Addr)
+	}
 	if c.DBPath != "./partout.db" {
 		t.Errorf("db = %q, want ./partout.db", c.DBPath)
 	}
@@ -72,6 +75,7 @@ func TestServerEnv(t *testing.T) {
 	setenv(t,
 		"PARTOUT_MODE", "server",
 		"PARTOUT_PORT", "9443",
+		"PARTOUT_ADDR", "127.0.0.1",
 		"PARTOUT_DB_PATH", "/srv/partout/partout.db",
 		"PARTOUT_TLS", "on",
 		"PARTOUT_TLS_SERVER_NAMES", "partout.example.com,10.0.0.5",
@@ -85,6 +89,9 @@ func TestServerEnv(t *testing.T) {
 	}
 	if c.Port != 9443 {
 		t.Errorf("port = %d, want 9443", c.Port)
+	}
+	if c.Addr != "127.0.0.1" {
+		t.Errorf("addr = %q, want 127.0.0.1", c.Addr)
 	}
 	if c.DBPath != "/srv/partout/partout.db" {
 		t.Errorf("db = %q", c.DBPath)

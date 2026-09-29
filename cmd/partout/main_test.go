@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -359,6 +360,85 @@ func TestEmbeddedStaleIdentityFreshDB(t *testing.T) {
 	cfg2.AdminPassword = "password-only-1"
 	if id := runEmbeddedCfg(t, cfg2, log.New(io.Discard, "", 0), 30*time.Second); id == "" {
 		t.Fatal("agent did not re-enroll against a fresh DB with a stale identity file")
+	}
+}
+
+// TestCtlDBBackup verifies the local (no-server) db-backup path used by the
+// backup timer: it snapshots a live DB, the snapshot is a consistent
+// point-in-time copy, and it works while the source is still open.
+func TestCtlDBBackup(t *testing.T) {
+	tmp := t.TempDir()
+	db := filepath.Join(tmp, "partout.db")
+	st, err := store.New("sqlite:" + db)
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	if err := st.UpsertAgent(store.Agent{ID: "ag_bk", UUID: "u-bk", ED25519Pub: "p", X25519Pub: "x"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	out := filepath.Join(tmp, "backup.db")
+	if err := dbBackup(db, out); err != nil {
+		t.Fatalf("dbBackup: %v", err)
+	}
+	// Row written after the snapshot must not be in the copy.
+	if err := st.UpsertAgent(store.Agent{ID: "ag_late", UUID: "u-late", ED25519Pub: "p", X25519Pub: "x"}); err != nil {
+		t.Fatalf("UpsertAgent(late): %v", err)
+	}
+	b, err := store.New("sqlite:" + out)
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer b.Close()
+	defer st.Close()
+	a, err := b.Agent("ag_bk")
+	if err != nil || a == nil || a.ID != "ag_bk" {
+		t.Errorf("backup missing pre-snapshot agent (a=%+v err=%v)", a, err)
+	}
+	late, err := b.Agent("ag_late")
+	if err == nil && late != nil {
+		t.Error("backup contains post-snapshot agent — snapshot not point-in-time")
+	}
+}
+
+// TestServerLoopbackBind verifies the PARTOUT_ADDR/--addr knob: with Addr
+// set to 127.0.0.1 the server still serves (the JoinHostPort format is
+// valid) and is reachable on loopback. This is the deployment that keeps a
+// plaintext control plane off the public interface behind a reverse proxy.
+func TestServerLoopbackBind(t *testing.T) {
+	tmp := t.TempDir()
+	port := freePort(t)
+	cfg := config.Config{
+		Mode:       "server",
+		Port:       port,
+		Addr:       "127.0.0.1",
+		DBPath:     filepath.Join(tmp, "srv.db"),
+		AdminToken: "bk-admin",
+	}
+	lg := log.New(io.Discard, "", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runServer(ctx, &cfg, lg) }()
+
+	base := "http://127.0.0.1:" + strconv.Itoa(port)
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		resp, err := client.Get(base + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return
+			}
+			lastErr = fmt.Errorf("healthz status %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("loopback-bound server did not become healthy: %v", lastErr)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -130,6 +130,14 @@ partout.example.com {
 content-type. The split gRPC port is *proposed* — if added, add a second site or
 `handle` block on `content_type application/grpc` → `127.0.0.1:9443`.)
 
+**Behind HAProxy** (validated on a live multi-SNI edge, 2026-09-29):
+`deploy/haproxy/partout.cfg` ships a working snippet. The two gotchas that cost
+time there: (1) `timeout client` is a **frontend** directive — HAProxy silently
+ignores it on a `backend`, and the 1m default drops idle SSE/PTY streams, so set
+1h on the frontend; (2) a second domain on the same :443 is just another `crt`
+entry on the bind line. Bind the server loopback-only behind the edge:
+`PARTOUT_ADDR=127.0.0.1`.
+
 ---
 
 ## 2. Artifacts
@@ -353,6 +361,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | Var / Flag | Default | Notes |
 |---|---|---|
 | `PARTOUT_PORT` / `--port` | **8443** | single listener (REST + SSE + gRPC) |
+| `PARTOUT_ADDR` / `--addr` | *(empty = all interfaces)* | bind address for the single listener; set `127.0.0.1` when the server sits behind a reverse proxy on the same host — keeps a plaintext (or TLS) control plane off the public interface |
 | `PARTOUT_DB_PATH` / `--db` | **./partout.db** | SQLite path; `tls/` CA material is created in `<db dir>/tls/` |
 | `PARTOUT_TLS` / `--tls` | **off** | `on` → local root-CA bootstrap + mTLS on the gRPC stream; REST/SSE stay bearer-auth |
 | `PARTOUT_TLS_SERVER_NAMES` / `--tls-names` | **localhost,127.0.0.1,\<hostname\>** | comma-separated SANs for the server leaf |
@@ -488,18 +497,28 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 3. Mint an enrollment token: `partout ctl enroll-token --server … --token $ADMIN`.
 4. On the first host: install the agent (§3.2) with that token → `GET
    /api/v1/hosts` shows it `connected` with facts within ~10 s.
-5. If exposing beyond localhost: `PARTOUT_TLS=on`, fetch the CA
+5. Bind + expose: if the server sits behind a reverse proxy on the same host,
+   set `PARTOUT_ADDR=127.0.0.1` so the control plane is not reachable from the
+   network at all (the edge is the only path in). If exposing beyond localhost
+   directly: `PARTOUT_TLS=on`, fetch the CA
    (`partout ctl ca --server https://… --ca-file <fetched-ca>`), put `ca.crt` on agents
    (`PARTOUT_TLS_CA`), restart both sides → agents reconnect over mTLS.
 6. Run a command: `partout ctl run --selector all -- whoami` → verify output + an
    `exec.dispatch` audit row.
 7. Back up the DB file **and** `<db dir>/tls/` (CA + keys) **before** onboarding more
-   hosts (ops §4.1).
+   hosts (ops §4.1). Shipped: `scripts/backup.sh` (atomic snapshot via
+   `partout ctl db-backup`, retention) + `deploy/systemd/partout-backup.{service,timer}`
+   (daily 03:00, `Persistent=true`) — enable with `systemctl enable --now
+   partout-backup.timer`. Also version the config (`/etc/partout/`) in git: commit,
+   not back up.
 8. Open the UI: `http://<server>:8443/` (or `https://` with `PARTOUT_TLS=on`) → log in →
    see the fleet, run a command from **Execute**, and browse Observe · Services/Certificates/Configs.
-
-> *Still to come (M4/M6):* the approvals engine, the alert engine + Alerts UI page, and MCP.
-> Policy deny rules, host provisioning, secrets, and secret-key backup are wired today.
+9. Dogfood: on a server + agent split deployment, enroll the server host as its own
+   fleet member (a `partout-agent` unit alongside `partout-server`) and add alert
+   rules for `partout-server`/`partout-agent` failed + your edge service. Note: the
+   alert engine is server-side, so it cannot fire when the control plane itself dies —
+   an external observer (cron from another host hitting `/healthz`) is still needed
+   for that.
 
 ---
 

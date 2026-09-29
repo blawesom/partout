@@ -297,6 +297,45 @@ func setupTestDB(t *testing.T) (*Store, string) {
 	return s, dir
 }
 
+// TestBackupTo verifies VACUUM INTO produces an atomic snapshot of a live
+// database: rows written before the backup are present, rows written after
+// are not (the snapshot is consistent as of the statement), and a quoted
+// path is rejected (SQL injection via the backup destination).
+func TestBackupTo(t *testing.T) {
+	s, dir := setupTestDB(t)
+	defer s.Close()
+
+	if err := s.UpsertAgent(Agent{ID: "ag_bk", UUID: "u-bk", ED25519Pub: "p1", X25519Pub: "x1"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	out := dir + "/backup.db"
+	if err := s.BackupTo(out); err != nil {
+		t.Fatalf("BackupTo: %v", err)
+	}
+	// A row written AFTER the snapshot must not be in the backup.
+	if err := s.UpsertAgent(Agent{ID: "ag_late", UUID: "u-late", ED25519Pub: "p2", X25519Pub: "x2"}); err != nil {
+		t.Fatalf("UpsertAgent(late): %v", err)
+	}
+
+	b, err := New("sqlite:" + out)
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer b.Close()
+	a, err := b.Agent("ag_bk")
+	if err != nil || a == nil || a.ID != "ag_bk" {
+		t.Errorf("backup missing pre-snapshot agent ag_bk (a=%+v err=%v)", a, err)
+	}
+	late, err := b.Agent("ag_late")
+	if err == nil && late != nil {
+		t.Errorf("backup contains post-snapshot agent ag_late — snapshot not atomic")
+	}
+
+	if err := s.BackupTo(dir + "/it's.db"); err == nil {
+		t.Error("BackupTo with a single quote in the path should be rejected")
+	}
+}
+
 // TestFileDSNOpensCleanPath verifies the opened file is exactly the dsn path
 // (regression guard for the pre-fix "&_pragma=..." filename quirk) and that
 // WAL + foreign_keys are actually applied.

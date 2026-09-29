@@ -114,6 +114,9 @@ For systemd units, Docker/compose, cloud-init, and Helm, see [docs/deployment.md
 
 ### Deployment notes
 
+- **Bind address**: the default listens on all interfaces. Behind a reverse proxy on
+  the same host, set `PARTOUT_ADDR=127.0.0.1` so the control plane is only reachable
+  through the edge (see docs/deployment.md §1.3 for the Caddy/nginx/HAProxy patterns).
 - **Turn on TLS before exposing it**: `PARTOUT_TLS=on` bootstraps a local root CA and serves
   HTTPS + mTLS (the default is plaintext HTTP on all interfaces — fine for loopback/dev).
 - **Token env vars** (server): `PARTOUT_ADMIN_PASSWORD` bootstraps the web-UI `admin` user;

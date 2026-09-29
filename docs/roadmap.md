@@ -282,6 +282,15 @@ readiness beyond `/healthz`/`/readyz`). All remain *proposed* in
 
 ### Polish items (closed this cycle)
 
+- **v0.7.3 — deployment-feedback fixes** (from `DEPLOYMENT_FEEDBACK.md`, ccc.laplane.net
+  field deploy): `PARTOUT_ADDR`/`--addr` bind knob (loopback-only behind a reverse
+  proxy); `partout ctl db-backup` (atomic VACUUM INTO snapshot, no sqlite3 CLI) +
+  `scripts/backup.sh` (retention) + `partout-backup.{service,timer}` (daily, `Persistent`);
+  `deploy/haproxy/partout.cfg` (validated multi-SNI edge: frontend `timeout client 1h`
+  for SSE/PTY, `/healthz` check, bundle perms) + reverse-proxy gotchas in deployment.md;
+  `partout-embedded.service` + `embedded.env.example`; bring-up checklist now covers
+  bind/backup/dogfood (incl. the "alerts can't fire on the alerting plane's death"
+  limitation); dnf-broken-repo troubleshooting row.
 - **`partout --version`** — prints the stamped version and exits (used by the
   provisioning version-diff check too).
 - **Live audit log** — the previously-dead `audit.event` SSE subscription is now

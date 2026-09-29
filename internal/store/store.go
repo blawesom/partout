@@ -114,6 +114,22 @@ func parseDSN(dsn string) (string, string, error) {
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// BackupTo writes an atomic, consistent snapshot of the database to path
+// using SQLite's VACUUM INTO. It is a hot copy: the source may be actively
+// served (WAL), and the snapshot reflects the DB as of the statement.
+// The parent directory of path must exist; an existing file at path is
+// replaced. This is the mechanism the backup timer
+// (deploy/systemd/partout-backup.timer) uses.
+func (s *Store) BackupTo(path string) error {
+	if strings.Contains(path, "'") {
+		return fmt.Errorf("store: backup path must not contain a single quote")
+	}
+	if _, err := s.db.Exec("VACUUM INTO '" + path + "'"); err != nil {
+		return fmt.Errorf("store: backup to %s: %w", path, err)
+	}
+	return nil
+}
+
 // DB exposes the raw *sql.DB for tests and advanced use.
 func (s *Store) DB() *sql.DB { return s.db }
 

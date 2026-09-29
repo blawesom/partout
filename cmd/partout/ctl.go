@@ -26,6 +26,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/blawesom/partout/internal/store"
 )
 
 type ctl struct {
@@ -77,7 +79,9 @@ commands:
 		}
 	}
 
-	if *server == "" {
+	// db-backup is local (no server round-trip); every other command needs
+	// the server address.
+	if *server == "" && fs.Arg(0) != "db-backup" {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
 		os.Exit(2)
 	}
@@ -156,6 +160,8 @@ commands:
 		c.cmdJobs(rest)
 	case "external-data":
 		c.cmdExternalData(rest)
+	case "db-backup":
+		cmdDBBackup(rest)
 	case "auth":
 		c.cmdAuth(rest)
 	case "help", "-h", "--help":
@@ -165,6 +171,35 @@ commands:
 		fs.Usage()
 		os.Exit(2)
 	}
+}
+
+// cmdDBBackup is a local operation (no server round-trip): an atomic hot
+// snapshot of the server's SQLite file via VACUUM INTO. This is what
+// deploy/systemd/partout-backup.timer runs, so the backup never depends on
+// the sqlite3 CLI being installed on the host. The server may be running.
+func cmdDBBackup(rest []string) {
+	fs := flag.NewFlagSet("db-backup", flag.ExitOnError)
+	fs.Parse(rest)
+	args := fs.Args()
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: ctl db-backup <db> <out>")
+		fmt.Fprintln(os.Stderr, "  atomic snapshot of <db> into <out> (VACUUM INTO); the server may be running")
+		os.Exit(2)
+	}
+	if err := dbBackup(args[0], args[1]); err != nil {
+		fmt.Fprintln(os.Stderr, "ctl:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("backup: %s -> %s\n", args[0], args[1])
+}
+
+func dbBackup(dbPath, out string) error {
+	st, err := store.New("sqlite:" + dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return st.BackupTo(out)
 }
 
 func (c *ctl) cmdCA() {

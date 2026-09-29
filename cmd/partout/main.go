@@ -78,6 +78,7 @@ func main() {
 	fs := flag.NewFlagSet("partout", flag.ContinueOnError)
 	mode := fs.String("mode", cfg.Mode, "server|agent|embedded")
 	port := fs.Int("port", cfg.Port, "server: single listener port")
+	addr := fs.String("addr", cfg.Addr, "server: bind address (empty = all interfaces; use 127.0.0.1 behind a reverse proxy)")
 	db := fs.String("db", cfg.DBPath, "server: SQLite path")
 	dataDir := fs.String("data-dir", cfg.DataDir, "agent: identity/policy dir (default ~/.partout/agent)")
 	server := fs.String("server", cfg.ServerURL, "agent: server host:port")
@@ -104,6 +105,7 @@ func main() {
 	// the loaded config, so after Parse the pointers hold the effective value).
 	cfg.Mode = strings.ToLower(*mode)
 	cfg.Port = *port
+	cfg.Addr = *addr
 	cfg.DBPath = *db
 	cfg.DataDir = *dataDir
 	cfg.ServerURL = *server
@@ -538,14 +540,14 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		}
 	}()
 
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+	lis, err := net.Listen("tcp", net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.Port)))
 	if err != nil {
-		return fmt.Errorf("listen :%d: %w", cfg.Port, err)
+		return fmt.Errorf("listen %s:%d: %w", cfg.Addr, cfg.Port, err)
 	}
 	if serveTLS {
-		lg.Printf("gRPC + REST + SSE (TLS) on :%d, db %s", cfg.Port, cfg.DBPath)
+		lg.Printf("gRPC + REST + SSE (TLS) on %s:%d, db %s", cfg.Addr, cfg.Port, cfg.DBPath)
 	} else {
-		lg.Printf("gRPC + REST + SSE on :%d, db %s", cfg.Port, cfg.DBPath)
+		lg.Printf("gRPC + REST + SSE on %s:%d, db %s", cfg.Addr, cfg.Port, cfg.DBPath)
 	}
 
 	// shutdownDone is closed once the gRPC server has fully stopped and the

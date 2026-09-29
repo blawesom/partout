@@ -29,6 +29,11 @@ type Config struct {
 	// Port is the single listener port (REST v1 + SSE + gRPC, demuxed by
 	// protocol/content-type).
 	Port int
+	// Addr is the bind address for the single listener (PARTOUT_ADDR /
+	// --addr). Empty = all interfaces ("0.0.0.0"); set "127.0.0.1" to bind
+	// loopback-only when the server sits behind a reverse proxy on the same
+	// host (the recommended deployment, see docs/deployment.md).
+	Addr string
 	// DBPath is the SQLite database path (server data set).
 	DBPath string
 	// DataDir: agent — identity, TLS material, policy dir (used).
@@ -88,6 +93,7 @@ func Load() (*Config, error) {
 	c := &Config{
 		Mode:                 mode,
 		Port:                 envInt("PARTOUT_PORT", 8443),
+		Addr:                 os.Getenv("PARTOUT_ADDR"),
 		DBPath:               envStr("PARTOUT_DB_PATH", "./partout.db"),
 		DataDir:              os.Getenv("PARTOUT_DATA_DIR"),
 		TLS:                  envBool("PARTOUT_TLS"),

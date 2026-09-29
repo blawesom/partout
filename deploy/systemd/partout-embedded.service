@@ -1,0 +1,26 @@
+[Unit]
+Description=Partout (embedded: server + local agent in one process)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partout
+Group=partout
+EnvironmentFile=-/etc/partout/embedded.env
+ExecStart=/usr/local/bin/partout --mode=embedded \
+    --port=8443 \
+    --db=/var/lib/partout/partout.db
+Restart=on-failure
+RestartSec=2
+# Hardening: the embedded process serves the control plane AND runs the
+# local agent, so it gets the server unit's hardening profile.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/partout
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

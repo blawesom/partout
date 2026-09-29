@@ -1,0 +1,16 @@
+[Unit]
+Description=Partout server DB backup (atomic snapshot via VACUUM INTO)
+# Prefer running while the control plane is up (hot copy).
+After=partout-server.service
+
+[Service]
+Type=oneshot
+User=partout
+Group=partout
+# <binary> <db> <backup dir> <retention: keep newest 14 daily snapshots>
+ExecStart=/usr/local/sbin/partout-backup.sh /usr/local/bin/partout /var/lib/partout/partout.db /var/lib/partout/backups 14
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/partout
+PrivateTmp=true
+ProtectHome=true

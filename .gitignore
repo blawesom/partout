@@ -31,3 +31,6 @@ identity/
 
 # Generated protobuf (regenerate with protoc; committed copy is internal/proto/)
 proto/partout/*.pb.go
+
+# Release build artifacts (published via GitHub releases, not the repo)
+/dist/

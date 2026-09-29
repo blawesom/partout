@@ -232,7 +232,7 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
 
 | What | How | RPO target |
 |---|---|---|
-| Server DB (SQLite) | `sqlite3 partout.db ".backup '/backup/partout.db.bak'"` (atomic hot copy) or `cp` after WAL checkpoint | per-hour or nightly |
+| Server DB (SQLite) | **Shipped:** `scripts/backup.sh` + `deploy/systemd/partout-backup.timer` (daily, `Persistent=true`, retention 14) — atomic hot snapshot via `partout ctl db-backup` (VACUUM INTO; no sqlite3 CLI needed, server may be running). Manual: `partout ctl db-backup <db> <out>`, or `sqlite3 partout.db ".backup '…'"` | per-hour or nightly |
 | Server output / recordings | in-DB (`output_chunks` + `session_records`); included in the DB backup | daily |
 | Extern cache | in-DB (`eol_cache` + `vuln_cache`); included in the DB backup | nightly |
 | Secret key file | encrypted offsite copy (GPG, HSM) | **always available** |
@@ -327,8 +327,13 @@ Partout observes **hosts**; you also need to observe the control plane:
 - **Log tail**: `journalctl -u partout-server -f` — monitor for "migrations failed",
   "secret key missing", "DB connection error", "extern refresh failed", "stream handler
   panic" (shouldn't happen — panic means a bug).
-- **Dogfooding**: deploy the embedded agent on the server host — you'll have real-time
-  observability of the host running Partout.
+- **Dogfooding**: deploy the [local] agent on the server host (a `partout-agent`
+  unit alongside `partout-server`) — you'll have real-time observability of the host
+  running Partout. Add alert rules for `partout-server`/`partout-agent` failed plus
+  your edge (e.g. `haproxy.service`) and the edge's certs. **Limitation:** the alert
+  engine is server-side, so it cannot fire when the control plane itself dies — keep
+  an external observer (cron from another host hitting `/healthz`, or a second fleet
+  member) for that case.
 - **Metrics**: Prometheus / OTLP metrics export is a post-v1 enhancement (not in v1 scope;
   the alert channel + log tail is the v1 observability surface).
 
@@ -471,6 +476,7 @@ never connects.
 | `version_mismatch` on the host | Server and agent versions are beyond compatibility skew | Upgrade the agent to match the server (or vice versa) |
 | "secret key missing" at startup | `PARTOUT_SECRET_KEY_FILE` or `PARTOUT_SECRET_KEY` not configured | Set the key; the secrets feature is disabled until then |
 | `apply-updates` fails on `ended` host | EOL gate (host is past end-of-support, defaults to require-approval) | Approve manually or remove the EOL gate from the rule |
+| `packages list-updates` / `apply` fails with repo/GPG errors | The host's own package manager is broken (e.g. a third-party repo's GPG key is stale — `grafana`, `tailscale` are frequent offenders); `dnf` fails *silently* until `--disablerepo=…` is added | Fix the repo keys on the host (`rpm --import …`, or remove the broken repo); the package surface only reports what `dnf`/`apt`/`apk` report, it does not repair the host's repos |
 | Policy stale → jobs fail closed | Agent hasn't received a fresh bundle in >48 h (A8), server unreachable | Restore server; agents will fetch the bundle on reconnect |
 | A rebooted host's task run stays `rebooting` (never resumes) | The `resume-after-reboot` marker (`<data dir>/resume/<run_id>.json`) is only processed after the first policy bundle loads post-boot; a stale marker (host never actually rebooted, or reboot command lacked permission) is discarded and the run reported `failed` | Check agent logs for `resume:` lines; verify the agent user can reboot (root/sudo/polkit); confirm the marker file exists until processed, then check `job_runs`/`task_runs` for the final `trigger: resume` report |
 | Run shows `awaiting_approval` and never dispatches | A `require_approval` rule matched; an admin must approve (or the request expired after `PARTOUT_APPROVAL_TTL_S`, default 1 h → run finalizes `failed`) | `GET /api/v1/approvals?state=pending`, then `POST /api/v1/approvals/{id}/approve` (admin token). An already-decided/expired request returns 409 — re-run the action for a fresh request |
