@@ -182,11 +182,17 @@ embedded-mode error surfacing are tracked separately.)
 The Provision page's quick "New run" form assumed you already knew the flow.
 The **onboarding wizard** ("Start onboarding →") makes first-time host
 onboarding a guided, three-step modal: **target** (host + mode) →
-**confirm** (the plan — SSH key source, the host-key confirmation gate, the
-five steps) → **live** (polls the run; surfaces the `key_confirm` fingerprint
-with Confirm/Deny; links to the enrolled host on success). It reuses the
-existing `/provision-runs` endpoints (no backend change) and leaves the quick
-form for power users. See `docs/ui-guidelines.md` §21.
+**confirm** (the plan — **live SSH-key readiness**, the host-key confirmation
+gate, the five steps) → **live** (polls the run; surfaces the `key_confirm`
+fingerprint with Confirm/Deny; links to the enrolled host on success).
+
+The confirm screen's **SSH access** row is dynamic: it calls
+`GET /api/v1/provision/ssh-status` and shows exactly what the provisioner will
+use — a conventional file key, the ssh-agent, or a red *no identity key found*
+warning that a run will fail. This converts `doctor`'s SSH-key check from a
+CLI-only pre-flight into the wizard's first checkpoint, and shares one source
+of truth (`sshutil.IdentityStatus`) across doctor, the endpoint, and the
+provisioner's own SSH args. See `docs/ui-guidelines.md` §21.
 
 ### Onboarding: first-run UI affordances + quiet empty-fleet ticks
 

@@ -54,6 +54,53 @@ func Default(sshDir string) Config {
 	return Config{SSHDir: sshDir, ConnectTimeout: 10}
 }
 
+// conventionalIdentityNames are the identity files OpenSSH itself tries, in
+// order. This is the single source of truth for both the actual SSH args
+// (dirArgs) and the readiness report (IdentityStatus), so the two can never
+// drift.
+var conventionalIdentityNames = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
+
+// IdentityStatus reports which identity keys a Config would offer for host
+// provisioning: the conventional file keys present in SSHDir (in OpenSSH
+// order) and whether the ssh-agent holds a key. It returns file basenames
+// only — never key material. Shared by `partout doctor` and the provisioning
+// ssh-status endpoint so both report exactly what the provisioner will use.
+type IdentityStatus struct {
+	SSHDir   string   `json:"ssh_dir"`
+	FileKeys []string `json:"file_keys"`
+	Agent    bool     `json:"agent"`
+}
+
+// Found reports whether an identity key is available (a conventional file
+// key or an agent key).
+func (s IdentityStatus) Found() bool { return len(s.FileKeys) > 0 || s.Agent }
+
+// IdentityStatus inspects SSHDir and the ssh-agent to report which identity
+// keys a Config would offer. It performs no writes and never exposes key
+// material.
+func (c Config) IdentityStatus() IdentityStatus {
+	s := IdentityStatus{SSHDir: c.SSHDir, FileKeys: []string{}}
+	if c.SSHDir != "" {
+		for _, name := range conventionalIdentityNames {
+			if _, err := os.Stat(filepath.Join(c.SSHDir, name)); err == nil {
+				s.FileKeys = append(s.FileKeys, name)
+			}
+		}
+	}
+	s.Agent = agentHasKeys()
+	return s
+}
+
+// agentHasKeys reports whether the ssh-agent holds at least one key. It is
+// read-only and bounded: with no SSH_AUTH_SOCK it returns false immediately,
+// as does a missing ssh-add or an agent with no keys.
+func agentHasKeys() bool {
+	if os.Getenv("SSH_AUTH_SOCK") == "" {
+		return false
+	}
+	return exec.Command("ssh-add", "-l").Run() == nil
+}
+
 func (c Config) sshBin() string {
 	if c.SSH == "" {
 		return "ssh"
@@ -136,7 +183,7 @@ func (c Config) dirArgs() []string {
 		"-o", "UserKnownHostsFile=" + c.knownHostsPath(),
 	}
 	// Conventional key names, in the order OpenSSH itself tries them.
-	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+	for _, name := range conventionalIdentityNames {
 		p := filepath.Join(c.SSHDir, name)
 		if _, err := os.Stat(p); err == nil {
 			args = append(args, "-o", "IdentityFile="+p)

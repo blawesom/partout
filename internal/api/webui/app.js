@@ -181,7 +181,25 @@
           <tbody>
             <tr><td class="muted" style="width:130px">Target</td><td class="mono">{{ provWiz.host }}</td></tr>
             <tr><td class="muted">Mode</td><td>{{ provWiz.mode }} <span class="muted small">— {{ provWizModeShort }}</span></td></tr>
-            <tr><td class="muted">SSH access</td><td>your existing <span class="mono">~/.ssh</span> — no credentials are created or stored</td></tr>
+            <tr><td class="muted">SSH access</td><td>
+              <template v-if="provWiz.sshBusy"><span class="muted small">checking…</span></template>
+              <template v-else-if="provWiz.sshStatus && (provWiz.sshStatus.file_keys||[]).length">
+                <span class="mono">{{ provWiz.sshStatus.ssh_dir }}/{{ provWiz.sshStatus.file_keys[0] }}</span>
+                <span class="muted small"> — conventional key found</span>
+              </template>
+              <template v-else-if="provWiz.sshStatus && provWiz.sshStatus.agent">
+                <b>ssh-agent</b> <span class="muted small">holds a key (no conventional file in <span class="mono">{{ provWiz.sshStatus.ssh_dir }}</span>)</span>
+              </template>
+              <template v-else-if="provWiz.sshErr">
+                <span class="muted small">unavailable ({{ provWiz.sshErr }})</span>
+              </template>
+              <template v-else-if="provWiz.sshStatus">
+                <span style="color:var(--critical, #dc2626);font-weight:600">no identity key found</span>
+                <span class="muted small"> in <span class="mono">{{ provWiz.sshStatus.ssh_dir }}</span> or the ssh-agent — add a key or provisioning will fail</span>
+              </template>
+              <template v-else><span class="muted small">…</span></template>
+              <span class="muted small"> — nothing created or stored</span>
+            </td></tr>
             <tr><td class="muted">Host key</td><td>a new key pauses for your confirmation first (no silent TOFU)</td></tr>
             <tr><td class="muted">Steps</td><td class="mono small">connect → preflight → transfer → install → wait-enroll</td></tr>
           </tbody>
@@ -2391,7 +2409,7 @@
       },
       // --- Onboarding wizard (guided SSH provisioning) ---
       openProvWizard() {
-        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], timer: null };
+        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], timer: null, sshStatus: null, sshBusy: false, sshErr: "" };
       },
       dismissGettingStarted() {
         this.gsDismissed = true;
@@ -2404,7 +2422,21 @@
         if (hadRun) this.loadProvRuns();
       },
       provWizNext() {
-        if (this.provWiz.phase === "target" && this.provWiz.host.trim()) this.provWiz.phase = "confirm";
+        if (this.provWiz.phase === "target" && this.provWiz.host.trim()) {
+          this.provWiz.phase = "confirm";
+          this.provWizLoadSSH();
+        }
+      },
+      // Fetch the identity-key readiness report so the confirm screen can show
+      // the operator exactly which key will be used (or that none was found)
+      // BEFORE a run can fail on a missing key.
+      async provWizLoadSSH() {
+        this.provWiz.sshBusy = true; this.provWiz.sshErr = "";
+        try {
+          this.provWiz.sshStatus = await this.api("/provision/ssh-status", { toast: false });
+        } catch (e) {
+          this.provWiz.sshStatus = null; this.provWiz.sshErr = e.message;
+        } finally { this.provWiz.sshBusy = false; }
       },
       async provWizStart() {
         this.provWiz.busy = true;

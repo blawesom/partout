@@ -651,18 +651,29 @@ users). The wizard turns the 5-step server-side state machine into a focused,
 step-by-step modal so a first-time operator isn't staring at a run table.
 
 Phases (one modal, `provWiz` state): **1 · target** (host + mode) →
-**2 · confirm** (the plan: SSH key source, host-key gate, the five steps
-`connect → preflight → transfer → install → wait-enroll`) →
+**2 · confirm** (the plan: **live SSH-key readiness**, host-key gate, the
+five steps `connect → preflight → transfer → install → wait-enroll`) →
 **3 · live** (polls the run every 2.5 s: state badge, current step, step
 list; a `key_confirm` run shows the fingerprint prominently with
 Confirm/Deny; a terminal run shows the result). On `connected`/`handoff` it
-offers a link straight to the enrolled host. The wizard reuses the existing
-`/provision-runs` endpoints — it adds no backend. The quick form is unchanged.
+offers a link straight to the enrolled host.
+
+The confirm screen's **SSH access** row is dynamic: on entering the phase it
+calls `GET /api/v1/provision/ssh-status` (viewer) and shows exactly what the
+provisioner will use — a conventional file key (`<ssh_dir>/id_ed25519`), the
+ssh-agent fallback, or a red **no identity key found** warning that a run
+will fail until a key is added. This reuses the same `sshutil.IdentityStatus`
+that `partout doctor` and the provisioner's own SSH args use, so the
+operator sees the real outcome, not a guess. The run-lifecycle parts reuse the
+existing `/provision-runs` endpoints; the quick form is unchanged.
 
 Guards: `scripts/ui-smoke.js` (deterministic — drives the Vue instance via
 `window.__partout`, no real SSH: asserts the entry button, target → confirm
-phases, the five-step plan, the key_confirm fingerprint panel with
-Confirm/Deny, the enrolled result + host link, and close).
+phases, the five-step plan, the three SSH-access row variants, the
+key_confirm fingerprint panel with Confirm/Deny, the enrolled result + host
+link, and close). `TestIdentityStatus` / `TestIdentityStatusAgent`
+(`internal/sshutil`) pin the shared key-detection; `TestProvisionREST`
+asserts the `ssh-status` endpoint shape.
 
 ## 22. First-run UI affordances
 

@@ -16,6 +16,7 @@ func (h *Handler) RegisterProvision(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/provision-runs/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetRun)))
 	mux.Handle("POST /api/v1/provision-runs/{id}/key", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleConfirmKey)))
 	mux.Handle("POST /api/v1/provision-runs/{id}/cancel", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleCancelRun)))
+	mux.Handle("GET /api/v1/provision/ssh-status", h.requireRole(roleViewer)(http.HandlerFunc(h.handleSSHStatus)))
 }
 
 // ---- admin: create provisioning run ----------------------------------------
@@ -173,6 +174,21 @@ func (h *Handler) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"action": "cancelled"})
+}
+
+// ---- viewer: ssh identity readiness for provisioning ---------------------
+
+// handleSSHStatus reports the identity keys the provisioner would offer, so
+// the wizard can show the operator what will be used (or that none was
+// found) before starting a run. Read-only; exposes file basenames + a
+// boolean only, never key material.
+func (h *Handler) handleSSHStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.provIsReady() {
+		writeError(w, http.StatusServiceUnavailable, "provisioner_unavailable",
+			"provisioner not yet configured", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.prov.SSHStatus())
 }
 
 // ---- helpers ---------------------------------------------------------------

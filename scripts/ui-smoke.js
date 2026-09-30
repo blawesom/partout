@@ -472,6 +472,19 @@ async function main() {
     await sleep(200);
     check("wizard: confirm phase + plan", d.body.textContent.includes("Step 2 of 3") && d.body.textContent.includes("Start provisioning"), "confirm phase not shown");
     check("wizard: five-step plan listed", /connect → preflight → transfer → install → wait-enroll/.test(d.body.textContent), "step plan not shown");
+    // SSH access row: let the real fetch settle, then assert each render path
+    // with a known value (deterministic — independent of the box's real keys).
+    await sleep(400); // let provWizLoadSSH's real fetch settle
+    inst.provWiz.phase = "confirm"; inst.provWiz.sshBusy = false;
+    inst.provWiz.sshStatus = { ssh_dir: "/smoke/ssh", file_keys: ["id_ed25519"], agent: false };
+    await sleep(150);
+    check("wizard: ssh access row (file key)", d.body.textContent.includes("/smoke/ssh/id_ed25519") && d.body.textContent.includes("conventional key found"), "file-key row not shown");
+    inst.provWiz.sshStatus = { ssh_dir: "/smoke/ssh", file_keys: [], agent: true };
+    await sleep(150);
+    check("wizard: ssh access row (agent)", d.body.textContent.includes("ssh-agent"), "agent row not shown");
+    inst.provWiz.sshStatus = { ssh_dir: "/smoke/ssh", file_keys: [], agent: false };
+    await sleep(150);
+    check("wizard: ssh access row (none found)", d.body.textContent.includes("no identity key found"), "none-found row not shown");
     // inject a key_confirm live run -> fingerprint panel with Confirm/Deny
     inst.provWiz.phase = "live"; inst.provWiz.runId = "pr_wiz";
     inst.provWiz.run = { id: "pr_wiz", host: "smoke@127.0.0.1", mode: "fresh", state: "key_confirm", key_type: "ssh-ed25519", fingerprint: "SHA256:WIZFINGERPRINT123", step: "connect", created: 0, updated: 0 };

@@ -570,6 +570,20 @@ func TestProvisionREST(t *testing.T) {
 		}
 	}
 
+	// ssh-status: the readiness report the wizard shows before start. The temp
+	// ssh dir is empty, so no file keys; assert the shape + the reported dir.
+	var sshSt struct {
+		SSHDir   string   `json:"ssh_dir"`
+		FileKeys []string `json:"file_keys"`
+		Agent    bool     `json:"agent"`
+	}
+	if err := get("/api/v1/provision/ssh-status", &sshSt); err != nil {
+		t.Fatalf("ssh-status: %v", err)
+	}
+	if sshSt.SSHDir != sshDir {
+		t.Errorf("ssh-status ssh_dir = %q, want %q", sshSt.SSHDir, sshDir)
+	}
+
 	// Create a provision run for an untrusted fake host.
 	var created struct {
 		ID    string `json:"id"`

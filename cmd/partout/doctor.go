@@ -21,13 +21,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/config"
+	"github.com/blawesom/partout/internal/sshutil"
 )
 
 type doctorLevel int
@@ -244,19 +244,17 @@ func checkSSHKey(cfg *config.Config, r *doctorResult) {
 		r.add(dwarn, "ssh key", "cannot determine SSH dir (HOME unset?)")
 		return
 	}
-	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
-		p := filepath.Join(sshDir, name)
-		if _, err := os.Stat(p); err == nil {
-			r.add(dok, "ssh key", p+" (host provisioning)")
-			return
-		}
-	}
-	// No conventional file key: the ssh-agent may still have keys.
-	if agentOK() {
+	// Same source of truth the provisioner uses (sshutil.IdentityStatus), so
+	// doctor reports exactly what a run would offer.
+	st := sshutil.Default(sshDir).IdentityStatus()
+	switch {
+	case len(st.FileKeys) > 0:
+		r.add(dok, "ssh key", filepath.Join(sshDir, st.FileKeys[0])+" (host provisioning)")
+	case st.Agent:
 		r.add(dok, "ssh key", "ssh-agent holds a key (no conventional file in "+sshDir+")")
-		return
+	default:
+		r.add(dwarn, "ssh key", "no identity key found for host provisioning (looked for id_ed25519/ecdsa/rsa in "+sshDir+" or the ssh-agent)")
 	}
-	r.add(dwarn, "ssh key", "no identity key found for host provisioning (looked for id_ed25519/ecdsa/rsa in "+sshDir+" or the ssh-agent)")
 }
 
 func checkReleaseKey(cfg *config.Config, r *doctorResult) {
@@ -286,17 +284,6 @@ func probeOutbound(url string, timeout time.Duration) (bool, string) {
 	}
 	res.Body.Close()
 	return true, res.Status
-}
-
-// agentOK reports whether the ssh-agent holds at least one key.
-func agentOK() bool {
-	if os.Getenv("SSH_AUTH_SOCK") == "" {
-		return false
-	}
-	cmd := exec.Command("ssh-add", "-l")
-	cmd.Env = os.Environ()
-	err := cmd.Run()
-	return err == nil
 }
 
 func orAll(s string) string {

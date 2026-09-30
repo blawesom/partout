@@ -90,6 +90,15 @@ func New(st *store.Store, ssh sshutil.Config, serverHost, binaryPath string, em 
 	}
 }
 
+// SSHStatus reports the identity keys this provisioner would offer to a
+// target host (conventional files in SSHDir + the ssh-agent). The wizard's
+// confirm screen surfaces this BEFORE start so the operator sees exactly
+// which key will be used — and that none was found — before a run can fail
+// on a missing key.
+func (p *Provisioner) SSHStatus() sshutil.IdentityStatus {
+	return p.ssh.IdentityStatus()
+}
+
 // stepNames are the five provisioning steps in order.
 var stepNames = []string{"connect", "preflight", "transfer", "install", "wait-enroll"}
 

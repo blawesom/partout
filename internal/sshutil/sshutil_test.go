@@ -281,3 +281,60 @@ func TestHostKeyStripsUserPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestIdentityStatus: the readiness report lists the conventional file keys
+// present in OpenSSH's own order (not the order they were created), and
+// reports "not found" on an empty dir. The ssh-agent is forced off so the
+// file keys are the only variable.
+func TestIdentityStatus(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	empty := t.TempDir()
+	st := Default(empty).IdentityStatus()
+	if st.Found() {
+		t.Fatalf("empty dir should not report a key, got %+v", st)
+	}
+	if st.SSHDir != empty {
+		t.Errorf("SSHDir = %q, want %q", st.SSHDir, empty)
+	}
+
+	withKeys := t.TempDir()
+	// Deliberately written out of OpenSSH order.
+	for _, name := range []string{"id_rsa", "id_ed25519", "id_ecdsa"} {
+		os.WriteFile(filepath.Join(withKeys, name), []byte("fake"), 0o600)
+	}
+	st = Default(withKeys).IdentityStatus()
+	want := []string{"id_ed25519", "id_ecdsa", "id_rsa"}
+	if !st.Found() {
+		t.Fatalf("expected a key, got %+v", st)
+	}
+	if len(st.FileKeys) != len(want) || !equalStrings(st.FileKeys, want) {
+		t.Fatalf("FileKeys = %v, want %v", st.FileKeys, want)
+	}
+}
+
+// TestIdentityStatusAgent: the ssh-agent fallback is detected via a fake
+// ssh-add on PATH, even when no conventional file key is present.
+func TestIdentityStatusAgent(t *testing.T) {
+	bin := t.TempDir()
+	os.WriteFile(filepath.Join(bin, "ssh-add"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_AUTH_SOCK", "/fake/agent.sock")
+
+	st := Default(t.TempDir()).IdentityStatus() // empty dir -> no file keys
+	if !st.Agent || !st.Found() {
+		t.Fatalf("expected the ssh-agent to satisfy Found(), got %+v", st)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
