@@ -321,6 +321,25 @@ async function main() {
   await visit("#/policies");
   check("policies: name", rowsWithText(d, "deny-rm") > 0, "policy name missing");
   check("policies: match chip", rowsWithText(d, "command_regex") > 0, "match not rendered");
+  // Fleet-management preset (first-boot defaults): panel renders, a fresh
+  // server has every default present, deleting one is detected, and
+  // "Apply missing" restores it (idempotent re-apply).
+  check("policies: preset panel", d.body.textContent.includes("Fleet defaults (preset)"), "preset card missing");
+  if (w.__partout && w.__partout.presetStatus) {
+    check("policies: preset defaults all present on a fresh server", w.__partout.presetMissing === 0, "missing=" + w.__partout.presetMissingList);
+    const row = ((w.__partout.presetStatus.policies) || [])[0];
+    if (row) {
+      await realFetch(base + "/api/v1/policies/" + row.id, { method: "DELETE", headers: { Authorization: "Bearer " + token } });
+      w.__partout.loadPreset();
+      await sleep(500);
+      check("policies: deleted default detected as missing", w.__partout.presetMissing >= 1, "missing=" + w.__partout.presetMissing);
+      w.__partout.applyPreset();
+      await sleep(900);
+      check("policies: apply missing restores the default", w.__partout.presetMissing === 0, "still missing=" + w.__partout.presetMissingList);
+    }
+  } else {
+    check("policies: preset status exposed", false, "no window.__partout.presetStatus");
+  }
 
   await visit("#/approvals");
   check("approvals: page renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Approvals"));

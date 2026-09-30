@@ -23,7 +23,8 @@ rails on the way through.
 Partout unifies that loop — **observe → act → verify** — in one place:
 
 - **Safe** — a policy deny-list gates every dispatch; a `require_approval` rule parks the action
-  for a human; the agent re-checks every action locally (fail-closed).
+  for a human; the agent re-checks every action locally (fail-closed). A fresh server boots with a
+  **preset** of sensible safety-net rules + standard alerts (all `default-*`, editable).
 - **Auditable** — every action is an append-only, filterable, exportable audit row.
 - **Verifiable** — the agent continuously reports facts (services, TLS certs, webservice configs,
   resources); a server-side alert engine turns them into firing/resolved alerts.
@@ -113,6 +114,10 @@ PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' ./partout --mode=agent
 ```
 
 The host appears in the **Fleet** page; Observe facts fill in after the first upload.
+
+A fresh server also seeds a fleet-management **preset** (safety-net policies +
+standard alert rules, all named `default-*`) on first boot — review it under
+**Policies** and **Alerts**, or `partout ctl preset show`.
 
 For systemd units, Docker/compose, cloud-init, and Helm, see [docs/deployment.md](docs/deployment.md).
 
