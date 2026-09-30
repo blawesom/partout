@@ -325,6 +325,21 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 [data-tip][data-tip-pos="below"]:focus-visible::after {
   transform: translateX(-50%) translateY(0);
 }
+/* Stale-data banner: shown when the live stream drops after a real
+   connection, so the operator knows the data on screen is no longer live. */
+.stale-banner {
+  background: var(--warning-subtle);
+  border: 1px solid var(--warning);
+  color: #7c2d12;
+  padding: 8px 14px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.sse-stale .tbl,
+.sse-stale .stat {
+  opacity: 0.6;
+}
 
 .err-box {
   background: var(--critical-subtle); border: 1px solid #fecaca; color: #7f1d1d;

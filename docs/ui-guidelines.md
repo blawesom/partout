@@ -374,6 +374,11 @@ tell the operator whether anything executed at all.
 - **One SSE subscription**, `GET /api/v1/events`, established after login, authenticated
   with the session token as `?token=<jwt>` (EventSource cannot set headers). Pages filter
   event kinds; they never open their own stream. No polling, ever.
+- **Stale-data banner.** If the stream drops *after* a real connection (`sseWasConnected`
+  && `sseStatus !== 'connected'`), a persistent **stale banner** appears ("Live updates
+  paused — data may be stale") and the data tables dim (`.sse-stale`). This prevents an
+  operator from acting on a view that looks live but isn't. It only shows after a genuine
+  connection is lost, so there's no flash on initial load.
 - **Event → UI map:**
 
 | Kind | Consumer |

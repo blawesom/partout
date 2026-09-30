@@ -390,7 +390,12 @@
         </div>
       </div>
 
-      <div class="body">
+      <div class="body" :class="{ 'sse-stale': sseWasConnected && sseStatus !== 'connected' }">
+        <div v-if="sseWasConnected && sseStatus !== 'connected'" class="stale-banner">
+          <b>Live updates paused</b> — data on this page may be stale.
+          <template v-if="sseStatus === 'reconnecting'"> Reconnecting…</template>
+          <template v-else> Stream down — check the server.</template>
+        </div>
         <div v-if="userMenu" @click="userMenu=false" style="position:fixed;inset:0;z-index:40;background:rgba(15,23,42,.25)">
           <div style="position:absolute;bottom:70px;left:12px;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px;min-width:180px">
             <div class="nav-item" @click.stop="userMenu=false; go('account')">Account</div>
@@ -1653,7 +1658,7 @@
         me: null, caps: {}, loginForm: { username: "", password: "" },
         loginErr: "", loginBusy: false, userMenu: false,
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
-        sseStatus: "disconnected",
+        sseStatus: "disconnected", sseWasConnected: false,
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
@@ -2023,7 +2028,7 @@
       async afterLogin() { await Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups()]); this.startSSE(); this.loadPageData(); },
       signOut() {
         this.token = ""; localStorage.removeItem(LS_TOKEN); this.me = null;
-        this.stopSSE(); this.sseStatus = "disconnected"; this.go("fleet");
+        this.stopSSE(); this.sseStatus = "disconnected"; this.sseWasConnected = false; this.go("fleet");
       },
       async changePassword() {
         this.pwMsg = ""; this.pwErr = "";
@@ -2045,6 +2050,7 @@
         this._es = es;
         es.onopen = () => {
           this.sseStatus = "connected";
+          this.sseWasConnected = true;
           // Reconcile only on RE-connect: the first open follows the initial
           // page load (mounted/afterLogin already fetched); reloading here
           // would double every list request on every page load.

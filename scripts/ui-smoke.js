@@ -49,6 +49,17 @@ async function main() {
 
   check("shell mounted", !!d.querySelector(".shell"), "no .shell; body=" + d.body.innerHTML.length);
   check("logged in as admin", (d.querySelector(".uname") || {}).textContent === "admin");
+  // Stale banner: simulating a stream drop (after a real connection) must
+  // surface a warning + dim the data, so stale data isn't mistaken for live.
+  if (w.__partout) {
+    const inst = w.__partout;
+    inst.sseWasConnected = true; inst.sseStatus = "reconnecting";
+    await sleep(150);
+    check("stale: banner on stream drop", !!d.querySelector(".stale-banner") && d.body.textContent.includes("Live updates paused"), "no stale banner");
+    check("stale: data dimmed", !!d.querySelector(".body.sse-stale"), "data not dimmed on stale");
+    inst.sseStatus = "connected"; await sleep(100); // restore
+    check("stale: banner cleared on reconnect", !d.querySelector(".stale-banner"), "stale banner persists after reconnect");
+  }
   // Sidebar brand shows the SERVER VERSION (fetched from /api/v1/version),
   // not the listen port.
   let srvVer = "";
