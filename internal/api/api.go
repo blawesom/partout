@@ -32,30 +32,30 @@ import (
 
 // Handler wraps the server-side resources and serves REST endpoints.
 type Handler struct {
-	st          *store.Store
-	ctrl        *control.Control
-	prov        *provision.Provisioner
-	files       *files.Controller
-	pkgs        *packages.Controller
-	tasks       *tasks.Controller
-	jobs        *jobs.Controller
-	approvals   *serverapprovals.Controller
-	oauthC      *oauth.Manager
-	mcpWired    bool // true once HandleMCP registered the /mcp route
-	sess        *sessions.Manager
-	secretsMgr  *serversecrets.Manager
-	extdata     *externaldata.Refresher
-	sse         *sse.Broker
-	log         *log.Logger
-	router      http.Handler   // final router (API mux + SPA static wrapper)
-	mux         *http.ServeMux // the API mux (routes register here, pre-wrapper)
-	auth        *auth
-	authC       *serverauth.Controller // local user identity (PRD Decision 6); nil until set
-	usersActive bool                   // true once the principals table is non-empty
-	ca          *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
-	streamH     *stream.Handler        // stream handler (for mTLS leaf rotation)
-	updatesMgr  *updates.Manager       // M8.1 rollout orchestrator
-	allowUnsigned bool                // M8.1 beta: unsigned releases accepted (PARTOUT_ALLOW_UNSIGNED_RELEASES)
+	st            *store.Store
+	ctrl          *control.Control
+	prov          *provision.Provisioner
+	files         *files.Controller
+	pkgs          *packages.Controller
+	tasks         *tasks.Controller
+	jobs          *jobs.Controller
+	approvals     *serverapprovals.Controller
+	oauthC        *oauth.Manager
+	mcpWired      bool // true once HandleMCP registered the /mcp route
+	sess          *sessions.Manager
+	secretsMgr    *serversecrets.Manager
+	extdata       *externaldata.Refresher
+	sse           *sse.Broker
+	log           *log.Logger
+	router        http.Handler   // final router (API mux + SPA static wrapper)
+	mux           *http.ServeMux // the API mux (routes register here, pre-wrapper)
+	auth          *auth
+	authC         *serverauth.Controller // local user identity (PRD Decision 6); nil until set
+	usersActive   bool                   // true once the principals table is non-empty
+	ca            *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
+	streamH       *stream.Handler        // stream handler (for mTLS leaf rotation)
+	updatesMgr    *updates.Manager       // M8.1 rollout orchestrator
+	allowUnsigned bool                   // M8.1 beta: unsigned releases accepted (PARTOUT_ALLOW_UNSIGNED_RELEASES)
 }
 
 // New builds the REST handler and its router.
