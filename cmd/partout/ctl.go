@@ -53,10 +53,13 @@ commands:
   exec EXEC_ID             show execution detail + output
   audit [--kind K] [--actor A] [--limit N]   show audit log
   policy <list|create|delete>                manage policy deny rules
+  preset <show|apply>      first-boot fleet defaults (safety-net policies + alerts);
+                           apply is idempotent — creates only what is missing
   approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
   alerts <list|rules>                         view alerts + alert rules (M6)
-  provision <new|list|get|key|cancel>        host provisioning (admin)
+  provision <new|list|get|key|cancel>        host provisioning over fleet SSH (admin)
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
+  tls <status|rotate>      mTLS leaf status / rotate agent leaves
   files stat  --agent A --path P             show file metadata
   files list  --agent A --dir D              directory listing
   files upload --agent A --path P --file F  upload a local file (base64) to agent
@@ -66,7 +69,19 @@ commands:
   sessions close <id>                       end a PTY session
   sessions list --agent A                   recent sessions
   sessions replay <id>                      replay recorded PTY chunks
+  secrets <list|create|rotate|revoke>     managed secrets (values write-only)
+  update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
+           release signing + the one-command fleet update (M8.1)
+  packages <updates|apply> --agent A      OS package updates (apt/dnf; dry-run first)
+  tasks <list|create|show|run|runs>       versioned task templates
+  playbooks <list|create|show|delete|run|runs>  multi-host playbooks
+  jobs <list|create|show|delete|run|runs|list-runs>  scheduled jobs (cron, agent-side)
+  external-data <status|refresh|host-eol>   OS end-of-life data
+  db-backup <db> <out>       atomic hot DB snapshot (local; no server round-trip)
   auth login --username U [--password P]    log in; stores the session token
+  help                       this help
+
+(there is also a top-level 'partout selftest' — the embedded pre-install suite)
 `)
 	}
 	fs.Parse(reorderGlobalFlags(args))
