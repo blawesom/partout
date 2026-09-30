@@ -165,7 +165,16 @@
             </select>
           </label>
         </div>
-        <p class="muted small" style="margin-top:8px">{{ provModeHint }}</p>
+        <p class="muted small" style="margin-top:8px">{{ provWizModeHint }}</p>
+        <p v-if="provWizKnownHost" class="small" style="margin-top:6px">
+          <template v-if="provWiz.mode==='fresh'">
+            <span style="color:var(--warning,#d97706);font-weight:600">⚠ {{ provWizKnownHost }} looks already enrolled.</span>
+            <span class="muted"> fresh will stop and remove its existing agent + identity — choose <b>join</b> to preserve it.</span>
+          </template>
+          <template v-else>
+            <span class="muted">ℹ <b class="mono">{{ provWizKnownHost }}</b> looks already enrolled — join updates it in place, preserving its identity.</span>
+          </template>
+        </p>
         <div class="toolbar" style="margin-top:14px">
           <span v-if="!isAdmin" class="muted small">requires admin role</span>
           <div class="spacer"></div>
@@ -1725,6 +1734,27 @@
       },
       provWizModeShort() {
         return this.provWiz.mode === "fresh" ? "clean slate, enroll a brand-new agent" : "in-place update, identity preserved";
+      },
+      // Full guidance for the selected mode (fresh/join), shown in the wizard's
+      // target phase.
+      provWizModeHint() {
+        return this.provWiz.mode === "fresh"
+          ? "fresh — clean slate: stops and removes any existing partout agent + identity on the target, then enrolls a brand-new one. Use for a NEW host."
+          : "join — non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved). Use for an upgrade.";
+      },
+      // Soft hint only: does the target's host part look like an already-
+      // enrolled host? Best-effort hostname/name match; null when no match.
+      provWizKnownHost() {
+        const target = (this.provWiz.host || "").trim();
+        if (!target) return null;
+        const hpart = target.split("@").pop().split(":")[0].toLowerCase();
+        if (!hpart) return null;
+        for (const h of this.hosts) {
+          const name = (h.name || "").toLowerCase();
+          const host = (h.hostname || "").toLowerCase();
+          if (hpart === name || hpart === host) return h.name || h.hostname || h.id;
+        }
+        return null;
       },
       provWizPhaseLabel() {
         return ({ target: "Step 1 of 3 — target", confirm: "Step 2 of 3 — review", live: "Step 3 of 3 — progress" })[this.provWiz.phase] || "";

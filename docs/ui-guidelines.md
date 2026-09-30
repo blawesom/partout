@@ -650,13 +650,24 @@ The Provision page offers two paths: a **guided wizard** (the primary entry,
 users). The wizard turns the 5-step server-side state machine into a focused,
 step-by-step modal so a first-time operator isn't staring at a run table.
 
-Phases (one modal, `provWiz` state): **1 · target** (host + mode) →
+Phases (one modal, `provWiz` state): **1 · target** (host + mode, with live
+mode guidance — see below) →
 **2 · confirm** (the plan: **live SSH-key readiness**, host-key gate, the
 five steps `connect → preflight → transfer → install → wait-enroll`) →
 **3 · live** (polls the run every 2.5 s: state badge, current step, step
 list; a `key_confirm` run shows the fingerprint prominently with
 Confirm/Deny; a terminal run shows the result). On `connected`/`handoff` it
 offers a link straight to the enrolled host.
+
+**Mode guidance (target phase).** The fresh/join choice is the wizard's main
+trap — `fresh` is destructive. The selected mode shows a full one-line
+explanation (`provWizModeHint`). On top of that, a **soft, targeted hint**
+(`provWizKnownHost`) does a best-effort match of the target's host part
+against enrolled hosts: if it looks already enrolled, a warning appears that
+`fresh` will stop and remove its existing agent + identity (choose `join`),
+or a neutral note that `join` updates in place. It deliberately does **not**
+auto-switch the mode — a fuzzy hostname match silently changing a destructive
+default would be worse than a hint. No match → no hint (a genuinely new host).
 
 The confirm screen's **SSH access** row is dynamic: on entering the phase it
 calls `GET /api/v1/provision/ssh-status` (viewer) and shows exactly what the
@@ -669,9 +680,9 @@ existing `/provision-runs` endpoints; the quick form is unchanged.
 
 Guards: `scripts/ui-smoke.js` (deterministic — drives the Vue instance via
 `window.__partout`, no real SSH: asserts the entry button, target → confirm
-phases, the five-step plan, the three SSH-access row variants, the
-key_confirm fingerprint panel with Confirm/Deny, the enrolled result + host
-link, and close). `TestIdentityStatus` / `TestIdentityStatusAgent`
+phases, the mode hint + already-enrolled warning/join hint, the five-step
+plan, the three SSH-access row variants, the key_confirm fingerprint panel
+with Confirm/Deny, the enrolled result + host link, and close). `TestIdentityStatus` / `TestIdentityStatusAgent`
 (`internal/sshutil`) pin the shared key-detection; `TestProvisionREST`
 asserts the `ssh-status` endpoint shape.
 

@@ -467,6 +467,19 @@ async function main() {
     if (startBtn) { startBtn.click(); await sleep(300); }
     check("wizard: target phase", d.body.textContent.includes("Step 1 of 3") && d.body.textContent.includes("Onboard a host"), "target phase not shown");
     check("wizard: host input + continue", !!d.querySelector("input[placeholder='user@host']") && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Continue"), "host input or Continue missing");
+    // Mode guidance: the selected mode's hint is shown (fresh default).
+    check("wizard: mode hint shown", d.body.textContent.includes("clean slate") || d.body.textContent.includes("non-destructive"), "mode hint missing");
+    // Already-enrolled hint: target a host that matches an enrolled one.
+    const enrolledName = (inst.hosts[0] && (inst.hosts[0].hostname || inst.hosts[0].name)) || "";
+    if (enrolledName) {
+      inst.provWiz.host = "root@" + enrolledName; inst.provWiz.mode = "fresh";
+      await sleep(150);
+      check("wizard: already-enrolled warning (fresh)", d.body.textContent.includes("looks already enrolled"), "no already-enrolled hint");
+      inst.provWiz.mode = "join";
+      await sleep(150);
+      check("wizard: join hint for enrolled host", /in place, preserving its identity/.test(d.body.textContent), "no join hint");
+      inst.provWiz.host = "smoke@127.0.0.1"; inst.provWiz.mode = "fresh"; // restore for the rest
+    }
     // advance to confirm
     inst.openProvWizard(); inst.provWiz.host = "smoke@127.0.0.1"; inst.provWizNext();
     await sleep(200);
