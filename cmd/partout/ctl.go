@@ -53,7 +53,7 @@ commands:
   exec EXEC_ID             show execution detail + output
   audit [--kind K] [--actor A] [--limit N]   show audit log
   policy <list|create|delete>                manage policy deny rules
-  preset <show|apply>      first-boot fleet defaults (safety-net policies + alerts);
+  preset <show|status|apply> first-boot fleet defaults (safety-net policies + alerts);
                            apply is idempotent — creates only what is missing
   approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
   alerts <list|rules>                         view alerts + alert rules (M6)
@@ -69,12 +69,12 @@ commands:
   sessions close <id>                       end a PTY session
   sessions list --agent A                   recent sessions
   sessions replay <id>                      replay recorded PTY chunks
-  secrets <list|create|rotate|revoke>     managed secrets (values write-only)
+  secrets <list|create|rotate|revoke|delete>   managed secrets (values write-only)
   update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
            release signing + the one-command fleet update (M8.1)
-  packages <updates|apply> --agent A      OS package updates (apt/dnf; dry-run first)
-  tasks <list|create|show|run|runs>       versioned task templates
-  playbooks <list|create|show|delete|run|runs>  multi-host playbooks
+  packages <updates|apply|actions> --agent A  OS package updates (apt/dnf; dry-run first)
+  tasks <list|create|show|run|runs|run-show>   versioned task templates
+  playbooks <list|create>      multi-host playbooks (run them via 'tasks run')
   jobs <list|create|show|delete|run|runs|list-runs>  scheduled jobs (cron, agent-side)
   external-data <status|refresh|host-eol>   OS end-of-life data
   db-backup <db> <out>       atomic hot DB snapshot (local; no server round-trip)
