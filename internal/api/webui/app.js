@@ -315,7 +315,7 @@
       <div class="brand">
         <div class="logo">P</div>
         <div><div class="word">Partout</div><div class="sub">Fleet Management</div></div>
-        <div class="port" v-if="serverVersion" :title="'server ' + serverVersion">{{ serverVersion }}</div>
+        <div class="port" v-if="serverVersion" tabindex="0" :data-tip="'server ' + serverVersion">{{ serverVersion }}</div>
       </div>
       <nav class="nav">
         <template v-for="g in navGroups()" :key="g.key">
@@ -368,7 +368,7 @@
         <button class="btn sm ghost palette-btn" @click="openPalette" title="Jump to a page or host (⌘K / Ctrl-K)">
           <span class="kbd">⌘K</span> Jump to…
         </button>
-        <div class="sse-dot" :title="'stream: /api/v1/events — ' + sseStatus">
+        <div class="sse-dot" data-tip-pos="below" :data-tip="'stream: /api/v1/events — ' + sseStatus">
           <span class="dot" :class="sseDot"></span>{{ sseStatus }}
         </div>
       </div>
@@ -903,7 +903,7 @@
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
             </select>
             <button class="btn sm" @click="loadUpdates">Refresh</button>
-            <span class="ext-status" :class="{ 'ext-err': extStatus && extStatus.last_error, 'ext-stale': extStatus && !extStatus.last_error && (Date.now()/1000 - (extStatus.last_at||0) > 86400) }" :title="extStatus ? 'last refresh: ' + (extStatus.last_at ? new Date(extStatus.last_at*1000).toLocaleString() : 'never') + (extStatus.last_error ? ' — ' + extStatus.last_error : '') : 'unknown'">
+            <span class="ext-status" :class="{ 'ext-err': extStatus && extStatus.last_error, 'ext-stale': extStatus && !extStatus.last_error && (Date.now()/1000 - (extStatus.last_at||0) > 86400) }" :data-tip="extStatus ? 'last refresh: ' + (extStatus.last_at ? new Date(extStatus.last_at*1000).toLocaleString() : 'never') + (extStatus.last_error ? ' — ' + extStatus.last_error : '') : 'unknown'">
               EOL data: {{ extStatus ? (extStatus.last_at ? 'updated ' + fmtAgo(extStatus.last_at) : 'never') : '…' }}{{ extStatus && extStatus.last_error ? ' ⚠' : '' }}
             </span>
             <button v-if="isAdmin" class="btn sm" :disabled="!!extBusy" @click="refreshExtData"><span v-if="extBusy" class="spin"></span> Refresh EOL data</button>
@@ -995,7 +995,7 @@
                     <td class="mono">{{ r.arch }}</td>
                     <td>{{ r.kind }}</td>
                     <td class="mono" :title="r.sha256">{{ (r.sha256 || '').slice(0, 12) }}…</td>
-                    <td><span v-if="r.signature" class="badge ok">signed</span><span v-else class="badge warn" title="beta: no signature — keyless agents apply on sha256 integrity alone">unsigned (beta)</span></td>
+                    <td><span v-if="r.signature" class="badge ok">signed</span><span v-else class="badge warn" data-tip="beta: no signature — keyless agents apply on sha256 integrity alone">unsigned (beta)</span></td>
                     <td class="muted">{{ fmtBytes(r.size) }}</td>
                     <td class="muted">{{ fmtAgo(r.created) }}</td>
                     <td class="muted">{{ r.uploaded_by || '—' }}</td>

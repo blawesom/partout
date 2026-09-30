@@ -55,6 +55,10 @@ async function main() {
   try { const j = await (await realFetch(base + "/api/v1/version")).json(); srvVer = j.version || ""; } catch (e) { srvVer = ""; }
   const brandPort = ((d.querySelector(".brand .port") || {}).textContent || "").trim();
   check("sidebar: server version in brand", srvVer !== "" && brandPort === srvVer, "brand=" + JSON.stringify(brandPort) + " expected=" + srvVer);
+  const portEl = d.querySelector(".port");
+  check("sidebar: brand version has data-tip", !!portEl && portEl.hasAttribute("data-tip"), "no data-tip on brand version");
+  const sseDot = d.querySelector(".sse-dot");
+  check("topbar: sse dot has data-tip", !!sseDot && sseDot.hasAttribute("data-tip"), "no data-tip on sse dot");
 
   // Global toast system: drive notify() and assert a toast renders.
   const inst = w.__partout;
@@ -251,6 +255,7 @@ async function main() {
   check("updates: apply button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Apply")), "no Apply button");
   check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
   check("updates: EOL data status + refresh", d.body.textContent.includes("EOL data:") && [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Refresh EOL data")), "ext-data controls missing");
+  check("updates: EOL status has data-tip", !!d.querySelector(".ext-status[data-tip]"), "no data-tip on ext-status");
 
   // M5.1: fleet CVE security scan card + "Scan now" (real apt/dnf list +
   // OSV correlation in the harness; assert a host row appears, not which
@@ -306,6 +311,7 @@ async function main() {
     const okBadge = [...d.querySelectorAll(".badge.ok")].some((b) => b.textContent.trim() === "signed");
     const warnBadge = [...d.querySelectorAll(".badge.warn")].some((b) => b.textContent.trim() === "unsigned (beta)");
     check("releases: trust column + badges", d.body.textContent.includes("Trust") && okBadge && warnBadge, "trust column or badges missing");
+    check("releases: unsigned badge has data-tip", !!d.querySelector(".badge.warn[data-tip]"), "no data-tip on unsigned badge");
   }
   // M8.1 step 3: rollout runs tab. Start a run at the smoke release via the
   // API; the embedded agent (no release key) refuses, so the run lands on

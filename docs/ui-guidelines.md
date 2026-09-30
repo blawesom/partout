@@ -708,3 +708,24 @@ Guards: `scripts/ui-smoke.js` (checklist: clears `hosts` on the fleet page →
 asserts the card + the primary onboarding CTA → `dismissGettingStarted()` →
 asserts it is gone; login hint: clears `token` to render the logged-out view → asserts
 the hint → restores `token` → asserts the shell returns).
+
+## 23. Tooltip mechanism (`data-tip`)
+
+A lightweight, focus-capable tooltip for **non-clipped** elements (spans,
+badges, the sidebar brand). `data-tip` + CSS shows the text on hover **and**
+keyboard focus (`:focus-visible`) — the native `title=` only covers hover for
+mouse users. Long text wraps (max-width 280px); `data-tip-pos="below"` flips
+it under the element for topbar items near the top edge.
+
+Migrated: sidebar server version, the SSE status dot, the EOL/external-data
+status chip, and the “unsigned (beta)” release badge. A `tabindex` is added
+where the element wasn’t otherwise focusable so keyboard users can reach it.
+
+**Deliberate ceiling.** The highest-value cases — truncated table cells
+(`sha256`, errors, step output) — use `overflow:hidden`, which **clips** a CSS
+`::after` tooltip, so they keep native `title=` (works on hover). `<option>`
+mode hints also stay native (CSS can’t reach select options); their guidance
+is already inline text. A body-ported JS tooltip that escapes clipping for
+those cells + the remaining `title=` sites is a **follow-up**, not part of
+this release. The mechanism + these four clean wins ship now; the rest is
+explicitly deferred.

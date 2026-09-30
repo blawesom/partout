@@ -282,6 +282,50 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 .gs-link { cursor: pointer; text-decoration: underline; color: var(--brand); margin-left: 6px; font-weight: 500; }
 .gs-link:hover { color: #1d4ed8; }
 
+/* Lightweight tooltip: shows on hover AND keyboard focus (focus-visible),
+   wrapping long text. Use on non-clipped elements (spans, badges, the
+   sidebar brand). For cells whose content is truncated with overflow:hidden
+   (sha256, errors, step output) the native title= is kept instead — a CSS
+   ::after tooltip would be clipped by the cell. A body-ported JS tooltip for
+   those is a follow-up. */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  background: var(--text);
+  color: #fff;
+  padding: 5px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.4;
+  width: max-content;
+  max-width: 280px;
+  white-space: normal;
+  text-align: left;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease, transform .12s ease;
+  z-index: 300;
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+/* data-tip-pos="below": for elements near the top edge (e.g. the topbar). */
+[data-tip][data-tip-pos="below"]::after {
+  bottom: auto;
+  top: calc(100% + 7px);
+  transform: translateX(-50%) translateY(-2px);
+}
+[data-tip][data-tip-pos="below"]:hover::after,
+[data-tip][data-tip-pos="below"]:focus-visible::after {
+  transform: translateX(-50%) translateY(0);
+}
+
 .err-box {
   background: var(--critical-subtle); border: 1px solid #fecaca; color: #7f1d1d;
   border-radius: var(--radius-ctrl); padding: 10px 14px; font-size: 13px; margin-bottom: 14px;
