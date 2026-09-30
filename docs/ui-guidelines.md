@@ -697,12 +697,14 @@ Two small surfaces make a brand-new server self-explanatory:
   view (always, since a first-run operator has no other reference).
 - **Fleet page — getting-started checklist.** A dismissible card shown only
   while the fleet is empty (`!hosts.length`, not just filtered/scoped) and not
-  yet dismissed. Three steps: onboard the first host (→ Provision), review the
-  preset-seeded guardrails (→ Policies / Alerts), keep the fleet current (→
-  Updates). Dismissal is persisted per-browser in `localStorage`
-  (`partout.gs.dismissed`) so it does not reappear.
+  yet dismissed. Three numbered steps with clear hierarchy: **1 · onboard the
+  first host** is the primary action (a highlighted row + primary
+  “Start onboarding →” button → Provision); **2 · review the default
+  guardrails** (→ Policies / Alerts) and **3 · keep the fleet current** (→
+  Updates) are secondary links. Dismissal is persisted per-browser in
+  `localStorage` (`partout.gs.dismissed`) so it does not reappear.
 
 Guards: `scripts/ui-smoke.js` (checklist: clears `hosts` on the fleet page →
-asserts the card + onboarding link → `dismissGettingStarted()` → asserts it
-is gone; login hint: clears `token` to render the logged-out view → asserts
+asserts the card + the primary onboarding CTA → `dismissGettingStarted()` →
+asserts it is gone; login hint: clears `token` to render the logged-out view → asserts
 the hint → restores `token` → asserts the shell returns).

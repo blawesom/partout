@@ -158,7 +158,7 @@ async function main() {
     w.__partout.hosts = []; w.__partout.hostsLoading = false; w.__partout.gsDismissed = false;
     await sleep(250);
     check("fleet: getting-started on empty fleet", !!d.querySelector(".gs-card") && d.body.textContent.includes("Get started"), "checklist not shown on empty fleet");
-    check("fleet: checklist onboarding link", [...d.querySelectorAll(".gs-link")].some((a) => a.textContent.includes("Start onboarding")), "onboarding link missing");
+    check("fleet: checklist primary CTA", [...d.querySelectorAll(".gs-primary button.btn.primary")].some((b) => b.textContent.includes("Start onboarding")), "primary onboarding CTA missing");
     w.__partout.dismissGettingStarted();
     await sleep(250);
     check("fleet: checklist dismissible", !d.querySelector(".gs-card"), "checklist still shown after dismiss");

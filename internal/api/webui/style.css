@@ -278,6 +278,7 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 .empty .big { font-size: 30px; margin-bottom: 8px; opacity: 0.5; }
 .gs-steps { margin: 4px 0 6px; padding-left: 20px; display: flex; flex-direction: column; gap: 9px; }
 .gs-steps li { line-height: 1.55; }
+.gs-steps .gs-primary { background: var(--brand-subtle); margin: 0 -8px; padding: 8px; border-radius: 8px; }
 .gs-link { cursor: pointer; text-decoration: underline; color: var(--brand); margin-left: 6px; font-weight: 500; }
 .gs-link:hover { color: #1d4ed8; }
 

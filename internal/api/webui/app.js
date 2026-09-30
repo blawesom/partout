@@ -397,11 +397,11 @@
               <button class="btn sm" @click="dismissGettingStarted()" aria-label="dismiss">✕</button>
             </div>
             <ol class="gs-steps">
-              <li><b>Onboard your first host</b> — over your existing SSH (guided wizard) or a one-time token.
-                <a @click.prevent="go('provision')" class="gs-link">Start onboarding →</a></li>
-              <li><b>Review the default guardrails</b> — the preset seeded safety-net policies and alert rules on first run.
+              <li class="gs-primary"><b>1 · Onboard your first host</b> — over your existing SSH (guided wizard) or a one-time token.
+                <button class="btn primary sm" style="margin-left:8px" @click="go('provision')">Start onboarding →</button></li>
+              <li><b>2 · Review the default guardrails</b> — the preset seeded safety-net policies and alert rules on first run.
                 <a @click.prevent="go('policies')" class="gs-link">Policies</a><span class="muted"> · </span><a @click.prevent="go('obs-alerts')" class="gs-link">Alerts</a></li>
-              <li><b>Keep the fleet current</b> — upload a release and roll it out.
+              <li><b>3 · Keep the fleet current</b> — upload a release and roll it out.
                 <a @click.prevent="go('updates')" class="gs-link">Updates</a></li>
             </ol>
           </div>
