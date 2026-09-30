@@ -177,6 +177,17 @@ Exit 0 = runnable (warnings allowed), 1 = a hard failure. Intended as
 `partout doctor && ./partout`. (Companion work: cleaner first-run output +
 embedded-mode error surfacing are tracked separately.)
 
+### Onboarding: guided SSH provisioning wizard
+
+The Provision page's quick "New run" form assumed you already knew the flow.
+The **onboarding wizard** ("Start onboarding →") makes first-time host
+onboarding a guided, three-step modal: **target** (host + mode) →
+**confirm** (the plan — SSH key source, the host-key confirmation gate, the
+five steps) → **live** (polls the run; surfaces the `key_confirm` fingerprint
+with Confirm/Deny; links to the enrolled host on success). It reuses the
+existing `/provision-runs` endpoints (no backend change) and leaves the quick
+form for power users. See `docs/ui-guidelines.md` §21.
+
 ### M6 — Observe: alert engine (shipped)
 
 Done (R23/R25 — the engine that makes observe data actionable; PRD Decision 16: server-side only):

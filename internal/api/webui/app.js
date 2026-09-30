@@ -143,6 +143,105 @@
       </div>
     </div>
   </div>
+  <!-- ============ ONBOARD WIZARD (guided SSH provisioning) ============ -->
+  <div class="overlay" v-if="provWiz.open && loggedIn" @click.self="provWizClose()">
+    <div class="dialog card" style="max-width:660px">
+      <div class="head">
+        <h2>Onboard a host</h2>
+        <span class="muted small" style="margin-left:12px">{{ provWizPhaseLabel }}</span>
+        <div class="spacer"></div>
+        <button class="btn sm" @click="provWizClose()" aria-label="close">✕</button>
+      </div>
+
+      <!-- PHASE: target -->
+      <div v-if="provWiz.phase==='target'">
+        <p class="cap">Bring a Linux host under management over your existing SSH access.</p>
+        <div class="form-row" style="align-items:flex-end">
+          <label class="fld" style="flex:1"><span>Host</span><input v-model="provWiz.host" class="mono" placeholder="user@host" @keyup.enter="provWizNext()" /></label>
+          <label class="fld" style="max-width:220px"><span>Mode</span>
+            <select v-model="provWiz.mode">
+              <option value="fresh">fresh — new agent</option>
+              <option value="join">join — update existing</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted small" style="margin-top:8px">{{ provModeHint }}</p>
+        <div class="toolbar" style="margin-top:14px">
+          <span v-if="!isAdmin" class="muted small">requires admin role</span>
+          <div class="spacer"></div>
+          <button class="btn sm" @click="provWizClose()">Cancel</button>
+          <button class="btn primary sm" :disabled="!isAdmin || !provWiz.host.trim()" @click="provWizNext()">Continue</button>
+        </div>
+      </div>
+
+      <!-- PHASE: confirm -->
+      <div v-else-if="provWiz.phase==='confirm'">
+        <p class="cap">Confirm the onboarding plan for <b class="mono">{{ provWiz.host }}</b>.</p>
+        <table class="tbl">
+          <tbody>
+            <tr><td class="muted" style="width:130px">Target</td><td class="mono">{{ provWiz.host }}</td></tr>
+            <tr><td class="muted">Mode</td><td>{{ provWiz.mode }} <span class="muted small">— {{ provWizModeShort }}</span></td></tr>
+            <tr><td class="muted">SSH access</td><td>your existing <span class="mono">~/.ssh</span> — no credentials are created or stored</td></tr>
+            <tr><td class="muted">Host key</td><td>a new key pauses for your confirmation first (no silent TOFU)</td></tr>
+            <tr><td class="muted">Steps</td><td class="mono small">connect → preflight → transfer → install → wait-enroll</td></tr>
+          </tbody>
+        </table>
+        <div class="toolbar" style="margin-top:14px">
+          <div class="spacer"></div>
+          <button class="btn sm" @click="provWiz.phase='target'">Back</button>
+          <button class="btn primary sm" :disabled="!!provWiz.busy" @click="provWizStart()"><span v-if="provWiz.busy" class="spin"></span>Start provisioning</button>
+        </div>
+      </div>
+
+      <!-- PHASE: live -->
+      <div v-else-if="provWiz.phase==='live' && provWiz.run">
+        <div class="toolbar">
+          <span class="badge" :class="provBadge(provWiz.run.state).cls" style="font-size:13px">{{ provBadge(provWiz.run.state).label }}</span>
+          <span class="mono muted small">{{ provWiz.run.host }} · {{ provWiz.run.mode }}</span>
+          <span v-if="provWiz.run.step && !provTerminal(provWiz.run.state)" class="muted small">→ {{ provWiz.run.step }}</span>
+        </div>
+
+        <div v-if="provWiz.run.state==='key_confirm'" class="info-box" style="margin-top:12px;border-left:3px solid var(--warn,#d97706)">
+          <div style="font-weight:600">New host key — confirm to continue</div>
+          <div class="mono" style="margin:8px 0;word-break:break-all">{{ provWiz.run.key_type || '' }} {{ provWiz.run.fingerprint }}</div>
+          <p class="muted small" style="margin:0 0 10px">Verify this fingerprint out-of-band before confirming.</p>
+          <button class="btn ok sm" @click="provWizKey('confirm')">Confirm key</button>
+          <button class="btn danger sm" @click="provWizKey('deny')">Deny</button>
+        </div>
+
+        <div v-if="provWiz.run.error" class="err-box" style="margin-top:12px">{{ provWiz.run.error }}</div>
+
+        <table class="tbl" style="margin-top:12px">
+          <thead><tr><th>#</th><th>Step</th><th>State</th><th>Output excerpt</th></tr></thead>
+          <tbody>
+            <tr v-for="s in provWiz.steps" :key="s.seq">
+              <td class="mono">{{ s.seq }}</td><td class="mono">{{ s.name }}</td>
+              <td><span class="badge" :class="provStepBadge(s.state)">{{ s.state }}</span></td>
+              <td class="mono small" style="max-width:300px;overflow:hidden;text-overflow:ellipsis" :title="s.stderr_excerpt || s.stdout_excerpt">{{ s.stderr_excerpt || s.stdout_excerpt || '—' }}</td>
+            </tr>
+            <tr v-if="!(provWiz.steps||[]).length"><td colspan="4" class="muted">Connecting…</td></tr>
+          </tbody>
+        </table>
+
+        <div v-if="provTerminal(provWiz.run.state)" class="info-box" style="margin-top:12px">
+          <template v-if="provWiz.run.state==='connected' || provWiz.run.state==='handoff'">
+            <b>Host enrolled.</b>
+            <a v-if="provWiz.run.agent_id" @click.prevent="provWizOpenHost()" class="mono" style="margin-left:6px">{{ provWiz.run.agent_id }}</a>
+            <span v-if="provWiz.run.agent_id"> → open in Fleet</span>
+          </template>
+          <template v-else-if="provWiz.run.state==='failed'">Provisioning failed — see the error above.</template>
+          <template v-else-if="provWiz.run.state==='cancelled'">Provisioning cancelled.</template>
+        </div>
+
+        <div class="toolbar" style="margin-top:14px">
+          <button v-if="!provTerminal(provWiz.run.state)" class="btn danger sm" @click="provWizCancel()">Cancel run</button>
+          <div class="spacer"></div>
+          <button v-if="provTerminal(provWiz.run.state)" class="btn primary sm" @click="provWizClose()">Close</button>
+          <button v-else class="btn sm" @click="provWizClose()">Minimize</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <!-- ============ COMMAND PALETTE (⌘K / Ctrl-K) ============ -->
   <div class="overlay palette-overlay" v-if="paletteOpen && loggedIn" @click.self="closePalette()">
     <div class="dialog card palette">
@@ -1088,6 +1187,14 @@
         <section v-else-if="page==='provision'">
           <h1 class="page">Provision</h1>
           <p class="page-sub">Server-initiated host onboarding over the operator's fleet SSH (R17, admin). A new host key pauses the run at <span class="mono">key_confirm</span> until an admin confirms the fingerprint (no silent TOFU).</p>
+          <div class="card" style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
+            <div style="flex:1">
+              <b>Onboard a host (guided)</b>
+              <p class="muted small" style="margin:2px 0 0">Step-by-step: pick the target, review the plan, watch the five steps, confirm the host key.</p>
+            </div>
+            <button class="btn primary" :disabled="!isAdmin" @click="openProvWizard()">Start onboarding →</button>
+            <span v-if="!isAdmin" class="muted small">requires admin role</span>
+          </div>
           <div class="card" style="margin-bottom:12px">
             <div class="head"><h2>New run</h2><p class="cap">Uses the operator's existing <span class="mono">~/.ssh</span>; no credentials are created or persisted.</p></div>
             <div class="toolbar">
@@ -1507,6 +1614,7 @@
         addHostOpen: false, addHostTab: "manual",
         ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
         provRuns: [],
+        provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], timer: null },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
@@ -1574,6 +1682,12 @@
         return this.provMode === "fresh"
           ? "fresh: clean slate — stops and removes any existing partout agent + identity on the host, then enrolls a brand-new agent. Use for new hosts or a reset."
           : "join: non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved). Use for upgrades.";
+      },
+      provWizModeShort() {
+        return this.provWiz.mode === "fresh" ? "clean slate, enroll a brand-new agent" : "in-place update, identity preserved";
+      },
+      provWizPhaseLabel() {
+        return ({ target: "Step 1 of 3 — target", confirm: "Step 2 of 3 — review", live: "Step 3 of 3 — progress" })[this.provWiz.phase] || "";
       },
       initials() { return (this.me?.username || "?").slice(0, 2).toUpperCase(); },
       sseDot() { return this.sseStatus === "connected" ? "ok" : this.sseStatus === "reconnecting" ? "warn" : "down"; },
@@ -2252,6 +2366,49 @@
           this.provHost = "";
           this.loadProvRuns();
         } catch (e) { this.provMsg = "Provision failed: " + e.message; } finally { this.provBusy = false; }
+      },
+      // --- Onboarding wizard (guided SSH provisioning) ---
+      openProvWizard() {
+        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], timer: null };
+      },
+      provWizClose() {
+        if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
+        const hadRun = !!this.provWiz.runId;
+        this.provWiz.open = false;
+        if (hadRun) this.loadProvRuns();
+      },
+      provWizNext() {
+        if (this.provWiz.phase === "target" && this.provWiz.host.trim()) this.provWiz.phase = "confirm";
+      },
+      async provWizStart() {
+        this.provWiz.busy = true;
+        try {
+          const d = await this.api("/provision-runs", { method: "POST", body: { host: this.provWiz.host.trim(), mode: this.provWiz.mode } });
+          this.provWiz.runId = d.id;
+          this.provWiz.phase = "live";
+          await this.provWizRefresh();
+          if (!this.provWiz.timer) this.provWiz.timer = setInterval(() => this.provWizRefresh(), 2500);
+        } catch (e) { this.notify("err", "provision start failed: " + e.message); } finally { this.provWiz.busy = false; }
+      },
+      async provWizRefresh() {
+        if (!this.provWiz.runId) return;
+        try {
+          const d = await this.api("/provision-runs/" + encodeURIComponent(this.provWiz.runId), { toast: false });
+          this.provWiz.run = d.run; this.provWiz.steps = d.steps || [];
+          if (d.run && this.provTerminal(d.run.state) && this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
+        } catch (e) { /* keep last state on a transient error */ }
+      },
+      async provWizKey(action) {
+        try { await this.api("/provision-runs/" + encodeURIComponent(this.provWiz.runId) + "/key", { method: "POST", body: { action } }); await this.provWizRefresh(); } catch (e) { this.notify("err", e.message); }
+      },
+      async provWizCancel() {
+        if (!confirm("Cancel this provisioning run?")) return;
+        try { await this.api("/provision-runs/" + encodeURIComponent(this.provWiz.runId) + "/cancel", { method: "POST" }); await this.provWizRefresh(); } catch (e) { this.notify("err", e.message); }
+      },
+      provWizOpenHost() {
+        const id = this.provWiz.run && this.provWiz.run.agent_id;
+        this.provWizClose();
+        if (id) this.go("host/" + id);
       },
       async decideProvKey(id, action) {
         const run = this.provRuns.find(r => r.id === id);

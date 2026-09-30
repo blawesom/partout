@@ -642,3 +642,24 @@ duplicating it:
 Guards: `scripts/ui-smoke.js` (injects a connected run + host via
 `window.__partout` → asserts the chip renders → click → asserts hash
 navigation to the host page).
+
+## 21. Onboarding wizard (Provision)
+
+The Provision page offers two paths: a **guided wizard** (the primary entry,
+"Start onboarding →") and the pre-existing quick **New run** form (power
+users). The wizard turns the 5-step server-side state machine into a focused,
+step-by-step modal so a first-time operator isn't staring at a run table.
+
+Phases (one modal, `provWiz` state): **1 · target** (host + mode) →
+**2 · confirm** (the plan: SSH key source, host-key gate, the five steps
+`connect → preflight → transfer → install → wait-enroll`) →
+**3 · live** (polls the run every 2.5 s: state badge, current step, step
+list; a `key_confirm` run shows the fingerprint prominently with
+Confirm/Deny; a terminal run shows the result). On `connected`/`handoff` it
+offers a link straight to the enrolled host. The wizard reuses the existing
+`/provision-runs` endpoints — it adds no backend. The quick form is unchanged.
+
+Guards: `scripts/ui-smoke.js` (deterministic — drives the Vue instance via
+`window.__partout`, no real SSH: asserts the entry button, target → confirm
+phases, the five-step plan, the key_confirm fingerprint panel with
+Confirm/Deny, the enrolled result + host link, and close).

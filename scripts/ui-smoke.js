@@ -443,6 +443,37 @@ async function main() {
     await visit("#/provision");
   }
 
+  if (w.__partout) {
+    const inst = w.__partout;
+    // --- Onboarding wizard: target -> confirm -> live (deterministic, no SSH) ---
+    await visit("#/provision");
+    const startBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("Start onboarding"));
+    check("provision: guided onboarding entry", !!startBtn, "no 'Start onboarding' button");
+    if (startBtn) { startBtn.click(); await sleep(300); }
+    check("wizard: target phase", d.body.textContent.includes("Step 1 of 3") && d.body.textContent.includes("Onboard a host"), "target phase not shown");
+    check("wizard: host input + continue", !!d.querySelector("input[placeholder='user@host']") && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Continue"), "host input or Continue missing");
+    // advance to confirm
+    inst.openProvWizard(); inst.provWiz.host = "smoke@127.0.0.1"; inst.provWizNext();
+    await sleep(200);
+    check("wizard: confirm phase + plan", d.body.textContent.includes("Step 2 of 3") && d.body.textContent.includes("Start provisioning"), "confirm phase not shown");
+    check("wizard: five-step plan listed", /connect → preflight → transfer → install → wait-enroll/.test(d.body.textContent), "step plan not shown");
+    // inject a key_confirm live run -> fingerprint panel with Confirm/Deny
+    inst.provWiz.phase = "live"; inst.provWiz.runId = "pr_wiz";
+    inst.provWiz.run = { id: "pr_wiz", host: "smoke@127.0.0.1", mode: "fresh", state: "key_confirm", key_type: "ssh-ed25519", fingerprint: "SHA256:WIZFINGERPRINT123", step: "connect", created: 0, updated: 0 };
+    inst.provWiz.steps = [{ seq: 1, name: "connect", state: "running" }];
+    await sleep(250);
+    check("wizard: live phase state badge", d.body.textContent.includes("Step 3 of 3"), "live phase not shown");
+    check("wizard: fingerprint shown", d.body.textContent.includes("SHA256:WIZFINGERPRINT123"), "fingerprint not shown");
+    check("wizard: confirm/deny actions", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Confirm key")) && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Deny"), "Confirm/Deny missing");
+    // terminal connected -> host enrolled + link
+    inst.provWiz.run = { ...inst.provWiz.run, state: "connected", agent_id: "ag_wiz" };
+    await sleep(200);
+    check("wizard: enrolled result + host link", d.body.textContent.includes("Host enrolled.") && d.body.textContent.includes("ag_wiz"), "enrolled result not shown");
+    inst.provWizClose();
+    await sleep(200);
+    check("wizard: closed", !d.body.textContent.includes("Step 1 of 3"), "wizard did not close");
+  }
+
   await visit("#/obs-services", 1600);
   check("observe services: real unit",
     [...d.querySelectorAll("table.tbl tr")].some((tr) => /\.service|acme-serve|ssh|snap/.test(tr.textContent)),
