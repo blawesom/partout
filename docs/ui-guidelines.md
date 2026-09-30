@@ -386,6 +386,10 @@ tell the operator whether anything executed at all.
   reads as “loading”, not “nothing here”. On a reconnect the data is already
   present, so the indicator never flashes. Empty states render only once data
   has loaded.
+- **Actionable empty states.** When an empty list is something the operator can
+  create, the empty state offers a primary CTA that opens the create form
+  (Jobs → “+ New job”, Tasks → “Create task”, Alerts rules → “+ New rule”).
+  System-generated lists (alerts, audit, sessions) stay informational.
 - **Event → UI map:**
 
 | Kind | Consumer |

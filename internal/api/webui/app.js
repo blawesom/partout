@@ -742,7 +742,7 @@
                     <button class="btn danger sm" :disabled="!isOperator" @click="deleteJob(j)">Delete</button>
                   </td>
                 </tr>
-                <tr v-if="!jobs.length && !pageLoading"><td colspan="7"><div class="empty">No jobs.</div></td></tr>
+                <tr v-if="!jobs.length && !pageLoading"><td colspan="7"><div class="empty"><div class="big">▦</div>No jobs.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="newJobForm()">+ New job</button></div></div></td></tr>
               </tbody>
             </table>
 
@@ -854,7 +854,7 @@
                     <td class="mono">{{ t.id }}</td><td>{{ t.name }}</td><td class="muted">{{ t.description || '—' }}</td>
                     <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runTask(t)">Run…</button></td>
                   </tr>
-                  <tr v-if="!tasks.length && !pageLoading"><td colspan="4"><div class="empty">No tasks.</div></td></tr>
+                  <tr v-if="!tasks.length && !pageLoading"><td colspan="4"><div class="empty"><div class="big">▦</div>No tasks.<div style="margin-top:10px"><button class="btn sm" :disabled="!isOperator" @click="openTaskForm()">Create task</button></div></div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -1559,7 +1559,7 @@
                       <button class="btn danger sm" :disabled="!isOperator" @click="deleteRule(r.id)">Delete</button>
                     </td>
                   </tr>
-                  <tr v-if="!rules.length && !pageLoading"><td colspan="7"><div class="empty">No alert rules.</div></td></tr>
+                  <tr v-if="!rules.length && !pageLoading"><td colspan="7"><div class="empty"><div class="big">⚠</div>No alert rules.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="newRuleForm()">+ New rule</button></div></div></td></tr>
                 </tbody>
               </table>
 

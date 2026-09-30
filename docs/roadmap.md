@@ -208,6 +208,32 @@ provisioner's own SSH args. See `docs/ui-guidelines.md` §21.
   errors (bad syntax, unknown group) are still logged. Guarded by
   `TestEmptyFleetTickSilent`.
 
+### Web UI: operator-trust pass (confirm dialog, staleness, loading, CTAs)
+
+Four UX fixes aimed at the moments where the UI previously misled an operator:
+
+- **Shared confirm dialog** replaces all 15 native `confirm()` calls. Destructive
+  actions get a styled modal with the exact target (mono) and a type-to-confirm
+  guard for the highest-stakes ones (Remove host, Delete release, Delete
+  secret/user). The provision host-key confirm now shows the fingerprint
+  prominently instead of `\n`-text in a native dialog. `Esc`/Cancel cancels.
+- **Stale-data banner.** When the live stream drops after a real connection, a
+  banner warns “data may be stale” and the tables dim — so an operator never
+  acts on a view that looks live but isn't. No flash on initial load.
+- **Consistent loading states.** `loadPageData` sets a `pageLoading` flag; while
+  a page's data is loading *and* empty, a “Loading…” indicator shows and the
+  empty state is suppressed — an empty table during first load no longer reads
+  as “nothing here”. On reconnect the data is present, so it never flashes.
+- **Actionable empty states.** Create-able lists offer a primary CTA in their
+  empty state (Jobs → New job, Tasks → Create task, rules → New rule).
+
+**Follow-ups (not in this release):** (a) **row-level async feedback** —
+surface a dispatch's progress on the affected table row (like the provision
+inline step detail) rather than a separate message box; (b) a **body-ported JS
+tooltip** for the `overflow:hidden` truncated cells (sha256, errors, step
+output) that a CSS `::after` tooltip can't reach, plus the remaining `title=`
+sites. See `docs/ui-guidelines.md` §23–24.
+
 ### M6 — Observe: alert engine (shipped)
 
 Done (R23/R25 — the engine that makes observe data actionable; PRD Decision 16: server-side only):

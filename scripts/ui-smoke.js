@@ -584,6 +584,7 @@ async function main() {
     inst.pageLoading = false;
     await sleep(150);
     check("loading: empty state shown after load", d.body.textContent.includes("No jobs."), "empty state not shown after load");
+    check("empty: jobs has actionable CTA", [...d.querySelectorAll(".empty button")].some((b) => b.textContent.includes("New job")), "no 'New job' CTA in empty state");
     inst.jobs = savedJobs;
   }
 
