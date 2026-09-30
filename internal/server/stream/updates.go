@@ -150,6 +150,7 @@ func (h *Handler) deliverPendingUpdate(agentID string, send func(*pb.Envelope) e
 	dir := &pb.UpdateDirective{
 		ReleaseId: rel.ID, Version: rel.Version, Arch: rel.Arch,
 		Kind: rel.Kind, Sha256: rel.SHA256, Signature: rel.Signature, Grant: tok,
+		Unsigned: rel.Signature == "",
 	}
 	env := &pb.Envelope{
 		Kind:    pb.EnvelopeKind_UPDATE_DIRECTIVE,

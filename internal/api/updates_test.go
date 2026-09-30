@@ -296,3 +296,55 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateReleaseUnsignedBeta: M8.1 beta policy — an empty signature is
+// accepted only while unsigned releases are allowed; otherwise 400.
+func TestUpdateReleaseUnsignedBeta(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sseB := sse.New()
+	streamH := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	apiH := api.New(st, streamH, sseB, log.New(io.Discard, "api: ", 0))
+	srv := httptest.NewServer(apiH)
+	t.Cleanup(srv.Close)
+
+	artifact, m, _ := signedArtifact(t, "v0.9.1", "agent")
+
+	// Flag off (default in tests) → unsigned upload refused.
+	code, e := labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(m, "", artifact))
+	if code != http.StatusBadRequest {
+		t.Fatalf("unsigned upload, flag off = %d, want 400: %v", code, e)
+	}
+
+	// Flag on (beta default) → unsigned upload accepted, listed as unsigned.
+	apiH.SetAllowUnsignedReleases(true)
+	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(m, "", artifact))
+	if code != http.StatusCreated {
+		t.Fatalf("unsigned upload, flag on = %d: %v", code, e)
+	}
+	rid, _ := e["id"].(string)
+
+	code, got := labelsReq(t, "GET", srv.URL+"/api/v1/updates/releases/"+rid, "")
+	if code != http.StatusOK {
+		t.Fatalf("get = %d", code)
+	}
+	if got["signature"] != "" {
+		t.Errorf("signature = %q, want empty", got["signature"])
+	}
+	if got["sha256"] != m.SHA256 {
+		t.Errorf("sha256 = %v, want %s", got["sha256"], m.SHA256)
+	}
+
+	// A signed upload still works with the flag on (verification unchanged).
+	art2, m2, sigB64 := signedArtifact(t, "v0.9.2", "agent")
+	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(m2, sigB64, art2))
+	if code != http.StatusCreated {
+		t.Fatalf("signed upload, flag on = %d: %v", code, e)
+	}
+}

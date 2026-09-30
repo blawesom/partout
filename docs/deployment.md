@@ -208,6 +208,50 @@ partout update --check   # report-only first
 partout update           # server + fleet, from here on
 ```
 
+**Beta shortcut — unsigned fleet updates:** while `PARTOUT_ALLOW_UNSIGNED_RELEASES`
+is on (**the default during beta**; GA flips it to false), the in-server release
+store accepts releases **without a signature** (`partout ctl update upload`
+without `--signature`, or the Updates page — the form's signature field is
+optional). Keyless agents apply an unsigned release on the sha256 integrity
+check alone; an agent with `PARTOUT_RELEASE_KEY` provisioned stays
+strict-signed and refuses unsigned releases. The UI labels such releases
+`unsigned (beta)` and the audit trail records `unsigned: true` on
+`update.apply`/`update.dispatch`.
+
+### 2.2 First boot: the fleet-management preset
+
+A fresh server does not start as a blank slate. On first boot (no principals
+in the DB) Partout seeds a **preset** of sensible defaults so the fleet is
+usable and guarded immediately. Every seeded row is named `default-*` and is
+visible + editable/deletable in the UI (Policies and Alerts) — the preset is a
+starting point, not a lock-in.
+
+**Policies** (all hosts, `exec`):
+
+| Rule | Effect | Catches |
+|---|---|---|
+| `default-deny-rm-rf-root` | deny | `rm -rf /`, `sudo rm -r -f /`, `--no-preserve-root` — not `rm -rf /tmp` |
+| `default-deny-disk-wipe` | deny | `dd of=/dev/…`, `mkfs*`, `wipefs`, `shred /dev/…` |
+| `default-deny-auth-file-tamper` | deny | shell-redirect writes to `/etc/passwd`, `/etc/shadow`, `/etc/sudoers` |
+| `default-require-approval-reboot` | require_approval | `reboot`, `shutdown`, `halt`, `poweroff` (incl. `systemctl reboot`) |
+
+**Alert rules** (all hosts, engine-default thresholds):
+`default-service-failed` (critical), `default-service-restarting` (warning),
+`default-cert-expiring` 30 d (warning), `default-config-invalid` (critical),
+`default-config-drift` (info), `default-update-run` (warning — stuck rollout).
+
+**Re-apply after a restore** (a pre-preset backup has no `default-*` rows, and
+first-boot does not re-fire because the admin user already exists):
+
+```sh
+partout ctl preset show     # which defaults are present / missing
+partout ctl preset apply    # idempotent — creates only what is missing
+```
+
+`apply` never touches user rows: it creates only missing defaults, so an
+operator who edited or deleted a `default-*` rule on purpose keeps their edit
+until they explicitly re-apply that one.
+
 ---
 
 ## 3. Install paths (PRD R16)

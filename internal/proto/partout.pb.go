@@ -2821,6 +2821,12 @@ func (x *JobRunResult) GetRetryOf() int32 {
 // over "version|arch|kind|sha256" against its locally provisioned release
 // public key BEFORE downloading or executing anything; the grant only grants
 // access, the signature establishes trust.
+//
+// Beta exception: while the release store has no provisioned key fleet-wide,
+// an operator may mark a release unsigned (beta) and the agent accepts it
+// ONLY if it has no release key of its own (a provisioned key means
+// strict-signed mode: unsigned is refused). The sha256 integrity check
+// applies in all cases.
 type UpdateDirective struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ReleaseId     string                 `protobuf:"bytes,1,opt,name=release_id,json=releaseId,proto3" json:"release_id,omitempty"` // update_releases id (correlation + grant target)
@@ -2828,8 +2834,9 @@ type UpdateDirective struct {
 	Arch          string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`                            // e.g. linux-amd64 (agent must match)
 	Kind          string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`                            // "agent" (a server-kind artifact is never dispatched)
 	Sha256        string                 `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`                        // hex, of the artifact
-	Signature     string                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"`                  // base64 Ed25519 over the canonical manifest
+	Signature     string                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"`                  // base64 Ed25519 over the canonical manifest ("" when unsigned)
 	Grant         string                 `protobuf:"bytes,7,opt,name=grant,proto3" json:"grant,omitempty"`                          // one-time, TTL-bound artifact download grant
+	Unsigned      bool                   `protobuf:"varint,8,opt,name=unsigned,proto3" json:"unsigned,omitempty"`                   // beta: release has no signature; accepted only by keyless agents
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2911,6 +2918,13 @@ func (x *UpdateDirective) GetGrant() string {
 		return x.Grant
 	}
 	return ""
+}
+
+func (x *UpdateDirective) GetUnsigned() bool {
+	if x != nil {
+		return x.Unsigned
+	}
+	return false
 }
 
 // UpdateResult is the agent's report for an update directive (up).
@@ -4475,7 +4489,7 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\vfinished_at\x18\a \x01(\x03R\n" +
 	"finishedAt\x12\x18\n" +
 	"\atrigger\x18\b \x01(\tR\atrigger\x12\x19\n" +
-	"\bretry_of\x18\t \x01(\x05R\aretryOf\"\xbe\x01\n" +
+	"\bretry_of\x18\t \x01(\x05R\aretryOf\"\xda\x01\n" +
 	"\x0fUpdateDirective\x12\x1d\n" +
 	"\n" +
 	"release_id\x18\x01 \x01(\tR\treleaseId\x12\x18\n" +
@@ -4484,7 +4498,8 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\x04kind\x18\x04 \x01(\tR\x04kind\x12\x16\n" +
 	"\x06sha256\x18\x05 \x01(\tR\x06sha256\x12\x1c\n" +
 	"\tsignature\x18\x06 \x01(\tR\tsignature\x12\x14\n" +
-	"\x05grant\x18\a \x01(\tR\x05grant\"s\n" +
+	"\x05grant\x18\a \x01(\tR\x05grant\x12\x1a\n" +
+	"\bunsigned\x18\b \x01(\bR\bunsigned\"s\n" +
 	"\fUpdateResult\x12\x1d\n" +
 	"\n" +
 	"release_id\x18\x01 \x01(\tR\treleaseId\x12\x14\n" +

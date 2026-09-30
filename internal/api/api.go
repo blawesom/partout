@@ -55,6 +55,7 @@ type Handler struct {
 	ca          *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
 	streamH     *stream.Handler        // stream handler (for mTLS leaf rotation)
 	updatesMgr  *updates.Manager       // M8.1 rollout orchestrator
+	allowUnsigned bool                // M8.1 beta: unsigned releases accepted (PARTOUT_ALLOW_UNSIGNED_RELEASES)
 }
 
 // New builds the REST handler and its router.
@@ -70,6 +71,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	handler.RegisterExecutions(mux)
 	handler.RegisterHosts(mux)
 	handler.RegisterPolicies(mux)
+	handler.RegisterPreset(mux)
 	handler.RegisterObserve(mux)
 
 	// GET /api/v1/events — SSE event stream (PRD R10). Auth-gated: mirrors the
@@ -278,6 +280,10 @@ func (h *Handler) SetJobs(jc *jobs.Controller) { h.jobs = jc }
 
 // SetUpdates installs the M8.1 rollout orchestrator.
 func (h *Handler) SetUpdates(m *updates.Manager) { h.updatesMgr = m }
+
+// SetAllowUnsignedReleases sets the M8.1 beta policy for unsigned releases
+// (PARTOUT_ALLOW_UNSIGNED_RELEASES; beta default true, GA default false).
+func (h *Handler) SetAllowUnsignedReleases(v bool) { h.allowUnsigned = v }
 
 // SetSessions installs the sessions manager (M2, PRD §5.2.2).
 func (h *Handler) SetSessions(sm *sessions.Manager) { h.sess = sm }

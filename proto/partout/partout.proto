@@ -392,14 +392,21 @@ message JobRunResult {
 // over "version|arch|kind|sha256" against its locally provisioned release
 // public key BEFORE downloading or executing anything; the grant only grants
 // access, the signature establishes trust.
+//
+// Beta exception: while the release store has no provisioned key fleet-wide,
+// an operator may mark a release unsigned (beta) and the agent accepts it
+// ONLY if it has no release key of its own (a provisioned key means
+// strict-signed mode: unsigned is refused). The sha256 integrity check
+// applies in all cases.
 message UpdateDirective {
   string release_id = 1;   // update_releases id (correlation + grant target)
   string version = 2;      // target version
   string arch = 3;         // e.g. linux-amd64 (agent must match)
   string kind = 4;         // "agent" (a server-kind artifact is never dispatched)
   string sha256 = 5;       // hex, of the artifact
-  string signature = 6;    // base64 Ed25519 over the canonical manifest
+  string signature = 6;    // base64 Ed25519 over the canonical manifest ("" when unsigned)
   string grant = 7;        // one-time, TTL-bound artifact download grant
+  bool unsigned = 8;       // beta: release has no signature; accepted only by keyless agents
 }
 
 // UpdateResult is the agent's report for an update directive (up).

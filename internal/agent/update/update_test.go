@@ -63,6 +63,45 @@ func TestVerify(t *testing.T) {
 	}
 }
 
+// TestVerifyUnsignedBetaMatrix: M8.1 beta — an unsigned directive is accepted
+// only by a keyless agent; a provisioned key means strict-signed mode.
+func TestVerifyUnsignedBetaMatrix(t *testing.T) {
+	kp, err := cryptoutil.NewKeyPairEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := release.PubKeyB64(kp.Pub)
+	arch := runtime.GOOS + "-" + runtime.GOARCH
+	sha := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+	unsigned := func() *pb.UpdateDirective {
+		d := testDirective(t, "v0.9.0", arch, "agent", sha, "")
+		d.Unsigned = true
+		return d
+	}
+
+	// Keyless agent + unsigned (server-authorised) → accepted.
+	if err := Verify(unsigned(), ""); err != nil {
+		t.Errorf("keyless agent should accept a server-authorised unsigned release: %v", err)
+	}
+	// Provisioned key + unsigned → refused (strict-signed mode).
+	if err := Verify(unsigned(), pub); err == nil {
+		t.Error("provisioned key + unsigned release: want refusal")
+	}
+	// Unsigned flag is not enough to skip kind/arch checks.
+	bad := unsigned()
+	bad.Arch = "linux-sparc"
+	if err := Verify(bad, ""); err == nil {
+		t.Error("unsigned + arch mismatch: want refusal")
+	}
+	// A signed directive is unaffected by the unsigned flag being false.
+	m := release.Manifest{Version: "v0.9.0", Arch: arch, Kind: "agent", SHA256: sha}
+	sig := base64.StdEncoding.EncodeToString(release.Sign(kp.Priv, m))
+	if err := Verify(testDirective(t, "v0.9.0", arch, "agent", sha, sig), pub); err != nil {
+		t.Errorf("signed directive with key still verifies: %v", err)
+	}
+}
+
 func TestMarkerRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := MarkerPath(dir)

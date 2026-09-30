@@ -108,23 +108,20 @@ func MarkerPath(dataDir string) string {
 }
 
 // Verify checks a directive against the provisioned release key:
-//   - a key must be provisioned (fails closed)
+//   - the kind must be "agent" and the arch must match this host (a
+//     wrong-arch binary is refused before any byte is written)
 //   - the manifest must be well-formed
-//   - the signature must verify over the canonical manifest
-//   - the arch must match this host (a wrong-arch binary is refused before
-//     any byte is written)
+//   - trust matrix: a SIGNED release requires a provisioned key and a
+//     matching Ed25519 signature over the canonical manifest (fails
+//     closed); an UNSIGNED (beta) release is accepted only by a KEYLESS
+//     agent — a provisioned key means strict signed mode and unsigned is
+//     refused
 //
 // It does NOT check the artifact bytes: the caller computes the sha256 of
-// the downloaded file and compares it to dir.Sha256 (the signature binds
-// that digest).
+// the downloaded file and compares it to dir.Sha256 (for signed releases
+// the signature binds that digest; for unsigned beta releases the digest
+// is the integrity floor).
 func Verify(dir *pb.UpdateDirective, releaseKeyB64 string) error {
-	if releaseKeyB64 == "" {
-		return fmt.Errorf("no release key provisioned (set PARTOUT_RELEASE_KEY); refusing update")
-	}
-	pub, err := release.PubKeyFromB64(releaseKeyB64)
-	if err != nil {
-		return fmt.Errorf("release key: %w", err)
-	}
 	if dir.Kind != string(release.KindAgent) {
 		return fmt.Errorf("refusing kind %q (agent accepts only %q)", dir.Kind, release.KindAgent)
 	}
@@ -135,6 +132,21 @@ func Verify(dir *pb.UpdateDirective, releaseKeyB64 string) error {
 	m := release.Manifest{Version: dir.Version, Arch: dir.Arch, Kind: dir.Kind, SHA256: dir.Sha256}
 	if err := m.Valid(); err != nil {
 		return err
+	}
+	if dir.Unsigned {
+		if releaseKeyB64 != "" {
+			return fmt.Errorf("unsigned release refused: a release key is provisioned (PARTOUT_RELEASE_KEY) — sign the release or remove the key")
+		}
+		// Beta (M8.1): keyless agent + server-authorised unsigned release →
+		// accepted. The sha256 check over the downloaded bytes still applies.
+		return nil
+	}
+	if releaseKeyB64 == "" {
+		return fmt.Errorf("no release key provisioned (set PARTOUT_RELEASE_KEY); refusing update")
+	}
+	pub, err := release.PubKeyFromB64(releaseKeyB64)
+	if err != nil {
+		return fmt.Errorf("release key: %w", err)
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(dir.Signature))
 	if err != nil {

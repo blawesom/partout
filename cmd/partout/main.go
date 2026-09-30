@@ -40,6 +40,7 @@ import (
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/policy"
+	"github.com/blawesom/partout/internal/preset"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/approvals"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
@@ -239,6 +240,14 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		} else {
 			lg.Printf("FIRST RUN: admin user 'admin' created from PARTOUT_ADMIN_PASSWORD")
 		}
+		// Seed the fleet-management defaults (safety-net policies +
+		// standard alert rules) so a fresh server is usable out of the
+		// box. Additive and idempotent; rows are named default-*.
+		if cp, ca, err := preset.Apply(st); err != nil {
+			lg.Printf("WARNING: preset seed failed: %v (run `partout ctl preset apply`)", err)
+		} else if len(cp) > 0 || len(ca) > 0 {
+			lg.Printf("FIRST RUN: preset applied (%d policies, %d alert rules) — review under Policies and Alerts", len(cp), len(ca))
+		}
 	}
 	apiH.SetAuthController(authC)
 	// Drop expired sessions + stale login-throttle entries in the background
@@ -354,6 +363,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		updMgr.OnResult(agentID, r)
 	}
 	apiH.SetUpdates(updMgr)
+	apiH.SetAllowUnsignedReleases(cfg.AllowUnsignedReleases)
 	updMgr.ResumeAll(context.Background())
 
 	// Post-reboot task resumes: a TaskRunResult with no live waiter

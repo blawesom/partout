@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -143,9 +144,20 @@ func (h *Handler) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(body.Signature))
 	if err != nil || len(sig) != 64 {
-		writeError(w, http.StatusBadRequest, "bad_request",
-			"signature must be base64 of a 64-byte Ed25519 signature", nil)
-		return
+		// Beta (M8.1): an empty signature is accepted while unsigned releases
+		// are allowed (PARTOUT_ALLOW_UNSIGNED_RELEASES, default true). The
+		// sha256 integrity check still binds the artifact; what a signature
+		// adds is provenance. GA flips the default to signed-only.
+		if strings.TrimSpace(body.Signature) == "" && h.allowUnsigned {
+			sig = nil
+		} else {
+			msg := "signature must be base64 of a 64-byte Ed25519 signature"
+			if strings.TrimSpace(body.Signature) == "" {
+				msg = "unsigned releases are disabled (set PARTOUT_ALLOW_UNSIGNED_RELEASES=true); a signature is required"
+			}
+			writeError(w, http.StatusBadRequest, "bad_request", msg, nil)
+			return
+		}
 	}
 	if _, err := h.st.GetReleaseByVer(m.Version, m.Arch, m.Kind); err == nil {
 		writeError(w, http.StatusConflict, "conflict",
@@ -278,6 +290,7 @@ func (h *Handler) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	dir := &proto.UpdateDirective{
 		ReleaseId: rel.ID, Version: rel.Version, Arch: rel.Arch, Kind: rel.Kind,
 		Sha256: rel.SHA256, Signature: rel.Signature, Grant: grant,
+		Unsigned: rel.Signature == "",
 	}
 	if err := h.streamH.SendUpdateDirective(body.AgentID, dir); err != nil {
 		if errors.Is(err, stream.ErrAgentOffline) {
@@ -291,6 +304,7 @@ func (h *Handler) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	actor, _ := h.actorFor(r)
 	h.audit("update.apply", actor, map[string]string{
 		"agent_id": body.AgentID, "release_id": rel.ID, "version": rel.Version,
+		"unsigned": fmt.Sprintf("%t", rel.Signature == ""),
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "dispatched", "agent_id": body.AgentID, "release_id": rel.ID})
 }

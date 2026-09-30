@@ -257,6 +257,25 @@ async function main() {
   if (relTab) { relTab.click(); await sleep(600); }
   check("releases: uploaded row renders", rowsWithText(d, "v0.9.0-smoke") > 0, "no release row");
   check("releases: upload form", d.body.textContent.includes("Upload a release"), "upload form missing");
+  // M8.1 beta: an unsigned release uploads while the beta flag is on and is
+  // labelled in the Trust column.
+  {
+    const nodeCrypto = require("crypto");
+    const artifact = Buffer.from("smoke UNSIGNED artifact bytes");
+    const sha = nodeCrypto.createHash("sha256").update(artifact).digest("hex");
+    const up = await realFetch(base + "/api/v1/updates/releases", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ version: "v0.9.1-smoke", arch: "linux-amd64", kind: "agent", signature: "", artifact_b64: artifact.toString("base64") }),
+    });
+    check("releases: unsigned (beta) upload via API", up.status === 201, "status=" + up.status);
+    if (w.__partout) { w.__partout.loadReleases(); await sleep(500); }
+  }
+  {
+    const okBadge = [...d.querySelectorAll(".badge.ok")].some((b) => b.textContent.trim() === "signed");
+    const warnBadge = [...d.querySelectorAll(".badge.warn")].some((b) => b.textContent.trim() === "unsigned (beta)");
+    check("releases: trust column + badges", d.body.textContent.includes("Trust") && okBadge && warnBadge, "trust column or badges missing");
+  }
   // M8.1 step 3: rollout runs tab. Start a run at the smoke release via the
   // API; the embedded agent (no release key) refuses, so the run lands on
   // paused_failure — a real live state to assert.

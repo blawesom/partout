@@ -840,6 +840,7 @@ func (m *Manager) dispatchHost(run *store.UpdateRun, h *store.UpdateHost, rel st
 		Sha256:    rel.SHA256,
 		Signature: rel.Signature,
 		Grant:     tok,
+		Unsigned:  rel.Signature == "",
 	}
 	if err := m.h.QueueUpdateDirective(h.HostID, dir); err != nil {
 		return err
@@ -847,7 +848,7 @@ func (m *Manager) dispatchHost(run *store.UpdateRun, h *store.UpdateHost, rel st
 	if err := m.st.SetUpdateHostStatus(h.ID, HostDispatching, "", ""); err != nil {
 		return err
 	}
-	m.audit("update.dispatch", run.CreatedBy, map[string]any{"run": run.ID, "host": h.HostID, "release": rel.ID, "grant": tok})
+	m.audit("update.dispatch", run.CreatedBy, map[string]any{"run": run.ID, "host": h.HostID, "release": rel.ID, "grant": tok, "unsigned": rel.Signature == ""})
 	return nil
 }
 

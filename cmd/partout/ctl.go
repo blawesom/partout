@@ -138,6 +138,8 @@ commands:
 		c.cmdAudit(rest)
 	case "policy":
 		c.cmdPolicy(rest)
+	case "preset":
+		c.cmdPreset(rest)
 	case "approvals":
 		c.cmdApprovals(rest)
 	case "alerts":
@@ -375,6 +377,74 @@ func (c *ctl) do(method, path string, body any, out any) error {
 }
 
 // ---- commands -----------------------------------------------------------------
+
+// cmdPreset shows the fleet-management preset status or re-applies the
+// missing defaults (e.g. after restoring an older backup).
+func (c *ctl) cmdPreset(args []string) {
+	sub := "show"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "show", "status", "":
+		type row struct {
+			Name    string `json:"name"`
+			Present bool   `json:"present"`
+			ID      string `json:"id"`
+			Effect  string `json:"effect"`
+			Kind    string `json:"kind"`
+		}
+		var st struct {
+			Policies   []row `json:"policies"`
+			AlertRules []row `json:"alert_rules"`
+		}
+		if err := c.do("GET", "/api/v1/preset", nil, &st); err != nil {
+			fatal(err)
+		}
+		miss := 0
+		for _, r := range st.Policies {
+			mark := "ok      "
+			if !r.Present {
+				mark, miss = "MISSING", miss+1
+			}
+			fmt.Printf("  [%s] policy %-38s %s\n", mark, r.Name, r.Effect)
+		}
+		for _, r := range st.AlertRules {
+			mark := "ok      "
+			if !r.Present {
+				mark, miss = "MISSING", miss+1
+			}
+			fmt.Printf("  [%s] alert  %-38s %s\n", mark, r.Name, r.Kind)
+		}
+		if miss > 0 {
+			fmt.Printf("%d default(s) missing — run `partout ctl preset apply` to restore them\n", miss)
+		} else {
+			fmt.Println("all defaults present")
+		}
+	case "apply":
+		var res struct {
+			CreatedPolicies []string `json:"created_policies"`
+			CreatedAlerts   []string `json:"created_alerts"`
+		}
+		if err := c.do("POST", "/api/v1/preset/apply", map[string]any{}, &res); err != nil {
+			fatal(err)
+		}
+		if len(res.CreatedPolicies) == 0 && len(res.CreatedAlerts) == 0 {
+			fmt.Println("preset already complete — nothing to apply")
+			return
+		}
+		for _, n := range res.CreatedPolicies {
+			fmt.Println("  + policy " + n)
+		}
+		for _, n := range res.CreatedAlerts {
+			fmt.Println("  + alert  " + n)
+		}
+		fmt.Printf("applied %d policy / %d alert rule default(s)\n",
+			len(res.CreatedPolicies), len(res.CreatedAlerts))
+	default:
+		fatal(fmt.Errorf("unknown preset subcommand: %s (show|apply)", sub))
+	}
+}
 
 func (c *ctl) cmdEnrollToken(args []string) {
 	fs := flag.NewFlagSet("enroll-token", flag.ExitOnError)
@@ -647,8 +717,24 @@ func (c *ctl) updateSign(args []string) {
 func (c *ctl) updateVerify(args []string) {
 	fs, version, arch, kind, file, sig, _, pubkey := updateFlags("update verify", args)
 	_ = fs
-	if *version == "" || *arch == "" || *kind == "" || *file == "" || *sig == "" || *pubkey == "" {
-		fatal(fmt.Errorf("--version, --arch, --kind, --file, --signature and --pubkey (or $PARTOUT_RELEASE_KEY) are required"))
+	if *version == "" || *arch == "" || *kind == "" || *file == "" {
+		fatal(fmt.Errorf("--version, --arch, --kind and --file are required"))
+	}
+	m, err := updateManifest(*version, *arch, *kind, *file)
+	if err != nil {
+		fatal(err)
+	}
+	if strings.TrimSpace(*sig) == "" {
+		// Beta: no signature declared — integrity-only check (the file's
+		// sha256 matches the declared manifest). Provenance is NOT
+		// established; a signature (or a trusted source) is still needed
+		// before executing the artifact.
+		fmt.Printf("OK (unsigned, beta): %s sha256 %s matches the manifest for %s (%s, %s)\n", *file, m.SHA256, m.Version, m.Arch, m.Kind)
+		fmt.Println("note: unsigned — integrity only, no provenance. Sign releases (partout ctl update keygen/sign) before GA.")
+		return
+	}
+	if *pubkey == "" {
+		fatal(fmt.Errorf("--pubkey (or $PARTOUT_RELEASE_KEY) is required to verify a signature"))
 	}
 	pub, err := release.PubKeyFromB64(*pubkey)
 	if err != nil {
@@ -657,10 +743,6 @@ func (c *ctl) updateVerify(args []string) {
 	s, err := base64.StdEncoding.DecodeString(strings.TrimSpace(*sig))
 	if err != nil {
 		fatal(fmt.Errorf("--signature is not valid base64: %w", err))
-	}
-	m, err := updateManifest(*version, *arch, *kind, *file)
-	if err != nil {
-		fatal(err)
 	}
 	if !release.Verify(pub, m, s) {
 		fmt.Println("INVALID: signature does not match the artifact")
@@ -672,8 +754,12 @@ func (c *ctl) updateVerify(args []string) {
 func (c *ctl) updateUpload(args []string) {
 	fs, version, arch, kind, file, sig, _, _ := updateFlags("update upload", args)
 	_ = fs
-	if *version == "" || *arch == "" || *kind == "" || *file == "" || *sig == "" {
-		fatal(fmt.Errorf("--version, --arch, --kind, --file and --signature are required"))
+	if *version == "" || *arch == "" || *kind == "" || *file == "" {
+		fatal(fmt.Errorf("--version, --arch, --kind and --file are required (add --signature unless uploading unsigned, beta)"))
+	}
+	sigVal := strings.TrimSpace(*sig)
+	if sigVal == "" {
+		fmt.Println("note: uploading UNSIGNED (beta) — accepted while PARTOUT_ALLOW_UNSIGNED_RELEASES is on (default during beta); GA flips to signed-only.")
 	}
 	m, err := updateManifest(*version, *arch, *kind, *file)
 	if err != nil {
@@ -685,7 +771,7 @@ func (c *ctl) updateUpload(args []string) {
 	}
 	body := map[string]any{
 		"version": m.Version, "arch": m.Arch, "kind": m.Kind, "sha256": m.SHA256,
-		"signature": strings.TrimSpace(*sig), "artifact_b64": base64.StdEncoding.EncodeToString(data),
+		"signature": sigVal, "artifact_b64": base64.StdEncoding.EncodeToString(data),
 	}
 	var res map[string]string
 	if err := c.do("POST", "/api/v1/updates/releases", body, &res); err != nil {

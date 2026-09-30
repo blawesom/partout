@@ -263,3 +263,36 @@ func TestObserveFactsIntervalInvalidFallsBack(t *testing.T) {
 		t.Errorf("ObserveFactsInterval = %d, want default 300 for invalid input", c.ObserveFactsInterval)
 	}
 }
+
+func TestAllowUnsignedReleasesBetaDefault(t *testing.T) {
+	// Unset → beta default true.
+	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "")
+	os.Unsetenv("PARTOUT_ALLOW_UNSIGNED_RELEASES")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.AllowUnsignedReleases {
+		t.Error("unset env: want beta default true")
+	}
+
+	// Explicit off → false (the GA posture).
+	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "false")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AllowUnsignedReleases {
+		t.Error("env=false: want false")
+	}
+
+	// Explicit on → true.
+	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.AllowUnsignedReleases {
+		t.Error("env=true: want true")
+	}
+}

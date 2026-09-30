@@ -217,6 +217,15 @@ Ordering (each step is independently shippable):
      `PARTOUT_RELEASE_KEY` (agent unit env); a locally provisioned key always wins
      over anything server-delivered. `partout ctl update verify` validates a signed
      artifact offline.
+   - **Beta: unsigned releases** (operator decision, v0.7.x): the server flag
+     `PARTOUT_ALLOW_UNSIGNED_RELEASES` (**default ON during beta**; GA flips it to
+     false) lets the release store accept releases **without a signature**, and a
+     KEYLESS agent applies one on the sha256 integrity check alone. An agent with
+     `PARTOUT_RELEASE_KEY` provisioned stays strict-signed (unsigned refused).
+     Directives carry `unsigned` (proto field 8); the UI labels such releases
+     `unsigned (beta)`; `update.apply`/`update.dispatch` audits record
+     `unsigned: true`. sha256 verification is unchanged in all cases. **GA gate:**
+     flip the default to false and require signatures in the one-command flow.
 2. **Agent self-swap with rollback** (canary on one host proves it) — ✅ **shipped**
    (`UPDATE_DIRECTIVE`/`UPDATE_RESULT` stream envelopes; `POST /api/v1/updates/apply`
    canary dispatch, admin+, audited `update.apply`/`update.result`, SSE

@@ -807,23 +807,24 @@
           </div>
           </template>
           <template v-else-if="updTab==='releases'">
-            <p class="page-sub">Signed Partout release artifacts (M8.1). The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. Upload requires admin; downloading the artifact requires operator.</p>
+            <p class="page-sub">Partout release artifacts (M8.1). The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. <b>Beta:</b> releases without a signature are accepted while unsigned updates are enabled (<span class="mono">PARTOUT_ALLOW_UNSIGNED_RELEASES</span>, default on) — keyless agents apply them on the sha256 integrity check alone; a provisioned release key stays strict-signed. Upload requires admin; downloading the artifact requires operator.</p>
             <div class="card">
               <div class="head"><h2>Releases</h2><div class="spacer"></div><button class="btn sm" @click="loadReleases">Refresh</button></div>
               <table class="tbl">
-                <thead><tr><th>Version</th><th>Arch</th><th>Kind</th><th>SHA256</th><th>Size</th><th>Uploaded</th><th>By</th><th></th></tr></thead>
+                <thead><tr><th>Version</th><th>Arch</th><th>Kind</th><th>SHA256</th><th>Trust</th><th>Size</th><th>Uploaded</th><th>By</th><th></th></tr></thead>
                 <tbody>
                   <tr v-for="r in releases" :key="r.id">
                     <td class="mono">{{ r.version }}</td>
                     <td class="mono">{{ r.arch }}</td>
                     <td>{{ r.kind }}</td>
                     <td class="mono" :title="r.sha256">{{ (r.sha256 || '').slice(0, 12) }}…</td>
+                    <td><span v-if="r.signature" class="badge ok">signed</span><span v-else class="badge warn" title="beta: no signature — keyless agents apply on sha256 integrity alone">unsigned (beta)</span></td>
                     <td class="muted">{{ fmtBytes(r.size) }}</td>
                     <td class="muted">{{ fmtAgo(r.created) }}</td>
                     <td class="muted">{{ r.uploaded_by || '—' }}</td>
                     <td class="row-actions"><button class="btn danger sm" :disabled="!isAdmin" @click="deleteRelease(r)">Delete</button></td>
                   </tr>
-                  <tr v-if="!releases.length"><td colspan="8"><div class="empty">No releases uploaded yet (<span class="mono">partout ctl update upload …</span>).</div></td></tr>
+                  <tr v-if="!releases.length"><td colspan="9"><div class="empty">No releases uploaded yet (<span class="mono">partout ctl update upload …</span>).</div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -833,11 +834,11 @@
                 <label class="fld"><span>Version</span><input v-model="relForm.version" class="mono" placeholder="v0.9.0" /></label>
                 <label class="fld"><span>Arch</span><input v-model="relForm.arch" class="mono" placeholder="linux-amd64" /></label>
                 <label class="fld"><span>Kind</span><select v-model="relForm.kind"><option value="agent">agent</option><option value="server">server</option></select></label>
-                <label class="fld" style="flex:1"><span>Signature (base64)</span><input v-model="relForm.signature" class="mono" placeholder="64-byte Ed25519 signature" /></label>
+                <label class="fld" style="flex:1"><span>Signature (base64, optional in beta)</span><input v-model="relForm.signature" class="mono" placeholder="64-byte Ed25519 signature — empty = unsigned (beta)" /></label>
                 <label class="fld"><span>Artifact</span><input type="file" @change="onRelFile" /></label>
-                <button class="btn primary" :disabled="!isAdmin || !relForm.version || !relForm.arch || !relForm.signature || !relForm.file || relBusy" @click="uploadRelease"><span v-if="relBusy" class="spin"></span> Upload</button>
+                <button class="btn primary" :disabled="!isAdmin || !relForm.version || !relForm.arch || !relForm.file || relBusy" @click="uploadRelease"><span v-if="relBusy" class="spin"></span> Upload</button>
               </div>
-              <p class="muted small" style="margin-top:8px">Sign locally first: <span class="mono">partout ctl update sign --version … --arch … --kind … --file …</span>. The server stores the signature as-is and checks the artifact sha256 (declared, or computed from the bytes).</p>
+              <p class="muted small" style="margin-top:8px">Sign locally first: <span class="mono">partout ctl update sign --version … --arch … --kind … --file …</span>. The server stores the signature as-is and checks the artifact sha256 (declared, or computed from the bytes). <b>Beta:</b> an empty signature uploads an <i>unsigned</i> release (allowed while <span class="mono">PARTOUT_ALLOW_UNSIGNED_RELEASES</span> is on); keyless agents apply it on the sha256 check alone.</p>
             </div>
           </template>
           <template v-else-if="updTab==='runs'">

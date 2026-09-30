@@ -75,6 +75,12 @@ type Config struct {
 	// key always wins over anything server-delivered; with none set the agent
 	// refuses every update directive (fails closed).
 	ReleaseKey string
+	// AllowUnsignedReleases is the server-side beta policy for M8.1
+	// (PARTOUT_ALLOW_UNSIGNED_RELEASES): when true, the release store accepts
+	// releases WITHOUT a signature and keyless agents may apply them. Beta
+	// default is TRUE; at GA the default flips to false (signed-only).
+	// A release that carries a signature is always verified regardless.
+	AllowUnsignedReleases bool
 	// UpdateHealthS is the post-swap health window in seconds
 	// (PARTOUT_UPDATE_HEALTH_S): the new version must boot and connect within
 	// it or the boot guard rolls back to N-1.
@@ -124,6 +130,7 @@ func Load() (*Config, error) {
 		CertCA:               os.Getenv("PARTOUT_CERT_CA"),
 		TLSCAFile:            os.Getenv("PARTOUT_TLS_CA"),
 		ReleaseKey:           os.Getenv("PARTOUT_RELEASE_KEY"),
+		AllowUnsignedReleases: envBoolDefaultTrue("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
 		UpdateHealthS:        envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:     envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 	}
@@ -188,4 +195,12 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+// envBoolDefaultTrue is envBool with a beta-period default: unset = true.
+func envBoolDefaultTrue(key string) bool {
+	if strings.TrimSpace(os.Getenv(key)) == "" {
+		return true
+	}
+	return envBool(key)
 }
