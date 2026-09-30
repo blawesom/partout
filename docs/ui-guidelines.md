@@ -729,3 +729,24 @@ is already inline text. A body-ported JS tooltip that escapes clipping for
 those cells + the remaining `title=` sites is a **follow-up**, not part of
 this release. The mechanism + these four clean wins ship now; the rest is
 explicitly deferred.
+
+## 24. Confirmation dialog (no native `confirm()`)
+
+All destructive/security actions use the shared **confirm dialog**
+(`askConfirm`), never the browser's `confirm()` — the native dialog is
+unstyled, blocking, and can't show context. `askConfirm(opts)` returns a
+Promise<boolean> and renders a modal with:
+
+- `title` + `body` (multi-line), and an optional `mono` block for the exact
+target (host id, fingerprint, release) so the operator sees what's affected.
+- a `variant` (`danger` / `primary` / `ok`) on the confirm button.
+- an optional `requireText` **type-to-confirm guard**: for the highest-stakes
+  actions (Remove host, Delete release, Delete secret/user) the operator must
+  type the exact id/version/name before the confirm button enables.
+- `Esc` or Cancel resolves `false`.
+
+The host-key **confirm** in the provision flow now renders the fingerprint in
+the `mono` block (previously it was `\n`-separated text in a native
+`confirm()`), which is the one place a glanceable, prominent fingerprint
+matters most. Deny still uses a `prompt()` for the optional reason (input, not
+a confirmation).

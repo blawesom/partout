@@ -559,6 +559,25 @@ async function main() {
   check("account renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Account"));
   check("account: change-password form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Update")) && d.querySelectorAll('input[type="password"]').length >= 2, "no password form");
 
+  // --- Confirm dialog (replaces native confirm()) ---
+  // Drive askConfirm directly so no real destructive action fires.
+  if (w.__partout) {
+    const inst = w.__partout;
+    inst.askConfirm({ title: "Remove host", body: "Deletes all data.", mono: "web01 (ag_x)", confirmLabel: "Remove host", variant: "danger", requireText: "ag_x" });
+    await sleep(150);
+    check("confirm: dialog renders", !!d.querySelector(".overlay .dialog") && d.body.textContent.includes("Remove host"), "no confirm dialog");
+    check("confirm: mono target shown", d.body.textContent.includes("web01 (ag_x)"), "mono target missing");
+    check("confirm: type-to-confirm input", !!d.querySelector(".overlay input[placeholder='ag_x']"), "no type-to-confirm input");
+    const cbtn = [...d.querySelectorAll(".overlay button")].find((b) => b.textContent.trim() === "Remove host");
+    check("confirm: guard disables confirm", !!cbtn && cbtn.disabled, "confirm not disabled before type-to-confirm");
+    inst.confirmBox.value = "wrong"; await sleep(100);
+    check("confirm: wrong text keeps disabled", cbtn.disabled, "confirm enabled with wrong text");
+    inst.confirmBox.value = "ag_x"; await sleep(100);
+    check("confirm: right text enables", !cbtn.disabled, "confirm still disabled with right text");
+    inst.confirmBoxNo(); await sleep(100); // cancel — never confirm (would delete a real host)
+    check("confirm: cancel closes", !inst.confirmBox.open, "dialog not closed on cancel");
+  }
+
   // --- Login page: first-run password hint (render the logged-out view) ---
   if (w.__partout) {
     const savedToken = w.__partout.token;

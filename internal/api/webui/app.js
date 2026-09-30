@@ -269,6 +269,23 @@
       </div>
     </div>
   </div>
+  <!-- ============ CONFIRM DIALOG (replaces native confirm()) ============ -->
+  <div class="overlay" v-if="confirmBox.open && loggedIn" @click.self="confirmBoxNo()">
+    <div class="dialog card" style="max-width:520px">
+      <div class="head"><h2>{{ confirmBox.title }}</h2></div>
+      <p v-if="confirmBox.body" class="small" style="line-height:1.55;white-space:pre-line">{{ confirmBox.body }}</p>
+      <div v-if="confirmBox.mono" class="mono" style="margin:10px 0;padding:8px 10px;background:var(--surface-app);border:1px solid var(--border);border-radius:8px;word-break:break-all">{{ confirmBox.mono }}</div>
+      <div v-if="confirmBox.requireText" class="fld" style="margin-top:10px">
+        <span>Type <span class="mono">{{ confirmBox.requireText }}</span> to confirm</span>
+        <input v-model="confirmBox.value" class="mono" :placeholder="confirmBox.requireText" @keyup.enter="confirmBoxAllowed() && confirmBoxYes()" />
+      </div>
+      <div class="toolbar" style="margin-top:16px">
+        <div class="spacer"></div>
+        <button class="btn sm" @click="confirmBoxNo()" style="margin-right:8px">Cancel</button>
+        <button class="btn sm" :class="confirmBox.variant" :disabled="!confirmBoxAllowed()" @click="confirmBoxYes()">{{ confirmBox.confirmLabel }}</button>
+      </div>
+    </div>
+  </div>
   <!-- ============ COMMAND PALETTE (⌘K / Ctrl-K) ============ -->
   <div class="overlay palette-overlay" v-if="paletteOpen && loggedIn" @click.self="closePalette()">
     <div class="dialog card palette">
@@ -1640,6 +1657,7 @@
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
+        confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", _resolve: null },
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
         hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, serverVersion: "",
@@ -1980,6 +1998,7 @@
       paletteRun() { const it = this.paletteItems[this.paletteIdx]; if (it) this.paletteGo(it); },
       paletteGo(it) { this.closePalette(); this.go(it.kind === "host" ? "host/" + it.key : it.key); },
       onGlobalKey(e) {
+        if (e.key === "Escape" && this.confirmBox.open) { this.confirmBoxNo(); return; }
         if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
           e.preventDefault();
           if (this.paletteOpen) this.closePalette(); else this.openPalette();
@@ -2144,7 +2163,7 @@
       async removeHost() {
         const id = this.p1;
         const label = this.hostNameById(id);
-        if (!confirm("Remove host " + label + " (" + id + ")?\n\nThis deletes the agent and all its data (runs, facts, tags, roles). The host can never rejoin with its current identity.")) return;
+        if (!await this.askConfirm({ title: "Remove host", body: "This deletes the agent and all its data (runs, facts, tags, roles). The host can never rejoin with its current identity.", mono: label + " (" + id + ")", confirmLabel: "Remove host", variant: "danger", requireText: id })) return;
         try {
           await this.api("/hosts/" + encodeURIComponent(id), { method: "DELETE" });
           this.notify("ok", "host removed");
@@ -2197,7 +2216,7 @@
         } catch (e) { this.ptyErr = e.message; } finally { this.ptyBusy = false; }
       },
       async closeSession() {
-        if (!confirm("Close this session? The PTY receives SIGHUP.")) return;
+        if (!await this.askConfirm({ title: "Close session", body: "The PTY receives SIGHUP and the terminal closes.", confirmLabel: "Close", variant: "danger" })) return;
         try { await this.api("/sessions/" + encodeURIComponent(this.p1) + "/close", { method: "POST" }); this.notify("ok", "session closed"); } catch (e) { /* toast shown by api() */ }
         this.loadSessionReplay();
       },
@@ -2348,7 +2367,7 @@
         } catch (e) { /* toast shown by api() */ } finally { this.relBusy = false; }
       },
       async deleteRelease(r) {
-        if (!confirm("Delete release " + r.version + " (" + r.arch + ", " + r.kind + ")?")) return;
+        if (!await this.askConfirm({ title: "Delete release", body: "This removes the release artifact from the store. Hosts that already applied it are unaffected.", mono: r.version + " (" + r.arch + ", " + r.kind + ")", confirmLabel: "Delete release", variant: "danger", requireText: r.version })) return;
         try {
           await this.api("/updates/releases/" + encodeURIComponent(r.id), { method: "DELETE" });
           this.notify("ok", "release deleted");
@@ -2445,6 +2464,30 @@
         this.gsDismissed = true;
         try { localStorage.setItem("partout.gs.dismissed", "1"); } catch (e) { /* private mode: fine */ }
       },
+      // --- Confirmation dialog (replaces native confirm()) ---
+      // askConfirm shows the dialog and resolves true/false. opts: { title,
+      // body, mono (prominent mono block, e.g. a fingerprint), confirmLabel,
+      // variant (danger|primary|ok), requireText (type-to-confirm guard) }.
+      askConfirm(opts) {
+        const o = Object.assign({ title: "Are you sure?", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "" }, opts || {});
+        return new Promise((resolve) => {
+          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: o.requireText, value: "", _resolve: resolve };
+        });
+      },
+      confirmBoxYes() {
+        const r = this.confirmBox._resolve;
+        this.confirmBox.open = false;
+        if (r) r(true);
+      },
+      confirmBoxNo() {
+        const r = this.confirmBox._resolve;
+        this.confirmBox.open = false;
+        if (r) r(false);
+      },
+      confirmBoxAllowed() {
+        if (!this.confirmBox.requireText) return true;
+        return this.confirmBox.value.trim() === this.confirmBox.requireText;
+      },
       provWizClose() {
         if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
         const hadRun = !!this.provWiz.runId;
@@ -2490,7 +2533,7 @@
         try { await this.api("/provision-runs/" + encodeURIComponent(this.provWiz.runId) + "/key", { method: "POST", body: { action } }); await this.provWizRefresh(); } catch (e) { this.notify("err", e.message); }
       },
       async provWizCancel() {
-        if (!confirm("Cancel this provisioning run?")) return;
+        if (!await this.askConfirm({ title: "Cancel provisioning", body: "The run is stopped; any partial state on the host is left as-is.", confirmLabel: "Cancel run", variant: "danger" })) return;
         try { await this.api("/provision-runs/" + encodeURIComponent(this.provWiz.runId) + "/cancel", { method: "POST" }); await this.provWizRefresh(); } catch (e) { this.notify("err", e.message); }
       },
       provWizOpenHost() {
@@ -2502,15 +2545,15 @@
         const run = this.provRuns.find(r => r.id === id);
         const fp = (run && run.fingerprint) || "";
         if (action === "confirm") {
-          if (!confirm("Confirm host key for " + (run ? run.host : id) + "?\n\nFingerprint:\n" + fp + "\n\nThe run will resume and install the agent.")) return;
+          if (!await this.askConfirm({ title: "Confirm host key", body: "The run will resume and install the agent on " + (run ? run.host : id) + ". Verify this fingerprint out-of-band.", mono: fp, confirmLabel: "Confirm key", variant: "ok" })) return;
         } else {
-          if (!confirm("Deny the host key for " + (run ? run.host : id) + "? The run will be cancelled.")) return;
+          if (!await this.askConfirm({ title: "Deny host key", body: "The run will be cancelled. Use this if the fingerprint does not match the host you intended to provision.", confirmLabel: "Deny key", variant: "danger" })) return;
         }
         try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/key", { method: "POST", body: { action } }); this.notify("ok", "host key " + action + "d"); this.loadProvRuns(); }
         catch (e) { /* toast shown by api() */ }
       },
       async cancelProvRun(id) {
-        if (!confirm("Cancel provision run " + id + "?")) return;
+        if (!await this.askConfirm({ title: "Cancel provision run", body: "The run is stopped; any partial state on the host is left as-is.", mono: id, confirmLabel: "Cancel run", variant: "danger" })) return;
         try { await this.api("/provision-runs/" + encodeURIComponent(id) + "/cancel", { method: "POST" }); this.notify("ok", "provision run cancelled"); this.loadProvRuns(); }
         catch (e) { /* toast shown by api() */ }
       },
@@ -2526,7 +2569,7 @@
         const pkgs = this.pkgSel.split(/,\s*/).map(s => s.trim()).filter(Boolean);
         const scope = pkgs.length ? pkgs.join(", ") : "ALL pending updates";
         const verb = this.pkgDryRun ? "Dry-run" : "Apply";
-        if (!confirm(verb + " " + scope + " on " + this.updHost + "?" + (this.pkgDryRun ? "\n(Dry run only — no packages are installed.)" : "\nA dry-run is always executed first; the action is policy-gated (pkg.apply)."))) return;
+        if (!await this.askConfirm({ title: this.pkgDryRun ? "Dry-run apply" : "Apply updates", body: scope + " on " + this.updHost + ". " + (this.pkgDryRun ? "Dry run only — no packages are installed." : "A dry-run is always executed first; the action is policy-gated (pkg.apply)."), confirmLabel: this.pkgDryRun ? "Dry-run" : "Apply", variant: this.pkgDryRun ? "primary" : "danger" })) return;
         this.pkgBusy = true; this.pkgMsg = "";
         try {
           const d = await this.api("/packages/apply", { method: "POST", body: { agent_id: this.updHost, packages: pkgs, dry_run: this.pkgDryRun } });
@@ -2564,7 +2607,7 @@
         } catch (e) { this.jobErr = e.code === "policy_denied" ? "Policy denied: " + e.message : e.message; } finally { this.jobBusy = false; }
       },
       async deleteJob(j) {
-        if (!confirm("Delete job " + j.name + " (" + j.id + ")? Its scheduled fires stop immediately.")) return;
+        if (!await this.askConfirm({ title: "Delete job", body: "Its scheduled fires stop immediately.", mono: j.name, confirmLabel: "Delete job", variant: "danger" })) return;
         try { await this.api("/jobs/" + encodeURIComponent(j.id), { method: "DELETE" }); this.notify("ok", "job \"" + j.name + "\" deleted"); this.loadJobs(); }
         catch (e) { /* toast shown by api() */ }
       },
@@ -2598,7 +2641,7 @@
       },
       async toggleUserDisabled(u) {
         const n = u.username || u.name;
-        if (!confirm((u.disabled ? "Enable" : "Disable") + " user '" + n + "'?")) return;
+        if (!await this.askConfirm({ title: (u.disabled ? "Enable" : "Disable") + " user", body: (u.disabled ? "This user regains access." : "This user loses access immediately."), mono: n, confirmLabel: (u.disabled ? "Enable" : "Disable"), variant: u.disabled ? "ok" : "danger" })) return;
         try { await this.api("/users/" + encodeURIComponent(n), { method: "PATCH", body: { disabled: !u.disabled } }); this.notify("ok", "user \"" + n + "\" " + (u.disabled ? "enabled" : "disabled")); this.loadUsers(); }
         catch (e) { /* toast shown by api() */ }
       },
@@ -2662,7 +2705,7 @@
         } catch (e) { this.ruleErr = e.message; } finally { this.ruleBusy = ""; }
       },
       async deleteRule(id) {
-        if (!confirm("Delete alert rule " + id + "? Firing alerts from it are left as-is.")) return;
+        if (!await this.askConfirm({ title: "Delete alert rule", body: "Firing alerts from it are left as-is.", mono: id, confirmLabel: "Delete rule", variant: "danger" })) return;
         try { await this.api("/alerts/rules/" + encodeURIComponent(id), { method: "DELETE" }); this.notify("ok", "rule deleted"); this.loadRules(); }
         catch (e) { /* toast shown by api() */ }
       },
@@ -2712,7 +2755,7 @@
       async decideApproval(id, verb) {
         // Approve is a write to a host: confirm; deny takes an optional reason.
         if (verb === "approve") {
-          if (!confirm("Approve " + id + "? The exact stored payload will be dispatched to the agent.")) return;
+          if (!await this.askConfirm({ title: "Approve " + id, body: "The exact stored payload will be dispatched to the agent.", confirmLabel: "Approve", variant: "ok" })) return;
         } else {
           const r = prompt("Deny reason for " + id + " (optional):", "");
           if (r === null) return;
@@ -2847,7 +2890,7 @@
         const selector = prompt("Selector (all | host:ag_x | group:db):", "all"); if (!selector) return;
         try { await this.api("/groups", { body: { name, selector } }); this.notify("ok", "group \"" + name + "\" created"); this.loadGroups(); } catch (e) { /* toast shown by api() */ }
       },
-      async deleteSecret(n) { if (confirm("Delete secret '" + n + "'?")) { try { await this.api("/secrets/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "secret deleted"); this.loadSecrets(); } catch (e) { /* toast shown by api() */ } } },
+      async deleteSecret(n) { if (await this.askConfirm({ title: "Delete secret", body: "Hosts referencing this secret must be updated.", mono: n, confirmLabel: "Delete secret", variant: "danger", requireText: n })) { try { await this.api("/secrets/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "secret deleted"); this.loadSecrets(); } catch (e) { /* toast shown by api() */ } } },
       async createSecret() {
         const f = this.secretForm;
         if (!f.name || !f.value) return;
@@ -2861,8 +2904,8 @@
         try { const d = await this.api("/secrets/" + encodeURIComponent(name) + "/rotate", { method: "POST", body: { value: v } }); this.notify("ok", "secret \"" + name + "\" rotated (v" + (d.version != null ? d.version : "") + ")"); this.loadSecrets(); }
         catch (e) { /* toast shown by api() */ }
       },
-      async deletePolicy(id) { if (confirm("Delete policy " + id + "?")) { try { await this.api("/policies/" + encodeURIComponent(id), { method: "DELETE" }); this.notify("ok", "policy deleted"); this.loadPolicies(); } catch (e) { /* toast shown by api() */ } } },
-      async deleteUser(n) { if (confirm("Delete user '" + n + "'?")) { try { await this.api("/users/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "user deleted"); this.loadUsers(); } catch (e) { /* toast shown by api() */ } } },
+      async deletePolicy(id) { if (await this.askConfirm({ title: "Delete policy", body: "This removes the policy; matching actions are no longer governed by it.", mono: id, confirmLabel: "Delete policy", variant: "danger" })) { try { await this.api("/policies/" + encodeURIComponent(id), { method: "DELETE" }); this.notify("ok", "policy deleted"); this.loadPolicies(); } catch (e) { /* toast shown by api() */ } } },
+      async deleteUser(n) { if (await this.askConfirm({ title: "Delete user", body: "The user can no longer sign in.", mono: n, confirmLabel: "Delete user", variant: "danger", requireText: n })) { try { await this.api("/users/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "user deleted"); this.loadUsers(); } catch (e) { /* toast shown by api() */ } } },
     },
     created() {
       window.addEventListener("hashchange", () => { this.route = (location.hash || "#/fleet").replace(/^#\/?/, ""); });
