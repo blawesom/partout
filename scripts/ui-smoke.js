@@ -151,6 +151,21 @@ async function main() {
     check("add-host: app instance exposed", false, "no window.__partout");
   }
 
+  // --- Getting-started checklist: shown on an empty fleet, dismissible ---
+  // (already on #/fleet, so clearing hosts does not trigger a refetch)
+  if (w.__partout) {
+    const savedHosts = w.__partout.hosts;
+    w.__partout.hosts = []; w.__partout.hostsLoading = false; w.__partout.gsDismissed = false;
+    await sleep(250);
+    check("fleet: getting-started on empty fleet", !!d.querySelector(".gs-card") && d.body.textContent.includes("Get started"), "checklist not shown on empty fleet");
+    check("fleet: checklist onboarding link", [...d.querySelectorAll(".gs-link")].some((a) => a.textContent.includes("Start onboarding")), "onboarding link missing");
+    w.__partout.dismissGettingStarted();
+    await sleep(250);
+    check("fleet: checklist dismissible", !d.querySelector(".gs-card"), "checklist still shown after dismiss");
+    w.__partout.hosts = savedHosts;
+    await sleep(250);
+  }
+
   const hostId = (w.__partout && w.__partout.hosts && w.__partout.hosts[0] && w.__partout.hosts[0].id) ||
     [...d.querySelectorAll("table.tbl tr td .host-id")].map((t) => t.textContent.trim()).find((s) => s.startsWith("ag_"));
   check("fleet: host id resolvable", !!hostId, "no host id on the fleet page");
@@ -487,7 +502,16 @@ async function main() {
   check("observe configs renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Configs"));
   await visit("#/obs-alerts");
   check("observe alerts: live card (engine wired)", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Alerts") && d.body.textContent.includes("Firing now:"), "alerts card missing");
-  check("observe alerts: empty state honest", d.body.textContent.includes("No alerts"), "no empty-state text");
+  // Honest state: the empty-state text is shown iff there are no alerts. The
+  // smoke's real security scan (Updates section) can find real CVEs and fire
+  // security_updates, so "No alerts" is not guaranteed — assert the rendered
+  // DOM matches the app's own alert list instead of a guaranteed empty state.
+  const nAlerts = (w.__partout && w.__partout.alerts || []).length;
+  if (nAlerts === 0) {
+    check("observe alerts: empty state honest", d.body.textContent.includes("No alerts"), "no empty-state text");
+  } else {
+    check("observe alerts: alert rows shown when present", !!d.querySelector("section table.tbl") && !d.body.textContent.includes("No alerts (firing"), "expected alert rows, got empty state");
+  }
   check("observe alerts: rules card", d.body.textContent.includes("Rules"), "rules card missing");
   check("observe alerts: seeded rule row", rowsWithText(d, "web restart loop") > 0, "rule row missing");
   check("observe alerts: M6.1 kind chip", rowsWithText(d, "service_restarting") > 0, "kind missing");
@@ -502,6 +526,17 @@ async function main() {
   await visit("#/account");
   check("account renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Account"));
   check("account: change-password form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Update")) && d.querySelectorAll('input[type="password"]').length >= 2, "no password form");
+
+  // --- Login page: first-run password hint (render the logged-out view) ---
+  if (w.__partout) {
+    const savedToken = w.__partout.token;
+    w.__partout.token = ""; // loggedIn is computed from token -> login page renders
+    await sleep(300);
+    check("login: first-run password hint", d.body.textContent.includes("First run?") && d.body.textContent.includes("admin_password.txt"), "login hint missing");
+    w.__partout.token = savedToken; // restore -> shell renders again
+    await sleep(400);
+    check("login: restored to shell", !!d.querySelector(".shell"), "shell not restored after re-login");
+  }
 
   console.log(failures.length ? "\n" + failures.length + " FAILURE(S)" : "\nALL UI DATA-RENDER CHECKS PASSED");
   w.close();

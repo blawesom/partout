@@ -276,6 +276,10 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
   text-align: center; padding: 40px 20px; color: var(--text-faint);
 }
 .empty .big { font-size: 30px; margin-bottom: 8px; opacity: 0.5; }
+.gs-steps { margin: 4px 0 6px; padding-left: 20px; display: flex; flex-direction: column; gap: 9px; }
+.gs-steps li { line-height: 1.55; }
+.gs-link { cursor: pointer; text-decoration: underline; color: var(--brand); margin-left: 6px; font-weight: 500; }
+.gs-link:hover { color: #1d4ed8; }
 
 .err-box {
   background: var(--critical-subtle); border: 1px solid #fecaca; color: #7f1d1d;

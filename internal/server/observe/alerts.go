@@ -8,6 +8,7 @@ package observe
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/blawesom/partout/internal/id"
+	"github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 	"github.com/blawesom/partout/internal/version"
@@ -170,7 +172,12 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 			var err error
 			hosts, err = c.resolveHosts(resolver, r.Selector)
 			if err != nil {
-				if c.log != nil {
+				// No matching hosts (empty fleet, or a selector that matches
+				// nothing yet) is a normal state, not a failure — skip it
+				// quietly. Logging it turned a fresh server into 8 lines of
+				// false alarm every 30s (one per enabled host-scoped rule).
+				// Real errors (bad selector syntax, etc.) are still logged.
+				if !errors.Is(err, selector.ErrNoMatch) && c.log != nil {
 					c.log.Printf("observe/alerts: rule %s selector %q: %v", r.ID, r.Selector, err)
 				}
 				continue

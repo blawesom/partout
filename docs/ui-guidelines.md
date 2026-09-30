@@ -663,3 +663,24 @@ Guards: `scripts/ui-smoke.js` (deterministic — drives the Vue instance via
 `window.__partout`, no real SSH: asserts the entry button, target → confirm
 phases, the five-step plan, the key_confirm fingerprint panel with
 Confirm/Deny, the enrolled result + host link, and close).
+
+## 22. First-run UI affordances
+
+Two small surfaces make a brand-new server self-explanatory:
+
+- **Login page — first-run password hint.** Below the sign-in form: “First
+  run? Sign in as `admin`. If you did not set `PARTOUT_ADMIN_PASSWORD`, the
+  generated password was written to `admin_password.txt` next to the database
+  — log in, change it, then delete the file.” Shown only on the logged-out
+  view (always, since a first-run operator has no other reference).
+- **Fleet page — getting-started checklist.** A dismissible card shown only
+  while the fleet is empty (`!hosts.length`, not just filtered/scoped) and not
+  yet dismissed. Three steps: onboard the first host (→ Provision), review the
+  preset-seeded guardrails (→ Policies / Alerts), keep the fleet current (→
+  Updates). Dismissal is persisted per-browser in `localStorage`
+  (`partout.gs.dismissed`) so it does not reappear.
+
+Guards: `scripts/ui-smoke.js` (checklist: clears `hosts` on the fleet page →
+asserts the card + onboarding link → `dismissGettingStarted()` → asserts it
+is gone; login hint: clears `token` to render the logged-out view → asserts
+the hint → restores `token` → asserts the shell returns).

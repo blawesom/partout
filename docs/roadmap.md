@@ -188,6 +188,20 @@ with Confirm/Deny; links to the enrolled host on success). It reuses the
 existing `/provision-runs` endpoints (no backend change) and leaves the quick
 form for power users. See `docs/ui-guidelines.md` §21.
 
+### Onboarding: first-run UI affordances + quiet empty-fleet ticks
+
+- **Login-page first-run password hint** and a **dismissible getting-started
+  checklist** on the Fleet page (shown only while the fleet is empty;
+  onboard a host → review the preset guardrails → keep the fleet current;
+  dismissal persisted per-browser). See `docs/ui-guidelines.md` §22.
+- **Quiet empty-fleet alert ticks.** A selector that matches no hosts (an
+  empty fleet, or a not-yet-matching role) is a *normal* state, not a
+  failure. The alert engine used to log `selector: … no hosts matched` for
+  every enabled host-scoped rule every tick — 8 lines of false alarm per 30 s
+  on a fresh server. `ErrNoMatch` is now skipped silently; genuine selector
+  errors (bad syntax, unknown group) are still logged. Guarded by
+  `TestEmptyFleetTickSilent`.
+
 ### M6 — Observe: alert engine (shipped)
 
 Done (R23/R25 — the engine that makes observe data actionable; PRD Decision 16: server-side only):

@@ -274,6 +274,12 @@
           <span v-if="loginBusy" class="spin"></span> Sign in
         </button>
       </form>
+      <p class="muted small" style="margin-top:14px;line-height:1.5">
+        <b>First run?</b> Sign in as <span class="mono">admin</span>. If you did not set
+        <span class="mono">PARTOUT_ADMIN_PASSWORD</span>, the generated password was written to
+        <span class="mono">admin_password.txt</span> next to the database on the server —
+        log in, change it, then delete the file.
+      </p>
     </div>
   </div>
   <!-- ============ SHELL ============ -->
@@ -356,6 +362,21 @@
             <div class="stat ok"><div class="lbl">🛡 Connected</div><div class="num">{{ health.connected }}</div></div>
             <div class="stat bad"><div class="lbl">✕ Disconnected</div><div class="num">{{ health.disconnected }}</div></div>
             <div class="stat info"><div class="lbl">◷ Pending</div><div class="num">{{ health.pending }}</div></div>
+          </div>
+          <div v-if="!hostsLoading && !hosts.length && !gsDismissed" class="card gs-card" style="margin-bottom:16px">
+            <div class="head">
+              <h2>Get started</h2>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="dismissGettingStarted()" aria-label="dismiss">✕</button>
+            </div>
+            <ol class="gs-steps">
+              <li><b>Onboard your first host</b> — over your existing SSH (guided wizard) or a one-time token.
+                <a @click.prevent="go('provision')" class="gs-link">Start onboarding →</a></li>
+              <li><b>Review the default guardrails</b> — the preset seeded safety-net policies and alert rules on first run.
+                <a @click.prevent="go('policies')" class="gs-link">Policies</a><span class="muted"> · </span><a @click.prevent="go('obs-alerts')" class="gs-link">Alerts</a></li>
+              <li><b>Keep the fleet current</b> — upload a release and roll it out.
+                <a @click.prevent="go('updates')" class="gs-link">Updates</a></li>
+            </ol>
           </div>
           <div class="card">
             <div class="head"><h2>Hosts</h2>
@@ -1591,6 +1612,7 @@
         sseStatus: "disconnected",
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
+        gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
         hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, serverVersion: "",
@@ -2370,6 +2392,10 @@
       // --- Onboarding wizard (guided SSH provisioning) ---
       openProvWizard() {
         this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], timer: null };
+      },
+      dismissGettingStarted() {
+        this.gsDismissed = true;
+        try { localStorage.setItem("partout.gs.dismissed", "1"); } catch (e) { /* private mode: fine */ }
       },
       provWizClose() {
         if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }

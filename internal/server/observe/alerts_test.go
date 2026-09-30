@@ -2,8 +2,10 @@
 package observe
 
 import (
+	"bytes"
 	"log"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +54,44 @@ func makeRule(t *testing.T, st *store.Store, kind, selector, thresholds, severit
 		t.Fatalf("CreateAlertRule: %v", err)
 	}
 	return ru
+}
+
+// TestEmptyFleetTickSilent: on a fresh (hostless) server, a tick over the
+// seeded host-scoped rules must NOT log "no hosts matched" — that turned a
+// normal empty state into 8 lines of false alarm every 30s. A genuinely bad
+// selector (a parse error, not a no-match) must still be logged.
+func TestEmptyFleetTickSilent(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	var buf bytes.Buffer
+	c := New(st, sse.New(), log.New(&buf, "obs: ", 0), time.Minute)
+
+	// Enabled host-scoped rule; the fleet is empty so it matches nothing.
+	now := time.Now().Unix()
+	for _, id := range []string{"empty_ok", "empty_bad"} {
+		sel := "all"
+		if id == "empty_bad" {
+			// A parse error (unknown predicate) is a real misconfiguration.
+			sel = "bogus:1"
+		}
+		r := &store.AlertRule{ID: id, Name: id, Kind: KindServiceFailed, Selector: sel,
+			Thresholds: `{"minutes":0}`, Severity: "critical", Enabled: true, CreatedAt: now, UpdatedAt: now}
+		if err := st.CreateAlertRule(r); err != nil {
+			t.Fatalf("CreateAlertRule %s: %v", id, err)
+		}
+	}
+	buf.Reset()
+	c.evaluate()
+	if got := buf.String(); strings.Contains(got, "no hosts matched") {
+		t.Fatalf("empty-fleet tick logged a false alarm:\n%s", got)
+	}
+	// The parse-error rule must still surface in the log.
+	if got := buf.String(); !strings.Contains(got, "bogus:1") {
+		t.Fatalf("a genuinely bad selector was not logged:\n%s", got)
+	}
 }
 
 // TestServiceFailedFireResolve: failed → fires (0-min threshold) → second
