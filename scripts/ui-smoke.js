@@ -334,6 +334,23 @@ async function main() {
     const inline = iRow >= 0 && after[iRow + 1] && after[iRow + 1].querySelector(".prov-inline");
     check("provision: inline step detail under row", !!inline && d.body.textContent.includes("Output excerpt"), "step detail not rendered directly below the clicked row");
   }
+  // A finished run whose agent linked in must show the host's LIVE state
+  // (run state is a past-tense snapshot) and link to the host page.
+  if (w.__partout) {
+    const inst = w.__partout;
+    const now = Math.floor(Date.now() / 1000);
+    inst.hosts = [...inst.hosts, { id: "ag_smokechip", name: "smoke-chip", state: "connected", last_seen: now }];
+    inst.provRuns = [...inst.provRuns, { id: "pr_smokechip", host: "chip@127.0.0.1", mode: "join", state: "connected", agent_id: "ag_smokechip", created: now }];
+    await sleep(400);
+    const row = [...d.body.querySelectorAll("table.tbl tbody tr")].find((tr) => tr.textContent.includes("pr_smokechip"));
+    const chip = row && [...row.querySelectorAll("a.badge")].find((a) => a.textContent.trim() === "connected");
+    check("provision: live host chip on connected run", !!chip, "no host state chip on the connected run row");
+    if (chip) { chip.click(); await sleep(900); }
+    check("provision: chip navigates to host page", String(w.location.hash).includes("ag_smokechip"), "hash=" + w.location.hash);
+    inst.hosts = inst.hosts.filter((h) => h.id !== "ag_smokechip");
+    inst.provRuns = inst.provRuns.filter((r) => r.id !== "pr_smokechip");
+    await visit("#/provision");
+  }
 
   await visit("#/obs-services", 1600);
   check("observe services: real unit",

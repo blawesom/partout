@@ -930,6 +930,14 @@
         <section v-else-if="page==='policies'">
           <h1 class="page">Policies</h1>
           <p class="page-sub">Command policy rules (PRD R7).</p>
+          <div class="card" v-if="presetStatus" style="margin-bottom:12px">
+            <div class="toolbar">
+              <div><strong>Fleet defaults (preset)</strong>
+                <span class="muted"> — the safety-net rules seeded on first boot; every <span class="mono">default-*</span> row can be edited or deleted.</span></div>
+              <button class="btn sm" v-if="presetMissing > 0 && isAdmin" @click="applyPreset">Apply missing ({{ presetMissing }})</button>
+            </div>
+            <div v-if="presetMissing > 0" class="muted" style="margin-top:6px">Missing: {{ presetMissingList }}</div>
+          </div>
           <div class="card">
             <table class="tbl">
               <thead><tr><th>ID</th><th>Name</th><th>Effect</th><th>Priority</th><th>Match</th><th></th></tr></thead>
@@ -1081,7 +1089,10 @@
                       <button class="btn danger sm" @click.stop="decideProvKey(r.id,'deny')">Deny</button>
                     </template>
                     <button v-else-if="!provTerminal(r.state) && isAdmin" class="btn danger sm" @click.stop="cancelProvRun(r.id)">Cancel</button>
-                    <span v-else class="muted small">{{ provDetail && provDetail.run && provDetail.run.id===r.id ? 'hide ▴' : 'steps ▸' }}</span>
+                    <span v-else style="display:inline-flex;align-items:center;gap:8px">
+                      <a v-if="r.agent_id" @click.prevent.stop="go('host/'+r.agent_id)" class="badge" :class="agentBadge((hostMap[r.agent_id]||{}).state).cls" :title="(hostMap[r.agent_id] ? hostName(hostMap[r.agent_id]) : r.agent_id) + ' — open in Fleet'">{{ agentBadge((hostMap[r.agent_id]||{}).state).label }}</a>
+                      <span class="muted small">{{ provDetail && provDetail.run && provDetail.run.id===r.id ? 'hide ▴' : 'steps ▸' }}</span>
+                    </span>
                   </td>
                 </tr>
                 <tr v-if="provDetail && provDetail.run && provDetail.run.id===r.id">
@@ -1089,7 +1100,12 @@
                     <div class="toolbar">
                       <span class="muted mono small">run {{ provDetail.run.id }} · {{ provDetail.run.host }} · {{ provDetail.run.state }}</span>
                       <span class="err-box" style="margin:0" v-if="provDetail.run.error">{{ provDetail.run.error }}</span>
-                      <span class="muted mono small" v-if="provDetail.run.agent_id">agent {{ hostNameById(provDetail.run.agent_id) }}</span>
+                      <template v-if="provDetail.run.agent_id">
+                        <span class="badge" :class="agentBadge((hostMap[provDetail.run.agent_id]||{}).state).cls">{{ agentBadge((hostMap[provDetail.run.agent_id]||{}).state).label }}</span>
+                        <span class="muted mono small">{{ hostMap[provDetail.run.agent_id] ? hostName(hostMap[provDetail.run.agent_id]) : provDetail.run.agent_id }}</span>
+                        <span class="muted small" v-if="hostMap[provDetail.run.agent_id]">last seen {{ fmtAgo(hostMap[provDetail.run.agent_id].last_seen) }}</span>
+                        <button class="btn sm" @click="go('host/' + provDetail.run.agent_id)">View host →</button>
+                      </template>
                       <div class="spacer"></div>
                       <button class="btn sm" @click="provDetail=null">Close</button>
                     </div>
@@ -1440,7 +1456,7 @@
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
         tasks: [], playbooks: [], updates: [],
-        secrets: [], policies: [], users: [],
+        secrets: [], policies: [], users: [], presetStatus: null,
         secretForm: { name: "", value: "", selector: "all" }, secretBusy: false,
         userForm: { username: "", password: "", role: "operator" }, userBusy: false,
         provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false,
@@ -1490,6 +1506,16 @@
       p2() { return this.parts[2] || ""; },
       isOperator() { return ["operator", "admin"].includes(this.me?.role); },
       isAdmin() { return this.me?.role === "admin"; },
+      presetMissing() {
+        if (!this.presetStatus) return 0;
+        const rows = [...(this.presetStatus.policies || []), ...(this.presetStatus.alert_rules || [])];
+        return rows.filter(r => !r.present).length;
+      },
+      presetMissingList() {
+        if (!this.presetStatus) return "";
+        const rows = [...(this.presetStatus.policies || []), ...(this.presetStatus.alert_rules || [])];
+        return rows.filter(r => !r.present).map(r => r.name).join(", ");
+      },
       locationHost() { return (typeof location !== "undefined" && location.host) ? location.host : "server:8443"; },
       ahCmd() {
         if (!this.ahToken) return "";
@@ -1507,6 +1533,7 @@
       initials() { return (this.me?.username || "?").slice(0, 2).toUpperCase(); },
       port() { return location.port || (location.protocol === "https:" ? "443" : "80"); },
       sseDot() { return this.sseStatus === "connected" ? "ok" : this.sseStatus === "reconnecting" ? "warn" : "down"; },
+      hostMap() { const m = {}; for (const h of this.hosts) m[h.id] = h; return m; },
       crumbHost() { return this.page === "host" ? (this.hostName(this.host) || this.p1) : ""; },
       crumbPage() { if (this.page === "host") return this.p2 || "overview"; if (this.page === "exec") return "execution"; return ""; },
       health() {
@@ -1831,7 +1858,7 @@
           case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
           case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); this.loadReleases(); this.loadRuns(); break;
           case "secrets": await this.loadSecrets(); break;
-          case "policies": await this.loadPolicies(); break;
+          case "policies": await this.loadPolicies(); await this.loadPreset(); break;
           case "approvals": await this.loadApprovals(); break;
           case "obs-alerts": await this.loadAlerts(); this.loadRules(); break;
           case "mcp": await this.loadMcp(); this.loadMcpClients(); break;
@@ -2129,7 +2156,9 @@
       },
       async loadSecrets() { try { const d = await this.api("/secrets"); this.secrets = d.secrets || d.items || []; } catch (e) { this.secrets = []; } },
       async loadPolicies() { try { const d = await this.api("/policies"); this.policies = d.items || d || []; } catch (e) { this.policies = []; } },
-      async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || []; } catch (e) { this.provRuns = []; } },
+      async loadPreset() { try { this.presetStatus = await this.api("/preset"); } catch (e) { this.presetStatus = null; } },
+      async applyPreset() { try { const r = await this.api("/preset/apply", { method: "POST", body: {} }); this.notify("ok", "preset applied: " + (r.created_policies?.length || 0) + " policy, " + (r.created_alerts?.length || 0) + " alert rule default(s)"); this.loadPolicies(); this.loadPreset(); } catch (e) { } },
+      async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || []; } catch (e) { this.provRuns = []; } if (!this.hosts.length) this.loadHosts(); },
       provTerminal(state) { return ["connected", "failed", "cancelled", "handoff"].includes(state); },
       async showProvRun(id) {
         if (this.provDetail && this.provDetail.run && this.provDetail.run.id === id) { this.provDetail = null; return; }

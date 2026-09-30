@@ -622,3 +622,23 @@ has two valid paths and the old UI only exposed one (SSH provision, admin-only):
 Guards: `TestUIShape_AddHostSurface` (entry points, both tabs, token call, tooltips)
 + `scripts/ui-smoke.js` (open dialog → mint token → command block embeds
 `par_enr_` → tooltips → close).
+
+## 20. Provision runs link to live host state
+
+A finished provision run's terminal state (`connected`) is a **past-tense
+snapshot** — it says enrollment happened, not that the host is healthy *now*.
+Live state lives on the host, so the Provision page must link to it instead of
+duplicating it:
+
+- Runs that enrolled an agent (`run.agent_id`) show a **live host-state chip**
+  (connected/disconnected, from the fleet's `hosts` list, refreshed by the
+  existing `host.state` SSE) in the row's action cell. Clicking it navigates
+  to `#/host/<agent_id>`.
+- The inline step-detail panel (the row expands under the clicked run) shows
+  the same chip plus host name, last-seen, and a **View host →** button.
+- The provision page loads `hosts` on demand (`loadProvRuns` triggers
+  `loadHosts` when empty) so the chip is correct without visiting Fleet first.
+
+Guards: `scripts/ui-smoke.js` (injects a connected run + host via
+`window.__partout` → asserts the chip renders → click → asserts hash
+navigation to the host page).
