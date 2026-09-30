@@ -183,7 +183,7 @@
       <div class="brand">
         <div class="logo">P</div>
         <div><div class="word">Partout</div><div class="sub">Fleet Management</div></div>
-        <div class="port">:{{ port }}</div>
+        <div class="port" v-if="serverVersion" :title="'server ' + serverVersion">{{ serverVersion }}</div>
       </div>
       <nav class="nav">
         <template v-for="g in navGroups()" :key="g.key">
@@ -1442,7 +1442,7 @@
         fleetFilter: "",
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
-        hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null,
+        hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, serverVersion: "",
         labelDraft: { name: "", service: "" }, roleDraft: "", labelBusy: false,
         exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
         preview: null, previewLoading: false, executions: [],
@@ -1531,7 +1531,6 @@
           : "join: non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved). Use for upgrades.";
       },
       initials() { return (this.me?.username || "?").slice(0, 2).toUpperCase(); },
-      port() { return location.port || (location.protocol === "https:" ? "443" : "80"); },
       sseDot() { return this.sseStatus === "connected" ? "ok" : this.sseStatus === "reconnecting" ? "warn" : "down"; },
       hostMap() { const m = {}; for (const h of this.hosts) m[h.id] = h; return m; },
       crumbHost() { return this.page === "host" ? (this.hostName(this.host) || this.p1) : ""; },
@@ -1758,6 +1757,7 @@
         }
       },
       async refreshCaps() { try { this.caps = await this.api("/capabilities"); } catch (e) { this.caps = {}; } },
+      async loadVersion() { try { const d = await this.api("/version"); this.serverVersion = d.version || ""; } catch (e) { } },
       async loadMe() { try { this.me = await this.api("/auth/me"); } catch (e) { } },
       async loadGroups() { try { this.groups = (await this.api("/groups")) || []; } catch (e) { this.groups = []; } },
       async doLogin() {
@@ -2549,7 +2549,7 @@
       this.loadNavCollapsed();
       window.addEventListener("keydown", this.onGlobalKey);
       if (this.token) {
-        Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups()]).then(() => {
+        Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups(), this.loadVersion()]).then(() => {
           if (!this.me) { this.signOut(); return; }
           this.ensureNavExpanded();
           this.startSSE(); this.loadPageData(); this.loadNavBadges();

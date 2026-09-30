@@ -49,6 +49,12 @@ async function main() {
 
   check("shell mounted", !!d.querySelector(".shell"), "no .shell; body=" + d.body.innerHTML.length);
   check("logged in as admin", (d.querySelector(".uname") || {}).textContent === "admin");
+  // Sidebar brand shows the SERVER VERSION (fetched from /api/v1/version),
+  // not the listen port.
+  let srvVer = "";
+  try { const j = await (await realFetch(base + "/api/v1/version")).json(); srvVer = j.version || ""; } catch (e) { srvVer = ""; }
+  const brandPort = ((d.querySelector(".brand .port") || {}).textContent || "").trim();
+  check("sidebar: server version in brand", srvVer !== "" && brandPort === srvVer, "brand=" + JSON.stringify(brandPort) + " expected=" + srvVer);
 
   // Global toast system: drive notify() and assert a toast renders.
   const inst = w.__partout;
