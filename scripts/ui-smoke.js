@@ -570,6 +570,23 @@ async function main() {
   check("account renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Account"));
   check("account: change-password form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Update")) && d.querySelectorAll('input[type="password"]').length >= 2, "no password form");
 
+  // --- Loading banner: while a page's data is loading AND empty, show
+  //     "Loading…" and suppress the empty state (not "No jobs.") ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    await visit("#/jobs");
+    const savedJobs = inst.jobs;
+    inst.jobs = [];
+    inst.pageLoading = true;
+    await sleep(150);
+    check("loading: banner while loading", d.body.textContent.includes("Loading…"), "no loading banner");
+    check("loading: empty state suppressed during load", !d.body.textContent.includes("No jobs."), "empty state shown during load");
+    inst.pageLoading = false;
+    await sleep(150);
+    check("loading: empty state shown after load", d.body.textContent.includes("No jobs."), "empty state not shown after load");
+    inst.jobs = savedJobs;
+  }
+
   // --- Confirm dialog (replaces native confirm()) ---
   // Drive askConfirm directly so no real destructive action fires.
   if (w.__partout) {

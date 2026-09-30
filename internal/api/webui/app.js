@@ -396,6 +396,7 @@
           <template v-if="sseStatus === 'reconnecting'"> Reconnecting…</template>
           <template v-else> Stream down — check the server.</template>
         </div>
+        <div v-if="pageLoading && pagePrimaryEmpty" class="loading-banner"><span class="spin"></span> Loading…</div>
         <div v-if="userMenu" @click="userMenu=false" style="position:fixed;inset:0;z-index:40;background:rgba(15,23,42,.25)">
           <div style="position:absolute;bottom:70px;left:12px;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px;min-width:180px">
             <div class="nav-item" @click.stop="userMenu=false; go('account')">Account</div>
@@ -622,7 +623,7 @@
                   <td class="mono">{{ a.agent_id ? (hostNameById(a.agent_id) || a.agent_id) : 'server' }}</td>
                   <td class="mono small" style="max-width:420px;overflow:hidden;text-overflow:ellipsis">{{ typeof a.payload==='string'? a.payload : (a.payload && a.payload.message) || JSON.stringify(a.payload||{}) }}</td>
                 </tr>
-                <tr v-if="!audit.length"><td colspan="5"><div class="empty">No audit events.</div></td></tr>
+                <tr v-if="!audit.length && !pageLoading"><td colspan="5"><div class="empty">No audit events.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -657,7 +658,7 @@
                   <td><span class="badge neutral">{{ s.state || '—' }}</span></td>
                   <td><button class="btn sm" @click="go('session/'+(s.id||s.session_id))">{{ (s.id||s.session_id)===p1 ? 'Open' : (s.state==='open' ? 'Attach' : 'Replay') }}</button></td>
                 </tr>
-                <tr v-if="!sessions.length"><td colspan="5"><div class="empty">No sessions.</div></td></tr>
+                <tr v-if="!sessions.length && !pageLoading"><td colspan="5"><div class="empty">No sessions.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -741,7 +742,7 @@
                     <button class="btn danger sm" :disabled="!isOperator" @click="deleteJob(j)">Delete</button>
                   </td>
                 </tr>
-                <tr v-if="!jobs.length"><td colspan="7"><div class="empty">No jobs.</div></td></tr>
+                <tr v-if="!jobs.length && !pageLoading"><td colspan="7"><div class="empty">No jobs.</div></td></tr>
               </tbody>
             </table>
 
@@ -853,7 +854,7 @@
                     <td class="mono">{{ t.id }}</td><td>{{ t.name }}</td><td class="muted">{{ t.description || '—' }}</td>
                     <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runTask(t)">Run…</button></td>
                   </tr>
-                  <tr v-if="!tasks.length"><td colspan="4"><div class="empty">No tasks.</div></td></tr>
+                  <tr v-if="!tasks.length && !pageLoading"><td colspan="4"><div class="empty">No tasks.</div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -867,7 +868,7 @@
                     <td class="mono">{{ p.selector || '—' }}</td>
                     <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runPlaybook(p)">Run</button></td>
                   </tr>
-                  <tr v-if="!playbooks.length"><td colspan="5"><div class="empty">No playbooks.</div></td></tr>
+                  <tr v-if="!playbooks.length && !pageLoading"><td colspan="5"><div class="empty">No playbooks.</div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -969,7 +970,7 @@
                   <td class="muted">{{ fmtAgo(a.created) }}</td>
                   <td class="muted small">{{ pkgActionDetail && pkgActionDetail.id===a.id ? 'hide ▴' : 'summary ▸' }}</td>
                 </tr>
-                <tr v-if="!pkgActions.length"><td colspan="7"><div class="empty">No package actions.</div></td></tr>
+                <tr v-if="!pkgActions.length && !pageLoading"><td colspan="7"><div class="empty">No package actions.</div></td></tr>
               </tbody>
             </table>
             <div v-if="pkgActionDetail" class="console" style="margin-top:8px;max-height:220px;white-space:pre-wrap">{{ pkgActionDetail.dry_summary || pkgActionDetail.error || '(no summary)' }}</div>
@@ -1000,7 +1001,7 @@
                     <span v-if="!(s.findings || []).length" class="muted">no known CVEs on installed packages</span>
                   </td>
                 </tr>
-                <tr v-if="!security.length"><td colspan="5"><div class="empty">No host scanned yet — the scan runs automatically (PARTOUT_SECURITY_SCAN_S, default 6 h) or press “Scan now”.</div></td></tr>
+                <tr v-if="!security.length && !pageLoading"><td colspan="5"><div class="empty">No host scanned yet — the scan runs automatically (PARTOUT_SECURITY_SCAN_S, default 6 h) or press “Scan now”.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1023,7 +1024,7 @@
                     <td class="muted">{{ r.uploaded_by || '—' }}</td>
                     <td class="row-actions"><button class="btn danger sm" :disabled="!isAdmin" @click="deleteRelease(r)">Delete</button></td>
                   </tr>
-                  <tr v-if="!releases.length"><td colspan="9"><div class="empty">No releases uploaded yet (<span class="mono">partout ctl update upload …</span>).</div></td></tr>
+                  <tr v-if="!releases.length && !pageLoading"><td colspan="9"><div class="empty">No releases uploaded yet (<span class="mono">partout ctl update upload …</span>).</div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -1070,7 +1071,7 @@
                     <td class="muted">{{ fmtAgo(r.created) }}</td>
                     <td class="row-actions"><button v-if="r.status==='draft'" class="btn primary sm" :disabled="!isAdmin" @click.stop="startDraft(r.id)">Start</button> <button class="btn sm" @click.stop="openRun(r.id)">Detail</button></td>
                   </tr>
-                  <tr v-if="!runs.length"><td colspan="10"><div class="empty">No rollout runs yet.</div></td></tr>
+                  <tr v-if="!runs.length && !pageLoading"><td colspan="10"><div class="empty">No rollout runs yet.</div></td></tr>
                 </tbody>
               </table>
             </div>
@@ -1121,7 +1122,7 @@
                     <button class="btn danger sm" :disabled="!isAdmin" @click="deleteSecret(s.name)">Delete</button>
                   </td>
                 </tr>
-                <tr v-if="!secrets.length"><td colspan="4"><div class="empty">No secrets (or feature disabled).</div></td></tr>
+                <tr v-if="!secrets.length && !pageLoading"><td colspan="4"><div class="empty">No secrets (or feature disabled).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1151,7 +1152,7 @@
                   <td><span class="chip" v-for="(v,k) in matchPairs(p)" :key="k">{{ k }}={{ v }}</span><span v-if="!matchPairs(p).length" class="muted">—</span></td>
                   <td><button class="btn danger sm" :disabled="!isAdmin" @click="deletePolicy(p.id)">Delete</button></td>
                 </tr>
-                <tr v-if="!policies.length"><td colspan="6"><div class="empty">No policies.</div></td></tr>
+                <tr v-if="!policies.length && !pageLoading"><td colspan="6"><div class="empty">No policies.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1192,7 +1193,7 @@
                     <button class="btn danger sm" :disabled="apprBusy===a.id" @click="decideApproval(a.id,'deny')">Deny</button>
                   </td>
                 </tr>
-                <tr v-if="!approvals.length"><td colspan="10"><div class="empty">No approval requests{{ apprState ? ' (' + apprState + ')' : '' }}.</div></td></tr>
+                <tr v-if="!approvals.length && !pageLoading"><td colspan="10"><div class="empty">No approval requests{{ apprState ? ' (' + apprState + ')' : '' }}.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1368,7 +1369,7 @@
                     <button class="btn danger sm" :disabled="(u.username||u.name)===meName" @click="deleteUser(u.username||u.name)">Delete</button>
                   </td>
                 </tr>
-                <tr v-if="!users.length"><td colspan="4"><div class="empty">No users.</div></td></tr>
+                <tr v-if="!users.length && !pageLoading"><td colspan="4"><div class="empty">No users.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1406,7 +1407,7 @@
                   <td><span class="chip" v-for="l in (row.unit.labels||[])" :key="l">{{ l }}</span></td>
                   <td><a v-if="unitCfgLink(row)" @click.prevent="go(unitCfgLink(row))" :title="row.unit.name + ' config'">⚙ config</a><span v-else class="muted">—</span></td>
                 </tr>
-                <tr v-if="!services.length"><td colspan="9"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
+                <tr v-if="!services.length && !pageLoading"><td colspan="9"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1444,7 +1445,7 @@
                     <span v-if="!certUsedBy(row).length" class="muted">—</span>
                   </td>
                 </tr>
-                <tr v-if="!certs.length"><td colspan="7"><div class="empty">No certificate facts.</div></td></tr>
+                <tr v-if="!certs.length && !pageLoading"><td colspan="7"><div class="empty">No certificate facts.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1505,7 +1506,7 @@
               </table>
             </template>
           </div>
-          <div class="card" v-if="!configs.length"><div class="empty">No config facts (haproxy/nginx must be installed).</div></div>
+          <div class="card" v-if="!configs.length && !pageLoading"><div class="empty">No config facts (haproxy/nginx must be installed).</div></div>
         </section>
 
         <!-- ============ OBSERVE · ALERTS (M6 engine; rule-management UI M7) ============ -->
@@ -1531,7 +1532,7 @@
                   </tr>
                 </tbody>
               </table>
-              <p v-else class="muted">No alerts (firing or recently resolved).</p>
+              <p v-else-if="!pageLoading" class="muted">No alerts (firing or recently resolved).</p>
             </div>
 
             <div class="card" style="margin-top:12px">
@@ -1558,7 +1559,7 @@
                       <button class="btn danger sm" :disabled="!isOperator" @click="deleteRule(r.id)">Delete</button>
                     </td>
                   </tr>
-                  <tr v-if="!rules.length"><td colspan="7"><div class="empty">No alert rules.</div></td></tr>
+                  <tr v-if="!rules.length && !pageLoading"><td colspan="7"><div class="empty">No alert rules.</div></td></tr>
                 </tbody>
               </table>
 
@@ -1658,7 +1659,7 @@
         me: null, caps: {}, loginForm: { username: "", password: "" },
         loginErr: "", loginBusy: false, userMenu: false,
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
-        sseStatus: "disconnected", sseWasConnected: false,
+        sseStatus: "disconnected", sseWasConnected: false, pageLoading: false,
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
@@ -1781,6 +1782,29 @@
       },
       provWizPhaseLabel() {
         return ({ target: "Step 1 of 3 — target", confirm: "Step 2 of 3 — review", live: "Step 3 of 3 — progress" })[this.provWiz.phase] || "";
+      },
+      // Is the current page's primary list empty? Drives the "Loading…"
+      // indicator: shown only while loading AND empty, so a reconnect (data
+      // already present) never flashes it.
+      pagePrimaryEmpty() {
+        switch (this.page) {
+          case "exec": return !this.executions.length;
+          case "audit": return !this.audit.length;
+          case "sessions": return !this.sessions.length;
+          case "files": return !this.fileEntries.length;
+          case "jobs": return !this.jobs.length;
+          case "tasks": return !this.tasks.length;
+          case "updates": return !this.releases.length && !this.runs.length && !this.security.length;
+          case "secrets": return !this.secrets.length;
+          case "policies": return !this.policies.length;
+          case "approvals": return !this.approvals.length;
+          case "obs-alerts": return !this.alerts.length && !this.rules.length;
+          case "obs-services": return !this.services.length;
+          case "obs-certs": return !this.certs.length;
+          case "obs-configs": return !this.configs.length;
+          case "users": return !this.users.length;
+          default: return false;
+        }
       },
       initials() { return (this.me?.username || "?").slice(0, 2).toUpperCase(); },
       sseDot() { return this.sseStatus === "connected" ? "ok" : this.sseStatus === "reconnecting" ? "warn" : "down"; },
@@ -2093,6 +2117,13 @@
         else if (kind === "alert.firing" || kind === "alert.resolved") { this.loadNavBadges(); if (this.page === "obs-alerts") this.loadAlerts(); }
       },
       async loadPageData() {
+        // Central loading flag: a page shows a "Loading…" indicator (and
+        // suppresses its empty state) while its data is fetched, so an empty
+        // table during the first load isn't mistaken for "there is nothing".
+        this.pageLoading = true;
+        try { await this._loadPageDataInner(); } finally { this.pageLoading = false; }
+      },
+      async _loadPageDataInner() {
         // Files, Updates, Jobs and the Observe pages need the host list (default
         // host selection, per-host run target, host filter dropdowns). Load it
         // first if a deep link lands here before the fleet page ever ran.

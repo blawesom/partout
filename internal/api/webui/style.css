@@ -340,6 +340,17 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 .sse-stale .stat {
   opacity: 0.6;
 }
+/* Loading indicator: shown while a page's data is being fetched AND its list
+   is still empty, so an empty table during first load reads as "loading",
+   not "nothing here". */
+.loading-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  padding: 14px;
+  font-size: 13px;
+}
 
 .err-box {
   background: var(--critical-subtle); border: 1px solid #fecaca; color: #7f1d1d;

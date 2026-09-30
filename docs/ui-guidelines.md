@@ -379,6 +379,13 @@ tell the operator whether anything executed at all.
   paused — data may be stale") and the data tables dim (`.sse-stale`). This prevents an
   operator from acting on a view that looks live but isn't. It only shows after a genuine
   connection is lost, so there's no flash on initial load.
+- **Loading vs. empty.** `loadPageData` sets a single `pageLoading` flag around
+  each page's fetch. While `pageLoading` **and** the page's primary list is
+  still empty (`pagePrimaryEmpty`), a “Loading…” indicator shows and the
+  page's empty state is suppressed — so an empty table during the first load
+  reads as “loading”, not “nothing here”. On a reconnect the data is already
+  present, so the indicator never flashes. Empty states render only once data
+  has loaded.
 - **Event → UI map:**
 
 | Kind | Consumer |
