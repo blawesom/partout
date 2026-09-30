@@ -479,6 +479,8 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_SESSION_RETENTION_DAYS` | **30** | retention sweeper window for session recordings (PRD §9) |
 | `PARTOUT_APPROVAL_TTL_S` | **3600** | (M4) approval-request TTL in seconds (PRD §5.8): a `require_approval`-parked action expires and is finalized `failed` if un-acted within this window; expired requests can never be retroactively honored |
 | `PARTOUT_ALERT_TICK_S` | **30** | (M6) alert-engine evaluation cadence in seconds (PRD R25); one pass over all enabled rules × all host facts per tick |
+| `PARTOUT_SECURITY_SCAN_S` | **21600** | (M5.1) periodic CVE security-scan cadence in seconds (6 h); `0` disables the scan loop. The scan correlates installed packages against the OSV cache and persists findings; the `security_updates` alert kind reads them |
+| `PARTOUT_AUTO_DRAFT_ROLLOUTS` | **true** | (M8.1.1) when a new **agent** release is uploaded, pre-arm a **paused** fleet rollout (draft, canary 1, wave 25). Safe to leave on — a draft is inert until an operator Starts it; set `false` to disable |
 | `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` | **false** | air-gap switch: disables all external data fetching, EOL + CVE (PRD §6.3) |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for future output blobs — external data cache is in-DB (`eol_cache`/`vuln_cache`) |
 | `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules |
@@ -492,12 +494,17 @@ hierarchy viewer < operator < admin.
 | Var / Flag | Default | Notes |
 |---|---|---|
 | `PARTOUT_SERVER` / `--server` | *(required)* | server `host:port` (a `http(s)://` prefix is accepted); gRPC + REST on the same port |
+| `PARTOUT_MODE` / `--mode` | **embedded** | process role: `embedded` (server + co-located agent), `server`, `agent`, `mcp`. See §3.8 |
 | `PARTOUT_TOKEN` / `--token` | *(first boot only)* | one-time enrollment token |
 | `PARTOUT_TLS_CA` / `--ca-file` | *(empty)* | path to the server root CA (PEM); enables HTTPS enrollment + mTLS stream |
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |
 | `PARTOUT_REBOOT_FLUSH_S` | **5** | (M3) pre-reboot grace for a task `reboot` step (PRD §5.5): the agent waits this long after persisting the resume marker, so the `rebooting` report flushes up the stream before the host goes down |
+| `PARTOUT_RELEASE_KEY` | *(empty)* | (M8.1) Ed25519 **public** key (hex or path) the agent verifies fleet-update releases against; set → strict-signed (unsigned refused). Unset + `PARTOUT_ALLOW_UNSIGNED_RELEASES=true` → unsigned-beta |
+| `PARTOUT_ALLOW_UNSIGNED_RELEASES` | **true (beta)** | override the unsigned-release posture; **GA sets this to false** (signed-only) |
+| `PARTOUT_UPDATE_HEALTH_S` | **60** | (M8.1) post-swap health window: the new binary must boot and reconnect within this many seconds, else the update is marked unhealthy and rolled back (crashloop guard) |
+| `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
 
 ### 4.3 `partout ctl` — wired
 
@@ -602,6 +609,13 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 
 ## 6. Bring-up checklist (first deployment, current)
 
+0. **Pre-flight the server host:** `partout doctor` (mode/addr/port/db/tls-taken
+   from the same env/flag config the server uses). It reports pass/fail for the
+   things that otherwise surface as a confusing start failure — port free, DB
+   dir writable, TLS mode + SANs, admin auth, outbound OSV/EOL reachability
+   (warn only), the provisioning SSH key, and the fleet-update release key —
+   and exits non-zero on a hard failure. Run it before first start and after a
+   config change: `partout doctor && ./partout`.
 1. Install server (§3.1) → `systemctl status partout-server` green;
    `GET /healthz` 200, `GET /readyz` 200.
 2. Set up auth: pre-seed the first-run admin user with `PARTOUT_ADMIN_PASSWORD` (or

@@ -211,7 +211,7 @@ UI labels are presentation names; the PRD/API nouns stay authoritative.
 | Updates | Updates | `/packages/updates`, `/packages/apply` |
 | Secrets | Secrets | `/secrets` |
 | Policies | Policy & Approvals | `/policies` |
-| Provision | Provision | `/provision-runs` |
+| Provision | Provision | `/provision-runs`, `/provision/ssh-status` |
 | Users | (admin) | `/users` |
 | Observe · Services | Observe → Services | `/services`, `/services?agent_id=&name=` |
 | Observe · Certificates | Observe → Certificates | `/certificates`, `/certificates?days_remaining_lt=` |

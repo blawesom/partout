@@ -509,7 +509,8 @@ Shipped (no new scheduling mechanism — reuses the run FSM + alert engine):
    every agent's reported version against the store's newest agent release
    (per-arch latest in the message); fires once per rule (deduped), resolves
    when the fleet catches up. Preset rule `default-update-drift`
-   (`min_drifted: 1`, warning) — the preset is now 4 policies + 7 alert rules.
+   (`min_drifted: 1`, warning) — at this point the preset was 4 policies +
+   7 alert rules (M5.1 later adds the 8th, `default-security-updates`).
 
 Explicitly NOT done: an agent-side cron job that self-swaps "latest". That
 breaks the M8.1 invariant (the agent never decides to update), bypasses
