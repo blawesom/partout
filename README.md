@@ -90,6 +90,14 @@ agent (or an all-in-one demo process).
 go build -o partout ./cmd/partout
 ```
 
+**Check the host first.** `partout doctor` runs a pre-flight (port free, DB
+writable, TLS, outbound CVE/EOL data, SSH key for provisioning) and exits
+non-zero on a hard failure — the "start it and see" step, made visible:
+
+```bash
+./partout doctor && ./partout   # doctor reports exactly what would stop a start
+```
+
 **Fastest path — one-process demo.** Server **and** a co-located local agent; the fleet is
 populated the moment you open the UI. No enrollment token or second process needed.
 
@@ -171,7 +179,8 @@ partout ctl audit --kind policy.deny --limit 50
 The full command set: `auth · enroll-token · hosts · run · exec · audit · policy ·
 preset · approvals · alerts · provision · ca · tls · files · sessions · jobs · tasks ·
 playbooks · packages · secrets · update · db-backup · external-data` (plus the
-top-level `partout selftest`). `partout ctl help` prints the full reference.
+top-level `partout doctor`, `partout selftest`, and `partout update`). `partout ctl
+help` prints the full reference.
 
 ## Documentation
 

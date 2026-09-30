@@ -80,6 +80,17 @@ func main() {
 		return
 	}
 
+	// `partout doctor` is the pre-flight readiness check: port free, DB
+	// writable, TLS, outbound data feeds, SSH key for provisioning. It makes
+	// no changes and starts no server. Intended as `partout doctor && ./partout`.
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		if err := runDoctor(); err != nil {
+			fmt.Fprintln(os.Stderr, "partout:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// `partout update` is the M8.1 one-command: fetch the signed release,
 	// verify both artifacts, supervised server swap, fleet rollout.
 	if len(os.Args) > 1 && os.Args[1] == "update" {

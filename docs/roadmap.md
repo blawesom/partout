@@ -163,6 +163,20 @@ existing pkg.apply governance (dry-run, approval-park) applies. Deliberately
 no auto-apply: patches restart services and change host state, so a human
 stands at the moment of change.
 
+### Onboarding: `partout doctor`
+
+First-run diagnostics that used to surface as a confusing startup failure
+(most often: a listener port already taken) are now checkable up front.
+`partout doctor` inspects the current host against the effective server
+config and reports pass/fail for: port free, DB dir writable, TLS mode +
+SANs, admin auth (warns that a first-run password will be generated),
+outbound reachability of the OSV + EOL data feeds (warn only — the security
+scan / EOL features degrade offline), the SSH identity key host provisioning
+would use, and the fleet-update release key. No changes, no server started.
+Exit 0 = runnable (warnings allowed), 1 = a hard failure. Intended as
+`partout doctor && ./partout`. (Companion work: cleaner first-run output +
+embedded-mode error surfacing are tracked separately.)
+
 ### M6 — Observe: alert engine (shipped)
 
 Done (R23/R25 — the engine that makes observe data actionable; PRD Decision 16: server-side only):
