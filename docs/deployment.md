@@ -240,7 +240,9 @@ starting point, not a lock-in.
 `default-cert-expiring` 30 d (warning), `default-config-invalid` (critical),
 `default-config-drift` (info), `default-update-run` (warning — stuck rollout),
 `default-update-drift` (warning — agents behind the store's newest release;
-server-level, fires once, resolves when the fleet catches up).
+server-level, fires once, resolves when the fleet catches up),
+`default-security-updates` (warning — host has ≥ 1 package with a known
+CVE at CVSS ≥ 7 from the periodic security scan; resolves when patched).
 
 **Re-apply after a restore** (a pre-preset backup has no `default-*` rows, and
 first-boot does not re-fire because the admin user already exists):

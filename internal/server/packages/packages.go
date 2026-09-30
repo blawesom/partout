@@ -108,6 +108,7 @@ func (c *Controller) ListUpdates(ctx context.Context, agentID string, actor Acto
 					u.VulnCount = int64(len(rows))
 					u.MaxSeverity = maxCVSS(rows)
 					u.IsSecurity = true
+					u.VulnIds = vulnIDsFromRows(rows)
 				}
 			}
 			// Rank: highest severity first, then most CVEs, then name.
@@ -402,4 +403,19 @@ func pbUpdatesToJSON(ups []*pb.PkgUpdate) (string, error) {
 		})
 	}
 	return store.MarshalPkgUpdates(jups)
+}
+
+// vulnIDsFromRows extracts the advisory/CVE ids from a correlated vuln set
+// (capped), for display and the security scan findings.
+func vulnIDsFromRows(rows []store.VulnRow) []string {
+	var ids []string
+	for _, r := range rows {
+		if r.VulnID != "" && r.VulnID != "-" {
+			ids = append(ids, r.VulnID)
+			if len(ids) >= maxVulnIDs {
+				break
+			}
+		}
+	}
+	return ids
 }

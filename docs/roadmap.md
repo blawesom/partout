@@ -19,7 +19,7 @@
 | **M2 — Files & sessions** | ✅ Complete | File stat/list/download/upload/edit-CAS/perm with path safety + size caps + audit; PTY sessions (open/input/resize/close) with SSE output, optional recording + replay + 30-day retention; D1 file policy posture; D2 stream-drop interruption; CLI `files` + `sessions` subcommands. Web UI: files browser + sessions list/replay built; live PTY (xterm.js) terminal deferred to a later V1 phase |
 | **M3 — Automation** | ✅ Complete | Secrets ✅, external data ✅, packages ✅, tasks/playbooks ✅, scheduled jobs ✅ (cron, agent-side execution, overlap/retry policy, per-host resolved schedules). Former gaps all closed: (a) ~~scheduled job steps without policy~~ ✅ gated under `task.run` with per-host signed `Decision` + agent guardrail re-check (fail-closed); (b) **reboot continuation** ✅ — `reboot` step persists a resume marker, reboots, and resumes after boot (PRD §5.5); (c) job dispatch E2E ✅ — live bufconn test drives `JOB_ASSIGN` → real agent scheduler → `JOB_RUN_RESULT` → `job_runs` row |
 | **M4 — Governance** | ✅ **Done** | **Local user auth ✅** + **SSE stream auth-gated ✅** + **approvals engine ✅** on every policy-gated surface (exec, pkg.apply, files, sessions, tasks, jobs) + **MCP server ✅** (R11: stdio + Streamable HTTP + **OAuth2 (PKCE)**, 25 read/write tools) |
-| **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
+| **M5 — Observe: fact collectors** | ✅ Complete + M5.1 | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). **M5.1: periodic CVE security scan** (agent update list + OSV correlation → `security_findings`), `security_updates` alert kind + preset rule, fleet Security card + Scan now. |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
 | **M8 — Distribution & self-update** | 🚧 M8.1 + M8.1.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.1.1 update drift & auto-draft rollouts**: uploading an agent release pre-arms a parked draft rollout (operator starts it; policy re-checked at start) + `update_drift` server-level alert (preset `default-update-drift` — agents behind the store's latest). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
@@ -131,6 +131,37 @@ Done (R18–R20, the read side of the observe→act→verify loop):
 - ✅ **Web UI pages** (M7, v0.5): Services / Certificates / Configs render real data with label/state/expiry filters.
 - ✅ **Tests**: parser unit tests incl. real generated certs (chained / broken-chain / multi-cert), the nginx vhost parser, `ActiveState` mapping; server `host_facts` merge + same-second collision probe; API shape tests.
 - Remaining: **cross-fact correlation** (R21) rendering. Config **drift detection** (R22) is shipped as the `config_drift` alert rule (M6/M7): per-host `config_sha256` vs the fleet majority, alerting on divergence; the M6 alert engine and MCP read tools are shipped.
+
+### M5.1 — CVE detection & pre-armed security patching
+
+Goal: a host sitting on unpatched high/critical CVEs is *told about*, and the
+patch is pre-armed for one human confirmation — no auto-apply.
+
+Shipped (this build):
+- **Periodic security scan** (`PARTOUT_SECURITY_SCAN_S`, default 6 h, 0 =
+  loop off, manual still works): for each connected agent, reuses the
+  existing list-updates path (agent apt/dnf + **OSV.dev correlation that
+  already existed for the Packages page**) and persists per-package findings
+  (`security_findings`: pkg, installed→available, vuln_count, CVSS bucket,
+  capped CVE ids) + scan meta. Read-only on hosts; offline agents keep their
+  last findings (shown stale). `POST /api/v1/security/scan` = "Scan now".
+- **`security_updates` alert kind** (host-scoped): thresholds `min_severity`
+  (low|medium|high|critical, default high — same CVSS buckets as the
+  packages ranking) + `min_count` (default 1). One alert per host, resolves
+  when patched below the floor. Preset rule `default-security-updates`
+  (warning) — the preset is now 4 policies + 8 alert rules.
+- **UI**: fleet "Security — unpatched CVEs" card on the Updates page (per
+  host: last scan, update counts, top findings with CVE ids) + Scan now;
+  `security_updates` in the alert-rule form.
+- **API**: `GET /api/v1/security` (viewer). Schema v18 (`security_findings`,
+  `security_scan_meta`). Proto: `PkgUpdate.vuln_ids`.
+
+Follow-up (M5.1b, not started): **pre-armed security-patch plan** — when a
+scan shows qualifying findings, park a draft `packages apply` scoped to the
+affected hosts (the M8.1.1 draft/Start pattern); operator starts it, the
+existing pkg.apply governance (dry-run, approval-park) applies. Deliberately
+no auto-apply: patches restart services and change host state, so a human
+stands at the moment of change.
 
 ### M6 — Observe: alert engine (shipped)
 

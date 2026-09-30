@@ -87,6 +87,11 @@ type Config struct {
 	// explicitly start. The draft is inert — nothing dispatches without a
 	// human; the flag only controls whether the reminder is created.
 	AutoDraftRollouts bool
+	// SecurityScanS (M5.1, PARTOUT_SECURITY_SCAN_S, default 21600 = 6 h):
+	// cadence of the periodic security scan — per-host update list + OSV CVE
+	// correlation, persisted for the security_updates alert kind. 0 disables
+	// the loop (manual scans via POST /api/v1/security/scan still work).
+	SecurityScanS int
 	// UpdateHealthS is the post-swap health window in seconds
 	// (PARTOUT_UPDATE_HEALTH_S): the new version must boot and connect within
 	// it or the boot guard rolls back to N-1.
@@ -138,6 +143,7 @@ func Load() (*Config, error) {
 		ReleaseKey:            os.Getenv("PARTOUT_RELEASE_KEY"),
 		AllowUnsignedReleases: envBoolDefaultTrue("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
 		AutoDraftRollouts:     envBoolDefaultTrue("PARTOUT_AUTO_DRAFT_ROLLOUTS"),
+		SecurityScanS:         envInt("PARTOUT_SECURITY_SCAN_S", 21600),
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 	}

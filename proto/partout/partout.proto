@@ -264,6 +264,7 @@ message PkgUpdate {
   int64 vuln_count = 4;    // correlated CVEs against the *installed* version
   string max_severity = 5; // critical | high | medium | low | ""
   bool is_security = 6;    // distro flagged it as a security update
+  repeated string vuln_ids = 7; // correlated CVE/advisory ids (capped; M5.1)
 }
 
 // PkgOp dispatches a package operation to the agent (PRD §5.6).

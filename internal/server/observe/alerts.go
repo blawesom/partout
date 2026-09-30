@@ -31,9 +31,10 @@ const (
 	KindServiceRestarting = "service_restarting" // M6.1 (NRestarts rate)
 	KindCertExpiring      = "cert_expiring"
 	KindConfigInvalid     = "config_invalid"
-	KindConfigDrift       = "config_drift" // M7: cross-host hash divergence
-	KindUpdateRun         = "update_run"   // M8.1: rollout stuck (server-level, no host scope)
-	KindUpdateDrift       = "update_drift" // M8.1.1: agents behind the store's latest release
+	KindConfigDrift       = "config_drift"     // M7: cross-host hash divergence
+	KindUpdateRun         = "update_run"       // M8.1: rollout stuck (server-level, no host scope)
+	KindUpdateDrift       = "update_drift"     // M8.1.1: agents behind the store's latest release
+	KindSecurityUpdates   = "security_updates" // M5.1: unpatched CVEs on a host (security scan)
 )
 
 // Controller evaluates alert rules on a tick.
@@ -200,6 +201,9 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 		case KindUpdateDrift:
 			res.Fired += c.evalUpdateDrift(r)
 			res.Resolved += c.resolveUpdateDrift(r)
+		case KindSecurityUpdates:
+			res.Fired += c.evalSecurityUpdates(r, hosts)
+			res.Resolved += c.resolveByDedupDiff(r, hosts, c.securityConditionKeys(r, hosts))
 		default:
 			if c.log != nil {
 				c.log.Printf("observe/alerts: rule %s: unsupported kind %q (skipped)", r.ID, r.Kind)
@@ -846,6 +850,113 @@ func latestSummary(latest map[string]string) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ", ")
+}
+
+// --- security_updates (M5.1) ---
+
+// securityMinCVSS maps the rule's min_severity threshold (low|medium|high|
+// critical, default high) to the CVSS floor, using the same buckets as
+// maxCVSS in the packages controller.
+func securityMinCVSS(r *store.AlertRule) float64 {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(r.Thresholds), &m); err != nil || m == nil {
+		m = map[string]any{}
+	}
+	v, _ := m["min_severity"].(string)
+	if v == "" {
+		v = "high"
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "critical":
+		return 9
+	case "medium":
+		return 4
+	case "low":
+		return 0
+	default:
+		return 7 // high (default)
+	}
+}
+
+func securityMinCount(r *store.AlertRule) int {
+	return int(thresholdInt(r, "min_count", 1))
+}
+
+// securityQualifying returns the findings on one host at or above the rule's
+// CVSS floor (already sorted highest-CVSS first by the store query).
+func securityQualifying(r *store.AlertRule, findings []store.SecurityFinding) []store.SecurityFinding {
+	min := securityMinCVSS(r)
+	var out []store.SecurityFinding
+	for _, f := range findings {
+		if f.MaxCVSS >= min {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func (c *Controller) evalSecurityUpdates(r *store.AlertRule, hosts []string) int {
+	minCount := securityMinCount(r)
+	fired := 0
+	for _, agID := range hosts {
+		findings, err := c.st.SecurityFindingsFor(agID)
+		if err != nil {
+			continue
+		}
+		q := securityQualifying(r, findings)
+		if len(q) < minCount {
+			continue
+		}
+		if c.fire(r, agID, r.ID+"|"+agID+"|sec", securityMessage(q)) {
+			fired++
+		}
+	}
+	return fired
+}
+
+func (c *Controller) securityConditionKeys(r *store.AlertRule, hosts []string) map[string]struct{} {
+	minCount := securityMinCount(r)
+	out := make(map[string]struct{})
+	for _, agID := range hosts {
+		findings, err := c.st.SecurityFindingsFor(agID)
+		if err != nil {
+			continue
+		}
+		if len(securityQualifying(r, findings)) >= minCount {
+			out[r.ID+"|"+agID+"|sec"] = struct{}{}
+		}
+	}
+	return out
+}
+
+func securityMessage(f []store.SecurityFinding) string {
+	var crit, high, med, low int
+	for _, x := range f {
+		switch {
+		case x.MaxCVSS >= 9:
+			crit++
+		case x.MaxCVSS >= 7:
+			high++
+		case x.MaxCVSS >= 4:
+			med++
+		default:
+			low++
+		}
+	}
+	parts := make([]string, 0, len(f))
+	for i, x := range f {
+		if i >= 3 {
+			parts = append(parts, fmt.Sprintf("+%d more", len(f)-3))
+			break
+		}
+		cve := ""
+		if x.VulnIDs != "" {
+			cve = ": " + strings.SplitN(x.VulnIDs, ",", 2)[0]
+		}
+		parts = append(parts, fmt.Sprintf("%s %s→%s%s", x.Pkg, x.Installed, x.Available, cve))
+	}
+	return fmt.Sprintf("%d unpatched security updates (%d critical, %d high, %d medium, %d low): %s",
+		len(f), crit, high, med, low, strings.Join(parts, "; "))
 }
 
 // --- shared fire/resolve ---

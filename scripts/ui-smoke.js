@@ -236,6 +236,22 @@ async function main() {
   check("updates: apply button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Apply")), "no Apply button");
   check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
   check("updates: EOL data status + refresh", d.body.textContent.includes("EOL data:") && [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Refresh EOL data")), "ext-data controls missing");
+
+  // M5.1: fleet CVE security scan card + "Scan now" (real apt/dnf list +
+  // OSV correlation in the harness; assert a host row appears, not which
+  // CVEs — that depends on the box's real package state).
+  check("updates: security card", d.body.textContent.includes("unpatched CVEs"), "security card missing");
+  const scanBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "Scan now");
+  check("updates: Scan now button", !!scanBtn, "Scan now missing");
+  if (scanBtn) {
+    scanBtn.click();
+    let scanned = false;
+    for (let i = 0; i < 90 && !scanned; i++) {
+      await sleep(1000);
+      if (w.__partout) scanned = (w.__partout.security || []).length > 0;
+    }
+    check("updates: security scan produced a host row", scanned, "no scan row after 90s");
+  }
   // M8.1 release store: upload a signed release via the API, then show the
   // Releases tab.
   {

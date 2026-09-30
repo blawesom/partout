@@ -386,6 +386,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// (air-gapped): the last cached copy applies.
 	eolRefresher := externaldata.New(st, lg)
 	pkgC.SetRefresher(eolRefresher)
+	// M5.1: periodic security scan (per-host update list + OSV correlation
+	// -> security_findings, read by the security_updates alert kind).
+	pkgC.RunSecurityLoop(context.Background(), time.Duration(cfg.SecurityScanS)*time.Second)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()

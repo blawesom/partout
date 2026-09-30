@@ -539,10 +539,30 @@ CREATE TABLE IF NOT EXISTS pending_updates (
   release_id TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+-- M5.1: periodic security scan results (server-side, derived from agent
+-- update lists + OSV correlation; the alert engine reads these).
+CREATE TABLE IF NOT EXISTS security_findings (
+  agent_id   TEXT NOT NULL,
+  pkg        TEXT NOT NULL,
+  installed  TEXT NOT NULL DEFAULT '',
+  available  TEXT NOT NULL DEFAULT '',
+  vuln_count INTEGER NOT NULL DEFAULT 0,
+  max_cvss   REAL NOT NULL DEFAULT 0,
+  vuln_ids   TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (agent_id, pkg)
+);
+CREATE TABLE IF NOT EXISTS security_scan_meta (
+  agent_id         TEXT PRIMARY KEY,
+  scanned_at       INTEGER NOT NULL,
+  updates_total    INTEGER NOT NULL DEFAULT 0,
+  security_updates INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 17
+const currentSchemaVersion = 18
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

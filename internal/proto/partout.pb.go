@@ -1823,6 +1823,7 @@ type PkgUpdate struct {
 	VulnCount     int64                  `protobuf:"varint,4,opt,name=vuln_count,json=vulnCount,proto3" json:"vuln_count,omitempty"`      // correlated CVEs against the *installed* version
 	MaxSeverity   string                 `protobuf:"bytes,5,opt,name=max_severity,json=maxSeverity,proto3" json:"max_severity,omitempty"` // critical | high | medium | low | ""
 	IsSecurity    bool                   `protobuf:"varint,6,opt,name=is_security,json=isSecurity,proto3" json:"is_security,omitempty"`   // distro flagged it as a security update
+	VulnIds       []string               `protobuf:"bytes,7,rep,name=vuln_ids,json=vulnIds,proto3" json:"vuln_ids,omitempty"`             // correlated CVE/advisory ids (capped; M5.1)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1897,6 +1898,13 @@ func (x *PkgUpdate) GetIsSecurity() bool {
 		return x.IsSecurity
 	}
 	return false
+}
+
+func (x *PkgUpdate) GetVulnIds() []string {
+	if x != nil {
+		return x.VulnIds
+	}
+	return nil
 }
 
 // PkgOp dispatches a package operation to the agent (PRD §5.6).
@@ -4387,7 +4395,7 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x17\n" +
 	"\aeph_pub\x18\x03 \x01(\fR\x06ephPub\x12\x16\n" +
 	"\x06sealed\x18\x04 \x01(\fR\x06sealed\x12\x1e\n" +
-	"\vcache_ttl_s\x18\x05 \x01(\x03R\tcacheTtlS\"\xbe\x01\n" +
+	"\vcache_ttl_s\x18\x05 \x01(\x03R\tcacheTtlS\"\xd9\x01\n" +
 	"\tPkgUpdate\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1c\n" +
 	"\tinstalled\x18\x02 \x01(\tR\tinstalled\x12\x1c\n" +
@@ -4396,7 +4404,8 @@ const file_partout_partout_proto_rawDesc = "" +
 	"vuln_count\x18\x04 \x01(\x03R\tvulnCount\x12!\n" +
 	"\fmax_severity\x18\x05 \x01(\tR\vmaxSeverity\x12\x1f\n" +
 	"\vis_security\x18\x06 \x01(\bR\n" +
-	"isSecurity\"\xc0\x01\n" +
+	"isSecurity\x12\x19\n" +
+	"\bvuln_ids\x18\a \x03(\tR\avulnIds\"\xc0\x01\n" +
 	"\x05PkgOp\x12\x13\n" +
 	"\x05op_id\x18\x01 \x01(\tR\x04opId\x12)\n" +
 	"\x04kind\x18\x02 \x01(\x0e2\x15.partout.v1.PkgOpKindR\x04kind\x120\n" +

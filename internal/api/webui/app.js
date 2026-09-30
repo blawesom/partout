@@ -805,6 +805,36 @@
             </table>
             <div v-if="pkgActionDetail" class="console" style="margin-top:8px;max-height:220px;white-space:pre-wrap">{{ pkgActionDetail.dry_summary || pkgActionDetail.error || '(no summary)' }}</div>
           </div>
+          <div class="card" style="margin-top:12px">
+            <div class="head"><h2>Security — unpatched CVEs (fleet)</h2><div class="spacer"></div>
+              <span class="muted small">server-side scan: per-host update list + OSV correlation (M5.1)</span>
+              <button v-if="isAdmin" class="btn sm" :disabled="!!secBusy" @click="scanSecurity"><span v-if="secBusy" class="spin"></span> Scan now</button>
+            </div>
+            <table class="tbl">
+              <thead><tr><th>Host</th><th>Last scan</th><th>Updates</th><th>Security</th><th>Top findings (patchable via Apply above)</th></tr></thead>
+              <tbody>
+                <tr v-for="s in security" :key="s.agent_id">
+                  <td class="mono">{{ hostNameById(s.agent_id) }}</td>
+                  <td class="muted">{{ fmtAgo(s.scanned_at) }}</td>
+                  <td class="muted">{{ s.updates_total }}</td>
+                  <td>
+                    <span v-if="s.security_updates" class="badge" :class="secCountBadge(s)">{{ s.security_updates }}</span>
+                    <span v-else class="muted">—</span>
+                  </td>
+                  <td>
+                    <div v-for="f in (s.findings || []).slice(0, 3)" :key="f.pkg" class="small">
+                      <span class="mono">{{ f.pkg }}</span>
+                      <span class="muted mono">{{ f.installed }}→{{ f.available }}</span>
+                      <span v-if="f.vuln_ids" class="mono muted">{{ f.vuln_ids.split(',')[0] }}</span>
+                      <span v-if="f.vuln_count > 1" class="muted">+{{ f.vuln_count - 1 }}</span>
+                    </div>
+                    <span v-if="!(s.findings || []).length" class="muted">no known CVEs on installed packages</span>
+                  </td>
+                </tr>
+                <tr v-if="!security.length"><td colspan="5"><div class="empty">No host scanned yet — the scan runs automatically (PARTOUT_SECURITY_SCAN_S, default 6 h) or press “Scan now”.</div></td></tr>
+              </tbody>
+            </table>
+          </div>
           </template>
           <template v-else-if="updTab==='releases'">
             <p class="page-sub">Partout release artifacts (M8.1). The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. <b>Beta:</b> releases without a signature are accepted while unsigned updates are enabled (<span class="mono">PARTOUT_ALLOW_UNSIGNED_RELEASES</span>, default on) — keyless agents apply them on the sha256 integrity check alone; a provisioned release key stays strict-signed. Upload requires admin; downloading the artifact requires operator.</p>
@@ -1368,6 +1398,7 @@
                       <option value="config_drift">config_drift — cross-host config hash divergence (R22)</option>
                       <option value="update_run">update_run — rollout stuck: paused/failed (M8.1, server-level)</option>
                       <option value="update_drift">update_drift — agents behind the store's latest release (M8.1.1, server-level)</option>
+                      <option value="security_updates">security_updates — unpatched CVEs on a host (M5.1, security scan)</option>
                     </select>
                   </label>
                   <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
@@ -1392,6 +1423,13 @@
                 <label class="fld" v-if="ruleForm.kind==='update_drift'" style="max-width:280px"><span>Fire when ≥ N agents behind</span>
                   <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
                 <p class="cap" v-if="ruleForm.kind==='update_drift'" style="margin:8px 0 0">Server-level: the selector is ignored. Compares every agent's version against the newest agent release in the store; auto-resolves when the fleet catches up.</p>
+                <label class="fld" v-if="ruleForm.kind==='security_updates'" style="max-width:240px"><span>Min severity</span>
+                  <select v-model="ruleForm.severityMin">
+                    <option>low</option><option>medium</option><option>high</option><option>critical</option>
+                  </select></label>
+                <label class="fld" v-if="ruleForm.kind==='security_updates'" style="max-width:240px"><span>Fire when ≥ N packages</span>
+                  <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
+                <p class="cap" v-if="ruleForm.kind==='security_updates'" style="margin:8px 0 0">Host-scoped: one alert per host with ≥ N packages carrying a CVE at or above the severity floor (from the periodic security scan). Resolves when the host is patched below the floor.</p>
                 <div class="toolbar" style="margin-top:10px">
                   <label class="lbl" style="margin:0"><input type="checkbox" v-model="ruleForm.enabled" /> enabled</label>
                   <div class="spacer"></div>
@@ -1475,6 +1513,7 @@
         taskFormOpen: false, taskCreateBusy: false, taskForm: { name: "", description: "", steps: [] },
         mcpInfo: null, mcpClients: [],
         extStatus: null, extBusy: false,
+        security: [], secBusy: false,
         services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "",
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
@@ -2074,6 +2113,27 @@
         if (!this.updHost && this.hosts.length) this.updHost = this.hosts[0].id;
         if (!this.updHost) { this.updates = []; return; }
         try { const d = await this.api("/packages/updates?agent_id=" + encodeURIComponent(this.updHost)); this.updates = d.items || d || []; } catch (e) { this.updates = []; }
+        this.loadSecurity();
+      },
+      // --- Security (M5.1 periodic CVE scan) ---
+      async loadSecurity() {
+        try { const d = await this.api("/security", { toast: false }); this.security = d.items || []; } catch (e) { this.security = []; }
+      },
+      async scanSecurity() {
+        this.secBusy = true;
+        try {
+          const d = await this.api("/security/scan", { method: "POST", body: {} });
+          this.notify("ok", "security scan: " + (d.scanned != null ? d.scanned + " host(s) scanned" : "done"));
+          await this.loadSecurity();
+        } catch (e) { /* toast shown by api() */ } finally { this.secBusy = false; }
+      },
+      secTop(s) { return (s.findings || [])[0]; },
+      secCountBadge(s) {
+        const t = this.secTop(s);
+        if (!t) return "neutral";
+        if (t.max_cvss >= 9) return "bad";
+        if (t.max_cvss >= 7) return "warn";
+        return "neutral";
       },
       // --- Releases (M8.1 update store) ---
       async loadReleases() {
@@ -2309,7 +2369,7 @@
       ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0, update_drift: 1 })[kind] || 0; },
       newRuleForm() {
         this.ruleErr = "";
-        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", enabled: true };
+        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", severityMin: "high", enabled: true };
       },
       editRule(r) {
         this.ruleErr = "";
@@ -2320,6 +2380,7 @@
           severity: r.severity, enabled: r.enabled,
           thresh: (key && t[key] != null) ? t[key] : this.ruleDefaultThresh(r.kind),
           status: (t.status != null) ? t.status : "paused_failure,failed",
+          severityMin: (t.min_severity != null) ? t.min_severity : "high",
         };
       },
       thresholdsFor(kind) {
@@ -2331,6 +2392,7 @@
           case "config_drift": return { config_drift_tolerance: v };
           case "update_run": return { status: (this.ruleForm && this.ruleForm.status) || "paused_failure,failed" };
           case "update_drift": return { min_drifted: v || 1 };
+          case "security_updates": return { min_severity: (this.ruleForm && this.ruleForm.severityMin) || "high", min_count: v || 1 };
           default: return {};
         }
       },

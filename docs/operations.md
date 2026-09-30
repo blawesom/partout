@@ -278,6 +278,12 @@ How it supervises each hop:
   restart) and delivered on reconnect with a fresh artifact grant.
 - **Stuck runs**: an `update_run` alert rule (default statuses
   `paused_failure,failed`) fires a server-level alert per stuck run.
+- **Security**: a periodic scan (default 6 h, `PARTOUT_SECURITY_SCAN_S`) lists
+  each connected host's pending updates and correlates the *installed*
+  versions against OSV; the fleet Security card (Updates page) shows the top
+  findings, and the `default-security-updates` preset rule alerts per host
+  with a known CVE at CVSS ≥ 7 (high). Patch via the per-host Apply (or the
+  M5.1b pre-armed patch plan, not yet shipped).
 - **New releases**: uploading an agent release auto-creates a **parked**
   rollout draft (whole fleet, one canary — `PARTOUT_AUTO_DRAFT_ROLLOUTS=false`
   disables it). It dispatches nothing until you press **Start** on the Runs

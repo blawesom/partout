@@ -721,3 +721,74 @@ func TestUpdateDriftMinThreshold(t *testing.T) {
 		t.Fatalf("3 behind >= min: %+v, want 1 fired", res)
 	}
 }
+
+// TestSecurityUpdatesFireResolve (M5.1): stored findings at/above the rule's
+// severity floor fire a per-host alert; dedup while the condition holds;
+// resolving below the floor (patched) clears it.
+func TestSecurityUpdatesFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindSecurityUpdates, "all", `{"min_severity":"high","min_count":1}`, "warning", true)
+
+	// Two hosts: one with a critical finding, one with only medium.
+	seedHost(t, st, "ag_sec", `{}`)
+	seedHost(t, st, "ag_ok", `{}`)
+	now := time.Now().Unix()
+	if err := st.ReplaceSecurityFindings("ag_sec", []store.SecurityFinding{
+		{Pkg: "openssl", Installed: "3.0.7", Available: "3.0.13", VulnCount: 2,
+			MaxCVSS: 9.5, VulnIDs: "CVE-2024-0727,CVE-2024-0728", UpdatedAt: now},
+		{Pkg: "libsasl2", Installed: "2.1.28", Available: "2.1.28-10", VulnCount: 1,
+			MaxCVSS: 7.5, VulnIDs: "CVE-2023-48795", UpdatedAt: now},
+	}, store.SecurityScanMeta{AgentID: "ag_sec", ScannedAt: now, UpdatesTotal: 5, SecurityUpdates: 2}); err != nil {
+		t.Fatalf("ReplaceSecurityFindings: %v", err)
+	}
+	if err := st.ReplaceSecurityFindings("ag_ok", []store.SecurityFinding{
+		{Pkg: "vim", Installed: "9.0.1", Available: "9.0.2", VulnCount: 1,
+			MaxCVSS: 5.0, VulnIDs: "CVE-2024-9999", UpdatedAt: now},
+	}, store.SecurityScanMeta{AgentID: "ag_ok", ScannedAt: now, UpdatesTotal: 1, SecurityUpdates: 1}); err != nil {
+		t.Fatalf("ReplaceSecurityFindings: %v", err)
+	}
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("tick 1: %+v, want exactly 1 fired (ag_sec only)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 {
+		t.Fatalf("firing = %d, want 1", len(alerts))
+	}
+	a := alerts[0]
+	if a.AgentID != "ag_sec" {
+		t.Errorf("alert host = %q, want ag_sec", a.AgentID)
+	}
+	if !contains(a.Message, "openssl") || !contains(a.Message, "CVE-2024-0727") || !contains(a.Message, "1 critical, 1 high") {
+		t.Errorf("message %q should name the package, a CVE, and the severity split", a.Message)
+	}
+
+	// Still vulnerable: dedup.
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("tick 2: %+v, want 0 fired (dedup)", res)
+	}
+
+	// Patched below the floor: resolves.
+	if err := st.ReplaceSecurityFindings("ag_sec", []store.SecurityFinding{
+		{Pkg: "libsasl2", Installed: "2.1.28", Available: "2.1.28-10", VulnCount: 1,
+			MaxCVSS: 7.5, VulnIDs: "CVE-2023-48795", UpdatedAt: now},
+	}, store.SecurityScanMeta{AgentID: "ag_sec", ScannedAt: now}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	// Still one high -> still firing (dedup, no resolve).
+	res, _ = c.EvaluateOnce()
+	if res.Resolved != 0 {
+		t.Fatalf("tick 3: %+v, want 0 resolved (still 1 high)", res)
+	}
+	// Patch that too.
+	if err := st.ReplaceSecurityFindings("ag_sec", nil,
+		store.SecurityScanMeta{AgentID: "ag_sec", ScannedAt: now}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	res, _ = c.EvaluateOnce()
+	if res.Resolved != 1 {
+		t.Fatalf("tick 4: %+v, want 1 resolved", res)
+	}
+}

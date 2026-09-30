@@ -116,10 +116,13 @@ PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' ./partout --mode=agent
 The host appears in the **Fleet** page; Observe facts fill in after the first upload.
 
 A fresh server also seeds a fleet-management **preset** (safety-net policies +
-standard alert rules, all named `default-*` — including update-run and
-update-drift alerts) on first boot — review it under **Policies** and **Alerts**,
-or `partout ctl preset show`. Uploading an agent release pre-arms a parked
-rollout draft (Start it from the Updates page when ready).
+standard alert rules, all named `default-*` — including update-run, update-drift
+and security-update alerts) on first boot — review it under **Policies** and
+**Alerts**, or `partout ctl preset show`. Uploading an agent release pre-arms a
+parked rollout draft (Start it from the Updates page when ready). The server
+also runs a periodic **security scan** (default every 6 h,
+`PARTOUT_SECURITY_SCAN_S`) that correlates each host's packages against OSV
+CVE data — see the fleet Security card on the Updates page.
 
 For systemd units, Docker/compose, cloud-init, and Helm, see [docs/deployment.md](docs/deployment.md).
 

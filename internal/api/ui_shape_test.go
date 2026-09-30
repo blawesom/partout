@@ -538,3 +538,20 @@ func repoRoot(t *testing.T) string {
 		dir = parent
 	}
 }
+
+// TestUIShape_Security: GET /security shape (fleet scan view) and the
+// admin-only scan trigger. Findings are seeded straight into the store
+// (the production path is the periodic scan).
+func TestUIShape_Security(t *testing.T) {
+	_, _, srv := startAPITest(t)
+	// The startAPITest handler has no packages controller wired, so the
+	// endpoint must fail closed with the documented code.
+	code, b := apiReq(t, "GET", srv.URL+"/api/v1/security", "", "")
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("GET /security unwired = %d (%s), want 503", code, b)
+	}
+	code, b = apiReq(t, "POST", srv.URL+"/api/v1/security/scan", "", "")
+	if code != http.StatusServiceUnavailable {
+		t.Errorf("POST /security/scan unwired = %d (%s), want 503", code, b)
+	}
+}

@@ -14,9 +14,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"database/sql"
+
 	"github.com/blawesom/partout/internal/hsauth"
 	"github.com/blawesom/partout/internal/identity"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
@@ -354,5 +357,74 @@ func TestPkgActionCRUD(t *testing.T) {
 	}
 	if len(before) != 1 || before[0].Name != "bash" {
 		t.Fatalf("bad before: %+v", before)
+	}
+}
+
+// TestSecurityScan (M5.1): one scan pass over the connected fake agent —
+// vuln cache seeded so no network is touched — persists findings + meta.
+func TestSecurityScan(t *testing.T) {
+	st, pc, _, _, cleanup := newBufconnTest(t)
+	defer cleanup()
+
+	// Air-gapped refresher: cache-only correlation, so the scan never
+	// touches OSV (test stays deterministic + offline).
+	t.Setenv("PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH", "1")
+
+	// Seed the vuln cache (Correlate short-circuits on a fresh cache row,
+	// so the scan never touches OSV). Ecosystem for the test agent's
+	// os-release facts (ubuntu 24.04) is "Ubuntu:24.04".
+	err := st.InsertVulns([]store.VulnRow{
+		{VulnID: "CVE-2025-0001", Package: "bash", Ecosystem: "Ubuntu:24.04", Version: "5.2.21",
+			Severity: sql.NullFloat64{Float64: 7.8, Valid: true}, Summary: "priv esc", URL: "https://osv.dev/CVE-2025-0001"},
+		{VulnID: "CVE-2025-0002", Package: "bash", Ecosystem: "Ubuntu:24.04", Version: "5.2.21",
+			Severity: sql.NullFloat64{Float64: 8.6, Valid: true}, Summary: "rce", URL: "https://osv.dev/CVE-2025-0002"},
+	})
+	if err != nil {
+		t.Fatalf("InsertVulns: %v", err)
+	}
+	pc.SetRefresher(externaldata.New(st, log.New(io.Discard, "", 0)))
+
+	n, err := pc.SecurityScan(context.Background())
+	if err != nil {
+		t.Fatalf("SecurityScan: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("scanned = %d, want 1", n)
+	}
+
+	meta, err := st.SecurityScanMetaFor("ag_test")
+	if err != nil {
+		t.Fatalf("SecurityScanMetaFor: %v", err)
+	}
+	if meta.UpdatesTotal != 4 {
+		t.Errorf("updates_total = %d, want 4 (all fake packages have an update)", meta.UpdatesTotal)
+	}
+	if meta.SecurityUpdates != 1 {
+		t.Errorf("security_updates = %d, want 1 (only bash is correlated)", meta.SecurityUpdates)
+	}
+
+	fs, err := st.SecurityFindingsFor("ag_test")
+	if err != nil {
+		t.Fatalf("SecurityFindingsFor: %v", err)
+	}
+	if len(fs) != 1 || fs[0].Pkg != "bash" {
+		t.Fatalf("findings = %+v, want one bash finding", fs)
+	}
+	if fs[0].VulnCount != 2 {
+		t.Errorf("vuln_count = %d, want 2", fs[0].VulnCount)
+	}
+	if fs[0].MaxCVSS != 7.5 { // "high" label -> representative 7.5
+		t.Errorf("max_cvss = %v, want 7.5", fs[0].MaxCVSS)
+	}
+	if fs[0].VulnIDs != "CVE-2025-0001,CVE-2025-0002" {
+		t.Errorf("vuln_ids = %q, want both CVEs", fs[0].VulnIDs)
+	}
+
+	// A second scan pass replaces (no duplicate findings).
+	if _, err := pc.SecurityScan(context.Background()); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+	if fs, _ := st.SecurityFindingsFor("ag_test"); len(fs) != 1 {
+		t.Fatalf("after rescan findings = %d, want 1", len(fs))
 	}
 }
