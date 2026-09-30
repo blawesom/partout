@@ -98,7 +98,7 @@ commands:
 
 	// db-backup and the local update subcommands (keygen/sign/verify) need no
 	// server round-trip; every other command needs the server address.
-	localOnly := fs.Arg(0) == "db-backup" ||
+	localOnly := fs.Arg(0) == "db-backup" || fs.Arg(0) == "help" ||
 		(fs.Arg(0) == "update" && (fs.Arg(1) == "keygen" || fs.Arg(1) == "sign" || fs.Arg(1) == "verify"))
 	if *server == "" && !localOnly {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
