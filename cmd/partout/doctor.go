@@ -345,7 +345,8 @@ func applyDoctorFlags(cfg *config.Config, d *doctorFlagSet) {
 	case "off", "false", "":
 		cfg.TLS = false
 	default:
-		cfg.TLS = cfg.TLS // unknown value keeps config; doctor will not start a server
+		// Unknown value: keep the config as-is (doctor only reports; it never
+		// starts a server, so an unrecognized --tls does not need to be fatal).
 	}
 }
 
