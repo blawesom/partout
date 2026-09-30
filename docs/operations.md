@@ -278,6 +278,11 @@ How it supervises each hop:
   restart) and delivered on reconnect with a fresh artifact grant.
 - **Stuck runs**: an `update_run` alert rule (default statuses
   `paused_failure,failed`) fires a server-level alert per stuck run.
+- **New releases**: uploading an agent release auto-creates a **parked**
+  rollout draft (whole fleet, one canary — `PARTOUT_AUTO_DRAFT_ROLLOUTS=false`
+  disables it). It dispatches nothing until you press **Start** on the Runs
+  board (policy re-checked at start). The `default-update-drift` alert keeps
+  nagging while any agent is behind the store's newest release.
 
 `--server-only` is the two-phase mode (fleet later); an approval-parked run
 reports the approval id and stops — approve it in the UI/CLI, then re-run

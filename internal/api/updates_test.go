@@ -11,11 +11,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/cryptoutil"
 	"github.com/blawesom/partout/internal/release"
 	"github.com/blawesom/partout/internal/server/stream"
+	updates "github.com/blawesom/partout/internal/server/updates"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -346,5 +348,85 @@ func TestUpdateReleaseUnsignedBeta(t *testing.T) {
 		releaseUploadBody(m2, sigB64, art2))
 	if code != http.StatusCreated {
 		t.Fatalf("signed upload, flag on = %d: %v", code, e)
+	}
+}
+
+// TestUploadAutoDraftRollout (M8.1.1): uploading an agent release pre-arms
+// a PARKED draft rollout (whole fleet, one canary); an operator starts it;
+// the flag off disables the auto-draft.
+func TestUploadAutoDraftRollout(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sseB := sse.New()
+	streamH := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	apiH := api.New(st, streamH, sseB, log.New(io.Discard, "api: ", 0))
+	srv := httptest.NewServer(apiH)
+	t.Cleanup(srv.Close)
+
+	if err := st.UpsertAgent(store.Agent{ID: "ag_x", UUID: "u-ag_x"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	m := updates.New(st, streamH, sseB, log.New(io.Discard, "upd: ", 0))
+	m.SetPollInterval(500 * time.Millisecond)
+	apiH.SetUpdates(m)
+	apiH.SetAutoDraftRollouts(true)
+
+	artifact, mRel, sig := signedArtifact(t, "v1.0.0", "agent")
+	code, e := labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(mRel, sig, artifact))
+	if code != http.StatusCreated {
+		t.Fatalf("upload = %d: %v", code, e)
+	}
+	if e["draft_run"] == nil || e["draft_run"] == "" {
+		t.Fatalf("upload response missing draft_run: %v", e)
+	}
+	runs, err := st.ListUpdateRuns(10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs after upload = %d (err %v), want 1", len(runs), err)
+	}
+	if runs[0].Status != updates.StatusDraft {
+		t.Fatalf("auto-draft status = %q, want %q", runs[0].Status, updates.StatusDraft)
+	}
+	if runs[0].CanaryCount != 1 || runs[0].Selector != "all" {
+		t.Errorf("draft = canary %d / selector %q, want 1 / \"all\"", runs[0].CanaryCount, runs[0].Selector)
+	}
+	if runs[0].TotalHosts != 1 {
+		t.Errorf("draft hosts = %d, want 1", runs[0].TotalHosts)
+	}
+
+	// An operator starts it: canary phase begins.
+	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/runs/"+runs[0].ID+"/start", "")
+	if code != http.StatusOK {
+		t.Fatalf("start = %d: %v", code, e)
+	}
+	r, _ := st.GetUpdateRun(runs[0].ID)
+	if r.Status != updates.StatusCanary {
+		t.Fatalf("status after start = %q, want %q", r.Status, updates.StatusCanary)
+	}
+
+	// A newer release pre-arms a second draft (the first run is live).
+	artifact2, m2, sig2 := signedArtifact(t, "v1.0.1", "agent")
+	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(m2, sig2, artifact2))
+	if code != http.StatusCreated {
+		t.Fatalf("second upload = %d: %v", code, e)
+	}
+	if e["draft_run"] == nil || e["draft_run"] == "" {
+		t.Fatalf("second upload missing draft_run: %v", e)
+	}
+
+	// Flag off: release stored, no draft.
+	apiH.SetAutoDraftRollouts(false)
+	artifact3, m3, sig3 := signedArtifact(t, "v1.0.2", "agent")
+	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(m3, sig3, artifact3))
+	if code != http.StatusCreated {
+		t.Fatalf("third upload = %d: %v", code, e)
+	}
+	if v, ok := e["draft_run"]; ok && v != "" {
+		t.Errorf("no draft expected with the flag off, got %v", v)
 	}
 }

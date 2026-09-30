@@ -647,3 +647,77 @@ func contains(s, sub string) bool {
 		return false
 	})())
 }
+
+// TestUpdateDriftFireResolve: an agent behind the store's latest release
+// fires a server-level drift alert, dedups while behind, and resolves when
+// the fleet catches up.
+func TestUpdateDriftFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindUpdateDrift, "all", `{"min_drifted":1}`, "warning", true)
+
+	rel := store.Release{ID: "rel_d", Version: "2.0.0", Arch: "linux-amd64", Kind: "agent",
+		SHA256: "aa", Artifact: []byte("x")}
+	if err := st.InsertRelease(rel); err != nil {
+		t.Fatalf("InsertRelease: %v", err)
+	}
+	seedHost(t, st, "ag_old", `{}`)
+	_ = st.SetAgentVersion("ag_old", "1.0.0")
+	seedHost(t, st, "ag_new", `{}`)
+	_ = st.SetAgentVersion("ag_new", "2.0.0")
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("drift tick: %+v, want 1 fired", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 {
+		t.Fatalf("firing alerts = %d, want 1", len(alerts))
+	}
+	if alerts[0].AgentID != "" {
+		t.Errorf("drift alert agent_id = %q, want empty (server-level)", alerts[0].AgentID)
+	}
+	if !contains(alerts[0].Message, "ag_old") || !contains(alerts[0].Message, "1.0.0") || !contains(alerts[0].Message, "2.0.0") {
+		t.Errorf("message %q should name the lagging host, its version, and the latest", alerts[0].Message)
+	}
+
+	// Still behind: dedup.
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("still-behind tick: %+v, want 0 fired (dedup)", res)
+	}
+
+	// The agent catches up -> resolves.
+	_ = st.SetAgentVersion("ag_old", "2.0.0")
+	res, _ = c.EvaluateOnce()
+	if res.Resolved != 1 {
+		t.Fatalf("caught-up tick: %+v, want 1 resolved", res)
+	}
+}
+
+// TestUpdateDriftMinThreshold: the rule's min_drifted gate.
+func TestUpdateDriftMinThreshold(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindUpdateDrift, "all", `{"min_drifted":3}`, "warning", true)
+
+	rel := store.Release{ID: "rel_m", Version: "2.0.0", Arch: "linux-amd64", Kind: "agent",
+		SHA256: "aa", Artifact: []byte("x")}
+	if err := st.InsertRelease(rel); err != nil {
+		t.Fatalf("InsertRelease: %v", err)
+	}
+	seedHost(t, st, "ag_a", `{}`)
+	_ = st.SetAgentVersion("ag_a", "1.0.0")
+	seedHost(t, st, "ag_b", `{}`)
+	_ = st.SetAgentVersion("ag_b", "1.0.0")
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("2 behind < min_drifted=3: %+v, want 0 fired", res)
+	}
+
+	seedHost(t, st, "ag_c", `{}`)
+	_ = st.SetAgentVersion("ag_c", "1.0.0")
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("3 behind >= min: %+v, want 1 fired", res)
+	}
+}

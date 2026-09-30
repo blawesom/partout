@@ -119,6 +119,26 @@ func (s *Store) ListReleases() ([]ReleaseMeta, error) {
 	return out, rows.Err()
 }
 
+// ListAgentReleases lists agent-kind releases (newest first) — the input
+// for update-drift evaluation (M8.1.1).
+func (s *Store) ListAgentReleases() ([]ReleaseMeta, error) {
+	rows, err := s.db.Query(`SELECT ` + releaseMetaColumns() + `
+		FROM update_releases WHERE kind = 'agent' ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReleaseMeta
+	for rows.Next() {
+		m, err := scanReleaseMeta(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // DeleteRelease removes a release and its artifact.
 func (s *Store) DeleteRelease(id string) (bool, error) {
 	res, err := s.db.Exec(`DELETE FROM update_releases WHERE id = ?`, id)

@@ -38,6 +38,7 @@ const (
 )
 
 const (
+	StatusDraft         = "draft"          // M8.1.1: parked draft, awaiting operator start
 	StatusPending       = "pending"        // parked on an approval request
 	StatusCanary        = "canary"         // canary cohort in flight
 	StatusRolling       = "rolling"        // waves in flight
@@ -68,6 +69,7 @@ type Params struct {
 	CanaryHosts []string `json:"canary_hosts"` // explicit canary selection
 	Actor       string   `json:"actor"`
 	ActorRole   string   `json:"actor_role"`
+	Park        bool     // server-side: create a parked draft, do not start (M8.1.1)
 }
 
 // Manager drives update runs.
@@ -219,6 +221,22 @@ func (m *Manager) StartRun(p Params) (*store.UpdateRun, *store.ApprovalRequest, 
 	}
 	run.TotalHosts = len(ids)
 	run.SkippedHosts = len(denied)
+
+	// Parked draft (M8.1.1): persist, no approval request, no loop. An
+	// operator starts it (Manager.Start), which re-checks policy at that
+	// moment.
+	if p.Park {
+		run.Status = StatusDraft
+		if err := m.st.CreateUpdateRun(run); err != nil {
+			return nil, nil, err
+		}
+		if err := m.st.AddUpdateHosts(run.ID, uhs); err != nil {
+			return nil, nil, err
+		}
+		m.audit("update.run.drafted", p.Actor, map[string]any{"run": run.ID, "version": rel.Version, "selector": p.Selector, "hosts": len(ids), "canary": cohort})
+		m.emitRun(run)
+		return run, nil, nil
+	}
 
 	// Park on approval if any host requires it.
 	if len(approval) > 0 {
@@ -564,6 +582,126 @@ func (m *Manager) Abort(runID, actor string) error {
 	m.audit("update.run.aborted", actor, map[string]any{"run": runID})
 	m.emitRun(run)
 	return nil
+}
+
+// Start launches a parked draft run (M8.1.1). Policy is (re)evaluated at
+// start time, not draft time: denied hosts are excluded and hosts that
+// require approval park the run on an approval request — so a draft is
+// inert until a human explicitly starts it, and the fleet's current policy
+// applies at the moment of change.
+func (m *Manager) Start(runID, actor string) error {
+	run, err := m.st.GetUpdateRun(runID)
+	if err != nil || run == nil {
+		return fmt.Errorf("updates: run %s not found", runID)
+	}
+	if run.Status != StatusDraft {
+		return fmt.Errorf("updates: run %s is %s, not a draft", runID, run.Status)
+	}
+	uhs, err := m.st.ListUpdateHosts(runID)
+	if err != nil {
+		return err
+	}
+
+	rules, _ := m.st.GetPolicyRules()
+	var approval []string
+	var denied int
+	for _, uh := range uhs {
+		if uh.Status != HostQueued {
+			continue
+		}
+		dec := policy.Evaluate(rules, policy.Action{
+			ActionClass: policy.ActionUpdateApply,
+			HostID:      uh.HostID,
+			ActorRole:   "admin",
+		})
+		switch dec.Effect {
+		case policy.EffectDeny:
+			if err := m.st.SetUpdateHostStatus(uh.ID, HostSkipped, "", "policy: "+decReason(rules, uh.HostID, "admin")); err == nil {
+				m.clearPending(uh.HostID)
+				denied++
+			}
+		case policy.EffectRequireApproval:
+			approval = append(approval, uh.HostID)
+		}
+	}
+	if denied > 0 {
+		_ = m.st.SetUpdateRunCounters(runID, run.CurrentWave, run.TotalHosts, run.DoneHosts, run.FailedHosts, run.SkippedHosts+denied)
+	}
+
+	if len(approval) > 0 {
+		if m.apr == nil {
+			return fmt.Errorf("policy requires approval for %d host(s) but approvals are not configured", len(approval))
+		}
+		req, err := m.apr.NewRequest(approvals.NewRequestParams{
+			ActionClass:  policy.ActionUpdateApply,
+			RunID:        run.ID,
+			Actor:        actor,
+			ActorRole:    "admin",
+			MatchedRules: matchedRuleIDs(rules, approval, "admin"),
+			Payload: map[string]any{
+				"run_id":   run.ID,
+				"release":  run.ReleaseID,
+				"version":  run.Version,
+				"selector": run.Selector,
+				"approval": approval,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("approval request: %w", err)
+		}
+		_ = m.st.SetUpdateRunApproval(run.ID, req.ID)
+		run.ApprovalID = req.ID
+		if err := m.st.SetUpdateRunStatus(run.ID, StatusPending, ""); err != nil {
+			_, _ = m.apr.Deny(req.ID, "status update failed", approvals.Actor{Principal: actor, Role: "admin"})
+			return err
+		}
+		m.audit("update.run.pending", actor, map[string]any{"run": run.ID, "version": run.Version, "approval": req.ID})
+		m.emitRun(run)
+		return nil
+	}
+
+	// All allowed: launch.
+	if run.CanaryCount > 0 && run.CanaryHosts != "" {
+		run.Status = StatusCanary
+	} else {
+		run.Status = StatusRolling
+		run.CurrentWave = 1
+	}
+	if err := m.st.SetUpdateRunStatus(runID, run.Status, ""); err != nil {
+		return err
+	}
+	m.audit("update.run.started", actor, map[string]any{"run": run.ID, "version": run.Version, "selector": run.Selector, "status": run.Status})
+	m.emitRun(run)
+	m.startLoop(runID)
+	return nil
+}
+
+// MaybeDraft creates a parked draft rollout for a freshly uploaded release
+// (M8.1.1): whole fleet, one canary, default waves — pre-armed and inert
+// until an operator starts it. Returns nil (without error) when the release
+// already has a non-terminal run or the selector matches no hosts.
+func (m *Manager) MaybeDraft(rel store.Release, actor string) *store.UpdateRun {
+	runs, err := m.st.ListUpdateRuns(100)
+	if err == nil {
+		for _, r := range runs {
+			if r.ReleaseID == rel.ID && !store.TerminalUpdateRun(r.Status) {
+				return nil // a draft/active run for this release already exists
+			}
+		}
+	}
+	run, _, err := m.StartRun(Params{
+		ReleaseID: rel.ID, Selector: "all",
+		Canary: 1, WavePct: 25,
+		Actor: actor, ActorRole: "admin",
+		Park: true,
+	})
+	if err != nil {
+		if m.log != nil {
+			m.log.Printf("updates: auto-draft for %s: %v", rel.Version, err)
+		}
+		return nil
+	}
+	return run
 }
 
 // ---------------------------------------------------------------------------

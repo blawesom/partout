@@ -45,6 +45,7 @@ func (h *Handler) RegisterUpdates(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/updates/runs", h.requireRole(roleViewer)(http.HandlerFunc(h.handleListUpdateRuns)))
 	mux.Handle("GET /api/v1/updates/runs/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetUpdateRun)))
 	mux.Handle("POST /api/v1/updates/runs/{id}/retry", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
+	mux.Handle("POST /api/v1/updates/runs/{id}/start", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
 	mux.Handle("POST /api/v1/updates/runs/{id}/skip", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
 	mux.Handle("POST /api/v1/updates/runs/{id}/abort", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleUpdateRunAction)))
 }
@@ -181,7 +182,19 @@ func (h *Handler) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 	h.audit("update.upload", actor, map[string]string{
 		"id": rid, "version": m.Version, "arch": m.Arch, "kind": m.Kind, "sha256": m.SHA256,
 	})
-	writeJSON(w, http.StatusCreated, map[string]string{"id": rid, "status": "uploaded"})
+
+	// M8.1.1: a new agent release pre-arms a PARKED draft rollout (whole
+	// fleet, one canary, default waves). Inert until an operator presses
+	// start — the change always needs a human, but the fleet can never be
+	// silently forgotten behind a new release.
+	resp := map[string]string{"id": rid, "status": "uploaded"}
+	if rel.Kind == "agent" && h.autoDraftRollouts && h.updatesMgr != nil {
+		if run := h.updatesMgr.MaybeDraft(rel, actor); run != nil {
+			resp["draft_run"] = run.ID
+			h.audit("update.run.drafted_auto", actor, map[string]string{"run": run.ID, "version": m.Version, "release": rid})
+		}
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (h *Handler) handleGetRelease(w http.ResponseWriter, r *http.Request) {
@@ -484,6 +497,8 @@ func (h *Handler) handleUpdateRunAction(w http.ResponseWriter, r *http.Request) 
 	action := ""
 	if strings.HasSuffix(r.URL.Path, "/retry") {
 		action = "retry"
+	} else if strings.HasSuffix(r.URL.Path, "/start") {
+		action = "start"
 	} else if strings.HasSuffix(r.URL.Path, "/skip") {
 		action = "skip"
 	} else if strings.HasSuffix(r.URL.Path, "/abort") {
@@ -493,6 +508,8 @@ func (h *Handler) handleUpdateRunAction(w http.ResponseWriter, r *http.Request) 
 	switch action {
 	case "retry":
 		err = h.updatesMgr.Retry(id, actor)
+	case "start":
+		err = h.updatesMgr.Start(id, actor)
 	case "skip":
 		err = h.updatesMgr.Skip(id, actor)
 	case "abort":

@@ -296,3 +296,25 @@ func TestAllowUnsignedReleasesBetaDefault(t *testing.T) {
 		t.Error("env=true: want true")
 	}
 }
+
+func TestAutoDraftRolloutsBetaDefault(t *testing.T) {
+	// Unset → default true (the pre-armed reminder is the beta posture).
+	os.Unsetenv("PARTOUT_AUTO_DRAFT_ROLLOUTS")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.AutoDraftRollouts {
+		t.Error("unset env: want default true")
+	}
+
+	// Explicit off → false.
+	t.Setenv("PARTOUT_AUTO_DRAFT_ROLLOUTS", "false")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AutoDraftRollouts {
+		t.Error("explicit false: want false")
+	}
+}

@@ -102,6 +102,8 @@ var Alerts = []DefaultAlert{
 		Thresholds: `{"config_drift_tolerance":0}`, Severity: "info"},
 	{Name: "default-update-run", Kind: observe.KindUpdateRun, Selector: "all",
 		Thresholds: `{"status":"paused_failure,failed"}`, Severity: "warning"},
+	{Name: "default-update-drift", Kind: observe.KindUpdateDrift, Selector: "all",
+		Thresholds: `{"min_drifted":1}`, Severity: "warning"},
 }
 
 // slug turns a default name into a deterministic row id

@@ -489,3 +489,69 @@ func TestRolloutScale100(t *testing.T) {
 		t.Fatalf("counters = done:%d total:%d failed:%d, want %d/%d/0", r.DoneHosts, r.TotalHosts, r.FailedHosts, N, N)
 	}
 }
+
+// --- M8.1.1: parked drafts (auto-draft rollout) ---------------------------
+
+func TestDraftRolloutParkAndStart(t *testing.T) {
+	e := newTestEnv(t, 4)
+
+	// Parked draft: persisted, but nothing dispatches.
+	run, _, err := e.m.StartRun(Params{ReleaseID: "rel_t", Selector: "all", Canary: 1,
+		Actor: "admin", ActorRole: "admin", Park: true})
+	if err != nil {
+		t.Fatalf("StartRun(park): %v", err)
+	}
+	if got := e.runStatus(t, run.ID); got != StatusDraft {
+		t.Fatalf("draft status = %q, want %q", got, StatusDraft)
+	}
+	time.Sleep(150 * time.Millisecond) // the FSM must not touch a draft
+	if got := e.runStatus(t, run.ID); got != StatusDraft {
+		t.Fatalf("draft moved on its own to %q", got)
+	}
+
+	// An operator starts it: canary phase begins.
+	if err := e.m.Start(run.ID, "admin"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := e.runStatus(t, run.ID); got != StatusCanary {
+		t.Fatalf("status after start = %q, want %q", got, StatusCanary)
+	}
+	// Starting a non-draft run must fail.
+	if err := e.m.Start(run.ID, "admin"); err == nil {
+		t.Fatal("Start on a non-draft run should fail")
+	}
+}
+
+func TestDraftWithNoCanaryGoesRolling(t *testing.T) {
+	e := newTestEnv(t, 3)
+	run, _, err := e.m.StartRun(Params{ReleaseID: "rel_t", Selector: "all", Canary: 0,
+		Actor: "admin", ActorRole: "admin", Park: true})
+	if err != nil {
+		t.Fatalf("StartRun(park): %v", err)
+	}
+	if err := e.m.Start(run.ID, "admin"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := e.runStatus(t, run.ID); got != StatusRolling {
+		t.Fatalf("status after start = %q, want %q", got, StatusRolling)
+	}
+}
+
+func TestMaybeDraftDedup(t *testing.T) {
+	e := newTestEnv(t, 3)
+	first := e.m.MaybeDraft(e.rel, "admin")
+	if first == nil || first.Status != StatusDraft {
+		t.Fatalf("MaybeDraft = %v, want a draft run", first)
+	}
+	// A second call while the draft is non-terminal: no duplicate.
+	if second := e.m.MaybeDraft(e.rel, "admin"); second != nil {
+		t.Fatalf("MaybeDraft duplicated while non-terminal: %s", second.ID)
+	}
+	// A terminal run doesn't block a new draft.
+	if err := e.m.Abort(first.ID, "admin"); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if third := e.m.MaybeDraft(e.rel, "admin"); third == nil {
+		t.Fatal("MaybeDraft after abort should create a new draft")
+	}
+}

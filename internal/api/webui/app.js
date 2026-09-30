@@ -869,7 +869,7 @@
                     <td class="muted">{{ r.skipped_hosts }}</td>
                     <td class="muted">{{ r.total_hosts }}</td>
                     <td class="muted">{{ fmtAgo(r.created) }}</td>
-                    <td class="row-actions"><button class="btn sm" @click.stop="openRun(r.id)">Detail</button></td>
+                    <td class="row-actions"><button v-if="r.status==='draft'" class="btn primary sm" :disabled="!isAdmin" @click.stop="startDraft(r.id)">Start</button> <button class="btn sm" @click.stop="openRun(r.id)">Detail</button></td>
                   </tr>
                   <tr v-if="!runs.length"><td colspan="10"><div class="empty">No rollout runs yet.</div></td></tr>
                 </tbody>
@@ -877,6 +877,7 @@
             </div>
             <div v-if="runDetail" class="card" style="margin-top:12px">
               <div class="head"><h2>Run {{ runDetail.run.id }} — {{ runDetail.run.version }}</h2><div class="spacer"></div>
+                <button v-if="runDetail.run.status==='draft'" class="btn primary sm" :disabled="!isAdmin || runBusy" @click="runAction('start')">Start rollout</button>
                 <button v-if="runDetail.run.status==='paused_failure'" class="btn sm" :disabled="!isAdmin || runBusy" @click="runAction('retry')">Retry failed</button>
                 <button v-if="runDetail.run.status==='paused_failure'" class="btn sm" :disabled="!isAdmin || runBusy" @click="runAction('skip')">Skip failed</button>
                 <button v-if="!runTerminal(runDetail.run.status)" class="btn danger sm" :disabled="!isAdmin || runBusy" @click="runAction('abort')">Abort</button>
@@ -1366,6 +1367,7 @@
                       <option value="config_invalid">config_invalid — haproxy/nginx native validation</option>
                       <option value="config_drift">config_drift — cross-host config hash divergence (R22)</option>
                       <option value="update_run">update_run — rollout stuck: paused/failed (M8.1, server-level)</option>
+                      <option value="update_drift">update_drift — agents behind the store's latest release (M8.1.1, server-level)</option>
                     </select>
                   </label>
                   <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
@@ -1387,6 +1389,9 @@
                 <label class="fld" v-if="ruleForm.kind==='update_run'" style="max-width:320px"><span>Statuses (comma-separated)</span>
                   <input v-model="ruleForm.status" class="mono" placeholder="paused_failure,failed" /></label>
                 <p class="cap" v-if="ruleForm.kind==='update_run'" style="margin:8px 0 0">Server-level: the selector is ignored. One alert per stuck run; auto-resolves when the run leaves those statuses (retry/skip/abort/completed).</p>
+                <label class="fld" v-if="ruleForm.kind==='update_drift'" style="max-width:280px"><span>Fire when ≥ N agents behind</span>
+                  <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
+                <p class="cap" v-if="ruleForm.kind==='update_drift'" style="margin:8px 0 0">Server-level: the selector is ignored. Compares every agent's version against the newest agent release in the store; auto-resolves when the fleet catches up.</p>
                 <div class="toolbar" style="margin-top:10px">
                   <label class="lbl" style="margin:0"><input type="checkbox" v-model="ruleForm.enabled" /> enabled</label>
                   <div class="spacer"></div>
@@ -2109,7 +2114,7 @@
       runStatusKind(st) {
         if (st === "verified" || st === "completed") return "ok";
         if (st === "failed" || st === "failed_rollback" || st === "aborted") return "bad";
-        if (st === "skipped" || st === "timed_out" || st === "pending") return "warn";
+        if (st === "skipped" || st === "timed_out" || st === "pending" || st === "draft") return "warn";
         if (st === "queued" || st === "canary" || st === "rolling" || st === "paused_failure" || st === "dispatching" || st === "restarting") return "info";
         return "neutral";
       },
@@ -2142,6 +2147,15 @@
           this.notify("ok", this.runNotice);
           await this.loadRuns();
           this.openRun(d.run_id);
+        } catch (e) { /* toast shown by api() */ } finally { this.runBusy = false; }
+      },
+      async startDraft(id) {
+        this.runBusy = true;
+        try {
+          await this.api("/updates/runs/" + encodeURIComponent(id) + "/start", { body: {} });
+          this.notify("ok", "run " + id + ": rollout started");
+          await this.loadRuns();
+          this.openRun(id);
         } catch (e) { /* toast shown by api() */ } finally { this.runBusy = false; }
       },
       async runAction(action) {
@@ -2292,7 +2306,7 @@
         for (const [k, v] of Object.entries(t)) out.push(k + "=" + v);
         return out.length ? out.join(" ") : "—";
       },
-      ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0 })[kind] || 0; },
+      ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0, update_drift: 1 })[kind] || 0; },
       newRuleForm() {
         this.ruleErr = "";
         this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", enabled: true };
@@ -2300,7 +2314,7 @@
       editRule(r) {
         this.ruleErr = "";
         const t = (r.thresholds && typeof r.thresholds === "object") ? r.thresholds : {};
-        const key = ({ service_failed: "service_failed_minutes", service_restarting: "service_restart_rate_per_hour", cert_expiring: "cert_days_remaining", config_drift: "config_drift_tolerance" })[r.kind];
+        const key = ({ service_failed: "service_failed_minutes", service_restarting: "service_restart_rate_per_hour", cert_expiring: "cert_days_remaining", config_drift: "config_drift_tolerance", update_drift: "min_drifted" })[r.kind];
         this.ruleForm = {
           id: r.id, name: r.name, kind: r.kind, selector: r.selector,
           severity: r.severity, enabled: r.enabled,
@@ -2316,6 +2330,7 @@
           case "cert_expiring": return { cert_days_remaining: v };
           case "config_drift": return { config_drift_tolerance: v };
           case "update_run": return { status: (this.ruleForm && this.ruleForm.status) || "paused_failure,failed" };
+          case "update_drift": return { min_drifted: v || 1 };
           default: return {};
         }
       },

@@ -238,7 +238,9 @@ starting point, not a lock-in.
 **Alert rules** (all hosts, engine-default thresholds):
 `default-service-failed` (critical), `default-service-restarting` (warning),
 `default-cert-expiring` 30 d (warning), `default-config-invalid` (critical),
-`default-config-drift` (info), `default-update-run` (warning — stuck rollout).
+`default-config-drift` (info), `default-update-run` (warning — stuck rollout),
+`default-update-drift` (warning — agents behind the store's newest release;
+server-level, fires once, resolves when the fleet catches up).
 
 **Re-apply after a restore** (a pre-preset backup has no `default-*` rows, and
 first-boot does not re-fire because the admin user already exists):

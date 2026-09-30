@@ -313,6 +313,37 @@ async function main() {
   check("runs: paused_failure badge", d.body.textContent.includes("paused_failure"), "status badge missing");
   check("runs: per-host failed_rollback row", d.body.textContent.includes("failed_rollback"), "host state missing");
 
+  // M8.1.1: each agent-release upload pre-armed a PARKED draft rollout.
+  // The board shows the drafts with a Start button. Start the SIGNED
+  // release's draft: the keyless harness agent refuses it (no release key),
+  // so the run goes live and fails safely — no swap. (Never start the
+  // unsigned one: a keyless agent in beta mode accepts unsigned releases
+  // and would swap to the fake artifact.)
+  const draftRows = [...d.querySelectorAll("tbody tr")].filter((tr) => {
+    const badge = tr.querySelector(".badge");
+    return badge && badge.textContent.trim() === "draft";
+  });
+  check("runs: auto-draft rows for the uploaded releases", draftRows.length >= 2, "draft rows=" + draftRows.length);
+  const v90 = draftRows.find((tr) => tr.textContent.includes("v0.9.0-smoke"));
+  check("runs: draft row for the signed release", !!v90, "no v0.9.0-smoke draft row");
+  if (v90) {
+    const startBtn = [...v90.querySelectorAll("button")].find((b) => b.textContent.trim() === "Start");
+    check("runs: draft Start button", !!startBtn, "Start button missing");
+    if (startBtn) {
+      startBtn.click();
+      let draftStatus = "draft";
+      for (let i = 0; i < 10 && draftStatus === "draft"; i++) {
+        await sleep(400);
+        try {
+          const runs = await (await realFetch(base + "/api/v1/updates/runs", { headers: { Authorization: "Bearer " + token } })).json();
+          const dr = (runs.items || []).find((r) => r.version === "v0.9.0-smoke" && r.status === "draft");
+          draftStatus = dr ? "draft" : "live";
+        } catch (e) { /* not ready yet */ }
+      }
+      check("runs: started draft left the draft state (live)", draftStatus !== "draft", "still draft");
+    }
+  }
+
   await visit("#/secrets");
   check("secrets: row rendered", rowsWithText(d, "dbpass") > 0, "secret not rendered");
   check("secrets: create form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create secret")), "no Create secret button");

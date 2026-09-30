@@ -81,6 +81,12 @@ type Config struct {
 	// default is TRUE; at GA the default flips to false (signed-only).
 	// A release that carries a signature is always verified regardless.
 	AllowUnsignedReleases bool
+	// AutoDraftRollouts (M8.1.1, PARTOUT_AUTO_DRAFT_ROLLOUTS, default true):
+	// when an agent-kind release is uploaded, the server immediately creates
+	// a PARKED draft rollout (whole fleet, one canary) that an operator must
+	// explicitly start. The draft is inert — nothing dispatches without a
+	// human; the flag only controls whether the reminder is created.
+	AutoDraftRollouts bool
 	// UpdateHealthS is the post-swap health window in seconds
 	// (PARTOUT_UPDATE_HEALTH_S): the new version must boot and connect within
 	// it or the boot guard rolls back to N-1.
@@ -131,6 +137,7 @@ func Load() (*Config, error) {
 		TLSCAFile:             os.Getenv("PARTOUT_TLS_CA"),
 		ReleaseKey:            os.Getenv("PARTOUT_RELEASE_KEY"),
 		AllowUnsignedReleases: envBoolDefaultTrue("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
+		AutoDraftRollouts:     envBoolDefaultTrue("PARTOUT_AUTO_DRAFT_ROLLOUTS"),
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 	}

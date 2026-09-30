@@ -364,6 +364,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	apiH.SetUpdates(updMgr)
 	apiH.SetAllowUnsignedReleases(cfg.AllowUnsignedReleases)
+	apiH.SetAutoDraftRollouts(cfg.AutoDraftRollouts)
 	updMgr.ResumeAll(context.Background())
 
 	// Post-reboot task resumes: a TaskRunResult with no live waiter

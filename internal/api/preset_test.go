@@ -49,8 +49,8 @@ func TestPresetAPI(t *testing.T) {
 		} `json:"alert_rules"`
 	}
 	_ = json.Unmarshal([]byte(body), &st)
-	if len(st.Policies) != 4 || len(st.AlertRules) != 6 {
-		t.Fatalf("status rows = %d policies / %d alerts, want 4/6", len(st.Policies), len(st.AlertRules))
+	if len(st.Policies) != 4 || len(st.AlertRules) != 7 {
+		t.Fatalf("status rows = %d policies / %d alerts, want 4/7", len(st.Policies), len(st.AlertRules))
 	}
 	for _, p := range st.Policies {
 		if p.Present {
@@ -68,8 +68,8 @@ func TestPresetAPI(t *testing.T) {
 		CreatedAlerts   []string `json:"created_alerts"`
 	}
 	_ = json.Unmarshal([]byte(body), &res)
-	if len(res.CreatedPolicies) != 4 || len(res.CreatedAlerts) != 6 {
-		t.Fatalf("apply created %d/%d, want 4/6: %s", len(res.CreatedPolicies), len(res.CreatedAlerts), body)
+	if len(res.CreatedPolicies) != 4 || len(res.CreatedAlerts) != 7 {
+		t.Fatalf("apply created %d/%d, want 4/7: %s", len(res.CreatedPolicies), len(res.CreatedAlerts), body)
 	}
 
 	// Apply again: no-op.

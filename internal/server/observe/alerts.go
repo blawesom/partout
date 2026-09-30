@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
+	"github.com/blawesom/partout/internal/version"
 )
 
 // DefaultTick is the evaluation cadence (PARTOUT_ALERT_TICK_S).
@@ -31,6 +33,7 @@ const (
 	KindConfigInvalid     = "config_invalid"
 	KindConfigDrift       = "config_drift" // M7: cross-host hash divergence
 	KindUpdateRun         = "update_run"   // M8.1: rollout stuck (server-level, no host scope)
+	KindUpdateDrift       = "update_drift" // M8.1.1: agents behind the store's latest release
 )
 
 // Controller evaluates alert rules on a tick.
@@ -158,10 +161,11 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 	restartRates := c.sampleRestartRates(docs, now)
 
 	for _, r := range enabled {
-		// update_run is server-level: no host scope to resolve (a fleet
-		// rollout is not a host fact), so selector errors are irrelevant.
+		// update_run / update_drift are server-level: no host scope to
+		// resolve (a fleet rollout / release-store drift is not a host
+		// fact), so selector errors are irrelevant.
 		var hosts []string
-		if r.Kind != KindUpdateRun {
+		if r.Kind != KindUpdateRun && r.Kind != KindUpdateDrift {
 			var err error
 			hosts, err = c.resolveHosts(resolver, r.Selector)
 			if err != nil {
@@ -193,6 +197,9 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 			// fleet operation, not a host fact).
 			res.Fired += c.evalUpdateRun(r)
 			res.Resolved += c.resolveUpdateRun(r)
+		case KindUpdateDrift:
+			res.Fired += c.evalUpdateDrift(r)
+			res.Resolved += c.resolveUpdateDrift(r)
 		default:
 			if c.log != nil {
 				c.log.Printf("observe/alerts: rule %s: unsupported kind %q (skipped)", r.ID, r.Kind)
@@ -722,6 +729,123 @@ func (c *Controller) resolveUpdateRun(r *store.AlertRule) int {
 		stale = append(stale, a.DedupKey)
 	}
 	return c.resolve(stale)
+}
+
+// --- update_drift (M8.1.1) ---
+
+// updateDrift compares every enrolled agent's reported version against the
+// release store's latest agent release. Agents do not report their arch,
+// so the comparison uses the newest version across archs (exact in the
+// supported single-arch fleet model); the message lists per-arch latest so
+// a mixed fleet still reads unambiguously.
+func (c *Controller) updateDrift() (latest map[string]string, behind []*store.Agent, err error) {
+	latest = map[string]string{}
+	rels, err := c.st.ListAgentReleases()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, m := range rels {
+		if cur, ok := latest[m.Arch]; !ok || version.Compare(m.Version, cur) > 0 {
+			latest[m.Arch] = m.Version
+		}
+	}
+	if len(latest) == 0 {
+		return latest, nil, nil // nothing in the store: nothing to be behind
+	}
+	newest := ""
+	for _, v := range latest {
+		if newest == "" || version.Compare(v, newest) > 0 {
+			newest = v
+		}
+	}
+	agents, err := c.st.Agents()
+	if err != nil {
+		return latest, nil, err
+	}
+	for _, a := range agents {
+		if a.State == "revoked" {
+			continue
+		}
+		if a.Version != "" && version.IsNewer(newest, a.Version) {
+			behind = append(behind, a)
+		}
+	}
+	return latest, behind, nil
+}
+
+func (c *Controller) evalUpdateDrift(r *store.AlertRule) int {
+	minDrifted := int(thresholdInt(r, "min_drifted", 1))
+	latest, behind, err := c.updateDrift()
+	if err != nil {
+		if c.log != nil {
+			c.log.Printf("observe/alerts: update_drift: %v", err)
+		}
+		return 0
+	}
+	if len(behind) < minDrifted {
+		return 0
+	}
+	// Group the lagging hosts by their current version.
+	byVer := map[string][]string{}
+	var order []string
+	for _, a := range behind {
+		if _, ok := byVer[a.Version]; !ok {
+			order = append(order, a.Version)
+		}
+		byVer[a.Version] = append(byVer[a.Version], a.ID)
+	}
+	sort.Strings(order)
+	parts := make([]string, 0, len(order))
+	shown := 0
+	for _, v := range order {
+		ids := byVer[v]
+		if shown < 5 {
+			n := min(len(ids), 5-shown)
+			parts = append(parts, fmt.Sprintf("%d× %s (%s)", len(ids), v, strings.Join(ids[:n], ", ")))
+			shown += len(ids)
+		} else {
+			parts = append(parts, fmt.Sprintf("%d× %s", len(ids), v))
+		}
+	}
+	msg := fmt.Sprintf("%d agent(s) behind the latest release (%s): %s",
+		len(behind), latestSummary(latest), strings.Join(parts, "; "))
+	if c.fire(r, "", r.ID+"|drift", msg) {
+		return 1
+	}
+	return 0
+}
+
+// resolveUpdateDrift resolves the drift alert once no agent is behind (or
+// the count drops under the rule's min_drifted threshold).
+func (c *Controller) resolveUpdateDrift(r *store.AlertRule) int {
+	minDrifted := int(thresholdInt(r, "min_drifted", 1))
+	_, behind, err := c.updateDrift()
+	if err != nil || len(behind) >= minDrifted {
+		return 0
+	}
+	firing, err := c.st.FiringAlertKeys(r.ID)
+	if err != nil {
+		return 0
+	}
+	var stale []string
+	for _, a := range firing {
+		if a.DedupKey == r.ID+"|drift" {
+			stale = append(stale, a.DedupKey)
+		}
+	}
+	return c.resolve(stale)
+}
+
+func latestSummary(latest map[string]string) string {
+	if len(latest) == 0 {
+		return "no releases in store"
+	}
+	var parts []string
+	for a, v := range latest {
+		parts = append(parts, a+" "+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
 }
 
 // --- shared fire/resolve ---

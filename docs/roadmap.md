@@ -22,7 +22,7 @@
 | **M5 — Observe: fact collectors** | ✅ Complete | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
-| **M8 — Distribution & self-update** | 🚧 M8.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
+| **M8 — Distribution & self-update** | 🚧 M8.1 + M8.1.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.1.1 update drift & auto-draft rollouts**: uploading an agent release pre-arms a parked draft rollout (operator starts it; policy re-checked at start) + `update_drift` server-level alert (preset `default-update-drift` — agents behind the store's latest). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
 
 ### M0 — Spine (complete)
 
@@ -386,6 +386,34 @@ non-zero exit; DB-cause failure → verified backup restored), repo fetch + sign
 verify (tampered release rejected), one-command convergence (re-run at latest =
 no-op; fleet at target = `skipped`), server-first mixed state (server N+1 + fleet N
 healthy, agents reconnected).
+
+#### M8.1.1 — Update drift & auto-draft rollouts
+
+Problem: a new release uploaded to the store sits there until someone remembers
+the fleet, and nothing says "N hosts are behind".
+
+Shipped (no new scheduling mechanism — reuses the run FSM + alert engine):
+
+1. **Auto-draft rollout** (`PARTOUT_AUTO_DRAFT_ROLLOUTS`, default true): uploading
+   an agent-kind release immediately creates a **parked** rollout run (`draft`
+   state: whole fleet, one canary, default waves, denied hosts excluded). The
+   draft is inert — nothing dispatches until an operator presses **Start**
+   (UI, or `POST /api/v1/updates/runs/{id}/start`). Start re-checks
+   `update.apply` policy at the moment of change (denied → skipped;
+   require-approval → parks on an approval request). Dedup: a release with a
+   non-terminal run never gets a second draft. The upload response carries
+   `draft_run`, so `partout update` / API callers see the pre-armed run.
+2. **`update_drift` alert kind** (server-level, like `update_run`): compares
+   every agent's reported version against the store's newest agent release
+   (per-arch latest in the message); fires once per rule (deduped), resolves
+   when the fleet catches up. Preset rule `default-update-drift`
+   (`min_drifted: 1`, warning) — the preset is now 4 policies + 7 alert rules.
+
+Explicitly NOT done: an agent-side cron job that self-swaps "latest". That
+breaks the M8.1 invariant (the agent never decides to update), bypasses
+canary/waves, and turns a poisoned release into self-propagating fleet
+compromise. If fully hands-off updates are ever wanted, the path is the
+signed-repo one-command triggered by CI the operator owns.
 
 #### M8.2 — Distribution artifacts
 
