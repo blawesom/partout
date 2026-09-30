@@ -48,6 +48,14 @@ for GOARCH in amd64 arm64; do
 done
 ( cd "$T/dist" && sha256sum *.tar.gz > SHA-256SUMS )
 
+# Guard: the version stamp must actually be in the binary (the UI sidebar
+# and `partout update` both rely on it). Fail the release, don't publish it.
+STAMPED_OUT="$("$T/dist/partout_linux_amd64/partout" --version)"
+case "$STAMPED_OUT" in
+  *"$VER"*) echo "  version stamp ok: $STAMPED_OUT" ;;
+  *) echo "FATAL: binary reports '$STAMPED_OUT', want stamp '$VER' — refusing to release" >&2; exit 1 ;;
+esac
+
 echo "==> changelog"
 PREV="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
 {
@@ -75,7 +83,7 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   [ "$PRERELEASE" = "1" ] && ARGS+=(--prerelease)
   [ -n "$TARGET" ] && ARGS+=(--target "$TARGET")
   ARGS+=("${ASSETS[@]}")
-  printf '  gh %s\n' "${ARGS[@]}"
+  echo "  gh ${ARGS[*]}"
   echo
   cat "$T/notes.md"
   exit 0
