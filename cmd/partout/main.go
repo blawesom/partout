@@ -204,6 +204,22 @@ func main() {
 // ---- server -----------------------------------------------------------------
 
 func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
+	// Bind the port BEFORE creating any state. On a real port conflict the
+	// operator sees a clear error and the database, the admin user, and
+	// admin_password.txt are all left untouched — a failed first start must
+	// not leave partial state behind. The listener is closed on the error
+	// paths and handed to Serve on the success path.
+	lis, err := net.Listen("tcp", net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.Port)))
+	if err != nil {
+		return fmt.Errorf("listen %s:%d: %w", cfg.Addr, cfg.Port, err)
+	}
+	listenerReleased := false
+	defer func() {
+		if !listenerReleased {
+			_ = lis.Close()
+		}
+	}()
+
 	st, err := store.New("sqlite:" + cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
@@ -598,15 +614,14 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		}
 	}()
 
-	lis, err := net.Listen("tcp", net.JoinHostPort(cfg.Addr, strconv.Itoa(cfg.Port)))
-	if err != nil {
-		return fmt.Errorf("listen %s:%d: %w", cfg.Addr, cfg.Port, err)
-	}
+	scheme := "http"
 	if serveTLS {
 		lg.Printf("gRPC + REST + SSE (TLS) on %s:%d, db %s", cfg.Addr, cfg.Port, cfg.DBPath)
+		scheme = "https"
 	} else {
 		lg.Printf("gRPC + REST + SSE on %s:%d, db %s", cfg.Addr, cfg.Port, cfg.DBPath)
 	}
+	lg.Printf("→ open %s://%s:%d/ in your browser (sign in as 'admin')", scheme, displayHost(cfg.Addr), cfg.Port)
 
 	// shutdownDone is closed once the gRPC server has fully stopped and the
 	// listening socket is released. Callers that restart on the same port
@@ -638,6 +653,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}()
 
 	var serveErr error
+	listenerReleased = true // Serve now owns the listener; the defer won't close it
 	if serveTLS {
 		serveErr = httpSrv.ServeTLS(lis, "", "") // certs from TLSConfig
 	} else {
@@ -801,9 +817,26 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 	if cfg.TLS {
 		base = "https://127.0.0.1"
 	}
-	if err := waitForReady(ctx, base, cfg.Port, agentCfg.TLSCAFile, lg); err != nil {
-		return fmt.Errorf("embedded: server not ready: %w", err)
+	uiURL := fmt.Sprintf("%s:%d/", base, cfg.Port)
+	// Readiness and a hard server failure race: if the server can't start
+	// (e.g. the port is already in use), surface THAT error instead of
+	// polling /healthz for 30s and reporting a misleading timeout.
+	readyCh := make(chan error, 1)
+	go func() { readyCh <- waitForReady(ctx, base, cfg.Port, agentCfg.TLSCAFile, lg) }()
+	select {
+	case err := <-readyCh:
+		if err != nil {
+			return fmt.Errorf("embedded: server not ready: %w", err)
+		}
+	case err := <-serverErr:
+		if err != nil {
+			return fmt.Errorf("embedded: server failed to start: %w", err)
+		}
+		return fmt.Errorf("embedded: server stopped before ready: %w", ctx.Err())
+	case <-ctx.Done():
+		return fmt.Errorf("embedded: server not ready: %w", ctx.Err())
 	}
+	lg.Printf("Partout is running — open %s in your browser (sign in as 'admin')", uiURL)
 
 	// Authoritative freshness: does the server know of any agent? If the DB is
 	// empty the local agent must (re-)enroll even if an identity file exists.
@@ -886,6 +919,17 @@ func runMCP(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 
 // waitForReady polls /healthz until it returns 200 or the context is done.
 // When TLS is on it uses caFile as the root CA for verification.
+func displayHost(addr string) string {
+	// The address to show the operator for opening the UI. A wildcard bind
+	// (0.0.0.0/::) means "all interfaces"; 127.0.0.1 is the safe local
+	// default. A concrete bind host is shown as-is.
+	switch addr {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	}
+	return addr
+}
+
 func waitForReady(ctx context.Context, base string, port int, caFile string, lg *log.Logger) error {
 	url := fmt.Sprintf("%s:%d/healthz", base, port)
 	deadline := time.Now().Add(30 * time.Second)
@@ -907,7 +951,7 @@ func waitForReady(ctx context.Context, base string, port int, caFile string, lg 
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				lg.Printf("embedded: server ready at %s", url)
+				lg.Printf("embedded: server ready")
 				return nil
 			}
 		}

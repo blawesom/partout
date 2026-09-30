@@ -628,3 +628,65 @@ func TestProvisionREST(t *testing.T) {
 		t.Error("handoff run should carry a remediation note")
 	}
 }
+
+// TestServerPortInUseNoPartialState guards the bind-before-bootstrap ordering:
+// if the listener port is already taken, runServer must fail fast with the real
+// bind error and leave NO state behind (no db file, no admin_password.txt, no
+// admin user). Before the fix, the admin + password file were created before the
+// listen, so a failed first start left partial state.
+func TestServerPortInUseNoPartialState(t *testing.T) {
+	tmp := t.TempDir()
+	port := freePort(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer ln.Close()
+
+	// AdminPassword left empty: if bootstrap were reached it would generate a
+	// password and write admin_password.txt — so the test proves bootstrap is
+	// never reached when the port is taken.
+	cfg := config.Config{
+		Mode:       "server",
+		Port:       port,
+		Addr:       "127.0.0.1",
+		DBPath:     filepath.Join(tmp, "srv.db"),
+		AdminToken: "bk-admin",
+	}
+	lg := log.New(io.Discard, "", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = runServer(ctx, &cfg, lg) // must fail fast on bind, not hang
+	if err == nil {
+		t.Fatal("expected a listen error, got nil")
+	}
+	if !strings.Contains(err.Error(), "listen") && !strings.Contains(err.Error(), "bind") && !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("expected a bind/listen error, got: %v", err)
+	}
+	entries, rerr := os.ReadDir(tmp)
+	if rerr != nil {
+		t.Fatalf("read tmp: %v", rerr)
+	}
+	for _, e := range entries {
+		if e.Name() == "srv.db" || e.Name() == "admin_password.txt" {
+			t.Fatalf("partial state left behind on a failed first start: %s", e.Name())
+		}
+	}
+}
+
+func TestDisplayHost(t *testing.T) {
+	cases := map[string]string{
+		"":           "127.0.0.1",
+		"0.0.0.0":    "127.0.0.1",
+		"::":         "127.0.0.1",
+		"[::]":       "127.0.0.1",
+		"10.0.0.5":   "10.0.0.5",
+		"db.example": "db.example",
+	}
+	for in, want := range cases {
+		if got := displayHost(in); got != want {
+			t.Errorf("displayHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
