@@ -702,6 +702,18 @@ async function main() {
   w.__partout.svcF = { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" };
   w.__partout.go("obs-services");
   await sleep(900);
+  // Viewer sees the read-only half of the action bar: target + Copy, but no
+  // group/alert controls (they render only for operators) — the gate the
+  // template uses is isOperator, so flip the role to exercise it.
+  const adminRole = w.__partout.me && w.__partout.me.role;
+  if (w.__partout.me) w.__partout.me.role = "viewer";
+  w.__partout.svcF.unit = firstSvc.unit.name;
+  await sleep(300);
+  check("services: viewer target is read-only", [...d.querySelectorAll("code")].some((c) => c.textContent.trim() === "all") && !d.body.textContent.includes("save as group"), "viewer still sees group controls");
+  check("services: viewer sees the operator-role note", d.body.textContent.includes("needs the operator role"), "no role note for viewer");
+  if (w.__partout.me && adminRole) w.__partout.me.role = adminRole;
+  w.__partout.svcClearF();
+  await sleep(200);
   // Row click expands the detail row (description/pid/fragment/last-start).
   const svcRowEl = d.querySelector("table.tbl tbody tr");
   if (svcRowEl) svcRowEl.click();

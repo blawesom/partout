@@ -1473,13 +1473,17 @@
           <div v-if="svcFAny" class="toolbar" style="background:var(--brand-subtle);border:1px solid var(--border)">
             <span class="muted small">⚡ target:</span>
             <code class="mono">{{ svcTarget }}</code>
+            <span class="muted small">({{ svcTargetHint }})</span>
             <button class="btn sm" @click="svcCopySel()">Copy</button>
-            <button class="btn sm" :disabled="!isOperator" @click="svcNewAlert()">New alert…</button>
-            <span class="muted small" style="margin:0 6px">·</span>
-            <span class="muted small">save as group:</span>
-            <input v-model="svcGroupName" placeholder="group name" class="mono" style="width:110px" />
-            <button class="btn sm" :disabled="!isOperator || !svcGroupName.trim() || svcGroupBusy" @click="svcSaveGroup()"><span v-if="svcGroupBusy" class="spin"></span>Save group</button>
-            <span class="muted small">→ then use <code class="mono">group:&lt;name&gt;</code> as the selector in tasks, jobs &amp; alerts</span>
+            <template v-if="isOperator">
+              <button class="btn sm" @click="svcNewAlert()">New alert…</button>
+              <span class="muted small" style="margin:0 6px">·</span>
+              <span class="muted small">save as group:</span>
+              <input v-model="svcGroupName" placeholder="group name" class="mono" style="width:110px" @keyup.enter="svcGroupName.trim() && svcSaveGroup()" />
+              <button class="btn sm" :disabled="!svcGroupName.trim() || svcGroupBusy" @click="svcSaveGroup()"><span v-if="svcGroupBusy" class="spin"></span>Save group</button>
+              <span class="muted small">→ then use <code class="mono">group:&lt;name&gt;</code> as a selector in tasks, jobs &amp; alerts</span>
+            </template>
+            <span v-else class="muted small">· these filters select hosts; saving a group or alert rule needs the operator role</span>
           </div>
           <div class="card">
             <table class="tbl">
@@ -1838,6 +1842,11 @@
       // Selectors target hosts: a host filter pins one; otherwise the
       // filtered set spans the whole fleet ("all" is a valid selector).
       svcTarget() { return this.svcF.host ? "host:" + this.svcF.host : "all"; },
+      // Human gloss for the selector in the action bar: "all" on its own
+      // reads like "no target chosen", so name what it actually covers.
+      svcTargetHint() {
+        return this.svcF.host ? "this host" : "every host in the fleet";
+      },
       svcRows() {
         const f = this.svcF;
         return this.services.filter((row) => {

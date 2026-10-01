@@ -141,6 +141,7 @@ seed POST /policies '{"name":"needs-approval","effect":"require_approval","prior
 # Park a command on an approval request so the Approvals page has a live row.
 seed POST /executions '{"selector":"all","cmd":"echo","args":["needsapproval"],"timeout_s":10}' >/dev/null
 seed POST /users   '{"username":"alice","password":"alicepass123","role":"operator"}' >/dev/null
+seed POST /users   '{"username":"vera","password":"verapass123","role":"viewer"}' >/dev/null
 seed POST /secrets '{"name":"dbpass","value":"s3cr3t","selector":"all"}' >/dev/null
 TID=$(seed POST /tasks '{"name":"check disk","description":"df -h","steps":[{"cmd":"df"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 seed POST /jobs "{\"name\":\"nightly df\",\"cron\":\"0 3 * * *\",\"task_id\":\"$TID\",\"selector\":\"all\"}" >/dev/null
