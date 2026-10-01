@@ -64,6 +64,14 @@
     return q ? "?" + q : "";
   }
   function joinPath(a, b) { if (!a || a === "/") return "/" + b; if (a.endsWith("/")) return a + b; return a + "/" + b; }
+  // b64FromBytes base64-encodes a Uint8Array in chunks (btoa on one huge
+  // string overflows the stack for large files).
+  function b64FromBytes(bytes) {
+    let bin = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    return btoa(bin);
+  }
   function parentPath(p) { const s = (p || "/").replace(/\/+$/, ""); const i = s.lastIndexOf("/"); return i <= 0 ? "/" : s.slice(0, i); }
   function obj(v) { try { return v ? JSON.parse(v) : null; } catch (e) { return v; } }
   // Human-friendly host label: the server already computes h.name, but these
@@ -276,6 +284,70 @@
       </div>
     </div>
   </div>
+  <!-- ============ FILE DIALOG (view / edit-CAS / perm) ============ -->
+  <div class="overlay" v-if="fileDlg && fileDlg.open && loggedIn" @click.self="fileDlg.open = false">
+    <div class="dialog card" style="max-width:780px">
+      <div class="head">
+        <h2>{{ fileDlg.name }}</h2>
+        <span class="muted mono small" style="margin-left:8px">{{ hostNameById(fileDlg.host) }} : {{ fileDlg.path }}</span>
+        <div class="spacer"></div>
+        <button class="btn sm" @click="fileDlg.open = false" aria-label="close">✕</button>
+      </div>
+      <div v-if="fileDlg.loading" class="muted" style="padding:18px 0">Loading…</div>
+      <template v-else-if="fileDlg.stat">
+        <div class="muted small mono" style="margin-bottom:8px">
+          {{ fmtBytes(fileDlg.stat.size) }} · mode {{ fileDlg.stat.mode }} · {{ fileDlg.stat.owner }}:{{ fileDlg.stat.group }} · sha256 {{ (fileDlg.origSha || '').slice(0, 12) }}…
+        </div>
+        <div v-if="fileDlg.err" class="err-box" style="margin-bottom:8px">{{ fileDlg.err }}</div>
+        <template v-if="!fileDlg.binary && !fileDlg.tooLarge">
+          <textarea v-model="fileDlg.content" spellcheck="false" rows="14" @input="fileDlg.dirty = true" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;line-height:1.45;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface-app);color:var(--text)"></textarea>
+          <p class="muted small" style="margin:6px 0 0">Compare-and-swap against sha256 {{ (fileDlg.origSha || '').slice(0, 12) }}… — the save aborts if the file changed on the host since you opened it. Inline edit cap: 1 MiB.</p>
+        </template>
+        <div v-else class="info-box" style="margin-bottom:8px">
+          {{ fileDlg.tooLarge ? 'Larger than the 1 MiB inline-edit cap — use Download, or Upload a replacement.' : 'Binary file — no inline editor; use Download, or Upload a replacement.' }}
+        </div>
+        <div class="toolbar" style="margin-top:12px">
+          <label class="fld" style="margin:0"><span>Mode</span><input v-model="fileDlg.mode" class="mono" style="width:70px" placeholder="0644" /></label>
+          <label class="fld" style="margin:0"><span>Owner</span><input v-model="fileDlg.owner" class="mono" style="width:90px" placeholder="—" /></label>
+          <label class="fld" style="margin:0"><span>Group</span><input v-model="fileDlg.group" class="mono" style="width:90px" placeholder="—" /></label>
+          <button class="btn sm" :disabled="!isOperator || fileDlg.permBusy" @click="fileDlgPerm()"><span v-if="fileDlg.permBusy" class="spin"></span>Apply perm</button>
+          <div class="spacer"></div>
+          <button class="btn sm" :disabled="fileDlg.loading" @click="fileDlgReload()">Reload</button>
+          <button v-if="!fileDlg.binary && !fileDlg.tooLarge" class="btn primary sm" :disabled="!isOperator || fileDlg.busy || !fileDlg.dirty" @click="fileDlgSave()"><span v-if="fileDlg.busy" class="spin"></span>Save (CAS)</button>
+        </div>
+      </template>
+      <div v-else class="muted" style="padding:18px 0">Unreadable (see error above, or the host is offline).</div>
+    </div>
+  </div>
+
+  <!-- ============ FILE UPLOAD DIALOG ============ -->
+  <div class="overlay" v-if="upDlg && upDlg.open && loggedIn" @click.self="upDlg.open = false">
+    <div class="dialog card" style="max-width:560px">
+      <div class="head">
+        <h2>Upload file</h2>
+        <span class="muted mono small" style="margin-left:8px">{{ hostNameById(fileHost) }}</span>
+        <div class="spacer"></div>
+        <button class="btn sm" @click="upDlg.open = false" aria-label="close">✕</button>
+      </div>
+      <p class="cap">Ship a local file to the host (atomic write; overwrites any existing file at the target path). Policy-gated (<span class="mono">file.write</span>), audited. Server cap: 256 MiB.</p>
+      <div v-if="upDlg.err" class="err-box" style="margin:10px 0">{{ upDlg.err }}</div>
+      <div class="form-row" style="align-items:flex-end">
+        <label class="fld" style="flex:1"><span>Local file</span>
+          <input type="file" @change="upDlgFilePicked($event)" />
+        </label>
+      </div>
+      <div class="form-row" style="align-items:flex-end;margin-top:8px">
+        <label class="fld" style="flex:1"><span>Target path</span><input v-model="upDlg.path" class="mono" :placeholder="fileDir || '/'" /></label>
+        <label class="fld" style="max-width:110px"><span>Mode</span><input v-model="upDlg.mode" class="mono" /></label>
+      </div>
+      <div class="toolbar" style="margin-top:14px">
+        <div class="spacer"></div>
+        <button class="btn sm" @click="upDlg.open = false">Cancel</button>
+        <button class="btn primary sm" :disabled="!isOperator || !upDlg.file || !upDlg.path.trim() || upDlg.busy" @click="upDlgGo()"><span v-if="upDlg.busy" class="spin"></span>Upload</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ============ CONFIRM DIALOG (replaces native confirm()) ============ -->
   <div class="overlay" v-if="confirmBox.open && loggedIn" @click.self="confirmBoxNo()">
     <div class="dialog card" style="max-width:520px">
@@ -696,7 +768,7 @@
         <!-- ============ FILES ============ -->
         <section v-else-if="page==='files'">
           <h1 class="page">Files</h1>
-          <p class="page-sub">Host file browser (M2).</p>
+          <p class="page-sub">Host file browser (M2). Reads are open to viewers; upload / edit / perm are policy-gated (<span class="mono">file.write</span> / <span class="mono">file.perm</span>) and audited. Edits are compare-and-swap — a save aborts if the file changed since you opened it.</p>
           <div class="toolbar">
             <select :value="fileHost" style="max-width:260px" @change="pickFileHost($event.target.value)">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
@@ -704,6 +776,7 @@
             <input v-model="fileDir" class="mono" style="flex:1" @keyup.enter="listFiles" />
             <button class="btn sm" @click="fileUp">↑</button>
             <button class="btn sm" @click="listFiles">Open</button>
+            <button class="btn primary sm" :disabled="!isOperator || !fileHost" @click="openUpDlg()" title="Ship a local file to the host (policy-gated file.write)">+ Upload</button>
           </div>
           <div class="card">
             <table class="tbl">
@@ -714,7 +787,7 @@
                   <td class="mono">{{ f.is_dir ? '—' : fmtBytes(f.size) }}</td>
                   <td class="mono">{{ f.mode || '—' }}</td>
                   <td class="muted">{{ fmtAgo(f.mtime_unix) }}</td>
-                  <td class="row-actions"><button v-if="!f.is_dir && !f.is_symlink" class="btn sm" :disabled="!fileHost" @click="downloadFile(f)">Download</button></td>
+                  <td class="row-actions"><button v-if="!f.is_dir && !f.is_symlink" class="btn sm" @click.stop="openFileDlg(f)">Edit</button><button v-if="!f.is_dir && !f.is_symlink" class="btn sm" :disabled="!fileHost" @click="downloadFile(f)">Download</button></td>
                 </tr>
                 <tr v-if="!fileLoading && !fileEntries.length"><td colspan="5"><div class="empty">{{ fileHost ? 'Empty or no access.' : 'No hosts available.' }}</div></td></tr>
               </tbody>
@@ -1687,7 +1760,7 @@
         audit: [], auditKind: "",
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
-        fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false,
+        fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null,
         updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
@@ -3020,6 +3093,88 @@
       },
       fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },
       pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.listFiles(); },
+      // ---- File dialog: view / edit-CAS / perm (M2 API was ahead of the UI) ----
+      openFileDlg(f) {
+        const path = joinPath(this.fileDir, f.name);
+        this.fileDlg = { open: true, host: this.fileHost, path, name: f.name, loading: true, busy: false, permBusy: false, stat: null, content: "", origSha: "", err: "", binary: false, tooLarge: false, mode: "", owner: "", group: "", dirty: false };
+        this.fileDlgLoad();
+      },
+      async fileDlgLoad() {
+        const d = this.fileDlg;
+        if (!d) return;
+        d.loading = true; d.err = ""; d.dirty = false;
+        try {
+          const st = await this.api("/files/stat?agent_id=" + encodeURIComponent(d.host) + "&path=" + encodeURIComponent(d.path), { toast: false });
+          d.stat = st; d.origSha = st.sha256 || ""; d.mode = st.mode || ""; d.owner = st.owner || ""; d.group = st.group || "";
+          d.tooLarge = (st.size || 0) > 1024 * 1024;
+          if (!d.tooLarge && !st.is_dir) {
+            const res = await fetch("/api/v1/files/download?agent_id=" + encodeURIComponent(d.host) + "&path=" + encodeURIComponent(d.path), { headers: { Authorization: "Bearer " + this.token } });
+            if (!res.ok) throw new Error("read failed (HTTP " + res.status + ")");
+            const buf = new Uint8Array(await res.arrayBuffer());
+            let binary = false;
+            const probe = buf.slice(0, 8192);
+            for (let i = 0; i < probe.length; i++) if (probe[i] === 0) { binary = true; break; }
+            d.content = new TextDecoder("utf-8").decode(buf);
+            if (d.content.indexOf("\uFFFD") !== -1) binary = true; // replacement chars → not text
+            d.binary = binary;
+          }
+        } catch (e) { d.err = e.message; d.stat = d.stat || { size: 0, mode: "", owner: "", group: "" }; }
+        d.loading = false;
+      },
+      fileDlgReload() { this.fileDlgLoad(); },
+      async fileDlgSave() {
+        const d = this.fileDlg;
+        if (!d.origSha) { d.err = "No baseline sha256 — Reload the file, then Save."; return; }
+        if (!await this.askConfirm({ title: "Save file (CAS)", body: "Writes " + d.content.length + " bytes to " + d.path + " on " + this.hostNameById(d.host) + ". Policy-gated (file.write) and audited. Aborts if the file changed since you opened it.", confirmLabel: "Save", variant: "danger" })) return;
+        d.busy = true; d.err = "";
+        try {
+          const r = await this.api("/files/edit", { method: "POST", body: { agent_id: d.host, path: d.path, expected_sha256: d.origSha, content_b64: b64FromBytes(new TextEncoder().encode(d.content)) } });
+          d.origSha = r.sha256 || ""; d.dirty = false;
+          if (d.stat) d.stat.size = d.content.length;
+          this.notify("ok", "saved " + d.name + " (sha256 " + (d.origSha || "").slice(0, 8) + "…)");
+        } catch (e) {
+          if (e.status === 409) {
+            d.err = "Conflict: the file changed on the host since you opened it. Reload to pick up the new content, then re-apply your change.";
+            this.notify("err", "save rejected: file changed since you opened it (CAS)", 10000);
+          } else d.err = "Save failed: " + e.message;
+        } finally { d.busy = false; }
+      },
+      async fileDlgPerm() {
+        const d = this.fileDlg;
+        const what = [d.mode && "mode " + d.mode, d.owner && "owner " + d.owner, d.group && "group " + d.group].filter(Boolean).join(", ");
+        if (!what) return;
+        if (!await this.askConfirm({ title: "Apply permissions", body: "Set " + what + " on " + d.path + " (policy-gated file.perm, audited). Blank fields are left unchanged.", confirmLabel: "Apply", variant: "danger" })) return;
+        d.permBusy = true;
+        try {
+          await this.api("/files/perm", { method: "POST", body: { agent_id: d.host, path: d.path, mode: d.mode, owner: d.owner, group: d.group } });
+          this.notify("ok", "permissions updated on " + d.path);
+        } catch (e) { this.notify("err", "perm failed: " + e.message); } finally { d.permBusy = false; }
+      },
+      // ---- File upload ----
+      openUpDlg() {
+        if (!this.fileHost) return;
+        this.upDlg = { open: true, file: null, path: "", mode: "0644", busy: false, err: "" };
+      },
+      upDlgFilePicked(ev) {
+        const f = ev.target.files && ev.target.files[0];
+        if (!f) return;
+        this.upDlg.file = f;
+        if (!this.upDlg.path.trim()) this.upDlg.path = joinPath(this.fileDir, f.name);
+      },
+      async upDlgGo() {
+        const u = this.upDlg; const f = u.file;
+        if (!f || !u.path.trim()) return;
+        if (f.size > 256 * 1024 * 1024) { u.err = "File exceeds the 256 MiB server cap."; return; }
+        if (!await this.askConfirm({ title: "Upload file", body: f.name + " (" + fmtBytes(f.size) + ") → " + u.path.trim() + " on " + this.hostNameById(this.fileHost) + ". Overwrites any existing file at that path. Policy-gated (file.write), audited.", confirmLabel: "Upload", variant: "danger" })) return;
+        u.busy = true; u.err = "";
+        try {
+          const buf = new Uint8Array(await f.arrayBuffer());
+          const r = await this.api("/files/upload", { method: "POST", body: { agent_id: this.fileHost, path: u.path.trim(), content_b64: b64FromBytes(buf), mode: u.mode } });
+          this.notify("ok", "uploaded " + u.path.trim() + " (sha256 " + ((r.sha256 || "").slice(0, 8)) + "…)");
+          u.open = false;
+          this.listFiles();
+        } catch (e) { u.err = "Upload failed: " + e.message; } finally { u.busy = false; }
+      },
       // ---- Add-host dialog (Fleet) ------------------------------------
       openAddHost() {
         if (!this.isOperator) return;

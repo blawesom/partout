@@ -7,6 +7,7 @@
 // template binding a field that does not exist blanks a page silently and no Go
 // test notices.
 const { JSDOM, VirtualConsole } = require("jsdom");
+const nodeUtil = require("util"); // TextEncoder/Decoder shims for jsdom (real browsers have both)
 
 const base = process.env.BASE || "http://localhost:18471";
 const realFetch = global.fetch;
@@ -32,6 +33,18 @@ async function main() {
     pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(window) {
+      if (!window.TextDecoder) { window.TextDecoder = nodeUtil.TextDecoder; window.TextEncoder = nodeUtil.TextEncoder; }
+      if (!window.Blob.prototype.arrayBuffer) {
+        // Modern browsers have Blob.arrayBuffer; jsdom@24 does not.
+        window.Blob.prototype.arrayBuffer = function () {
+          return new Promise((resolve, reject) => {
+            const fr = new window.FileReader();
+            fr.onload = () => resolve(new Uint8Array(fr.result).buffer);
+            fr.onerror = () => reject(fr.error);
+            fr.readAsArrayBuffer(this);
+          });
+        };
+      }
       window.fetch = (path, opts) => realFetch(new URL(String(path), base), opts);
       // No real SSE here; the app must render from its initial load alone.
       window.EventSource = class {
@@ -246,6 +259,78 @@ async function main() {
   if (w.__partout) { w.__partout.fileDir = "/etc"; w.__partout.listFiles(); }
   await sleep(1200);
   check("files: download action", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Download")), "no Download button in /etc");
+  // New file dialog: open a small real text file, assert stat + content +
+  // CAS controls render; Save must stay disabled until the editor is dirty.
+  check("files: + Upload button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("+ Upload")), "no + Upload button");
+  if (w.__partout) { w.__partout.openFileDlg({ name: "hostname", is_dir: false }); }
+  await sleep(1500);
+  const dlg = [...d.querySelectorAll(".dialog.card")].find((x) => x.textContent.includes(": /etc/hostname"));
+  check("files: dialog opens with stat meta", !!dlg && dlg.textContent.includes("sha256"), "no file dialog / no stat meta");
+  const ta = dlg && dlg.querySelector("textarea");
+  check("files: editor loaded real content", !!ta && ta.value.trim().length > 0, "textarea empty");
+  const saveBtn = dlg && [...dlg.querySelectorAll("button")].find((b) => b.textContent.includes("Save (CAS)"));
+  check("files: Save disabled until dirty", !!saveBtn && saveBtn.disabled, "Save not disabled on fresh load");
+  if (ta) { ta.value += "\n# smoke-test\n"; ta.dispatchEvent(new w.window.Event("input", { bubbles: true })); }
+  await sleep(150);
+  check("files: Save enables on edit", !!saveBtn && !saveBtn.disabled, "Save still disabled after edit");
+  if (w.__partout) { w.__partout.fileDlg.open = false; }
+  await sleep(200);
+  // End-to-end upload: ship a real file to /tmp on the local agent (driving
+  // the confirm dialog like a user), verify the listing shows it, then open
+  // it in the dialog and verify the content round-trips.
+  if (w.__partout) {
+    w.__partout.openUpDlg();
+    w.__partout.upDlg.file = new w.window.File([new w.window.TextEncoder().encode("partout-smoke-upload\n")], "smoke-upload.txt");
+    w.__partout.upDlg.path = "/tmp/smoke-upload.txt";
+    w.__partout.upDlgGo();
+  }
+  await sleep(300);
+  const upConfirm = [...d.querySelectorAll(".dialog.card button")].find((b) => b.textContent.trim() === "Upload" && b.closest(".dialog.card").textContent.includes("Overwrites"));
+  if (upConfirm) upConfirm.click();
+  await sleep(1800);
+  // Navigate to /tmp and reload so the listing actually shows the new file
+  // (upDlgGo re-lists the current dir, which was /etc).
+  if (w.__partout) { w.__partout.fileDir = "/tmp"; w.__partout.listFiles(); }
+  await sleep(1200);
+  check("files: upload round-trips to disk", [...d.querySelectorAll("table.tbl tbody tr")].some((tr) => tr.textContent.includes("smoke-upload.txt")), "uploaded row missing in listing");
+  if (w.__partout) {
+    w.__partout.openFileDlg({ name: "smoke-upload.txt", is_dir: false });
+  }
+  await sleep(1500);
+  const upDlg2 = [...d.querySelectorAll(".dialog.card")].find((x) => x.textContent.includes(": /tmp/smoke-upload.txt"));
+  const ta2 = upDlg2 && upDlg2.querySelector("textarea");
+  check("files: uploaded content round-trips", !!ta2 && ta2.value === "partout-smoke-upload\n", "content mismatch: " + (ta2 ? JSON.stringify(ta2.value) : "no textarea"));
+  // Edit-CAS round-trip: modify in the (still open) dialog, save via the
+  // confirm dialog, then close/reopen and verify persistence; afterwards
+  // force a stale baseline and verify the 409 conflict surfaces in the
+  // dialog instead of a silent clobber.
+  if (ta2) { ta2.value = "partout-smoke-edit\n"; ta2.dispatchEvent(new w.window.Event("input", { bubbles: true })); }
+  await sleep(150);
+  const saveBtn2 = upDlg2 && [...upDlg2.querySelectorAll("button")].find((b) => b.textContent.includes("Save (CAS)"));
+  if (saveBtn2) saveBtn2.click();
+  await sleep(300);
+  const saveConfirm = [...d.querySelectorAll(".dialog.card button")].find((b) => b.textContent.trim() === "Save" && b.closest(".dialog.card").textContent.includes("Aborts if the file changed"));
+  if (saveConfirm) saveConfirm.click();
+  await sleep(1800);
+  if (w.__partout) { w.__partout.fileDlg.open = false; await sleep(100); w.__partout.openFileDlg({ name: "smoke-upload.txt", is_dir: false }); }
+  await sleep(1500);
+  const dlg3 = [...d.querySelectorAll(".dialog.card")].find((x) => x.textContent.includes(": /tmp/smoke-upload.txt"));
+  const ta3 = dlg3 && dlg3.querySelector("textarea");
+  check("files: CAS edit round-trips to disk", !!ta3 && ta3.value === "partout-smoke-edit\n", "edit not persisted: " + (ta3 ? JSON.stringify(ta3.value) : "no textarea"));
+  if (w.__partout && ta3) {
+    w.__partout.fileDlg.origSha = "0000000000000000000000000000000000000000000000000000000000000000"; // stale baseline → must 409
+    ta3.value += "x\n"; ta3.dispatchEvent(new w.window.Event("input", { bubbles: true }));
+  }
+  await sleep(150);
+  const saveBtn3 = [...d.querySelectorAll(".dialog.card button")].find((b) => b.textContent.includes("Save (CAS)"));
+  if (saveBtn3) saveBtn3.click();
+  await sleep(300);
+  const saveConfirm2 = [...d.querySelectorAll(".dialog.card button")].find((b) => b.textContent.trim() === "Save" && b.closest(".dialog.card").textContent.includes("Aborts if the file changed"));
+  if (saveConfirm2) saveConfirm2.click();
+  await sleep(1500);
+  check("files: stale CAS rejected with conflict", (w.__partout.fileDlg.err || "").includes("Conflict"), "no conflict surfaced: " + (w.__partout.fileDlg.err || ""));
+  if (w.__partout) { w.__partout.fileDlg.open = false; }
+  await sleep(200);
 
   await visit("#/jobs");
   check("jobs: job name", rowsWithText(d, "nightly df") > 0, "no job row");
