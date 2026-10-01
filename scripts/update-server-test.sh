@@ -113,6 +113,13 @@ run_update() { # run_update <new> <sha> <sig> <version> -> exit code
     --admin-token restok --post-timeout 45 2>&1
 }
 
+run_update_unsigned() { # run_update_unsigned <new> <sha> <version> -> exit code
+  PATH="$T/fakebin:$PATH" "$REPO/scripts/update-server.sh" \
+    --new "$1" --sha256 "$2" --version "$3" --unsigned \
+    --binary "$BINPATH" --db "$T/db/p.db" --health-url "http://127.0.0.1:$PORT" \
+    --admin-token restok --post-timeout 45 2>&1
+}
+
 # =============================================================================
 echo "==> scenario 1: signature gate (bad signature -> not installed)"
 ensure_server
@@ -197,6 +204,33 @@ curl -sf -m2 "http://127.0.0.1:$PORT/healthz" >/dev/null && ok "service healthy 
   || bad "service healthy after rollback" "no healthz"
 ls "$T/db"/partout-backup-rollback-*.db >/dev/null 2>&1 && ok "pre-swap backup preserved on rollback" \
   || bad "pre-swap backup preserved on rollback" "no backup file"
+
+echo "==> scenario 6: unsigned beta flow (no signature/key — sha pin + version stamp + selftest only)"
+# --unsigned + --signature must conflict.
+if PATH="$T/fakebin:$PATH" "$REPO/scripts/update-server.sh" \
+    --new "$T/new-partout" --sha256 "$NEW_SHA" --version "$VER" \
+    --signature "$SIG2" --unsigned --binary "$BINPATH" >/dev/null 2>&1; then
+  bad "--unsigned conflicts with --signature" "script exited 0"
+else
+  ok "--unsigned conflicts with --signature"
+fi
+ensure_server
+# Distinct from whatever scenario 5 left installed (its rollback restores the
+# pre-5 binary, which is the scenario-3 decoy — same bytes as $T/new-partout).
+cp "$T/partout" "$T/new2-partout"
+printf '\n// decoy revision 2\n' >> "$T/new2-partout"
+NEW2_SHA="$(sha256sum "$T/new2-partout" | awk '{print $1}')"
+if run_update_unsigned "$T/new2-partout" "$NEW2_SHA" "$VER" > "$T/s6.log" 2>&1; then
+  ok "unsigned update installed"
+else
+  bad "unsigned update installed" "$(tail -3 "$T/s6.log")"
+fi
+grep -q "unsigned beta flow" "$T/s6.log" && ok "unsigned flow logged explicitly" \
+  || bad "unsigned flow logged explicitly" "$(tail -3 "$T/s6.log")"
+CUR_SHA="$(sha256sum "$BINPATH" | awk '{print $1}')"
+[ "$CUR_SHA" = "$NEW2_SHA" ] && ok "unsigned binary swapped in" || bad "unsigned binary swapped in" "sha=$CUR_SHA"
+curl -sf -m2 "http://127.0.0.1:$PORT/healthz" >/dev/null && ok "service healthy after unsigned update" \
+  || bad "service healthy after unsigned update" "no healthz"
 
 echo ""
 echo "RESULT: $PASS passed, $FAILN failed"

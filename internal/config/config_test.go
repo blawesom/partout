@@ -266,25 +266,25 @@ func TestObserveFactsIntervalInvalidFallsBack(t *testing.T) {
 }
 
 func TestAllowUnsignedReleasesDefault(t *testing.T) {
-	// Unset → GA default false (signed-only; fleet updates require a signature).
+	// Unset → beta default true (checksum + version-stamp rollouts).
 	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "")
 	os.Unsetenv("PARTOUT_ALLOW_UNSIGNED_RELEASES")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if c.AllowUnsignedReleases {
-		t.Error("unset env: want GA default false (signed-only)")
+	if !c.AllowUnsignedReleases {
+		t.Error("unset env: want beta default true (unsigned accepted)")
 	}
 
-	// Explicit on → true (throwaway dev fleets only).
-	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "true")
+	// Explicit off → false (opt back into signed-only before 1.0).
+	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "false")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !c.AllowUnsignedReleases {
-		t.Error("env=true: want true")
+	if c.AllowUnsignedReleases {
+		t.Error("env=false: want false")
 	}
 
 	// Explicit off → false.

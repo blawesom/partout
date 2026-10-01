@@ -21,6 +21,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -37,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/update"
 	"github.com/blawesom/partout/internal/release"
 )
 
@@ -44,8 +47,11 @@ func runUpdate(args []string) {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	server := fs.String("server", envOr("PARTOUT_SERVER", ""), "server host:port to update + roll out")
 	token := fs.String("token", envOr("PARTOUT_TOKEN", envOr("PARTOUT_ADMIN_TOKEN", "")), "admin bearer token")
-	version := fs.String("version", "", "target version (default: the repo's latest)")
-	repo := fs.String("repo", envOr("PARTOUT_RELEASE_REPO", ""), "base URL of published releases (or $PARTOUT_RELEASE_REPO)")
+	version := fs.String("version", "", "target version (default: latest of the source)")
+	repo := fs.String("repo", envOr("PARTOUT_RELEASE_REPO", ""), "signed release repo base URL (or $PARTOUT_RELEASE_REPO) — signed layout, Ed25519-verified")
+	fromFile := fs.String("from-file", "", "local build to install (instead of fetching); the same binary serves server + agent")
+	shaPin := fs.String("sha256", "", "--from-file: expected sha256 (hex) — the computed digest must match")
+	ghRepo := fs.String("github-repo", defaultGitHubRepo(), "default source: GitHub org/name of the published releases")
 	arch := fs.String("arch", defaultArch(), "target arch (e.g. linux-amd64)")
 	selector := fs.String("selector", "all", "fleet selector for the rollout")
 	canary := fs.Int("canary", 1, "canary cohort size (0 = no canary phase)")
@@ -131,26 +137,43 @@ Flags:
 	}
 	target := *version
 	if target == "" {
-		if *repo == "" {
-			fatal(fmt.Errorf("no --version and no --repo/$PARTOUT_RELEASE_REPO; cannot resolve a target"))
+		if *fromFile != "" {
+			fatal(fmt.Errorf("--from-file requires --version (a local file has no 'latest')"))
 		}
-		t, err := http.Get(*repo + "/latest")
-		if err != nil {
-			fatal(fmt.Errorf("repo latest: %w", err))
-		}
-		defer t.Body.Close()
-		if t.StatusCode != 200 {
-			fatal(fmt.Errorf("repo latest: HTTP %d from %s/latest", t.StatusCode, *repo))
-		}
-		lb, _ := io.ReadAll(t.Body)
-		target = strings.TrimSpace(string(lb))
-		if target == "" {
-			fatal(fmt.Errorf("repo %s/latest is empty", *repo))
+		if *repo != "" {
+			t, err := http.Get(*repo + "/latest")
+			if err != nil {
+				fatal(fmt.Errorf("repo latest: %w", err))
+			}
+			defer t.Body.Close()
+			if t.StatusCode != 200 {
+				fatal(fmt.Errorf("repo latest: HTTP %d from %s/latest", t.StatusCode, *repo))
+			}
+			lb, _ := io.ReadAll(t.Body)
+			target = strings.TrimSpace(string(lb))
+			if target == "" {
+				fatal(fmt.Errorf("repo %s/latest is empty", *repo))
+			}
+		} else {
+			// Default beta source: the GitHub release's latest tag.
+			tag, err := githubLatest(client, *ghRepo)
+			if err != nil {
+				fatal(err)
+			}
+			target = strings.TrimPrefix(tag, "v")
+			fmt.Printf("partout update: latest %s on github.com/%s\n", target, *ghRepo)
 		}
 	}
+	target = strings.TrimPrefix(target, "v")
 	fmt.Printf("partout update: server at %s, target %s\n", cur.Version, target)
 
 	serverAtTarget := cur.Version == target
+
+	// Server already at target and --server-only: nothing to do.
+	if serverAtTarget && *serverOnly {
+		fmt.Printf("update: already at %s — nothing to do\n", target)
+		return
+	}
 
 	// ---- --check: report and exit ------------------------------------------
 	if *checkOnly {
@@ -179,61 +202,48 @@ Flags:
 		}
 		// Preflight: fetch and verify the artifacts the real run would use.
 		// --check still makes no system changes — it only downloads to temp.
-		artState := "no --repo configured (artifact preflight skipped)"
-		if *repo != "" {
-			if err := checkArtifacts(client, *repo, target, *arch, serverAtTarget); err != nil {
-				artState = "ARTIFACT PRECHECK FAILED: " + err.Error()
-			} else {
-				artState = "artifacts verified against release key"
-			}
+		artState := "artifacts verified"
+		if _, _, _, _, _, _, u, err := resolveArtifacts(client, *repo, *fromFile, *shaPin, *ghRepo, target, *arch, serverAtTarget); err != nil {
+			artState = "ARTIFACT PRECHECK FAILED: " + err.Error()
+		} else if u {
+			artState = "artifacts verified (sha256 + version stamp; unsigned beta flow)"
+		} else {
+			artState = "artifacts verified against release key"
 		}
 		fmt.Printf("update --check: server=%s target=%s hosts=%d (%s)\n", cur.Version, target, n, state)
 		fmt.Printf("update --check: %s\n", artState)
-		if artState != "artifacts verified against release key" && !strings.HasPrefix(artState, "no --repo") {
+		if strings.HasPrefix(artState, "ARTIFACT") {
 			os.Exit(1)
 		}
 		return
 	}
 
 	// ---- 2+3. fetch + verify both artifacts --------------------------------
-	var srvFile, srvSig, srvSHA, agtFile, agtSig, agtSHA string
-	if !serverAtTarget {
-		if *repo == "" {
-			fatal(fmt.Errorf("server is behind but no --repo/$PARTOUT_RELEASE_REPO to fetch %s", target))
-		}
-		srvFile, srvSig, srvSHA = fetchArtifact(client, *repo, target, *arch, "server")
-		agtFile, agtSig, agtSHA = fetchArtifact(client, *repo, target, *arch, "agent")
-		if err := verifyArtifact(target, *arch, "server", srvFile, srvSHA, srvSig); err != nil {
-			fatal(err)
-		}
-		if err := verifyArtifact(target, *arch, "agent", agtFile, agtSHA, agtSig); err != nil {
-			fatal(err)
-		}
+	srvFile, srvSHA, srvSig, agtFile, agtSHA, agtSig, unsigned, err := resolveArtifacts(client, *repo, *fromFile, *shaPin, *ghRepo, target, *arch, serverAtTarget)
+	if err != nil {
+		fatal(err)
+	}
+	if !unsigned {
 		fmt.Println("partout update: both artifacts verified against the release key")
 	} else {
-		// Server is already at target: only the agent artifact is needed.
-		if *serverOnly {
-			fmt.Printf("update: already at %s — nothing to do\n", target)
-			return
-		}
-		if *repo == "" {
-			fatal(fmt.Errorf("server already at %s but no --repo to fetch the agent artifact", target))
-		}
-		agtFile, agtSig, agtSHA = fetchArtifact(client, *repo, target, *arch, "agent")
-		if err := verifyArtifact(target, *arch, "agent", agtFile, agtSHA, agtSig); err != nil {
-			fatal(err)
-		}
+		fmt.Println("partout update: artifacts verified — sha256 (+ pin) and version stamp; unsigned beta flow, no signature")
 	}
 
 	// ---- 4. supervised server update ---------------------------------------
 	if !serverAtTarget {
 		sc := resolveUpdateScript(*script)
-		cmd := exec.Command(sc,
+		args := []string{
 			"--new", srvFile, "--version", target, "--arch", *arch,
-			"--sha256", srvSHA, "--signature", srvSig, "--key", releaseKeyOrFatal(),
+			"--sha256", srvSHA,
 			"--binary", *serverBin, "--db", *serverDB, "--service", *service,
 			"--health-url", base, "--admin-token", *token,
-		)
+		}
+		if unsigned {
+			args = append(args, "--unsigned")
+		} else {
+			args = append(args, "--signature", srvSig, "--key", releaseKeyOrFatal())
+		}
+		cmd := exec.Command(sc, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -421,23 +431,213 @@ func fetchArtifact(client *http.Client, repo, version, arch, kind string) (file,
 	return file, strings.TrimSpace(string(sb)), hex.EncodeToString(h[:])
 }
 
-// checkArtifacts fetches and signature-verifies the artifacts a real run
-// would use (both when the server is behind; agent-only when the server is
-// already at target). Fail closed: any fetch or signature error is
-// returned so --check exits non-zero.
-func checkArtifacts(client *http.Client, repo, version, arch string, serverAtTarget bool) error {
-	if !serverAtTarget {
-		srvFile, srvSig, srvSHA := fetchArtifact(client, repo, version, arch, "server")
-		if err := verifyArtifact(version, arch, "server", srvFile, srvSHA, srvSig); err != nil {
-			return fmt.Errorf("server artifact: %w", err)
+// resolveArtifacts fetches and verifies both artifacts for the target using
+// the configured source: --repo (signed layout, Ed25519) or the unsigned
+// beta flow (default GitHub release, or --from-file) where one binary
+// serves both roles and verification is sha256 (+ optional pin) + the
+// version stamp. Returns local file paths + sha256 (hex); the signature is
+// "" for the unsigned flow.
+func resolveArtifacts(client *http.Client, repo, fromFile, shaPin, ghRepo, version, arch string, serverAtTarget bool) (srvFile, srvSHA, srvSig, agtFile, agtSHA, agtSig string, unsigned bool, err error) {
+	if repo != "" {
+		// Signed layout: server + agent signed as distinct kinds.
+		if !serverAtTarget {
+			srvFile, srvSig, srvSHA = fetchArtifact(client, repo, version, arch, "server")
+			if err = verifyArtifact(version, arch, "server", srvFile, srvSHA, srvSig); err != nil {
+				return
+			}
 		}
+		agtFile, agtSig, agtSHA = fetchArtifact(client, repo, version, arch, "agent")
+		return "", "", "", agtFile, agtSHA, agtSig, false, verifyArtifact(version, arch, "agent", agtFile, agtSHA, agtSig)
 	}
-	agtFile, agtSig, agtSHA := fetchArtifact(client, repo, version, arch, "agent")
-	return verifyArtifact(version, arch, "agent", agtFile, agtSHA, agtSig)
+	// Unsigned beta flow: one binary serves both roles.
+	switch {
+	case fromFile != "":
+		sha, e := loadLocalArtifact(fromFile, shaPin, version)
+		if e != nil {
+			return "", "", "", "", "", "", false, e
+		}
+		srvFile, agtFile, srvSHA, agtSHA = fromFile, fromFile, sha, sha
+	default:
+		bin, sha := fetchGitHubArtifact(client, ghRepo, version, arch)
+		srvFile, agtFile, srvSHA, agtSHA = bin, bin, sha, sha
+	}
+	unsigned = true
+	return
 }
 
-// verifyArtifact checks the Ed25519 signature over the canonical manifest
-// against the operator-provisioned release key (fail closed).
+// githubLatest resolves the latest release tag via the GitHub API (public
+// repo; GITHUB_TOKEN is honored when set). Returns the tag with any leading
+// "v" kept — callers normalize.
+func githubLatest(client *http.Client, orgRepo string) (string, error) {
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/"+orgRepo+"/releases/latest", nil)
+	if err != nil {
+		return "", err
+	}
+	if tk := os.Getenv("GITHUB_TOKEN"); tk != "" {
+		req.Header.Set("Authorization", "Bearer "+tk)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("github latest: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return "", fmt.Errorf("github latest: HTTP %d from api.github.com (rate limit? set GITHUB_TOKEN)", res.StatusCode)
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&rel); err != nil {
+		return "", fmt.Errorf("github latest: decode: %w", err)
+	}
+	if rel.TagName == "" {
+		return "", fmt.Errorf("github latest: empty tag_name for %s", orgRepo)
+	}
+	return rel.TagName, nil
+}
+
+// fetchGitHubArtifact downloads the published release tarball for version +
+// arch, verifies it against the release's SHA-256SUMS, extracts the binary,
+// and proves the version stamp by executing it. Returns the binary path and
+// its sha256 (hex). Integrity floor only — see the source comment.
+func fetchGitHubArtifact(client *http.Client, orgRepo, version, arch string) (file, sha string) {
+	ver := strings.TrimPrefix(version, "v")
+	tag := "v" + ver
+	asset := githubAssetName(version, arch)
+	dl := fmt.Sprintf("https://github.com/%s/releases/download/%s/", orgRepo, tag)
+	tmp, err := os.MkdirTemp("", "partout-update-gh-*")
+	if err != nil {
+		fatal(err)
+	}
+	fetchTo := func(name, out string) {
+		res, err := client.Get(dl + name)
+		if err != nil {
+			fatal(fmt.Errorf("fetch %s: %w", dl+name, err))
+		}
+		defer res.Body.Close()
+		if res.StatusCode != 200 {
+			fatal(fmt.Errorf("fetch %s: HTTP %d (is %s published on github.com/%s?)", dl+name, res.StatusCode, name, orgRepo))
+		}
+		w, err := os.Create(out)
+		if err != nil {
+			fatal(err)
+		}
+		defer w.Close()
+		if _, err := io.Copy(w, res.Body); err != nil {
+			fatal(err)
+		}
+	}
+	sumsFile := filepath.Join(tmp, "SHA-256SUMS")
+	fetchTo("SHA-256SUMS", sumsFile)
+	tarball := filepath.Join(tmp, asset)
+	fetchTo(asset, tarball)
+
+	sums := strings.TrimSpace(string(readFileBytes(sumsFile)))
+	expected, err := parseSumsLine(sums, asset)
+	if err != nil {
+		fatal(err)
+	}
+	h := sha256.Sum256(readFileBytes(tarball))
+	actual := hex.EncodeToString(h[:])
+	if !strings.EqualFold(expected, actual) {
+		fatal(fmt.Errorf("sha256 mismatch for %s: release says %s, downloaded %s", asset, expected, actual))
+	}
+
+	bin, err := extractTarballBinary(tarball)
+	if err != nil {
+		fatal(err)
+	}
+	if err := os.Chmod(bin, 0o755); err != nil {
+		fatal(err)
+	}
+	// Version stamp: the candidate must run and self-report the target.
+	if err := update.ValidateBinary(readFileBytes(bin), version); err != nil {
+		fatal(err)
+	}
+	return bin, strings.ToLower(actual)
+}
+
+// parseSumsLine returns the expected hex sha256 for name from SHA-256SUMS
+// content (lines: "<hex>  <name>").
+func parseSumsLine(sums, name string) (string, error) {
+	for _, line := range strings.Split(sums, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[1] == name {
+			return strings.ToLower(f[0]), nil
+		}
+	}
+	return "", fmt.Errorf("asset %s not listed in SHA-256SUMS", name)
+}
+
+// extractTarballBinary pulls the single `partout` binary out of a release
+// tarball (layout: partout_linux_<arch>/partout) into a temp file.
+func extractTarballBinary(tarball string) (string, error) {
+	in, err := os.Open(tarball)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	zr, err := gzip.NewReader(in)
+	if err != nil {
+		return "", fmt.Errorf("not a gzip tarball: %w", err)
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return "", fmt.Errorf("no partout binary found in %s", tarball)
+		}
+		if err != nil {
+			return "", err
+		}
+		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != "partout" {
+			continue
+		}
+		out, err := os.CreateTemp("", "partout-update-bin-*")
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.Copy(out, tr); err != nil {
+			out.Close()
+			return "", err
+		}
+		out.Close()
+		return out.Name(), nil
+	}
+}
+
+// loadLocalArtifact validates a --from-file build: computes its sha256
+// (optionally pinned), and proves the version stamp by executing it.
+func loadLocalArtifact(path, shaPin, version string) (string, error) {
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("--from-file: %w", err)
+	}
+	b := readFileBytes(path)
+	h := sha256.Sum256(b)
+	sha := hex.EncodeToString(h[:])
+	if shaPin != "" && !strings.EqualFold(strings.TrimSpace(shaPin), sha) {
+		return "", fmt.Errorf("--sha256 pin mismatch: file is %s, expected %s", sha, shaPin)
+	}
+	fmt.Printf("partout update: local build sha256 %s (pin with --sha256 if you have the expected value)\n", sha)
+	if err := update.ValidateBinary(b, version); err != nil {
+		return "", err
+	}
+	return sha, nil
+}
+
+// githubAssetName builds the published tarball name for a version + arch
+// (matches scripts/release-github.sh: partout_<ver>_<os>_<goarch>.tar.gz).
+func githubAssetName(version, arch string) string {
+	return fmt.Sprintf("partout_%s_%s.tar.gz", strings.TrimPrefix(version, "v"), strings.ReplaceAll(arch, "-", "_"))
+}
+
+// defaultGitHubRepo derives the public release repo from the module path.
+func defaultGitHubRepo() string {
+	const mod = "github.com/blawesom/partout"
+	return strings.TrimPrefix(mod, "github.com/")
+}
+
 func verifyArtifact(version, arch, kind, file, sha, sigB64 string) error {
 	pub, err := release.PubKeyFromB64(releaseKeyOrFatal())
 	if err != nil {

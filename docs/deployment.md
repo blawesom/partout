@@ -196,28 +196,31 @@ systemctl restart partout-agent
   future one-command updates get crashloop rollback; set `PARTOUT_RELEASE_KEY`
   in the agent env from the start.
 
-**Enabling the one-command afterwards** (operator side): `partout update`
-fetches from `PARTOUT_RELEASE_REPO` and refuses anything not signed with
-`PARTOUT_RELEASE_KEY` — the GitHub tarballs are *not* signed releases, so run
-the one-command only after you have published signed artifacts for the next
-release (build → `partout ctl update sign` → publish under `<repo>/<version>/`
-+ `latest`). Then, on the upgraded server:
+**Enabling the one-command afterwards (beta):** `partout update` by default
+fetches the **GitHub release** for the target version — the tarball is checked
+against the release's `SHA-256SUMS` and the candidate binary must execute and
+self-report the target version (version stamp). A local build installs with
+`--from-file` (optionally pinned with `--sha256`); the **signed layout**
+(`scripts/release-publish.sh` → `--repo URL`) stays available and verifies
+Ed25519 signatures fail-closed as before:
 
 ```sh
-export PARTOUT_RELEASE_KEY=<pub> PARTOUT_RELEASE_REPO=https://releases.example.com/partout
-partout update --check   # report-only first
-partout update           # server + fleet, from here on
+partout update --check   # report-only first (also preflights the artifacts)
+partout update           # server + fleet, from the GitHub release
+partout update --from-file /path/to/partout --version 0.9.6   # local build
 ```
 
-**Signing is the default (GA):** the in-server release store accepts
-releases **only with a valid Ed25519 signature** — `partout ctl update
-upload --signature …` or the Updates page. Fleet updates are signed-only
-by default. For throwaway dev fleets you may set
-`PARTOUT_ALLOW_UNSIGNED_RELEASES=true` to accept unsigned releases:
-keyless agents then apply them on the sha256 integrity check alone, while
-an agent with `PARTOUT_RELEASE_KEY` provisioned stays strict-signed and
-refuses unsigned releases. The UI labels such releases `unsigned` and the
-audit trail records `unsigned: true` on `update.apply`/`update.dispatch`.
+**Beta integrity model — checksums, not signatures:** the GitHub flow proves
+integrity (sha256 + version stamp + `partout selftest` before the swap), not
+authenticity. It protects against corruption and mislabeled uploads; it does
+NOT protect against a compromised GitHub account or a malicious contributor
+with release rights. That is an accepted beta trade-off; **GA (1.0) flips to
+signed-only**: `PARTOUT_ALLOW_UNSIGNED_RELEASES` defaults to false, and the
+server's release store accepts releases with a valid Ed25519 signature only.
+Until then the release store accepts unsigned releases by default — an agent
+with `PARTOUT_RELEASE_KEY` provisioned stays strict-signed either way (it
+refuses unsigned releases), the UI labels such releases `unsigned (beta)`,
+and `update.apply`/`update.dispatch` audits record `unsigned: true`.
 
 **Registration-time verification (optional):** set
 `PARTOUT_RELEASE_VERIFY_KEY=<pub>` on the SERVER to make every upload's
@@ -558,7 +561,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_REBOOT_FLUSH_S` | **5** | (M3) pre-reboot grace for a task `reboot` step (PRD §5.5): the agent waits this long after persisting the resume marker, so the `rebooting` report flushes up the stream before the host goes down |
 | `PARTOUT_RELEASE_KEY` | *(empty)* | (M8.1) Ed25519 **public** key (hex or path) the agent verifies fleet-update releases against; set → strict-signed (unsigned refused) |
 | `PARTOUT_RELEASE_VERIFY_KEY` | *(empty)* | server-side, optional: Ed25519 public key (base64) that every upload's signature must verify against before the release is stored (catches signing mistakes at registration) |
-| `PARTOUT_ALLOW_UNSIGNED_RELEASES` | **false** | opt-in for dev fleets only: when true the release store also accepts releases without a signature (signed-only is the default) |
+| `PARTOUT_ALLOW_UNSIGNED_RELEASES` | **true** (beta) | beta default: the release store also accepts releases without a signature (integrity via sha256 + version stamp; **GA/1.0 flips the default to false** = signed-only) |
 | `PARTOUT_UPDATE_HEALTH_S` | **60** | (M8.1) post-swap health window: the new binary must boot and reconnect within this many seconds, else the update is marked unhealthy and rolled back (crashloop guard) |
 | `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
 | `PARTOUT_AGENT_CLEANUP_ON_REVOKE` | **false** | when the server revokes the agent (host removed from the fleet), also remove the local credential material (`identity.json` + `tls/`) before the clean exit, leaving the machine a clean slate. Destructive, hence opt-in |

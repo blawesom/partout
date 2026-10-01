@@ -332,18 +332,23 @@ anchor for forensics.
 command, one status line at the end:
 
 ```sh
-# operator env (the only component that ever touches the internet):
-export PARTOUT_RELEASE_KEY=<ed25519 pub> PARTOUT_RELEASE_REPO=https://releases.example.com/partout
+# Default beta flow: the GitHub release (tarball vs SHA-256SUMS + version stamp).
 partout update --check     # report-only: current vs target, what would happen
-partout update             # fetch -> verify both artifacts -> supervised server
-                           # swap -> publish agent artifact -> canary -> waves -> DONE
+partout update             # fetch -> verify -> supervised server swap
+                           # -> publish agent artifact -> canary -> waves -> DONE
+# Local build instead of fetching (optionally digest-pinned):
+partout update --from-file ./dist/partout --version 0.9.6 [--sha256 <hex>]
+# Signed layout (Ed25519, fail closed): publish via scripts/release-publish.sh
+partout update --repo https://releases.example.com/partout
 ```
 
 How it supervises each hop:
-- **Artifacts** are verified against `PARTOUT_RELEASE_KEY` before anything is
-  touched (fail closed). The GitHub tarballs are *not* signed releases — the
-  release repo (`<repo>/latest` + `<repo>/<v>/partout-<v>-<arch>-{server,agent}[.sig]`)
-  is the update path.
+- **Artifacts** are proven before anything is touched (fail closed). Beta
+  default: sha256 against the release's `SHA-256SUMS` (or your `--sha256`
+  pin), then the candidate executes and must self-report the target version,
+  then `partout selftest` on this host — integrity, not authenticity (see the
+  threat note in deployment.md). With `--repo`, Ed25519 signatures are
+  verified against `PARTOUT_RELEASE_KEY` instead.
 - **Server**: `scripts/update-server.sh` — signature verify, `partout selftest`
   on the new binary *on this host*, proven `VACUUM INTO` backup, swap with
   `.prev` retention, ~60 s post-check window, automatic rollback on any

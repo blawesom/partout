@@ -83,9 +83,12 @@ type Config struct {
 	// refuses every update directive (fails closed).
 	ReleaseKey string
 	// AllowUnsignedReleases (PARTOUT_ALLOW_UNSIGNED_RELEASES): when true,
-	// the release store accepts releases WITHOUT a signature. GA default is
-	// FALSE — fleet updates are signed-only; set true only for throwaway
-	// dev fleets. A release that carries a signature is always verified.
+	// the release store accepts releases WITHOUT a signature. BETA default
+	// is TRUE — rollouts verify sha256 + version stamp only (see the update
+	// flow in operations.md §4.2); at 1.0 the default flips to false
+	// (signed-only). A release that carries a signature is always verified
+	// regardless, and an agent with a provisioned release key stays strict
+	// (it refuses unsigned releases either way).
 	AllowUnsignedReleases bool
 	// ReleaseVerifyKey (PARTOUT_RELEASE_VERIFY_KEY): optional base64 Ed25519
 	// public key. When set, an upload must present a signature that verifies
@@ -175,7 +178,7 @@ func Load() (*Config, error) {
 		CaddyConf:             os.Getenv("PARTOUT_CADDY_CONF"),
 		TLSCAFile:             os.Getenv("PARTOUT_TLS_CA"),
 		ReleaseKey:            os.Getenv("PARTOUT_RELEASE_KEY"),
-		AllowUnsignedReleases: envBool("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
+		AllowUnsignedReleases: envBoolDefaultTrue("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
 		ReleaseVerifyKey:      os.Getenv("PARTOUT_RELEASE_VERIFY_KEY"),
 		AutoDraftRollouts:     envBoolDefaultTrue("PARTOUT_AUTO_DRAFT_ROLLOUTS"),
 		SecurityScanS:         envInt("PARTOUT_SECURITY_SCAN_S", 21600),

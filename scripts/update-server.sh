@@ -29,10 +29,10 @@
 # Usage:
 #   update-server.sh --new /path/partout.new \
 #       --version v2.0.0 --arch linux-amd64 \
-#       --sha256 <hex> --signature <b64> --key <pub b64|via $PARTOUT_RELEASE_KEY> \
+#       --sha256 <hex> [--signature <b64> --key <pub b64|via $PARTOUT_RELEASE_KEY>]
 #       [--binary /usr/local/bin/partout] [--db /var/lib/partout/partout.db] \
 #       [--service partout-server.service] [--health-url http://127.0.0.1:8443] \
-#       [--admin-token $PARTOUT_ADMIN_TOKEN] [--post-timeout 90] [--dry-run]
+#       [--admin-token $PARTOUT_ADMIN_TOKEN] [--post-timeout 90] [--dry-run] [--unsigned]
 #
 # A --dry-run stops after selftest (no service, no file touched).
 
@@ -42,7 +42,7 @@ NEW="" VERSION="" ARCH="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 SHA="" SIG="" KEY="${PARTOUT_RELEASE_KEY:-}"
 BIN="/usr/local/bin/partout" DB="/var/lib/partout/partout.db"
 SERVICE="partout-server.service" HEALTH="http://127.0.0.1:8443"
-TOKEN="${PARTOUT_ADMIN_TOKEN:-}" POST_TIMEOUT=90 DRY_RUN=0
+TOKEN="${PARTOUT_ADMIN_TOKEN:-}" POST_TIMEOUT=90 DRY_RUN=0 UNSIGNED=0
 WORK=""
 
 usage() { grep '^#   update-server.sh\|^#       ' "$0" | sed 's/^# \{0,3\}//'; exit 2; }
@@ -62,15 +62,21 @@ while [ $# -gt 0 ]; do
     --admin-token) TOKEN="$2"; shift 2;;
     --post-timeout) POST_TIMEOUT="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
+    --unsigned) UNSIGNED=1; shift;;
     -h|--help) usage;;
     *) echo "unknown flag: $1" >&2; usage;;
   esac
 done
 
-for req in NEW VERSION SHA SIG; do
+for req in NEW VERSION SHA; do
   [ -n "${!req}" ] || { echo "missing required --$(echo "$req" | tr '[:upper:]' '[:lower:]')" >&2; exit 2; }
 done
-[ -n "$KEY" ] || { echo "missing release public key (--key or PARTOUT_RELEASE_KEY)" >&2; exit 2; }
+if [ "$UNSIGNED" -eq 1 ]; then
+  [ -z "$SIG" ] || { echo "--unsigned conflicts with --signature" >&2; exit 2; }
+else
+  [ -n "$SIG" ] || { echo "missing required --signature (or pass --unsigned for the beta flow)" >&2; exit 2; }
+  [ -n "$KEY" ] || { echo "missing release public key (--key or PARTOUT_RELEASE_KEY)" >&2; exit 2; }
+fi
 
 log()  { printf '[update-server] %s\n' "$*"; }
 fail() { echo "[update-server] FAILED: $*" >&2; exit 1; }
@@ -109,10 +115,14 @@ if [ "$INSTALLED_SHA" = "$SHA" ]; then
 fi
 
 # ---- verify (local, with the CURRENT binary — no server needed) ------------
-log "verify: Ed25519 signature via $BIN"
-"$BIN" ctl update verify --version "$VERSION" --arch "$ARCH" --kind server \
-  --file "$NEW" --signature "$SIG" --pubkey "$KEY" \
-  || fail "release signature verification FAILED for $VERSION"
+if [ "$UNSIGNED" -eq 1 ]; then
+  log "verify: unsigned beta flow — sha256 pinned, version stamp + selftest next (no signature)"
+else
+  log "verify: Ed25519 signature via $BIN"
+  "$BIN" ctl update verify --version "$VERSION" --arch "$ARCH" --kind server \
+    --file "$NEW" --signature "$SIG" --pubkey "$KEY" \
+    || fail "release signature verification FAILED for $VERSION"
+fi
 
 # ---- selftest (the new binary proves itself on THIS host) ------------------
 log "selftest: running the new binary's embedded suite"

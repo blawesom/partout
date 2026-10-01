@@ -3,6 +3,13 @@
 This directory holds the Ed25519 **release signing** keypair for the signed
 update repository that `partout update` consumes.
 
+> **Beta note:** the one-command's default flow is the *unsigned* beta path
+> (GitHub release + SHA-256SUMS + version stamp; local builds via
+> `--from-file`). Signing is **opt-in** today — `partout update --repo URL`
+> against a `scripts/release-publish.sh` layout — and becomes the default at
+> GA/1.0 (`PARTOUT_ALLOW_UNSIGNED_RELEASES` flips to false). Provisioning
+> `PARTOUT_RELEASE_KEY` to agents now makes them strict-signed either way.
+
 | File | Committed? | Where it goes |
 |---|---|---|
 | `release-key.pub` | **yes** — it is the trust anchor, meant to be distributed | every agent's `PARTOUT_RELEASE_KEY` (`/etc/partout/agent.env`), the server's `PARTOUT_RELEASE_VERIFY_KEY`, provisioned release keys on enrolled hosts |
