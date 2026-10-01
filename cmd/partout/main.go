@@ -401,6 +401,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	apiH.SetUpdates(updMgr)
 	apiH.SetAllowUnsignedReleases(cfg.AllowUnsignedReleases)
+	apiH.SetReleaseVerifyKey(cfg.ReleaseVerifyKey)
 	apiH.SetAutoDraftRollouts(cfg.AutoDraftRollouts)
 	updMgr.ResumeAll(context.Background())
 

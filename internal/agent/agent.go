@@ -795,8 +795,9 @@ func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 
 	// 1b. Convergence (idempotent re-run): already at the target version ->
 	// verified, no download or swap. A rollout targeting the current version
-	// therefore completes without touching the binary.
-	if dir.Version == facts.Version {
+	// therefore completes without touching the binary. v-insensitive: a
+	// directive version "v0.9.4" converges with the stamped binary "0.9.4".
+	if version.Equal(dir.Version, facts.Version) {
 		// Convergence: report verified and free the slot (this path does
 		// not exit the process, unlike the swap path).
 		a.endUpdate()
@@ -823,6 +824,14 @@ func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 	sum := sha256.Sum256(art)
 	if hex.EncodeToString(sum[:]) != strings.ToLower(dir.Sha256) {
 		fail("integrity", "artifact sha256 mismatch")
+		return
+	}
+
+	// 3b. Binary validation: prove the artifact is a working partout binary
+	// that self-reports the claimed version before it may replace the
+	// running one (a signed-but-mislabeled build fails here, not at boot).
+	if err := agentupdate.ValidateBinary(art, dir.Version); err != nil {
+		fail("binary", err.Error())
 		return
 	}
 

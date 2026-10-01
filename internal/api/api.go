@@ -4,15 +4,18 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/control"
+	"github.com/blawesom/partout/internal/release"
 	serverapprovals "github.com/blawesom/partout/internal/server/approvals"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
 	"github.com/blawesom/partout/internal/server/externaldata"
@@ -55,7 +58,8 @@ type Handler struct {
 	ca                *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
 	streamH           *stream.Handler        // stream handler (for mTLS leaf rotation)
 	updatesMgr        *updates.Manager       // M8.1 rollout orchestrator
-	allowUnsigned     bool                   // M8.1 beta: unsigned releases accepted (PARTOUT_ALLOW_UNSIGNED_RELEASES)
+	allowUnsigned     bool                   // GA: unsigned releases accepted only when PARTOUT_ALLOW_UNSIGNED_RELEASES=true (default false = signed-only)
+	releaseVerifyKey  ed25519.PublicKey      // optional: verify upload signatures at registration (PARTOUT_RELEASE_VERIFY_KEY); nil = store-and-forward
 	autoDraftRollouts bool                   // M8.1.1: auto-draft a parked rollout on agent release upload
 }
 
@@ -285,9 +289,23 @@ func (h *Handler) SetJobs(jc *jobs.Controller) { h.jobs = jc }
 // SetUpdates installs the M8.1 rollout orchestrator.
 func (h *Handler) SetUpdates(m *updates.Manager) { h.updatesMgr = m }
 
-// SetAllowUnsignedReleases sets the M8.1 beta policy for unsigned releases
-// (PARTOUT_ALLOW_UNSIGNED_RELEASES; beta default true, GA default false).
+// SetAllowUnsignedReleases sets the GA policy for unsigned releases
+// (PARTOUT_ALLOW_UNSIGNED_RELEASES; default false = signed-only).
 func (h *Handler) SetAllowUnsignedReleases(v bool) { h.allowUnsigned = v }
+
+// SetReleaseVerifyKey sets the optional registration-time signature check
+// (PARTOUT_RELEASE_VERIFY_KEY, base64 Ed25519 public key). Empty disables it.
+func (h *Handler) SetReleaseVerifyKey(pubB64 string) {
+	h.releaseVerifyKey = nil
+	if strings.TrimSpace(pubB64) == "" {
+		return
+	}
+	if pub, err := release.PubKeyFromB64(pubB64); err == nil {
+		h.releaseVerifyKey = pub
+	} else if h.log != nil {
+		h.log.Printf("api: PARTOUT_RELEASE_VERIFY_KEY is not a valid Ed25519 public key: %v", err)
+	}
+}
 
 // SetAutoDraftRollouts sets the M8.1.1 policy: when true, uploading an
 // agent-kind release also creates a parked draft rollout awaiting start.

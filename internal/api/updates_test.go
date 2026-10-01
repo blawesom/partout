@@ -216,19 +216,17 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 		t.Fatalf("get = %d %v", code, got)
 	}
 
-	// A v-prefixed version is rejected at registration: it would be a
-	// different signature row AND desync the boot guard's version match
-	// (the field rollback). The operator must sign and register the stamp
-	// form ("0.9.0").
+	// A v-prefixed version is ACCEPTED and stored exactly as given: the
+	// release key signs the exact version string, so the stored value must
+	// match what was signed (both conventions coexist; matching elsewhere is
+	// v-insensitive via version.Equal).
 	vArt, mv, sigV := signedArtifact(t, "v0.9.1", "agent")
 	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
 		releaseUploadBody(mv, sigV, vArt))
-	if code != http.StatusBadRequest {
-		t.Fatalf("v-prefixed upload = %d, want 400: %v", code, e)
+	if code != http.StatusCreated {
+		t.Fatalf("v-prefixed upload = %d, want 201 (stored as signed): %v", code, e)
 	}
-	if !strings.Contains(fmt.Sprint(e["message"]), "leading") {
-		t.Errorf("v-rejection message should mention the leading-v rule: %v", e["message"])
-	}
+	ridV, _ := e["id"].(string)
 
 	// Artifact → bytes match and integrity headers are present.
 	req, _ := http.NewRequest("GET", srv.URL+"/api/v1/updates/releases/"+rid+"/artifact", nil)
@@ -285,10 +283,14 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 		t.Errorf("delete unknown = %d, want 404", code)
 	}
 
-	// Delete → 200, then 404, list empties.
+	// Delete both rows → 200 each, then 404, list empties.
 	code, _ = labelsReq(t, "DELETE", srv.URL+"/api/v1/updates/releases/"+rid, "")
 	if code != http.StatusOK {
 		t.Fatalf("delete = %d", code)
+	}
+	code, _ = labelsReq(t, "DELETE", srv.URL+"/api/v1/updates/releases/"+ridV, "")
+	if code != http.StatusOK {
+		t.Fatalf("delete v-prefixed = %d", code)
 	}
 	if code, _ = labelsReq(t, "DELETE", srv.URL+"/api/v1/updates/releases/"+rid, ""); code != http.StatusNotFound {
 		t.Errorf("re-delete = %d, want 404", code)
@@ -443,5 +445,60 @@ func TestUploadAutoDraftRollout(t *testing.T) {
 	}
 	if v, ok := e["draft_run"]; ok && v != "" {
 		t.Errorf("no draft expected with the flag off, got %v", v)
+	}
+}
+
+// TestUploadReleaseVerifyKey: with PARTOUT_RELEASE_VERIFY_KEY set, an upload
+// must present a signature that verifies against it (wrong key or unsigned
+// are refused at registration even when unsigned releases are otherwise
+// allowed); the server stays store-and-forward when the key is unset.
+func TestUploadReleaseVerifyKey(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sseB := sse.New()
+	streamH := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	apiH := api.New(st, streamH, sseB, log.New(io.Discard, "api: ", 0))
+	apiH.SetAllowUnsignedReleases(true) // the verify key must dominate this
+	srv := httptest.NewServer(apiH)
+	t.Cleanup(srv.Close)
+
+	kpA, err := cryptoutil.NewKeyPairEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kpB, err := cryptoutil.NewKeyPairEd25519()
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiH.SetReleaseVerifyKey(base64.StdEncoding.EncodeToString(kpA.Pub))
+
+	upload := func(t *testing.T, version, sig string, art []byte) (int, map[string]any) {
+		t.Helper()
+		sum := sha256.Sum256(art)
+		m := release.Manifest{Version: version, Arch: "linux-amd64", Kind: "agent", SHA256: hex.EncodeToString(sum[:])}
+		return labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+			releaseUploadBody(m, sig, art))
+	}
+
+	art := []byte("fake binary")
+	sumA := sha256.Sum256(art)
+	sigA := base64.StdEncoding.EncodeToString(release.Sign(kpA.Priv, release.Manifest{Version: "2.0.0", Arch: "linux-amd64", Kind: "agent", SHA256: hex.EncodeToString(sumA[:])}))
+	if code, e := upload(t, "2.0.0", sigA, art); code != http.StatusCreated {
+		t.Fatalf("correct signature = %d: %v", code, e)
+	}
+
+	// Signed with a DIFFERENT key → refused at registration.
+	sumB := sha256.Sum256(art)
+	sigB := base64.StdEncoding.EncodeToString(release.Sign(kpB.Priv, release.Manifest{Version: "2.0.1", Arch: "linux-amd64", Kind: "agent", SHA256: hex.EncodeToString(sumB[:])}))
+	if code, e := upload(t, "2.0.1", sigB, art); code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(e["message"]), "does not verify") {
+		t.Fatalf("wrong-key signature = %d %v, want 400 'does not verify'", code, e)
+	}
+
+	// Unsigned is refused too, even with allowUnsigned=true.
+	if code, e := upload(t, "2.0.2", "", art); code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(e["message"]), "signature required") {
+		t.Fatalf("unsigned with verify key = %d %v, want 400 'signature required'", code, e)
 	}
 }

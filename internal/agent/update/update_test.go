@@ -258,3 +258,31 @@ func TestPostBootCheck(t *testing.T) {
 		t.Error("marker not cleared after mismatch rollback")
 	}
 }
+
+func TestValidateBinary(t *testing.T) {
+	// A stand-in "binary": a shell script answering --version like partout.
+	script := func(out string) []byte { return []byte("#!/bin/sh\n" + out + "\n") }
+
+	// Matching stamps (incl. both v-placement directions of the field bug).
+	if err := ValidateBinary(script(`echo "partout 0.9.4"`), "0.9.4"); err != nil {
+		t.Errorf("exact match: %v", err)
+	}
+	if err := ValidateBinary(script(`echo "partout 0.9.4"`), "v0.9.4"); err != nil {
+		t.Errorf("v-prefixed manifest vs stamped binary: %v", err)
+	}
+	if err := ValidateBinary(script(`echo "partout v0.9.4"`), "0.9.4"); err != nil {
+		t.Errorf("v-prefixed stamp vs stamped manifest: %v", err)
+	}
+	// Mislabeled build (signed bytes, wrong stamp) must be refused.
+	if err := ValidateBinary(script(`echo "partout 0.9.3"`), "0.9.4"); err == nil {
+		t.Error("mismatched stamp: want error")
+	}
+	// Not a partout binary.
+	if err := ValidateBinary(script(`echo "hello world"`), "0.9.4"); err == nil {
+		t.Error("non-partout --version output: want error")
+	}
+	// Not executable at all.
+	if err := ValidateBinary([]byte("this is not a binary"), "0.9.4"); err == nil {
+		t.Error("non-executable artifact: want error")
+	}
+}

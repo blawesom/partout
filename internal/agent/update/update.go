@@ -13,9 +13,11 @@ package update
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -155,6 +157,45 @@ func Verify(dir *pb.UpdateDirective, releaseKeyB64 string) error {
 	}
 	if !release.Verify(pub, m, sig) {
 		return fmt.Errorf("release signature verification FAILED for %s (%s, %s)", dir.Version, dir.Arch, dir.Kind)
+	}
+	return nil
+}
+
+// ValidateBinary proves the downloaded artifact is a working partout binary
+// of the claimed version BEFORE it replaces the running one. The sha256 (and
+// signature) prove the BYTES are what the release says; this proves the bytes
+// are actually an executable that runs and self-identifies as "partout
+// <version>" matching wantVersion (v-insensitively). It catches the
+// mislabeled-build class — a signed artifact whose stamp differs from its
+// manifest (exactly the v0.9.4-vs-0.9.4 field bug) — instead of discovering
+// the mismatch after the swap, at boot. Runs the candidate from a temp path
+// with a timeout and a "--version" arg; never touches the live binary.
+func ValidateBinary(artifact []byte, wantVersion string) error {
+	dir, err := os.MkdirTemp("", "partout-validate-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	cand := filepath.Join(dir, "partout")
+	if err := os.WriteFile(cand, artifact, 0o755); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := osexec.CommandContext(ctx, cand, "--version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("candidate binary did not run: %w", err)
+	}
+	line := strings.TrimSpace(string(bytes.TrimSpace(out)))
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	fields := strings.SplitN(line, " ", 2)
+	if len(fields) != 2 || fields[0] != "partout" {
+		return fmt.Errorf("candidate is not a partout binary (--version output %q)", line)
+	}
+	if !version.Equal(fields[1], wantVersion) {
+		return fmt.Errorf("binary version mismatch: binary reports %s, release manifest says %s", fields[1], wantVersion)
 	}
 	return nil
 }

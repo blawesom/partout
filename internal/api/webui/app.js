@@ -1103,7 +1103,7 @@
                     <td class="mono">{{ r.arch }}</td>
                     <td>{{ r.kind }}</td>
                     <td class="mono" :title="r.sha256">{{ (r.sha256 || '').slice(0, 12) }}…</td>
-                    <td><span v-if="r.signature" class="badge ok">signed</span><span v-else class="badge warn" data-tip="beta: no signature — keyless agents apply on sha256 integrity alone">unsigned (beta)</span></td>
+                    <td><span v-if="r.signature" class="badge ok">signed</span><span v-else class="badge warn" data-tip="no signature — only keyless agents apply it, and only while the server allows unsigned releases (PARTOUT_ALLOW_UNSIGNED_RELEASES=true)">unsigned</span></td>
                     <td class="muted">{{ fmtBytes(r.size) }}</td>
                     <td class="muted">{{ fmtAgo(r.created) }}</td>
                     <td class="muted">{{ r.uploaded_by || '—' }}</td>
@@ -1119,7 +1119,7 @@
                 <label class="fld"><span>Version</span><input v-model="relForm.version" class="mono" placeholder="v0.9.0" /></label>
                 <label class="fld"><span>Arch</span><input v-model="relForm.arch" class="mono" placeholder="linux-amd64" /></label>
                 <label class="fld"><span>Kind</span><select v-model="relForm.kind"><option value="agent">agent</option><option value="server">server</option></select></label>
-                <label class="fld" style="flex:1"><span>Signature (base64, optional in beta)</span><input v-model="relForm.signature" class="mono" placeholder="64-byte Ed25519 signature — empty = unsigned (beta)" /></label>
+                <label class="fld" style="flex:1"><span>Signature (base64, 64-byte Ed25519)</span><input v-model="relForm.signature" class="mono" placeholder="required unless the server allows unsigned (PARTOUT_ALLOW_UNSIGNED_RELEASES=true)" /></label>
                 <label class="fld"><span>Artifact</span><input type="file" @change="onRelFile" /></label>
                 <button class="btn primary" :disabled="!isAdmin || !relForm.version || !relForm.arch || !relForm.file || relBusy" @click="uploadRelease"><span v-if="relBusy" class="spin"></span> Upload</button>
               </div>

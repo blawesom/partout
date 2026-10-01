@@ -208,15 +208,30 @@ partout update --check   # report-only first
 partout update           # server + fleet, from here on
 ```
 
-**Beta shortcut — unsigned fleet updates:** while `PARTOUT_ALLOW_UNSIGNED_RELEASES`
-is on (**the default during beta**; GA flips it to false), the in-server release
-store accepts releases **without a signature** (`partout ctl update upload`
-without `--signature`, or the Updates page — the form's signature field is
-optional). Keyless agents apply an unsigned release on the sha256 integrity
-check alone; an agent with `PARTOUT_RELEASE_KEY` provisioned stays
-strict-signed and refuses unsigned releases. The UI labels such releases
-`unsigned (beta)` and the audit trail records `unsigned: true` on
-`update.apply`/`update.dispatch`.
+**Signing is the default (GA):** the in-server release store accepts
+releases **only with a valid Ed25519 signature** — `partout ctl update
+upload --signature …` or the Updates page. Fleet updates are signed-only
+by default. For throwaway dev fleets you may set
+`PARTOUT_ALLOW_UNSIGNED_RELEASES=true` to accept unsigned releases:
+keyless agents then apply them on the sha256 integrity check alone, while
+an agent with `PARTOUT_RELEASE_KEY` provisioned stays strict-signed and
+refuses unsigned releases. The UI labels such releases `unsigned` and the
+audit trail records `unsigned: true` on `update.apply`/`update.dispatch`.
+
+**Registration-time verification (optional):** set
+`PARTOUT_RELEASE_VERIFY_KEY=<pub>` on the SERVER to make every upload's
+signature verify against the release public key before it is stored — a
+wrong-key or wrong-manifest signing mistake then fails at registration
+instead of mid-rollout. The agent's own verification is unchanged; without
+this key the server stays store-and-forward.
+
+**What the agent checks before a binary is ever run:** (1) kind/arch
+match, (2) the Ed25519 signature over `version|arch|kind|sha256` against
+the provisioned release key (fails closed without a key), (3) the
+sha256 of the downloaded bytes against the manifest, (4) the candidate
+binary is actually executed (`--version` from a temp path) and must
+self-report the claimed version — a signed-but-mislabeled build is
+refused before the swap, not at boot.
 
 ### 2.2 First boot: the fleet-management preset
 
@@ -501,8 +516,9 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |
 | `PARTOUT_REBOOT_FLUSH_S` | **5** | (M3) pre-reboot grace for a task `reboot` step (PRD §5.5): the agent waits this long after persisting the resume marker, so the `rebooting` report flushes up the stream before the host goes down |
-| `PARTOUT_RELEASE_KEY` | *(empty)* | (M8.1) Ed25519 **public** key (hex or path) the agent verifies fleet-update releases against; set → strict-signed (unsigned refused). Unset + `PARTOUT_ALLOW_UNSIGNED_RELEASES=true` → unsigned-beta |
-| `PARTOUT_ALLOW_UNSIGNED_RELEASES` | **true (beta)** | override the unsigned-release posture; **GA sets this to false** (signed-only) |
+| `PARTOUT_RELEASE_KEY` | *(empty)* | (M8.1) Ed25519 **public** key (hex or path) the agent verifies fleet-update releases against; set → strict-signed (unsigned refused) |
+| `PARTOUT_RELEASE_VERIFY_KEY` | *(empty)* | server-side, optional: Ed25519 public key (base64) that every upload's signature must verify against before the release is stored (catches signing mistakes at registration) |
+| `PARTOUT_ALLOW_UNSIGNED_RELEASES` | **false** | opt-in for dev fleets only: when true the release store also accepts releases without a signature (signed-only is the default) |
 | `PARTOUT_UPDATE_HEALTH_S` | **60** | (M8.1) post-swap health window: the new binary must boot and reconnect within this many seconds, else the update is marked unhealthy and rolled back (crashloop guard) |
 | `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
 | `PARTOUT_AGENT_CLEANUP_ON_REVOKE` | **false** | when the server revokes the agent (host removed from the fleet), also remove the local credential material (`identity.json` + `tls/`) before the clean exit, leaving the machine a clean slate. Destructive, hence opt-in |

@@ -406,22 +406,22 @@ async function main() {
     const { privateKey } = nodeCrypto.generateKeyPairSync("ed25519");
     const artifact = Buffer.from("smoke release artifact bytes");
     const sha = nodeCrypto.createHash("sha256").update(artifact).digest("hex");
-    const manifest = ["v0.9.0-smoke", "linux-amd64", "agent", sha].join("|");
+    const manifest = ["0.9.0-smoke", "linux-amd64", "agent", sha].join("|");
     const sig = nodeCrypto.sign(null, Buffer.from(manifest), privateKey).toString("base64");
     const up = await realFetch(base + "/api/v1/updates/releases", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ version: "v0.9.0-smoke", arch: "linux-amd64", kind: "agent", signature: sig, artifact_b64: artifact.toString("base64") }),
+      body: JSON.stringify({ version: "0.9.0-smoke", arch: "linux-amd64", kind: "agent", signature: sig, artifact_b64: artifact.toString("base64") }),
     });
     check("releases: signed upload via API", up.status === 201, "status=" + up.status);
   }
   const relTab = [...d.querySelectorAll(".tab")].find((t) => t.textContent.trim() === "Releases");
   check("updates: Packages/Releases tabs", !!relTab, "Releases tab missing");
   if (relTab) { relTab.click(); await sleep(600); }
-  check("releases: uploaded row renders", rowsWithText(d, "v0.9.0-smoke") > 0, "no release row");
+  check("releases: uploaded row renders", rowsWithText(d, "0.9.0-smoke") > 0, "no release row");
   check("releases: upload form", d.body.textContent.includes("Upload a release"), "upload form missing");
-  // M8.1 beta: an unsigned release uploads while the beta flag is on and is
-  // labelled in the Trust column.
+  // An unsigned release uploads while the opt-in flag
+  // (PARTOUT_ALLOW_UNSIGNED_RELEASES=true) is on, labelled in the Trust column.
   {
     const nodeCrypto = require("crypto");
     const artifact = Buffer.from("smoke UNSIGNED artifact bytes");
@@ -429,14 +429,14 @@ async function main() {
     const up = await realFetch(base + "/api/v1/updates/releases", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: JSON.stringify({ version: "v0.9.1-smoke", arch: "linux-amd64", kind: "agent", signature: "", artifact_b64: artifact.toString("base64") }),
+      body: JSON.stringify({ version: "0.9.1-smoke", arch: "linux-amd64", kind: "agent", signature: "", artifact_b64: artifact.toString("base64") }),
     });
-    check("releases: unsigned (beta) upload via API", up.status === 201, "status=" + up.status);
+    check("releases: unsigned upload via API (opt-in flag on)", up.status === 201, "status=" + up.status);
     if (w.__partout) { w.__partout.loadReleases(); await sleep(500); }
   }
   {
     const okBadge = [...d.querySelectorAll(".badge.ok")].some((b) => b.textContent.trim() === "signed");
-    const warnBadge = [...d.querySelectorAll(".badge.warn")].some((b) => b.textContent.trim() === "unsigned (beta)");
+    const warnBadge = [...d.querySelectorAll(".badge.warn")].some((b) => b.textContent.trim() === "unsigned");
     check("releases: trust column + badges", d.body.textContent.includes("Trust") && okBadge && warnBadge, "trust column or badges missing");
     check("releases: unsigned badge has data-tip", !!d.querySelector(".badge.warn[data-tip]"), "no data-tip on unsigned badge");
   }
@@ -450,7 +450,7 @@ async function main() {
   let smokeRunId = "";
   {
     const rels = await (await realFetch(base + "/api/v1/updates/releases", { headers: { Authorization: "Bearer " + token } })).json();
-    const rel = rels.items.find((r) => r.version === "v0.9.0-smoke");
+    const rel = rels.items.find((r) => r.version === "0.9.0-smoke");
     const runRes = await realFetch(base + "/api/v1/updates/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
@@ -473,7 +473,7 @@ async function main() {
   // The harness stubs SSE by design; drive the same refresh it would.
   if (w.__partout) { w.__partout.loadRuns(); w.__partout.openRun(smokeRunId); }
   await sleep(700);
-  check("runs: run row renders", rowsWithText(d, "v0.9.0-smoke") > 0, "no run row");
+  check("runs: run row renders", rowsWithText(d, "0.9.0-smoke") > 0, "no run row");
   check("runs: paused_failure badge", d.body.textContent.includes("paused_failure"), "status badge missing");
   check("runs: per-host failed_rollback row", d.body.textContent.includes("failed_rollback"), "host state missing");
 
@@ -481,15 +481,15 @@ async function main() {
   // The board shows the drafts with a Start button. Start the SIGNED
   // release's draft: the keyless harness agent refuses it (no release key),
   // so the run goes live and fails safely — no swap. (Never start the
-  // unsigned one: a keyless agent in beta mode accepts unsigned releases
-  // and would swap to the fake artifact.)
+  // unsigned one: with the opt-in flag on, a keyless agent accepts
+  // unsigned releases and would swap to the fake artifact.)
   const draftRows = [...d.querySelectorAll("tbody tr")].filter((tr) => {
     const badge = tr.querySelector(".badge");
     return badge && badge.textContent.trim() === "draft";
   });
   check("runs: auto-draft rows for the uploaded releases", draftRows.length >= 2, "draft rows=" + draftRows.length);
-  const v90 = draftRows.find((tr) => tr.textContent.includes("v0.9.0-smoke"));
-  check("runs: draft row for the signed release", !!v90, "no v0.9.0-smoke draft row");
+  const v90 = draftRows.find((tr) => tr.textContent.includes("0.9.0-smoke"));
+  check("runs: draft row for the signed release", !!v90, "no 0.9.0-smoke draft row");
   if (v90) {
     const startBtn = [...v90.querySelectorAll("button")].find((b) => b.textContent.trim() === "Start");
     check("runs: draft Start button", !!startBtn, "Start button missing");
@@ -500,7 +500,7 @@ async function main() {
         await sleep(400);
         try {
           const runs = await (await realFetch(base + "/api/v1/updates/runs", { headers: { Authorization: "Bearer " + token } })).json();
-          const dr = (runs.items || []).find((r) => r.version === "v0.9.0-smoke" && r.status === "draft");
+          const dr = (runs.items || []).find((r) => r.version === "0.9.0-smoke" && r.status === "draft");
           draftStatus = dr ? "draft" : "live";
         } catch (e) { /* not ready yet */ }
       }

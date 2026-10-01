@@ -80,12 +80,18 @@ type Config struct {
 	// key always wins over anything server-delivered; with none set the agent
 	// refuses every update directive (fails closed).
 	ReleaseKey string
-	// AllowUnsignedReleases is the server-side beta policy for M8.1
-	// (PARTOUT_ALLOW_UNSIGNED_RELEASES): when true, the release store accepts
-	// releases WITHOUT a signature and keyless agents may apply them. Beta
-	// default is TRUE; at GA the default flips to false (signed-only).
-	// A release that carries a signature is always verified regardless.
+	// AllowUnsignedReleases (PARTOUT_ALLOW_UNSIGNED_RELEASES): when true,
+	// the release store accepts releases WITHOUT a signature. GA default is
+	// FALSE — fleet updates are signed-only; set true only for throwaway
+	// dev fleets. A release that carries a signature is always verified.
 	AllowUnsignedReleases bool
+	// ReleaseVerifyKey (PARTOUT_RELEASE_VERIFY_KEY): optional base64 Ed25519
+	// public key. When set, an upload must present a signature that verifies
+	// against it — a signing mistake (wrong key or wrong manifest) fails at
+	// registration instead of mid-rollout. Opt-in hardening: the agent's own
+	// verification is unchanged, and without this key the server stays
+	// store-and-forward (never a trust anchor).
+	ReleaseVerifyKey string
 	// AutoDraftRollouts (M8.1.1, PARTOUT_AUTO_DRAFT_ROLLOUTS, default true):
 	// when an agent-kind release is uploaded, the server immediately creates
 	// a PARKED draft rollout (whole fleet, one canary) that an operator must
@@ -154,7 +160,8 @@ func Load() (*Config, error) {
 		CaddyConf:             os.Getenv("PARTOUT_CADDY_CONF"),
 		TLSCAFile:             os.Getenv("PARTOUT_TLS_CA"),
 		ReleaseKey:            os.Getenv("PARTOUT_RELEASE_KEY"),
-		AllowUnsignedReleases: envBoolDefaultTrue("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
+		AllowUnsignedReleases: envBool("PARTOUT_ALLOW_UNSIGNED_RELEASES"),
+		ReleaseVerifyKey:      os.Getenv("PARTOUT_RELEASE_VERIFY_KEY"),
 		AutoDraftRollouts:     envBoolDefaultTrue("PARTOUT_AUTO_DRAFT_ROLLOUTS"),
 		SecurityScanS:         envInt("PARTOUT_SECURITY_SCAN_S", 21600),
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),

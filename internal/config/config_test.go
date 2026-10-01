@@ -37,6 +37,7 @@ func clearPartout(t *testing.T) {
 		"PARTOUT_SERVER", "PARTOUT_TOKEN", "PARTOUT_FACTS_INTERVAL",
 		"PARTOUT_TLS_CA", "PARTOUT_RELEASE_KEY", "PARTOUT_UPDATE_HEALTH_S",
 		"PARTOUT_UPDATE_RESTART_CMD",
+		"PARTOUT_ALLOW_UNSIGNED_RELEASES", "PARTOUT_RELEASE_VERIFY_KEY",
 	} {
 		setenv(t, k, "-")
 	}
@@ -264,29 +265,19 @@ func TestObserveFactsIntervalInvalidFallsBack(t *testing.T) {
 	}
 }
 
-func TestAllowUnsignedReleasesBetaDefault(t *testing.T) {
-	// Unset → beta default true.
+func TestAllowUnsignedReleasesDefault(t *testing.T) {
+	// Unset → GA default false (signed-only; fleet updates require a signature).
 	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "")
 	os.Unsetenv("PARTOUT_ALLOW_UNSIGNED_RELEASES")
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !c.AllowUnsignedReleases {
-		t.Error("unset env: want beta default true")
-	}
-
-	// Explicit off → false (the GA posture).
-	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "false")
-	c, err = Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
 	if c.AllowUnsignedReleases {
-		t.Error("env=false: want false")
+		t.Error("unset env: want GA default false (signed-only)")
 	}
 
-	// Explicit on → true.
+	// Explicit on → true (throwaway dev fleets only).
 	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "true")
 	c, err = Load()
 	if err != nil {
@@ -294,6 +285,16 @@ func TestAllowUnsignedReleasesBetaDefault(t *testing.T) {
 	}
 	if !c.AllowUnsignedReleases {
 		t.Error("env=true: want true")
+	}
+
+	// Explicit off → false.
+	t.Setenv("PARTOUT_ALLOW_UNSIGNED_RELEASES", "false")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.AllowUnsignedReleases {
+		t.Error("env=false: want false")
 	}
 }
 

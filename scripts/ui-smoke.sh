@@ -105,6 +105,7 @@ mkdir -p "$WORK/run"
     PARTOUT_HAPROXY_CONF="$WORK/svc/haproxy.cfg" \
     PARTOUT_CADDY_CONF="$WORK/svc/Caddyfile" \
     PARTOUT_SERVICE_LABELS=cron \
+    PARTOUT_ALLOW_UNSIGNED_RELEASES=true \
     PARTOUT_SECRET_KEY=0123456789abcdef0123456789abcdef \
     "$BIN" > "$WORK/server.log" 2>&1
 ) &

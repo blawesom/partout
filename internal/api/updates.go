@@ -145,10 +145,9 @@ func (h *Handler) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(body.Signature))
 	if err != nil || len(sig) != 64 {
-		// Beta (M8.1): an empty signature is accepted while unsigned releases
-		// are allowed (PARTOUT_ALLOW_UNSIGNED_RELEASES, default true). The
-		// sha256 integrity check still binds the artifact; what a signature
-		// adds is provenance. GA flips the default to signed-only.
+		// GA: unsigned releases are the exception (PARTOUT_ALLOW_UNSIGNED_
+		// RELEASES=true, default false). The sha256 integrity check still
+		// binds the artifact; a signature adds provenance.
 		if strings.TrimSpace(body.Signature) == "" && h.allowUnsigned {
 			sig = nil
 		} else {
@@ -160,19 +159,29 @@ func (h *Handler) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Reject a leading "v" outright (not silently stripped): the release
-	// key signs the EXACT version string ("version|arch|kind|sha256"), and
-	// the stamped binary reports without the v ("partout 0.9.4"). A v-prefixed
-	// registration would be a different signature row AND desync the boot
-	// guard's version match (it once rolled back a healthy update over
-	// exactly this mismatch) — so the operator must sign and register with
-	// the stamp form. Legacy v-prefixed rows keep working: the boot
-	// guard/agent compare v-insensitively (version.Equal).
-	if strings.HasPrefix(m.Version, "v") {
-		writeError(w, http.StatusBadRequest, "bad_request",
-			"version must not carry a leading \"v\" (register \""+strings.TrimPrefix(m.Version, "v")+"\", matching the binary stamp and the signed manifest)", nil)
-		return
+	// Optional registration-time verification (PARTOUT_RELEASE_VERIFY_KEY):
+	// when the server holds the release public key, the signature must
+	// verify against it — a wrong-key or wrong-manifest signing mistake
+	// fails here, not mid-rollout. The agent still verifies independently;
+	// without this key the server stays store-and-forward.
+	if h.releaseVerifyKey != nil {
+		if sig == nil {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"signature required: the server is configured with a release verification key (PARTOUT_RELEASE_VERIFY_KEY)", nil)
+			return
+		}
+		if !release.Verify(h.releaseVerifyKey, m, sig) {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"signature does not verify against the configured release key (wrong key or wrong manifest?)", nil)
+			return
+		}
 	}
+	// Version is stored EXACTLY as given: the release key signs the exact
+	// "version|arch|kind|sha256" string, so a silently-normalized stored
+	// version would no longer verify. Both version conventions coexist
+	// (GitHub releases stamp "0.9.4"; the one-command update path
+	// "v2.0.0-e2e"), so matching is done v-insensitively everywhere
+	// (version.Equal) rather than by forcing a form here.
 	if _, err := h.st.GetReleaseByVer(m.Version, m.Arch, m.Kind); err == nil {
 		writeError(w, http.StatusConflict, "conflict",
 			"release "+m.Version+" ("+m.Arch+", "+m.Kind+") already exists", nil)
