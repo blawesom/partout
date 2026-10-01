@@ -593,6 +593,23 @@ async function main() {
 
   if (w.__partout) {
     const inst = w.__partout;
+    // key_confirm (host-key TOFU gate) must be discoverable from anywhere:
+    // the SSE event fires a global warn toast (the run parks there until an
+    // admin acts — nothing else moves it), and the nav shows a badge for
+    // each run parked at the gate.
+    inst.onSSEEvent("provision.key_confirm", { run_id: "prv_smoke_kc", host: "smoke@key", key_type: "ED25519", fingerprint: "SHA256:smokefingerprint" });
+    await sleep(400);
+    check("provision: key_confirm toast fires on any page", d.body.textContent.includes("awaits host-key confirmation"), "no key_confirm toast");
+    inst.navBadges.provision = 2; // badge render wiring; the count itself comes from /provision-runs in loadNavBadges
+    await sleep(300);
+    const provBadge = [...d.querySelectorAll(".nav-badge")].find((b) => b.textContent.trim() === "2");
+    check("provision: nav badge counts key_confirm runs", !!provBadge, "no nav badge for pending key confirmations");
+    inst.navBadges.provision = 0;
+    await sleep(200);
+  }
+
+  if (w.__partout) {
+    const inst = w.__partout;
     // --- Onboarding wizard: target -> confirm -> live (deterministic, no SSH) ---
     await visit("#/provision");
     const startBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("Start onboarding"));

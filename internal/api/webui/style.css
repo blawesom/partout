@@ -449,6 +449,7 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 .toast.ok { border-left-color: var(--healthy); }
 .toast.err { border-left-color: var(--critical); }
 .toast.info { border-left-color: var(--info); }
+.toast.warn { border-left-color: var(--warning, #d97706); }
 .toast-msg { flex: 1; word-break: break-word; }
 .toast-x {
   border: 0; background: transparent; color: var(--text-faint);

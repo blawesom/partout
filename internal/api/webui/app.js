@@ -2121,7 +2121,7 @@
             { key: "audit", label: "Audit", icon: "≡", cap: "audit" },
           ] },
           { key: "admin", label: "Admin", items: [
-            { key: "provision", label: "Provision", icon: "➕", cap: "provision", admin: true },
+            { key: "provision", label: "Provision", icon: "➕", cap: "provision", admin: true, badge: "provision" },
             { key: "users", label: "Users", icon: "👤", cap: "users", admin: true },
             { key: "mcp", label: "MCP", icon: "⟨⟩", cap: "mcp" },
           ] },
@@ -2148,6 +2148,10 @@
       async loadNavBadges() {
         try { const d = await this.api("/approvals?state=pending", { silent: true }); this.navBadges.approvals = (d.approvals || []).length; } catch (e) { /* no badge */ }
         try { const d = await this.api("/alerts", { silent: true }); this.navBadges.alerts = (d.alerts || []).length; } catch (e) { /* no badge */ }
+        // Provision: runs parked at the host-key TOFU gate. The run does not
+        // fail or time out on its own, so this badge is the standing signal
+        // that an admin action is waiting.
+        try { const d = await this.api("/provision-runs", { silent: true }); this.navBadges.provision = (d.items || []).filter(r => r.state === "key_confirm").length; } catch (e) { /* no badge */ }
       },
       // Collapsible sections: persisted in localStorage, Admin collapsed by
       // default; the section holding the active page auto-expands.
@@ -2281,10 +2285,21 @@
         }
         else if (kind === "provision.cancelled") {
           if (this.provOnce(kind, p.run_id)) this.notify("info", "provision " + (p.host || p.run_id || "") + " cancelled" + (p.error ? " — " + firstLine(p.error) : ""), 8000);
+          this.loadNavBadges();
+          if (this.page === "provision") this.loadProvRuns();
+        }
+        else if (kind === "provision.key_confirm") {
+          // Host-key TOFU gate: the run pauses HERE until an admin confirms
+          // the fingerprint. It is a long-lived wait, not a failure — and
+          // nothing else moves it — so notify on ANY page and keep the
+          // Provision nav badge counting it.
+          if (this.provOnce(kind, p.run_id)) this.notify("warn", "provision " + (p.host || p.run_id || "") + " awaits host-key confirmation (" + (p.key_type || "host key") + " " + (p.fingerprint || "").slice(0, 20) + "…) — confirm or deny on the Provision page", 15000);
+          this.loadNavBadges();
           if (this.page === "provision") this.loadProvRuns();
         }
         else if (kind === "provision.connected" || kind === "provision.handoff") {
           if (this.provOnce(kind, p.run_id)) this.notify("ok", kind === "provision.handoff" ? "provision " + (p.host || p.run_id || "") + " reached handoff — non-systemd host, complete the install manually" : "provision " + (p.host || p.run_id || "") + " connected — host enrolled", 8000);
+          this.loadNavBadges();
           if (this.page === "provision") this.loadProvRuns();
         }
         else if (kind.startsWith("provision.") && this.page === "provision") { this.loadProvRuns(); if (this.provDetail) this.loadProvDetail(this.provDetail.run.id); }
