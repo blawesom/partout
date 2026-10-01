@@ -25,8 +25,8 @@ func TestParseSumsLine(t *testing.T) {
 
 func TestGitHubAssetName(t *testing.T) {
 	cases := map[[2]string]string{
-		{"0.9.5", "linux-amd64"}: "partout_0.9.5_linux_amd64.tar.gz",
-		{"v0.9.5", "linux-arm64"}: "partout_0.9.5_linux_arm64.tar.gz",
+		{"0.9.5", "linux-amd64"}:   "partout_0.9.5_linux_amd64.tar.gz",
+		{"v0.9.5", "linux-arm64"}:  "partout_0.9.5_linux_arm64.tar.gz",
 		{"1.0.0", "linux-riscv64"}: "partout_1.0.0_linux_riscv64.tar.gz",
 	}
 	for in, want := range cases {
