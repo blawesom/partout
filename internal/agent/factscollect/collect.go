@@ -171,11 +171,15 @@ func collectServices(cfg *Config) *ServiceFacts {
 	return facts
 }
 
-// listUnits runs systemctl list-units and returns unit names that are active,
-// failed, or in a transitional state.
+// listUnits runs systemctl list-units and returns unit names that are
+// active, failed, stopped (inactive), or in a transitional state. Inactive
+// is included because "enabled but not running, not failing" is a real
+// triage case (stopped/masked/missed-start); the Enabled column makes those
+// rows legible. Units that were never started are not loaded into the
+// runtime, so they do not appear (they are unit-*files*, not units).
 func listUnits() ([]string, error) {
 	out, err := runOutput(systemctlTimeout, "systemctl", "list-units", "--no-pager", "--no-legend",
-		"--type=service", "--state=active", "--state=failed",
+		"--type=service", "--state=active", "--state=failed", "--state=inactive",
 		"--state=activating", "--state=deactivating", "--state=auto-restarting")
 	if err != nil {
 		return nil, err

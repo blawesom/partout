@@ -654,6 +654,13 @@ async function main() {
     "no service rows");
   check("observe services: restarts column", d.body.textContent.includes("Restarts"), "no Restarts column");
   check("observe services: exit+cpu columns", d.body.textContent.includes("Exit") && d.body.textContent.includes("CPU"), "Exit/CPU columns missing");
+  // Vendor-only units (no file in /etc/systemd/system) appear when named in
+  // PARTOUT_SERVICE_LABELS (the harness sets it to 'cron'); stopped units
+  // (state=inactive) are collected too and filterable via the state facet.
+  const svcNames = w.__partout.services.map((r) => r.unit.name);
+  check("services: labeled vendor unit shown", svcNames.includes("cron"), "cron missing from: " + svcNames.slice(0, 20).join(","));
+  check("services: stopped units collected", w.__partout.services.some((r) => r.unit.state === "inactive"), "no inactive units listed");
+  check("services: state facet includes inactive", (w.__partout.svcFacets.state || []).includes("inactive"), "inactive not in state facet");
   // Header filters: a dropdown per filterable column, options = values
   // actually present, combined with AND.
   check("services: header filter dropdowns", d.querySelectorAll("table.tbl thead select").length >= 4, "no header selects");
