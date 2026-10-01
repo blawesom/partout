@@ -52,6 +52,8 @@
     return m[s] || { cls: "info", label: s || "running" };
   }
   function provStepBadge(s) { return ({ ok: "ok", done: "ok", succeeded: "ok", running: "info", failed: "bad", skipped: "neutral", cancelled: "neutral", pending: "neutral" })[s] || "neutral"; }
+  // firstLine bounds a (possibly multi-line) error to a single short line for toasts.
+  function firstLine(s) { return String(s || "").split(/\r?\n/)[0].slice(0, 300); }
   // EOL state vocabulary: supported|ending_soon|ended|unknown (server EOLState).
   function eolBadge(e) {
     const m = { ended: { cls: "bad", label: "end-of-life" }, ending_soon: { cls: "warn", label: "ending soon" }, supported: { cls: "ok", label: "supported" }, unknown: { cls: "neutral", label: "unknown" } };
@@ -237,6 +239,11 @@
         </div>
 
         <div v-if="provWiz.run.error" class="err-box" style="margin-top:12px">{{ provWiz.run.error }}</div>
+
+        <div v-if="provWizStalled" class="info-box" style="margin-top:12px;border-left:3px solid var(--warning,#d97706)">
+          <div style="font-weight:600">No state change for {{ Math.max(1, Math.floor((Date.now()/1000 - provWiz.run.updated)/60)) }}+ min</div>
+          <p class="muted small" style="margin:4px 0 0">This run may be stuck. Cancel it and start a fresh run — the reason will be shown in the Runs table.</p>
+        </div>
 
         <table class="tbl" style="margin-top:12px">
           <thead><tr><th>#</th><th>Step</th><th>State</th><th>Output excerpt</th></tr></thead>
@@ -1290,7 +1297,7 @@
                   <td class="mono">{{ r.id }}</td>
                   <td class="mono">{{ r.host }}</td>
                   <td class="mono">{{ r.mode }}</td>
-                  <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span></td>
+                  <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span><span v-if="r.error" class="mono small" style="color:var(--critical,#dc2626);display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom" :title="r.error"> · {{ r.error }}</span></td>
                   <td class="mono small">{{ r.fingerprint || '—' }}</td>
                   <td class="muted" :title="new Date(r.created * 1000).toLocaleString()">{{ fmtAgo(r.created) }}</td>
                   <td style="white-space:nowrap">
@@ -1298,8 +1305,9 @@
                       <button class="btn ok sm" @click.stop="decideProvKey(r.id,'confirm')">Confirm key</button>
                       <button class="btn danger sm" @click.stop="decideProvKey(r.id,'deny')">Deny</button>
                     </template>
-                    <button v-else-if="!provTerminal(r.state) && isAdmin" class="btn danger sm" @click.stop="cancelProvRun(r.id)">Cancel</button>
-                    <span v-else style="display:inline-flex;align-items:center;gap:8px">
+                    <button v-if="!provTerminal(r.state)" class="btn sm" @click.stop="provWizWatch(r.id)" title="Open in the onboarding wizard">Watch</button>
+                    <button v-if="!provTerminal(r.state) && isAdmin" class="btn danger sm" @click.stop="cancelProvRun(r.id)">Cancel</button>
+                    <span v-if="provTerminal(r.state)" style="display:inline-flex;align-items:center;gap:8px">
                       <a v-if="r.agent_id" @click.prevent.stop="go('host/'+r.agent_id)" class="badge" :class="agentBadge((hostMap[r.agent_id]||{}).state).cls" :title="(hostMap[r.agent_id] ? hostName(hostMap[r.agent_id]) : r.agent_id) + ' — open in Fleet'">{{ agentBadge((hostMap[r.agent_id]||{}).state).label }}</a>
                       <span class="muted small">{{ provDetail && provDetail.run && provDetail.run.id===r.id ? 'hide ▴' : 'steps ▸' }}</span>
                     </span>
@@ -1700,6 +1708,7 @@
         configs: [], cfgKind: "", cfgHost: "",
         pw: { current: "", next: "" }, pwMsg: "", pwErr: "",
         toasts: [],
+        _provOnce: {},
       };
     },
     computed: {
@@ -1730,6 +1739,13 @@
       },
       p1() { return this.parts[1] || ""; },
       p2() { return this.parts[2] || ""; },
+      // Wizard live view: the run's last state change is >2 min old and it is
+      // not terminal — it may be stuck (a server restart mid-run is reaped at
+      // boot; anything else deserves an explicit hint instead of "Connecting…").
+      provWizStalled() {
+        const r = this.provWiz.run;
+        return !!(r && !this.provTerminal(r.state) && r.updated && Date.now() / 1000 - r.updated > 120);
+      },
       isOperator() { return ["operator", "admin"].includes(this.me?.role); },
       isAdmin() { return this.me?.role === "admin"; },
       presetMissing() {
@@ -2094,6 +2110,21 @@
         else if (kind === "task.run" && this.page === "tasks") { this.loadTasks(); this.loadPlaybooks(); this.loadTaskRuns(); }
         else if (kind === "package.action" && this.page === "updates") { this.loadUpdates(); this.loadPkgActions(); }
         else if ((kind === "update.run" || kind === "update.host") && this.page === "updates") { this.loadRuns(); if (this.runDetailId) this.openRun(this.runDetailId); }
+        else if (kind === "provision.failed") {
+          // Terminal failure: notify on ANY page (the run may have been
+          // started while the operator was elsewhere) and expand the run's
+          // steps if the Provision page is open.
+          if (this.provOnce(kind, p.run_id)) this.notify("err", "provision " + (p.host || p.run_id || "") + " failed: " + firstLine(p.error || "unknown error"), 10000);
+          if (this.page === "provision") { this.loadProvRuns(); if (p.run_id) this.loadProvDetail(p.run_id); }
+        }
+        else if (kind === "provision.cancelled") {
+          if (this.provOnce(kind, p.run_id)) this.notify("info", "provision " + (p.host || p.run_id || "") + " cancelled" + (p.error ? " — " + firstLine(p.error) : ""), 8000);
+          if (this.page === "provision") this.loadProvRuns();
+        }
+        else if (kind === "provision.connected" || kind === "provision.handoff") {
+          if (this.provOnce(kind, p.run_id)) this.notify("ok", kind === "provision.handoff" ? "provision " + (p.host || p.run_id || "") + " reached handoff — non-systemd host, complete the install manually" : "provision " + (p.host || p.run_id || "") + " connected — host enrolled", 8000);
+          if (this.page === "provision") this.loadProvRuns();
+        }
         else if (kind.startsWith("provision.") && this.page === "provision") { this.loadProvRuns(); if (this.provDetail) this.loadProvDetail(this.provDetail.run.id); }
         else if (kind === "file.action" && this.page === "files") this.listFiles();
         else if (kind === "session.data") { if (this.page === "session") this._onSessionData(p); }
@@ -2475,6 +2506,18 @@
       async applyPreset() { try { const r = await this.api("/preset/apply", { method: "POST", body: {} }); this.notify("ok", "preset applied: " + (r.created_policies?.length || 0) + " policy, " + (r.created_alerts?.length || 0) + " alert rule default(s)"); this.loadPolicies(); this.loadPreset(); } catch (e) { } },
       async loadProvRuns() { try { const d = await this.api("/provision-runs"); this.provRuns = d.items || []; } catch (e) { this.provRuns = []; } if (!this.hosts.length) this.loadHosts(); },
       provTerminal(state) { return ["connected", "failed", "cancelled", "handoff"].includes(state); },
+      // provOnce de-dupes per-run terminal toasts (the server can emit the
+      // same terminal event twice, e.g. provision.connected from the state
+      // machine + the enroll watcher). Returns true once per (kind, run) per
+      // 4 s window.
+      provOnce(kind, runId) {
+        const key = kind + ":" + (runId || "");
+        const now = Date.now();
+        if (now - (this._provOnce[key] || 0) < 4000) return false;
+        this._provOnce[key] = now;
+        for (const k of Object.keys(this._provOnce)) if (now - this._provOnce[k] > 60000) delete this._provOnce[k];
+        return true;
+      },
       async showProvRun(id) {
         if (this.provDetail && this.provDetail.run && this.provDetail.run.id === id) { this.provDetail = null; return; }
         await this.loadProvDetail(id);
@@ -2495,6 +2538,9 @@
       },
       // --- Onboarding wizard (guided SSH provisioning) ---
       openProvWizard() {
+        // Starting a fresh wizard detaches any previous watch; the earlier
+        // run keeps going server-side and stays visible in the Runs table.
+        if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
         this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], timer: null, sshStatus: null, sshBusy: false, sshErr: "" };
       },
       dismissGettingStarted() {
@@ -2526,10 +2572,28 @@
         return this.confirmBox.value.trim() === this.confirmBox.requireText;
       },
       provWizClose() {
-        if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
+        const inFlight = !!(this.provWiz.runId && this.provWiz.run && !this.provTerminal(this.provWiz.run.state));
+        if (!inFlight) {
+          if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
+          this.provWiz.runId = ""; this.provWiz.run = null; this.provWiz.steps = [];
+        }
+        // In-flight run: keep the poll timer alive in the background so the
+        // wizard state is fresh if re-opened (Watch button on the run row)
+        // and the terminal SSE toast still fires; the timer self-stops when
+        // the run reaches a terminal state (provWizRefresh).
         const hadRun = !!this.provWiz.runId;
         this.provWiz.open = false;
         if (hadRun) this.loadProvRuns();
+      },
+      // Re-attach the wizard to an existing run from the Runs table.
+      async provWizWatch(id) {
+        if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
+        this.provWiz.open = true; this.provWiz.phase = "live"; this.provWiz.runId = id;
+        this.provWiz.run = null; this.provWiz.steps = [];
+        await this.provWizRefresh();
+        if (!this.provWiz.timer && this.provWiz.run && !this.provTerminal(this.provWiz.run.state)) {
+          this.provWiz.timer = setInterval(() => this.provWizRefresh(), 2500);
+        }
       },
       provWizNext() {
         if (this.provWiz.phase === "target" && this.provWiz.host.trim()) {

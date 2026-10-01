@@ -528,6 +528,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	binPath, _ := os.Executable()
 	prov := provision.New(st, sshutil.Default(sshDir), serverHost+":"+fmt.Sprint(cfg.Port), binPath, sseB, lg)
+	// Fail runs stranded by a previous process (the state machine is
+	// in-memory, so a mid-run restart leaves them stuck forever).
+	prov.ReapStale()
 	apiH.SetProvisioner(prov)
 
 	// M6: alert engine (PRD R23/R25). Server-side evaluation of threshold

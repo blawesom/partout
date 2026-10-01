@@ -214,6 +214,9 @@ func (p *Provisioner) DenyKey(runID string) error {
 	if err := p.store.SetProvisionRunState(runID, "cancelled", "connect", "key confirmation denied"); err != nil {
 		return err
 	}
+	if p.emitter != nil {
+		p.emitter.Emit("provision.cancelled", map[string]string{"run_id": runID, "host": run.Host, "state": "cancelled", "error": "key confirmation denied"})
+	}
 	p.emitStep(run, 1, stepNames[0], "cancelled")
 	p.mu.Lock()
 	ar := p.runs[runID]
@@ -236,6 +239,10 @@ func (p *Provisioner) Cancel(runID string) error {
 	if err := p.store.SetProvisionRunState(runID, "cancelled", run.Step, "cancelled by operator"); err != nil {
 		return err
 	}
+	if p.emitter != nil {
+		p.emitter.Emit("provision.cancelled", map[string]string{"run_id": runID, "host": run.Host, "state": "cancelled", "error": "cancelled by operator"})
+	}
+	p.audit("provision.cancelled", fmt.Sprintf(`{"run_id":%q,"error":"cancelled by operator"}`, runID))
 	p.mu.Lock()
 	ar := p.runs[runID]
 	p.mu.Unlock()
@@ -243,6 +250,27 @@ func (p *Provisioner) Cancel(runID string) error {
 		ar.cancel()
 	}
 	return nil
+}
+
+// ReapStale fails every non-terminal run left behind by a previous process.
+// The state machine lives in a goroutine, so a server restart strands
+// queued, in-flight, and key_confirm runs forever (nothing drives their
+// steps and the one-time enrollment token is not worth salvaging). Marking
+// them failed at boot keeps the UI truthful: the operator sees a reason
+// instead of a run that can never make progress. Called once from main at
+// server startup.
+func (p *Provisioner) ReapStale() {
+	runs, err := p.store.ProvisionRuns(100)
+	if err != nil {
+		p.log.Printf("provision: reap stale: %v", err)
+		return
+	}
+	for _, r := range runs {
+		if !isTerminal(r.State) {
+			p.log.Printf("provision: reaping %s (host=%s state=%s) — server restarted mid-run", r.ID, r.Host, r.State)
+			p.setTerminal(r, "failed", "server restarted while the run was in flight; start a new provision run")
+		}
+	}
 }
 
 // run executes the state machine. It blocks on the confirm channel while the
@@ -622,15 +650,24 @@ func (p *Provisioner) failStep(run *store.ProvisionRun, seq int, errMsg string) 
 }
 
 // setTerminal transitions the run to a terminal state and emits + audits.
-func (p *Provisioner) setTerminal(run *store.ProvisionRun, state, errMsg string) {
+// It is a no-op (returns false, no event) when the run already reached a
+// terminal state — e.g. an operator cancel racing a step failure — so a
+// "cancelled" run is never silently overwritten by a late "failed".
+func (p *Provisioner) setTerminal(run *store.ProvisionRun, state, errMsg string) bool {
+	cur, err := p.store.ProvisionRun(run.ID)
+	if err == nil && cur != nil && isTerminal(cur.State) {
+		p.log.Printf("provision: %s already terminal (%s); skipping %s", run.ID, cur.State, state)
+		return false
+	}
 	if err := p.store.SetProvisionRunState(run.ID, state, run.Step, errMsg); err != nil {
 		p.log.Printf("provision: %s set %s: %v", run.ID, state, err)
 	}
 	kind := "provision." + state
 	if p.emitter != nil {
-		p.emitter.Emit(kind, map[string]string{"run_id": run.ID, "state": state, "error": errMsg})
+		p.emitter.Emit(kind, map[string]string{"run_id": run.ID, "host": run.Host, "state": state, "error": errMsg})
 	}
 	p.audit(kind, fmt.Sprintf(`{"run_id":%q,"error":%q}`, run.ID, errMsg))
+	return true
 }
 
 // emitStep emits an SSE provision.step event.

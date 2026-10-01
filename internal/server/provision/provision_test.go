@@ -341,6 +341,50 @@ func TestConfirmAfterRestartFailsRun(t *testing.T) {
 	}
 }
 
+// TestReapStaleFailsStrandedRuns verifies that after a simulated restart
+// (in-memory state machine gone), ReapStale fails every non-terminal run
+// with a remediation message and leaves already-terminal runs untouched.
+func TestReapStaleFailsStrandedRuns(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+	a, err := prov.Start("web-stranded", "fresh")
+	if err != nil {
+		t.Fatalf("Start a: %v", err)
+	}
+	waitForState(t, st, a.ID, "key_confirm")
+	b, err := prov.Start("web-done", "fresh")
+	if err != nil {
+		t.Fatalf("Start b: %v", err)
+	}
+	waitForState(t, st, b.ID, "key_confirm")
+	// b already reached a terminal state before the "restart".
+	if err := st.SetProvisionRunState(b.ID, "cancelled", "connect", "manual cancel"); err != nil {
+		t.Fatalf("SetProvisionRunState b: %v", err)
+	}
+
+	// Simulate a restart: drop the in-memory active-run registry.
+	prov.mu.Lock()
+	delete(prov.runs, a.ID)
+	delete(prov.runs, b.ID)
+	prov.mu.Unlock()
+
+	prov.ReapStale()
+
+	aCur, _ := st.ProvisionRun(a.ID)
+	if aCur.State != "failed" {
+		t.Fatalf("stranded run state = %q, want failed", aCur.State)
+	}
+	if !strings.Contains(aCur.Error, "server restarted") {
+		t.Errorf("stranded run error = %q, want mention of server restart", aCur.Error)
+	}
+	bCur, _ := st.ProvisionRun(b.ID)
+	if bCur.State != "cancelled" {
+		t.Fatalf("terminal run state = %q, want unchanged cancelled", bCur.State)
+	}
+	if bCur.Error != "manual cancel" {
+		t.Errorf("terminal run error = %q, want unchanged", bCur.Error)
+	}
+}
+
 // TestProvisionUnreachableServerFailsPreflight verifies the host->server
 // reachability probe: when the target cannot reach the control-plane port,
 // the run fails at preflight (with remediation) instead of installing the
