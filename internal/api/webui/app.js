@@ -1466,24 +1466,28 @@
           <h1 class="page">Services</h1>
           <p class="page-sub">Fleet service health from agent-collected facts (M5, R18).</p>
           <div class="toolbar">
-            <select :value="svcHost" @change="svcHost=$event.target.value; loadServices()" style="max-width:180px">
-              <option value="">all hosts</option>
-              <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
-            </select>
-            <input v-model="svcName" placeholder="unit name" class="mono" @keyup.enter="loadServices" style="max-width:150px" />
-            <input v-model="svcLabel" placeholder="filter by label" @keyup.enter="loadServices" style="max-width:150px" />
-            <select v-model="svcState" @change="loadServices">
-              <option value="">any state</option><option value="active">active</option>
-              <option value="failed">failed</option><option value="inactive">inactive</option>
-            </select>
-            <button class="btn sm" @click="loadServices">Apply</button>
+            <span class="muted small">{{ svcRows.length }} of {{ services.length }} units</span>
+            <button v-if="svcFAny" class="btn sm" @click="svcClearF()">Clear filters</button>
+            <span class="muted small">· filter on the column headers (filters combine with AND)</span>
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Unit</th><th>Host</th><th>State</th><th>Enabled</th><th>Exit</th><th>Restart</th><th>Restarts</th><th>Memory</th><th>CPU</th><th></th></tr></thead>
+              <thead><tr>
+                <th>Unit<div><input v-model="svcF.unit" placeholder="filter…" style="width:110px;font-size:11px;margin-top:2px" /></div></th>
+                <th>Host<div><select v-model="svcF.host" style="font-size:11px;max-width:110px;margin-top:2px"><option value="">all</option><option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostNameById(h.id) }}</option></select></div></th>
+                <th>State<div><select v-model="svcF.state" style="font-size:11px;max-width:100px;margin-top:2px"><option value="">all</option><option v-for="v in svcFacets.state" :key="v" :value="v">{{ v }}</option></select></div></th>
+                <th>Enabled<div><select v-model="svcF.enabled" style="font-size:11px;max-width:80px;margin-top:2px"><option value="">all</option><option value="yes">yes</option><option value="no">no</option></select></div></th>
+                <th>Exit<div><select v-model="svcF.exit" style="font-size:11px;max-width:110px;margin-top:2px"><option value="">all</option><option value="(none)">none</option><option v-for="v in svcFacets.exit" :key="v" :value="v">{{ v }}</option></select></div></th>
+                <th>Restart<div><select v-model="svcF.restart" style="font-size:11px;max-width:110px;margin-top:2px"><option value="">all</option><option v-for="v in svcFacets.restart" :key="v" :value="v">{{ v }}</option></select></div></th>
+                <th>Restarts</th>
+                <th>Memory</th>
+                <th>CPU</th>
+                <th>Labels<div><select v-model="svcF.label" style="font-size:11px;max-width:100px;margin-top:2px"><option value="">all</option><option v-for="v in svcFacets.label" :key="v" :value="v">{{ v }}</option></select></div></th>
+                <th></th>
+              </tr></thead>
               <tbody>
-                <template v-for="(row,i) in services" :key="i">
-                <tr @click="toggleSvcDetail(i)" style="cursor:pointer" :title="'click for details'">
+                <template v-for="(row,i) in svcRows" :key="svcKey(row)">
+                <tr @click="toggleSvcDetail(svcKey(row))" style="cursor:pointer" :title="'click for details'">
                   <td class="mono">{{ row.unit.name }}<div v-if="row.unit.description" class="muted small" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.unit.description }}</div></td>
                   <td class="mono">{{ hostNameById(row.host_id) }}</td>
                   <td><span class="badge" :class="svcBadge(row.unit).cls">{{ svcBadge(row.unit).label }}</span></td>
@@ -1493,10 +1497,11 @@
                   <td class="mono">{{ row.unit.n_restarts || '—' }}</td>
                   <td class="mono">{{ row.unit.memory_current ? fmtBytes(row.unit.memory_current) : '—' }}</td>
                   <td class="mono">{{ row.unit.cpu_usage_sec ? row.unit.cpu_usage_sec + 's' : '—' }}</td>
+                  <td><span class="chip" v-for="l in (row.unit.labels||[])" :key="l">{{ l }}</span></td>
                   <td><a v-if="unitCfgLink(row)" @click.prevent.stop="go(unitCfgLink(row))" :title="row.unit.name + ' config'">⚙ config</a><span v-else class="muted">—</span></td>
                 </tr>
-                <tr v-if="svcDetail === i">
-                  <td colspan="10">
+                <tr v-if="svcDetail === svcKey(row)">
+                  <td colspan="11">
                     <div class="mono small" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:4px 18px;padding:8px 12px;background:var(--surface-app,#f6f6f4);border-radius:6px">
                       <span v-if="row.unit.description"><b>Description</b> — {{ row.unit.description }}</span>
                       <span><b>State</b> — {{ row.unit.state }} / {{ row.unit.sub_state || '?' }} · <b>type</b> {{ row.unit.type || '?' }}</span>
@@ -1512,6 +1517,7 @@
                   </td>
                 </tr>
                 </template>
+                <tr v-if="!svcRows.length && !pageLoading"><td colspan="11"><div class="empty">{{ services.length ? 'No units match the current filters.' : 'No service facts (agents must be connected &amp; systemd present).' }}</div></td></tr>
                 <tr v-if="!services.length && !pageLoading"><td colspan="10"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
               </tbody>
             </table>
@@ -1804,7 +1810,7 @@
         mcpInfo: null, mcpClients: [],
         extStatus: null, extBusy: false,
         security: [], secBusy: false, secPatchBusy: false,
-        services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "", svcDetail: -1,
+        services: [], svcF: { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" }, svcDetail: null,
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
         pw: { current: "", next: "" }, pwMsg: "", pwErr: "",
@@ -1814,6 +1820,38 @@
     },
     computed: {
       loggedIn() { return !!this.token; },
+      // Services header filters: AND-combined client-side over the loaded
+      // rows (the API returns the full unpaginated list). Facets are the
+      // distinct values actually present, so every option is reachable.
+      svcFAny() { return Object.values(this.svcF).some((v) => v !== ""); },
+      svcRows() {
+        const f = this.svcF;
+        return this.services.filter((row) => {
+          const u = row.unit;
+          if (f.unit && !u.name.toLowerCase().includes(f.unit.toLowerCase())) return false;
+          if (f.host && row.host_id !== f.host) return false;
+          if (f.state && u.state !== f.state) return false;
+          if (f.enabled && (u.enabled ? "yes" : "no") !== f.enabled) return false;
+          if (f.exit) {
+            const e = this.unitExit(u);
+            if (f.exit === "(none)" ? e !== "—" : e !== f.exit) return false;
+          }
+          if (f.restart && u.restart_policy !== f.restart) return false;
+          if (f.label && !(u.labels || []).includes(f.label)) return false;
+          return true;
+        });
+      },
+      svcFacets() {
+        const set = (fn) => [...new Set(this.services.map(fn).filter((v) => v !== "" && v != null))].sort();
+        const labels = new Set();
+        for (const r of this.services) for (const l of (r.unit.labels || [])) if (l) labels.add(l);
+        return {
+          state: set((r) => r.unit.state),
+          exit: set((r) => { const e = this.unitExit(r.unit); return e === "—" ? "" : e; }),
+          restart: set((r) => r.unit.restart_policy),
+          label: [...labels].sort(),
+        };
+      },
       parts() { return this.route.split("?")[0].split("/").filter(Boolean); },
       // Query string of the current hash route (cross-link params: host/name/q/kind).
       routeQuery() {
@@ -3035,8 +3073,8 @@
       syncObserveQuery() {
         const q = this.routeQuery;
         if (this.page === "obs-services") {
-          if (q.host) this.svcHost = q.host;
-          if (q.name) this.svcName = q.name;
+          if (q.host) this.svcF.host = q.host;
+          if (q.name) this.svcF.unit = q.name;
         } else if (this.page === "obs-certs") {
           if (q.host) this.certHost = q.host;
           if (q.q) this.certQ = q.q;
@@ -3067,8 +3105,10 @@
         }
         return out;
       },
-      async loadServices() { try { const d = await this.api("/services" + buildQ({ label: this.svcLabel, state: this.svcState, name: this.svcName, agent_id: this.svcHost })); this.services = d.items || []; this.svcDetail = -1; } catch (e) { this.services = []; } },
-      toggleSvcDetail(i) { this.svcDetail = this.svcDetail === i ? -1 : i; },
+      async loadServices() { try { const d = await this.api("/services"); this.services = d.items || []; this.svcDetail = null; } catch (e) { this.services = []; } },
+      svcKey(row) { return row.host_id + "/" + row.unit.name; },
+      toggleSvcDetail(key) { this.svcDetail = this.svcDetail === key ? null : key; },
+      svcClearF() { this.svcF = { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" }; },
       // last-run verdict for the Exit column: systemd's Result= word plus the
       // exit code when numeric. "success"/absent (never run or still up) and
       // clean stops render as a dash rather than noise.

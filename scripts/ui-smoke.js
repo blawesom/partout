@@ -654,6 +654,32 @@ async function main() {
     "no service rows");
   check("observe services: restarts column", d.body.textContent.includes("Restarts"), "no Restarts column");
   check("observe services: exit+cpu columns", d.body.textContent.includes("Exit") && d.body.textContent.includes("CPU"), "Exit/CPU columns missing");
+  // Header filters: a dropdown per filterable column, options = values
+  // actually present, combined with AND.
+  check("services: header filter dropdowns", d.querySelectorAll("table.tbl thead select").length >= 4, "no header selects");
+  const totalSvc = w.__partout.services.length;
+  const firstSvc = w.__partout.services[0];
+  w.__partout.svcF.unit = firstSvc.unit.name;
+  await sleep(200);
+  const nameRows = w.__partout.svcRows;
+  check("services: unit name filter", nameRows.length >= 1 && nameRows.every((r) => r.unit.name === firstSvc.unit.name), "unit filter broken");
+  w.__partout.svcF.state = firstSvc.unit.state;
+  await sleep(200);
+  const andRows = w.__partout.svcRows;
+  check("services: filters combine with AND", andRows.length <= nameRows.length && andRows.every((r) => r.unit.name === firstSvc.unit.name && r.unit.state === firstSvc.unit.state), "AND combine broken");
+  check("services: clear button appears", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Clear filters")), "no Clear filters button");
+  if (w.__partout.svcFacets.state.length > 1) {
+    const otherState = w.__partout.svcFacets.state.find((st) => st !== firstSvc.unit.state);
+    w.__partout.svcF.host = firstSvc.host_id; // pin host: this unit's state is known
+    w.__partout.svcF.state = otherState;
+    await sleep(200);
+    check("services: cross-state AND yields empty state", w.__partout.svcRows.length === 0 && d.body.textContent.includes("No units match the current filters"), "expected empty filtered state");
+    w.__partout.svcF.host = "";
+    await sleep(150);
+  }
+  w.__partout.svcClearF();
+  await sleep(200);
+  check("services: clear restores all rows", w.__partout.svcRows.length === totalSvc, "clear did not restore");
   // Row click expands the detail row (description/pid/fragment/last-start).
   const svcRowEl = d.querySelector("table.tbl tbody tr");
   if (svcRowEl) svcRowEl.click();
