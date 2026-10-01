@@ -63,11 +63,38 @@ openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=svc-smoke" -days 30 \
 printf 'server {\n  listen 443 ssl;\n  ssl_certificate %s/site.pem;\n}\n' "$WORK/svc" > "$WORK/svc/nginx.conf"
 printf 'svc-smoke.test {\n  tls %s/site.pem %s/site.key\n}\n' "$WORK/svc" "$WORK/svc" > "$WORK/svc/Caddyfile"
 
+# A fake haproxy whose config check FAILS with a real-looking error: proves
+# the invalid-config badge carries the validator's explanation (config_error)
+# instead of a bare red badge.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/haproxy" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-c" ]; then
+  echo "haproxy: [ALERT] (999) Config file line 14: 'bind :443 ssl crt-/etc/haproxy/ssl/api.pem' : cannot open certificate file /etc/haproxy/ssl/api.pem" >&2
+  exit 1
+fi
+if [ "$1" = "-v" ]; then echo "HA-Proxy version 2.8.14-smoke"; fi
+exit 0
+EOF
+chmod +x "$WORK/bin/haproxy"
+cat > "$WORK/svc/haproxy.cfg" <<'EOF'
+global
+    maxconn 4096
+
+frontend fe
+    bind :443 ssl crt-/etc/haproxy/ssl/api.pem
+    default_backend be
+
+backend be
+    server s1 127.0.0.1:8080 check
+EOF
+
 echo "==> starting embedded server on :$PORT"
 mkdir -p "$WORK/run"
 (
   cd "$WORK/run"
-  exec env PARTOUT_ADMIN_PASSWORD="$PASS" \
+  exec env PATH="$WORK/bin:$PATH" \
+    PARTOUT_ADMIN_PASSWORD="$PASS" \
     PARTOUT_TOKEN_ADMIN="$ADMIN_TOKEN" \
     PARTOUT_PORT="$PORT" \
     PARTOUT_DB_PATH="$WORK/run/p.db" \
@@ -75,6 +102,7 @@ mkdir -p "$WORK/run"
     PARTOUT_MODE=embedded \
     PARTOUT_OBSERVE_FACTS_INTERVAL=2 \
     PARTOUT_NGINX_CONF="$WORK/svc/nginx.conf" \
+    PARTOUT_HAPROXY_CONF="$WORK/svc/haproxy.cfg" \
     PARTOUT_CADDY_CONF="$WORK/svc/Caddyfile" \
     PARTOUT_SECRET_KEY=0123456789abcdef0123456789abcdef \
     "$BIN" > "$WORK/server.log" 2>&1

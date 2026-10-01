@@ -653,6 +653,14 @@ async function main() {
     [...d.querySelectorAll("table.tbl tr")].some((tr) => /\.service|acme-serve|ssh|snap/.test(tr.textContent)),
     "no service rows");
   check("observe services: restarts column", d.body.textContent.includes("Restarts"), "no Restarts column");
+  check("observe services: exit+cpu columns", d.body.textContent.includes("Exit") && d.body.textContent.includes("CPU"), "Exit/CPU columns missing");
+  // Row click expands the detail row (description/pid/fragment/last-start).
+  const svcRowEl = d.querySelector("table.tbl tbody tr");
+  if (svcRowEl) svcRowEl.click();
+  await sleep(300);
+  check("observe services: detail row expands", d.body.textContent.includes("State —") || d.body.textContent.includes("Main PID") || d.body.textContent.includes("Unit file"), "no detail fields after row click");
+  if (svcRowEl) svcRowEl.click();
+  await sleep(200);
   await visit("#/obs-certs", 1600);
   check("observe certs: real cert",
     [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("CN =")), "no cert rows");
@@ -666,6 +674,10 @@ async function main() {
   check("observe certs: caddy label", !!svcRow && svcRow.textContent.includes("caddy"), "caddy label missing in Used by");
   await visit("#/obs-configs", 1600);
   check("observe configs renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Configs"));
+  // The fake haproxy fails validation: the card must show an invalid badge
+  // AND the validator's own explanation, not a bare red badge.
+  check("observe configs: invalid haproxy flagged", [...d.querySelectorAll(".badge")].some((b) => b.textContent.trim() === "invalid"), "no invalid badge");
+  check("observe configs: validator error shown", d.body.textContent.includes("cannot open certificate file"), "config_error not surfaced");
   await visit("#/obs-alerts");
   check("observe alerts: live card (engine wired)", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Alerts") && d.body.textContent.includes("Firing now:"), "alerts card missing");
   // Honest state: the empty-state text is shown iff there are no alerts. The

@@ -144,10 +144,22 @@ type UnitFact struct {
 	// NRestartsKnown reports that the agent actually collected the counter
 	// (absent means the systemctl probe failed, so the engine must not read
 	// the zero value as a real count).
-	NRestartsKnown bool     `json:"n_restarts_known,omitempty"`
-	LastExitCode   int      `json:"last_exit_code,omitempty"`
-	LastExitStatus string   `json:"last_exit_status,omitempty"`
-	Labels         []string `json:"labels,omitempty"`
+	NRestartsKnown bool   `json:"n_restarts_known,omitempty"`
+	LastExitCode   int    `json:"last_exit_code,omitempty"`
+	LastExitStatus string `json:"last_exit_status,omitempty"`
+	// Description is the unit's human summary line (Description= field).
+	Description string `json:"description,omitempty"`
+	// MainPID is 0 when the unit is not running.
+	MainPID int64 `json:"main_pid,omitempty"`
+	// FragmentPath is where the unit file lives.
+	FragmentPath string `json:"fragment_path,omitempty"`
+	// ExecMainStartTimestamp is systemd's formatted last-start ("" when the
+	// unit has never run).
+	ExecMainStartTimestamp string `json:"exec_main_start_timestamp,omitempty"`
+	// Result is systemd's last-run verdict (success|exit-code|signal|
+	// core-dump|timeout|start-limit-hit|soft-restart|watchdog).
+	Result string   `json:"result,omitempty"`
+	Labels []string `json:"labels,omitempty"`
 }
 
 // ConfigFacts carries webservice config facts (haproxy, nginx).
@@ -158,23 +170,27 @@ type ConfigFacts struct {
 
 // HAProxyConfig is haproxy's config fact set.
 type HAProxyConfig struct {
-	Present      bool           `json:"present"`
-	Version      string         `json:"version"`
-	ConfigFile   string         `json:"config_file"`
-	ConfigSHA256 string         `json:"config_sha256"`
-	ConfigValid  bool           `json:"config_valid"`
-	Backends     []BackendFact  `json:"backends"`
-	Listeners    []ListenerFact `json:"listeners"`
+	Present      bool   `json:"present"`
+	Version      string `json:"version"`
+	ConfigFile   string `json:"config_file"`
+	ConfigSHA256 string `json:"config_sha256"`
+	ConfigValid  bool   `json:"config_valid"`
+	// ConfigError: haproxy -c output when invalid (bounded by the agent).
+	ConfigError string         `json:"config_error,omitempty"`
+	Backends    []BackendFact  `json:"backends"`
+	Listeners   []ListenerFact `json:"listeners"`
 }
 
 // NginxConfig is nginx's config fact set.
 type NginxConfig struct {
-	Present      bool        `json:"present"`
-	Version      string      `json:"version"`
-	ConfigFile   string      `json:"config_file"`
-	ConfigSHA256 string      `json:"config_sha256"`
-	ConfigValid  bool        `json:"config_valid"`
-	Vhosts       []VHostFact `json:"vhosts"`
+	Present      bool   `json:"present"`
+	Version      string `json:"version"`
+	ConfigFile   string `json:"config_file"`
+	ConfigSHA256 string `json:"config_sha256"`
+	ConfigValid  bool   `json:"config_valid"`
+	// ConfigError: nginx -t output when invalid (bounded by the agent).
+	ConfigError string      `json:"config_error,omitempty"`
+	Vhosts      []VHostFact `json:"vhosts"`
 }
 
 // BackendFact is one haproxy backend's server state.

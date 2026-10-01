@@ -1480,20 +1480,39 @@
           </div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Unit</th><th>Host</th><th>State</th><th>Enabled</th><th>Restart</th><th>Restarts</th><th>Memory</th><th>Labels</th><th></th></tr></thead>
+              <thead><tr><th>Unit</th><th>Host</th><th>State</th><th>Enabled</th><th>Exit</th><th>Restart</th><th>Restarts</th><th>Memory</th><th>CPU</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="(row,i) in services" :key="i">
-                  <td class="mono">{{ row.unit.name }}</td>
+                <template v-for="(row,i) in services" :key="i">
+                <tr @click="toggleSvcDetail(i)" style="cursor:pointer" :title="'click for details'">
+                  <td class="mono">{{ row.unit.name }}<div v-if="row.unit.description" class="muted small" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.unit.description }}</div></td>
                   <td class="mono">{{ hostNameById(row.host_id) }}</td>
                   <td><span class="badge" :class="svcBadge(row.unit).cls">{{ svcBadge(row.unit).label }}</span></td>
                   <td>{{ row.unit.enabled ? 'yes' : 'no' }}</td>
+                  <td class="mono">{{ unitExit(row.unit) }}</td>
                   <td class="mono">{{ row.unit.restart_policy || '—' }}</td>
                   <td class="mono">{{ row.unit.n_restarts || '—' }}</td>
                   <td class="mono">{{ row.unit.memory_current ? fmtBytes(row.unit.memory_current) : '—' }}</td>
-                  <td><span class="chip" v-for="l in (row.unit.labels||[])" :key="l">{{ l }}</span></td>
-                  <td><a v-if="unitCfgLink(row)" @click.prevent="go(unitCfgLink(row))" :title="row.unit.name + ' config'">⚙ config</a><span v-else class="muted">—</span></td>
+                  <td class="mono">{{ row.unit.cpu_usage_sec ? row.unit.cpu_usage_sec + 's' : '—' }}</td>
+                  <td><a v-if="unitCfgLink(row)" @click.prevent.stop="go(unitCfgLink(row))" :title="row.unit.name + ' config'">⚙ config</a><span v-else class="muted">—</span></td>
                 </tr>
-                <tr v-if="!services.length && !pageLoading"><td colspan="9"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
+                <tr v-if="svcDetail === i">
+                  <td colspan="10">
+                    <div class="mono small" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:4px 18px;padding:8px 12px;background:var(--surface-app,#f6f6f4);border-radius:6px">
+                      <span v-if="row.unit.description"><b>Description</b> — {{ row.unit.description }}</span>
+                      <span><b>State</b> — {{ row.unit.state }} / {{ row.unit.sub_state || '?' }} · <b>type</b> {{ row.unit.type || '?' }}</span>
+                      <span v-if="row.unit.main_pid"><b>Main PID</b> — {{ row.unit.main_pid }}</span>
+                      <span v-if="row.unit.fragment_path"><b>Unit file</b> — {{ row.unit.fragment_path }}</span>
+                      <span v-if="row.unit.exec_main_start_timestamp"><b>Last start</b> — {{ row.unit.exec_main_start_timestamp }}</span>
+                      <span v-if="row.unit.result && row.unit.result !== 'success'"><b>Last exit</b> — {{ unitExit(row.unit) }}</span>
+                      <span v-if="row.unit.restart_policy"><b>Restart</b> — {{ row.unit.restart_policy }}</span>
+                      <span v-if="(row.unit.wanted_by||[]).length"><b>Wanted by</b> — {{ row.unit.wanted_by.join(', ') }}</span>
+                      <span v-if="(row.unit.after||[]).length"><b>After</b> — {{ row.unit.after.join(', ') }}</span>
+                      <span v-if="(row.unit.labels||[]).length"><b>Labels</b> — {{ row.unit.labels.join(', ') }}</span>
+                    </div>
+                  </td>
+                </tr>
+                </template>
+                <tr v-if="!services.length && !pageLoading"><td colspan="10"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1557,16 +1576,17 @@
           <div class="card" v-for="(c,i) in configs" :key="i">
             <div class="head">
               <h2>{{ c.kind }} <span class="muted mono small" v-if="c.haproxy || c.nginx">· {{ (c.haproxy||c.nginx).version }}</span></h2>
-              <span class="badge" :class="((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'ok':'bad'">{{ ((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'valid':'invalid' }}</span>
+              <span class="badge" :title="cfgErr(c) || (c.haproxy||c.nginx).config_file || ''" :class="((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'ok':'bad'">{{ ((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'valid':'invalid' }}</span>
               <a @click.prevent="go('obs/services?host='+c.host_id+'&name='+c.kind)" :title="c.kind + ' service'" style="font-size:12px">◈ {{ c.kind }} service</a>
               <div class="spacer"></div>
               <span class="muted mono small">{{ hostNameById(c.host_id) }}</span>
             </div>
+            <div v-if="cfgErr(c)" class="err-box mono small" style="white-space:pre-wrap;margin:8px 0 0;max-height:160px;overflow:auto">{{ cfgErr(c) }}</div>
             <template v-if="c.haproxy">
               <p class="cap">{{ (c.haproxy.backends||[]).length }} backends · {{ (c.haproxy.listeners||[]).length }} listeners</p>
               <table class="tbl" v-if="(c.haproxy.backends||[]).length">
-                <thead><tr><th>Backend</th><th>Servers</th></tr></thead>
-                <tbody><tr v-for="b in c.haproxy.backends" :key="b.name"><td class="mono">{{ b.name }}</td><td class="mono">{{ b.servers || '—' }}</td></tr></tbody>
+                <thead><tr><th>Backend</th><th>Servers</th><th>Active</th></tr></thead>
+                <tbody><tr v-for="b in c.haproxy.backends" :key="b.name"><td class="mono">{{ b.name }}</td><td class="mono">{{ b.servers || '—' }}</td><td class="mono">{{ b.active != null ? b.active : '—' }}</td></tr></tbody>
               </table>
               <table class="tbl" v-if="(c.haproxy.listeners||[]).length">
                 <thead><tr><th>Port</th><th>Mode</th><th>TLS cert</th></tr></thead>
@@ -1784,7 +1804,7 @@
         mcpInfo: null, mcpClients: [],
         extStatus: null, extBusy: false,
         security: [], secBusy: false, secPatchBusy: false,
-        services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "",
+        services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "", svcDetail: -1,
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
         pw: { current: "", next: "" }, pwMsg: "", pwErr: "",
@@ -3047,7 +3067,18 @@
         }
         return out;
       },
-      async loadServices() { try { const d = await this.api("/services" + buildQ({ label: this.svcLabel, state: this.svcState, name: this.svcName, agent_id: this.svcHost })); this.services = d.items || []; } catch (e) { this.services = []; } },
+      async loadServices() { try { const d = await this.api("/services" + buildQ({ label: this.svcLabel, state: this.svcState, name: this.svcName, agent_id: this.svcHost })); this.services = d.items || []; this.svcDetail = -1; } catch (e) { this.services = []; } },
+      toggleSvcDetail(i) { this.svcDetail = this.svcDetail === i ? -1 : i; },
+      // last-run verdict for the Exit column: systemd's Result= word plus the
+      // exit code when numeric. "success"/absent (never run or still up) and
+      // clean stops render as a dash rather than noise.
+      unitExit(u) {
+        const r = u.result || "";
+        if (!r || r === "success") return "—";
+        return r + (u.last_exit_code ? " (" + u.last_exit_code + ")" : "");
+      },
+      // config_error text when the validator failed ("" when valid/unknown).
+      cfgErr(c) { const x = c.haproxy || c.nginx; return (x && !x.config_valid && x.config_error) ? x.config_error : ""; },
       async loadCerts() {
         try {
           const d = await this.api("/certificates" + buildQ({ agent_id: this.certHost, days_remaining_lt: this.certDays }));

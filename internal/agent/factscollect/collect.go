@@ -125,10 +125,26 @@ type UnitFact struct {
 	// a failed `systemctl show` (where NRestarts is simply absent). Without
 	// it the engine cannot tell "no datum" from "counter reset to 0" and
 	// would treat a transient collector failure as a spike of restarts.
-	NRestartsKnown bool     `json:"n_restarts_known,omitempty"`
-	LastExitCode   int      `json:"last_exit_code,omitempty"`
-	LastExitStatus string   `json:"last_exit_status,omitempty"`
-	Labels         []string `json:"labels,omitempty"`
+	NRestartsKnown bool   `json:"n_restarts_known,omitempty"`
+	LastExitCode   int    `json:"last_exit_code,omitempty"`
+	LastExitStatus string `json:"last_exit_status,omitempty"`
+	// Description is the unit's human summary line from the [Service]/[Unit]
+	// Description= field — the first thing an operator wants when scanning
+	// a wall of unit names.
+	Description string `json:"description,omitempty"`
+	// MainPID is 0 when the unit is not running.
+	MainPID int64 `json:"main_pid,omitempty"`
+	// FragmentPath is where the unit file lives (distro package vs
+	// /etc/systemd/system drop-in — hints at who owns the config).
+	FragmentPath string `json:"fragment_path,omitempty"`
+	// ExecMainStartTimestamp is systemd's formatted "last start" ("" when
+	// the unit has never run).
+	ExecMainStartTimestamp string `json:"exec_main_start_timestamp,omitempty"`
+	// Result is systemd's last-run verdict (success|exit-code|signal|
+	// core-dump|timeout|start-limit-hit|soft-restart|watchdog; "" when the
+	// unit has never run).
+	Result string   `json:"result,omitempty"`
+	Labels []string `json:"labels,omitempty"`
 }
 
 // collectServices runs `systemctl list-units` + `systemctl show` to collect
@@ -213,7 +229,7 @@ func isUnitName(s string) bool {
 // unitDetail runs systemctl show for a unit and parses the key=value output.
 func unitDetail(name string) UnitFact {
 	out, err := runOutput(systemctlTimeout, "systemctl", "show", name,
-		"--property=Type,State,SubState,ActiveState,UnitFileState,Requires,RequiredBy,Wants,WantedBy,After,Before,Restart,MemoryCurrent,CPUSec,NRestarts,ExecMainStatus,RestartForceExitStatus")
+		"--property=Type,State,SubState,ActiveState,UnitFileState,Requires,RequiredBy,Wants,WantedBy,After,Before,Restart,MemoryCurrent,CPUSec,NRestarts,ExecMainStatus,RestartForceExitStatus,Description,MainPID,FragmentPath,ExecMainStartTimestamp,Result")
 	if err != nil {
 		return UnitFact{Name: name}
 	}
@@ -273,6 +289,24 @@ func parseUnitShow(name, out string) UnitFact {
 			// configured restart trigger list, not the observed status.
 			f.LastExitStatus = v
 			f.LastExitCode = parseExitCode(v)
+		case "Result":
+			// systemd's one-word verdict for the last run: success,
+			// exit-code, signal, core-dump, timeout, start-limit-hit,
+			// soft-restart, watchdog. This is the operator-facing "why did
+			// it fail" (ExecMainStatus is just a raw number).
+			f.Result = v
+		case "Description":
+			f.Description = v
+		case "MainPID":
+			if n, err := parseUint64(v); err == nil {
+				f.MainPID = int64(n)
+			}
+		case "FragmentPath":
+			f.FragmentPath = v
+		case "ExecMainStartTimestamp":
+			if v != "Mon 1970-01-01 00:00:00 UTC" { // never-run sentinel
+				f.ExecMainStartTimestamp = v
+			}
 		}
 	}
 	return f
@@ -336,23 +370,29 @@ type ConfigFacts struct {
 
 // HAProxyConfig is haproxy's config fact set.
 type HAProxyConfig struct {
-	Present      bool           `json:"present"`
-	Version      string         `json:"version"`
-	ConfigFile   string         `json:"config_file"`
-	ConfigSHA256 string         `json:"config_sha256"`
-	ConfigValid  bool           `json:"config_valid"`
-	Backends     []BackendFact  `json:"backends"`
-	Listeners    []ListenerFact `json:"listeners"`
+	Present      bool   `json:"present"`
+	Version      string `json:"version"`
+	ConfigFile   string `json:"config_file"`
+	ConfigSHA256 string `json:"config_sha256"`
+	ConfigValid  bool   `json:"config_valid"`
+	// ConfigError carries the validator's (haproxy -c) output when
+	// ConfigValid is false, so the UI can explain *why* instead of just
+	// showing a red badge. Bounded by capConfigError.
+	ConfigError string         `json:"config_error,omitempty"`
+	Backends    []BackendFact  `json:"backends"`
+	Listeners   []ListenerFact `json:"listeners"`
 }
 
 // NginxConfig is nginx's config fact set.
 type NginxConfig struct {
-	Present      bool        `json:"present"`
-	Version      string      `json:"version"`
-	ConfigFile   string      `json:"config_file"`
-	ConfigSHA256 string      `json:"config_sha256"`
-	ConfigValid  bool        `json:"config_valid"`
-	Vhosts       []VHostFact `json:"vhosts"`
+	Present      bool   `json:"present"`
+	Version      string `json:"version"`
+	ConfigFile   string `json:"config_file"`
+	ConfigSHA256 string `json:"config_sha256"`
+	ConfigValid  bool   `json:"config_valid"`
+	// ConfigError: nginx -t output on failure (see HAProxyConfig).
+	ConfigError string      `json:"config_error,omitempty"`
+	Vhosts      []VHostFact `json:"vhosts"`
 }
 
 // BackendFact is one haproxy backend's server state.
@@ -399,10 +439,11 @@ func collectConfigs(cfg *Config) *ConfigFacts {
 
 // collectHAProxy runs haproxy -c for validation and parses topology.
 func collectHAProxy(cfg *Config) *HAProxyConfig {
+	cfg = cfg.Fill()
 	if _, err := exec.LookPath("haproxy"); err != nil {
 		return nil
 	}
-	cfgPath := "/etc/haproxy/haproxy.cfg"
+	cfgPath := orDefault(cfg.HaproxyConf, "/etc/haproxy/haproxy.cfg")
 	if _, err := os.Stat(cfgPath); err != nil {
 		return nil
 	}
@@ -411,10 +452,11 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 		ConfigFile: cfgPath,
 	}
 	// Validate: haproxy -c (bounded: a wedged binary must not stall collection)
-	if _, err := runOutput(configExecTimeout, "haproxy", "-c", "-f", cfgPath); err == nil {
+	// — capture the output on failure so the UI can explain the invalid state.
+	if out, err := runOutput(configExecTimeout, "haproxy", "-c", "-f", cfgPath); err == nil {
 		h.ConfigValid = true
 	} else {
-		h.ConfigValid = false
+		h.ConfigError = capConfigError(out)
 	}
 	// Version: haproxy -v
 	if out, err := runOutput(configExecTimeout, "haproxy", "-v"); err == nil {
@@ -431,10 +473,11 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 
 // collectNginx runs nginx -t for validation and extracts vhost topology.
 func collectNginx(cfg *Config) *NginxConfig {
+	cfg = cfg.Fill()
 	if _, err := exec.LookPath("nginx"); err != nil {
 		return nil
 	}
-	cfgPath := "/etc/nginx/nginx.conf"
+	cfgPath := orDefault(cfg.NginxConf, "/etc/nginx/nginx.conf")
 	if _, err := os.Stat(cfgPath); err != nil {
 		return nil
 	}
@@ -442,11 +485,11 @@ func collectNginx(cfg *Config) *NginxConfig {
 		Present:    true,
 		ConfigFile: cfgPath,
 	}
-	// Validate: nginx -t
-	if _, err := runOutput(configExecTimeout, "nginx", "-t"); err == nil {
+	// Validate: nginx -t — capture output on failure (see HAProxyConfig).
+	if out, err := runOutput(configExecTimeout, "nginx", "-t"); err == nil {
 		n.ConfigValid = true
 	} else {
-		n.ConfigValid = false
+		n.ConfigError = capConfigError(out)
 	}
 	// Version: nginx -v (writes to stderr)
 	if out, err := runOutput(configExecTimeout, "nginx", "-v"); err == nil {
@@ -768,6 +811,17 @@ func isSelfSigned(path string) bool {
 }
 
 // runOutput runs a command with a timeout and returns its combined output.
+// capConfigError bounds a validator's output for the facts channel: keep the
+// head (systemd/haproxy/nginx print the decisive error first) and mark the
+// truncation so the operator knows there is more in the log.
+func capConfigError(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= 2048 {
+		return s
+	}
+	return s[:2048] + " …(truncated)"
+}
+
 func runOutput(timeout time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

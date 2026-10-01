@@ -88,6 +88,59 @@ func TestParseUnitListEmpty(t *testing.T) {
 // TestParseUnitShowLastExitCode is the regression test for the property
 // collision: RestartForceExitStatus is a restart-trigger list, not the
 // observed exit status, and must never populate LastExitCode.
+func TestParseUnitShow(t *testing.T) {
+	f := parseUnitShow("myapp", strings.Join([]string{
+		"Type=simple",
+		"ActiveState=active",
+		"SubState=running",
+		"UnitFileState=enabled",
+		"Restart=on-failure",
+		"ExecMainStatus=137",
+		"Result=signal",
+		"Description=My background job",
+		"MainPID=4242",
+		"FragmentPath=/etc/systemd/system/myapp.service",
+		"ExecMainStartTimestamp=Wed 2026-10-01 12:00:00 UTC",
+	}, "\n"))
+	if f.Result != "signal" {
+		t.Errorf("Result = %q, want signal", f.Result)
+	}
+	if f.LastExitCode != 137 {
+		t.Errorf("LastExitCode = %d, want 137", f.LastExitCode)
+	}
+	if f.Description != "My background job" {
+		t.Errorf("Description = %q", f.Description)
+	}
+	if f.MainPID != 4242 {
+		t.Errorf("MainPID = %d, want 4242", f.MainPID)
+	}
+	if f.FragmentPath != "/etc/systemd/system/myapp.service" {
+		t.Errorf("FragmentPath = %q", f.FragmentPath)
+	}
+	if f.ExecMainStartTimestamp != "Wed 2026-10-01 12:00:00 UTC" {
+		t.Errorf("ExecMainStartTimestamp = %q", f.ExecMainStartTimestamp)
+	}
+}
+
+func TestParseUnitShowNeverRanTimestamp(t *testing.T) {
+	// systemd's never-run sentinel must not surface as a real start time.
+	f := parseUnitShow("idle", "ExecMainStartTimestamp=Mon 1970-01-01 00:00:00 UTC")
+	if f.ExecMainStartTimestamp != "" {
+		t.Errorf("ExecMainStartTimestamp = %q, want empty for never-run", f.ExecMainStartTimestamp)
+	}
+}
+
+func TestCapConfigError(t *testing.T) {
+	if got := capConfigError("  line1\nline2 "); got != "line1\nline2" {
+		t.Errorf("trim: %q", got)
+	}
+	long := strings.Repeat("x", 3000)
+	got := capConfigError(long)
+	if len(got) <= 2048 || !strings.Contains(got, "truncated") {
+		t.Errorf("cap: len=%d tail=%q", len(got), got[len(got)-20:])
+	}
+}
+
 func TestParseUnitShowLastExitCode(t *testing.T) {
 	f := parseUnitShow("myapp", strings.Join([]string{
 		"Type=simple",
