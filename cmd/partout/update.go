@@ -164,7 +164,6 @@ Flags:
 			fmt.Printf("partout update: latest %s on github.com/%s\n", target, *ghRepo)
 		}
 	}
-	target = strings.TrimPrefix(target, "v")
 	fmt.Printf("partout update: server at %s, target %s\n", cur.Version, target)
 
 	serverAtTarget := cur.Version == target
@@ -447,7 +446,7 @@ func resolveArtifacts(client *http.Client, repo, fromFile, shaPin, ghRepo, versi
 			}
 		}
 		agtFile, agtSig, agtSHA = fetchArtifact(client, repo, version, arch, "agent")
-		return "", "", "", agtFile, agtSHA, agtSig, false, verifyArtifact(version, arch, "agent", agtFile, agtSHA, agtSig)
+		return srvFile, srvSHA, srvSig, agtFile, agtSHA, agtSig, false, verifyArtifact(version, arch, "agent", agtFile, agtSHA, agtSig)
 	}
 	// Unsigned beta flow: one binary serves both roles.
 	switch {
