@@ -80,9 +80,14 @@ func SelectBackend(facts map[string]string) Backend {
 
 type aptBackend struct{}
 
-// aptInstRe matches `apt-get upgrade -s` install lines:
+// aptInstRe matches `apt-get upgrade -s` install lines (apt 2.6/2.7):
 // "Inst name:arch (old, ...) -> (new, ...)"
 var aptInstRe = regexp.MustCompile(`Inst\s+(\S+?):(\S+)\s+\(([^,]+),[^)]*\)\s*->\s*\(([^,]+),`)
+
+// aptInstBrkRe matches the same lines as printed by apt 2.8+ (Ubuntu 24.04):
+// "Inst name [old_ver] (new_ver repo [arch])" — no arrow, old version in
+// square brackets, arch (if any) at the end of the candidate tuple.
+var aptInstBrkRe = regexp.MustCompile(`^Inst\s+(\S+)\s+\[([^\]]+)\]\s+\((\S+)(?:\s|$)`)
 
 func (a *aptBackend) List(ctx context.Context) ([]PkgUpdate, error) {
 	out, err := run(ctx, time.Minute, "apt-get", "-o", "Dpkg::Progress-Focus=full", "-s", "upgrade")
@@ -137,16 +142,23 @@ func parseAptUpgrade(out string) []PkgUpdate {
 		if !strings.HasPrefix(line, "Inst ") {
 			continue
 		}
-		// Example: Inst python3.12:amd64 (3.12.3-1ubuntu0.5, auto, ubuntu) -> (3.12.3-1ubuntu0.6, auto, ubuntu)
-		m := aptInstRe.FindStringSubmatch(line)
-		if len(m) < 5 {
+		// Two formats across apt versions (see the regexes above): the arrow
+		// form and the apt 2.8+ bracket form.
+		if m := aptInstRe.FindStringSubmatch(line); len(m) >= 5 {
+			updates = append(updates, PkgUpdate{
+				Name:      m[1],
+				Installed: m[3],
+				Available: m[4],
+			})
 			continue
 		}
-		updates = append(updates, PkgUpdate{
-			Name:      m[1],
-			Installed: m[3],
-			Available: m[4],
-		})
+		if m := aptInstBrkRe.FindStringSubmatch(line); len(m) >= 4 {
+			updates = append(updates, PkgUpdate{
+				Name:      strings.SplitN(m[1], ":", 2)[0],
+				Installed: m[2],
+				Available: m[3],
+			})
+		}
 	}
 	return updates
 }

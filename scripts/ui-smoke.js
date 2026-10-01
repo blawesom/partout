@@ -264,6 +264,30 @@ async function main() {
   await visit("#/updates", 1800);
   check("updates renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Updates"));
   check("updates: apply button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Apply")), "no Apply button");
+  // Stage 1: real selection — header checkbox + Sel. all / Sel. security
+  // buttons replace the hand-typed package list as the primary path.
+  const updTable = [...d.querySelectorAll("table.tbl")].find((t) => t.querySelector("th") && t.querySelector("th").nextElementSibling && t.querySelector("th").nextElementSibling.textContent === "Package");
+  const selAllBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "Sel. all");
+  const selSecBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "Sel. security");
+  check("updates: selection controls (Sel. all / Sel. security)", !!updTable && !!selAllBtn && !!selSecBtn, "selection controls missing");
+  const rowChecks0 = updTable ? [...updTable.querySelectorAll("tbody tr td input[type=checkbox]")] : [];
+  // The agent's package backend is selected from the host.distro FACT, which
+  // lands a moment after enrollment on a fresh server; until then the list
+  // is legitimately empty (noop backend). Poll briefly for real rows so the
+  // interaction checks run where data exists.
+  let rowChecks = rowChecks0;
+  for (let i = 0; i < 15 && !rowChecks.length; i++) {
+    await sleep(1000);
+    if (w.__partout) { await w.__partout.loadUpdates(); }
+    rowChecks = updTable ? [...updTable.querySelectorAll("tbody tr td input[type=checkbox]")] : [];
+  }
+  if (rowChecks.length) {
+    rowChecks[0].click();
+    check("updates: row checkbox toggles model", Object.keys(w.__partout.pkgChecked).length === 1, "pkgChecked not updated on row click");
+    selAllBtn.click();
+    check("updates: Sel. all checks every row", Object.keys(w.__partout.pkgChecked).length === rowChecks.length, "Sel. all did not check all rows");
+    selSecBtn.click(); // leave a deterministic state for later checks
+  }
   check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
   check("updates: EOL data status + refresh", d.body.textContent.includes("EOL data:") && [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Refresh EOL data")), "ext-data controls missing");
   check("updates: EOL status has data-tip", !!d.querySelector(".ext-status[data-tip]"), "no data-tip on ext-status");
@@ -282,6 +306,13 @@ async function main() {
       if (w.__partout) scanned = (w.__partout.security || []).length > 0;
     }
     check("updates: security scan produced a host row", scanned, "no scan row after 90s");
+    // Stage 2: fleet patching — "Patch all security" is always present for
+    // operators (disabled without findings); per-host "Patch" appears when
+    // a host actually has CVE findings.
+    check("updates: Patch all security button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Patch all security")), "Patch all security missing");
+    const findings = (w.__partout.security || []).some((s) => (s.findings || []).length);
+    const patchBtns = [...d.querySelectorAll("button")].filter((b) => b.textContent.trim() === "Patch");
+    check("updates: per-host Patch buttons match findings", findings ? patchBtns.length >= 1 : patchBtns.length === 0, findings ? "expected per-host Patch buttons" : "unexpected Patch buttons");
   }
   // M8.1 release store: upload a signed release via the API, then show the
   // Releases tab.

@@ -938,7 +938,9 @@
             </span>
             <button v-if="isAdmin" class="btn sm" :disabled="!!extBusy" @click="refreshExtData"><span v-if="extBusy" class="spin"></span> Refresh EOL data</button>
             <div class="spacer"></div>
-            <input v-model="pkgSel" class="mono" placeholder="packages (comma-separated, blank = all)" style="flex:1;max-width:340px" />
+            <button class="btn sm" :disabled="!updates.length" @click="setPkgChecks(updates.map(u=>u.name))" title="Check every pending update">Sel. all</button>
+            <button class="btn sm" :disabled="!updates.length" @click="setPkgChecks(updates.filter(u=>u.is_security).map(u=>u.name))" title="Check only the updates flagged security">Sel. security</button>
+            <input v-model="pkgSel" class="mono" placeholder="or type packages (blank = all; checked rows win)" style="flex:1;max-width:340px" />
             <label class="lbl" style="margin:0;display:flex;align-items:center;gap:4px"><input type="checkbox" v-model="pkgDryRun" /> dry run</label>
             <button class="btn primary sm" :disabled="!isOperator || !updHost || !!pkgBusy" @click="applyUpdates">
               <span v-if="pkgBusy" class="spin"></span> Apply
@@ -947,9 +949,10 @@
           <div v-if="pkgMsg" class="info-box" style="margin-bottom:12px">{{ pkgMsg }}</div>
           <div class="card">
             <table class="tbl">
-              <thead><tr><th>Package</th><th>Installed</th><th>Available</th><th>Vulns</th></tr></thead>
+              <thead><tr><th style="width:30px" title="Select all pending updates"><input type="checkbox" :checked="updates.length>0 && updates.every(u=>pkgChecked[u.name])" @change="setPkgChecks($event.target.checked ? updates.map(u=>u.name) : [])" /></th><th>Package</th><th>Installed</th><th>Available</th><th>Vulns</th></tr></thead>
               <tbody>
                 <tr v-for="(u,i) in updates" :key="u.name || i">
+                  <td><input type="checkbox" :checked="!!pkgChecked[u.name]" @change="togglePkgCheck(u.name, $event.target.checked)" :aria-label="'select ' + u.name" /></td>
                   <td class="mono">{{ u.name }}</td>
                   <td class="mono">{{ u.installed || '—' }}</td>
                   <td class="mono">{{ u.available || '—' }}</td>
@@ -959,7 +962,7 @@
                     <span v-if="!u.is_security && !u.vuln_count" class="muted">—</span>
                   </td>
                 </tr>
-                <tr v-if="!updates.length"><td colspan="4"><div class="empty">No pending updates (or no host selected).</div></td></tr>
+                <tr v-if="!updates.length"><td colspan="5"><div class="empty">No pending updates (or no host selected).</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -986,9 +989,10 @@
             <div class="head"><h2>Security — unpatched CVEs (fleet)</h2><div class="spacer"></div>
               <span class="muted small">server-side scan: per-host update list + OSV correlation (M5.1)</span>
               <button v-if="isAdmin" class="btn sm" :disabled="!!secBusy" @click="scanSecurity"><span v-if="secBusy" class="spin"></span> Scan now</button>
+              <button v-if="isOperator" class="btn primary sm" :disabled="!!secPatchBusy || !secPatchTargets().length" :data-tip="'Patch the CVE-affected packages on every host with findings (dry-run first, policy-gated)'" @click="patchAllSecurity"><span v-if="secPatchBusy" class="spin"></span> Patch all security</button>
             </div>
             <table class="tbl">
-              <thead><tr><th>Host</th><th>Last scan</th><th>Updates</th><th>Security</th><th>Top findings (patchable via Apply above)</th></tr></thead>
+              <thead><tr><th>Host</th><th>Last scan</th><th>Updates</th><th>Security</th><th>Top findings (patchable via Apply above)</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="s in security" :key="s.agent_id">
                   <td class="mono">{{ hostNameById(s.agent_id) }}</td>
@@ -1007,8 +1011,9 @@
                     </div>
                     <span v-if="!(s.findings || []).length" class="muted">no known CVEs on installed packages</span>
                   </td>
+                  <td style="white-space:nowrap"><button v-if="(s.findings || []).length && isOperator" class="btn ok sm" :data-tip="'Patch ' + (s.findings || []).length + ' CVE-affected package(s) on this host'" @click="patchHostSecurity(s)">Patch</button></td>
                 </tr>
-                <tr v-if="!security.length && !pageLoading"><td colspan="5"><div class="empty">No host scanned yet — the scan runs automatically (PARTOUT_SECURITY_SCAN_S, default 6 h) or press “Scan now”.</div></td></tr>
+                <tr v-if="!security.length && !pageLoading"><td colspan="6"><div class="empty">No host scanned yet — the scan runs automatically (PARTOUT_SECURITY_SCAN_S, default 6 h) or press “Scan now”.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1686,7 +1691,7 @@
         updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
-        pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null,
+        pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null, pkgChecked: {},
         tasks: [], playbooks: [], updates: [],
         secrets: [], policies: [], users: [], presetStatus: null,
         secretForm: { name: "", value: "", selector: "all" }, secretBusy: false,
@@ -1702,7 +1707,7 @@
         taskFormOpen: false, taskCreateBusy: false, taskForm: { name: "", description: "", steps: [] },
         mcpInfo: null, mcpClients: [],
         extStatus: null, extBusy: false,
-        security: [], secBusy: false,
+        security: [], secBusy: false, secPatchBusy: false,
         services: [], svcLabel: "", svcState: "", svcHost: "", svcName: "",
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
@@ -2383,6 +2388,7 @@
         // fleet-wide endpoint. Default to the first host when none is chosen.
         if (!this.updHost && this.hosts.length) this.updHost = this.hosts[0].id;
         if (!this.updHost) { this.updates = []; return; }
+        this.pkgChecked = {}; // row selections are per-host; a host switch or refresh starts clean
         try { const d = await this.api("/packages/updates?agent_id=" + encodeURIComponent(this.updHost)); this.updates = d.items || d || []; } catch (e) { this.updates = []; }
         this.loadSecurity();
       },
@@ -2665,10 +2671,18 @@
         try { this.pkgActionDetail = await this.api("/packages/actions/" + encodeURIComponent(id)); }
         catch (e) { this.pkgActionDetail = null; }
       },
+      setPkgChecks(names) { const m = {}; for (const n of names) m[n] = true; this.pkgChecked = m; },
+      togglePkgCheck(name, on) { const m = { ...this.pkgChecked }; if (on) m[name] = true; else delete m[name]; this.pkgChecked = m; },
       async applyUpdates() {
         if (!this.updHost) return;
-        const pkgs = this.pkgSel.split(/,\s*/).map(s => s.trim()).filter(Boolean);
-        const scope = pkgs.length ? pkgs.join(", ") : "ALL pending updates";
+        const checked = Object.keys(this.pkgChecked);
+        const typed = this.pkgSel.split(/,\s*/).map(s => s.trim()).filter(Boolean);
+        const pkgs = checked.length ? checked : typed;
+        let scope;
+        if (pkgs.length) {
+          scope = (checked.length ? checked.length + " checked package(s)" : typed.length + " package(s)");
+          if (pkgs.length <= 5) scope += ": " + pkgs.join(", ");
+        } else scope = "ALL pending updates";
         const verb = this.pkgDryRun ? "Dry-run" : "Apply";
         if (!await this.askConfirm({ title: this.pkgDryRun ? "Dry-run apply" : "Apply updates", body: scope + " on " + this.updHost + ". " + (this.pkgDryRun ? "Dry run only — no packages are installed." : "A dry-run is always executed first; the action is policy-gated (pkg.apply)."), confirmLabel: this.pkgDryRun ? "Dry-run" : "Apply", variant: this.pkgDryRun ? "primary" : "danger" })) return;
         this.pkgBusy = true; this.pkgMsg = "";
@@ -2681,6 +2695,54 @@
           }
           this.loadPkgActions();
         } catch (e) { this.pkgMsg = "Apply failed: " + e.message; } finally { this.pkgBusy = false; }
+      },
+      // --- Security patching (fan-out apply over CVE findings) ---
+      // Hosts with findings, mapped to {agent_id, packages} targets: the
+      // CVE-affected packages per host (deduped).
+      secPatchTargets() {
+        return (this.security || [])
+          .filter(s => (s.findings || []).length)
+          .map(s => ({ agent_id: s.agent_id, host: this.hostNameById(s.agent_id), packages: [...new Set((s.findings || []).map(f => f.pkg))] }));
+      },
+      async patchHostSecurity(s) {
+        if ((s.findings || []).length) await this.patchSecurityTargets([s], "Patch security updates on " + this.hostNameById(s.agent_id));
+      },
+      async patchAllSecurity() {
+        await this.patchSecurityTargets(this.security.filter(s => (s.findings || []).length), "Patch security updates on ALL hosts with findings");
+      },
+      async patchSecurityTargets(hosts, title) {
+        const targets = hosts
+          .filter(s => (s.findings || []).length)
+          .map(s => ({ agent_id: s.agent_id, host: this.hostNameById(s.agent_id), packages: [...new Set((s.findings || []).map(f => f.pkg))] }));
+        if (!targets.length) return;
+        const detail = targets.map(t => t.host + ": " + t.packages.join(", ")).join(" · ");
+        const body = "Applies the CVE-affected packages below (dry-run first; policy-gated per host, can park on approval). " + (detail.length > 400 ? detail.slice(0, 397) + "…" : detail);
+        if (!await this.askConfirm({ title, body, confirmLabel: "Patch", variant: "danger" })) return;
+        this.secPatchBusy = true; this.pkgMsg = "";
+        try {
+          const d = await this.api("/packages/apply", { method: "POST", body: { targets: targets.map(t => ({ agent_id: t.agent_id, packages: t.packages })), dry_run: false } });
+          // Single target → legacy single result; multi → {results, summary}.
+          const results = d.results || [d];
+          const appr = results.filter(r => r.state === "approval_required");
+          const errs = results.filter(r => r.state === "error");
+          const done = results.filter(r => r.state === "ok" || r.state === undefined);
+          let msg;
+          if (results.length === 1) {
+            const r = results[0];
+            if (r.state === "approval_required") msg = "Parked on approval " + (r.approval_id || "") + " — an admin must approve it (Approvals page).";
+            else if (r.status && r.status !== "succeeded") msg = "Patch failed on " + (r.agent_id || "") + ": " + (r.error || r.status);
+            else msg = "Patch dispatched (action " + (r.id || "") + ", status " + (r.status || "") + ").";
+          } else {
+            msg = results.length + " host(s): " + done.length + " dispatched, " + appr.length + " parked on approval";
+            if (errs.length) msg += ", " + errs.length + " failed (" + errs.map(e => this.hostNameById(e.agent_id) + ": " + firstLine(e.error)).join("; ") + ")";
+            msg += ".";
+          }
+          msg += " Run “Scan now” to refresh the findings.";
+          this.pkgMsg = msg;
+          if (errs.length) this.notify("err", "patch: " + errs.length + " of " + results.length + " host(s) failed", 10000);
+          else this.notify("ok", "patch: " + results.length + " host(s) " + (appr.length ? "— " + appr.length + " awaiting approval" : "dispatched"), 8000);
+          this.loadPkgActions();
+        } catch (e) { this.pkgMsg = "Patch failed: " + e.message; } finally { this.secPatchBusy = false; }
       },
       // --- jobs: CRUD (M3) ---
       async newJobForm() {

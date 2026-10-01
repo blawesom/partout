@@ -71,6 +71,32 @@ Inst python3.12:amd64 (3.12.3-1, auto, ubuntu) -> (3.12.3-1ubuntu0.5, auto, ubun
 	}
 }
 
+// TestParseAptUpgradeApt28 covers the bracket format printed by apt 2.8+
+// (Ubuntu 24.04): "Inst name [old] (new repo [arch])" — no arrow. Without
+// this, the pending-updates list (and the CVE scan built on it) is empty on
+// current Ubuntu hosts even with upgrades available.
+func TestParseAptUpgradeApt28(t *testing.T) {
+	out := `
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+9 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Inst libaudit-common [1:3.1.2-2.1build1.1] (1:3.1.2-2.1ubuntu0.1 Ubuntu:24.04/noble-updates [all])
+Inst libaudit1 [1:3.1.2-2.1build1.1] (1:3.1.2-2.1ubuntu0.1 Ubuntu:24.04/noble-updates [amd64])
+Inst containerd.io [2.3.5-1~ubuntu.24.04~noble] (2.3.6-1~ubuntu.24.04~noble Docker CE:noble [amd64])
+`
+	got := parseAptUpgrade(out)
+	if len(got) != 3 {
+		t.Fatalf("got %d packages, want 3: %+v", len(got), got)
+	}
+	if got[0].Name != "libaudit-common" || got[0].Installed != "1:3.1.2-2.1build1.1" || got[0].Available != "1:3.1.2-2.1ubuntu0.1" {
+		t.Errorf("bad parse: %+v", got[0])
+	}
+	if got[2].Name != "containerd.io" || got[2].Available != "2.3.6-1~ubuntu.24.04~noble" {
+		t.Errorf("bad parse: %+v", got[2])
+	}
+}
+
 // TestParseDpkgQuery verifies parsing of `dpkg-query -W` output.
 func TestParseDpkgQuery(t *testing.T) {
 	b := []byte("bash\t5.2.15-2ubuntu1\tinstalled\n" +
