@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/blawesom/partout/internal/agent/elevate"
+	"github.com/blawesom/partout/internal/agent/fs"
 	pb "github.com/blawesom/partout/internal/proto"
 )
 
@@ -22,6 +23,9 @@ import (
 type Executor struct {
 	mu    sync.RWMutex
 	facts map[string]string
+	// fileRoot confines file/template steps to the file root
+	// (docs/spec-file-root.md). Empty = file steps fail closed.
+	fileRoot string
 	// elevate is the host-level elevation policy (PRD Decision 3 slice):
 	// sudo mode runs mutating step commands through `sudo -n`.
 	elevate elevate.Mode
@@ -114,6 +118,20 @@ func defaultReboot(m elevate.Mode) error {
 		}
 	}
 	return fmt.Errorf("reboot command failed (agent needs reboot permission, e.g. run as root or grant sudo/polkit): %v", lastErr)
+}
+
+// SetFileRoot installs the file root for file/template steps (no-op with an
+// empty root: those steps then fail closed).
+func (e *Executor) SetFileRoot(root string) {
+	e.mu.Lock()
+	e.fileRoot = root
+	e.mu.Unlock()
+}
+
+func (e *Executor) getFileRoot() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.fileRoot
 }
 
 // SetFacts installs the live fact map (updated on each facts batch).
@@ -211,11 +229,12 @@ func (e *Executor) doCommand(ctx context.Context, step *pb.TaskStep) (string, st
 	return StateOK, truncate(string(out), 500)
 }
 
-// doFile ensures content (idempotent).
+// doFile ensures content (idempotent). Paths are root-relative against the
+// file root; escapes fail closed (docs/spec-file-root.md).
 func (e *Executor) doFile(step *pb.TaskStep) (string, string) {
-	path := step.GetPath()
-	if path == "" {
-		return StateFailed, "empty path"
+	path, err := fs.ResolvePath(e.getFileRoot(), step.GetPath())
+	if err != nil {
+		return StateFailed, "file path: " + err.Error()
 	}
 	content := step.GetContent()
 	if content == "" {
@@ -362,11 +381,12 @@ func (e *Executor) doGroup(step *pb.TaskStep) (string, string) {
 	return StateChanged, "created group"
 }
 
-// doTemplate renders a Go template and writes to file (idempotent).
+// doTemplate renders a Go template and writes to file (idempotent). Paths
+// are root-relative against the file root; escapes fail closed.
 func (e *Executor) doTemplate(ctx context.Context, step *pb.TaskStep) (string, string) {
-	path := step.GetPath()
-	if path == "" {
-		return StateFailed, "empty template path"
+	path, err := fs.ResolvePath(e.getFileRoot(), step.GetPath())
+	if err != nil {
+		return StateFailed, "template path: " + err.Error()
 	}
 	src := step.GetTemplate()
 	if src == "" {

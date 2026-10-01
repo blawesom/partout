@@ -71,7 +71,8 @@ same control plane over REST.
 ## Web UI
 
 A buildless Vue 3 SPA, served same-origin (no CDN, no build step). Fleet + health cards, live
-command execution, an xterm.js terminal, files browser, jobs/tasks/updates, secrets, policies,
+command execution, an xterm.js terminal, files browser (jailed to the host's file root,
+default `/home/partout`), jobs/tasks/updates, secrets, policies,
 approvals, provisioning, users, and the Observe pages (Services, Certificates, Configs, Alerts).
 
 | | |

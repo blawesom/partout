@@ -2,14 +2,22 @@
 // stat, list, chunked download, atomic upload, compare-and-swap edit, and
 // permission changes.
 //
-// Path safety (PRD §7 "Path safety", D4 strict):
+// File root (docs/spec-file-root.md): every path is root-relative and
+// resolved against the file root (default /home/partout). The root gates
+// WHERE operations can happen; role/policy gate WHAT. No caller — no role,
+// flag, or parameter — can reach a path outside the root through this
+// package. Outside-the-root file work is a command, not a file op.
 //
-//   - Every path must be absolute.
+// Path safety (PRD §7 "Path safety", D4 strict + the file root):
+//
+//   - No `..` component survives cleaning (traversal is rejected).
 //   - No path component (including the final one) may be a symlink; any
 //     symlink anywhere in the path is rejected. This prevents symlink
 //     traversal across the transfer boundary (a maliciously placed link
-//     cannot redirect a transfer outside its apparent location).
+//     cannot redirect a transfer outside its apparent location) — including
+//     symlinks that would escape the root.
 //   - Intermediate components must exist and be real directories.
+//   - The fully resolved path is re-checked to be under the canonical root.
 //
 // Transfers are bounded: DefaultMaxTransfer (256 MiB) caps uploads and the
 // per-chunk size is DefaultMaxChunk (256 KiB) (D3, env-configurable upstream).
@@ -32,6 +40,115 @@ import (
 	"syscall"
 	"time"
 )
+
+// DefaultFileRoot is the hardcoded default file root. It is deliberately a
+// fixed path, NOT derived from the agent user's home directory: on the
+// standard server/embedded install that home is /var/lib/partout, which
+// contains the database, the root CA, and the server identity — a
+// home-derived default would expose that state to the file surface.
+const DefaultFileRoot = "/home/partout"
+
+// ErrRootUnavailable is returned when the file root is missing/unusable: the
+// file surface is disabled (fail closed). The agent maps it to code 503.
+var ErrRootUnavailable = errors.New("fs: file root unavailable")
+
+// PrepareFileRoot canonicalizes the file root: applies the default, resolves
+// symlinks in the parent chain, verifies the root is a real directory (no
+// symlink), and creates it (0750) when missing. The returned path is the
+// canonical root used for containment checks.
+func PrepareFileRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		root = DefaultFileRoot
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("fs: file root: %w", err)
+	}
+	info, err := os.Lstat(abs)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("fs: file root %s: symlink not allowed", abs)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("fs: file root %s: not a directory", abs)
+		}
+		canonical, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			return "", fmt.Errorf("fs: file root %s: %w", abs, err)
+		}
+		return canonical, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("fs: file root %s: %w", abs, err)
+	}
+	if err := os.MkdirAll(abs, 0o750); err != nil {
+		return "", fmt.Errorf("fs: create file root %s: %w", abs, err)
+	}
+	info, err = os.Lstat(abs)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("fs: file root %s: not a directory after create", abs)
+	}
+	return abs, nil
+}
+
+// ResolvePath resolves a root-relative path against the canonical file root
+// and returns the absolute path. It implements the spec-file-root
+// resolution algorithm:
+//
+//  1. empty path = the root itself (allowed for stat/list);
+//  2. Clean; reject any surviving `..` (traversal);
+//  3. join onto the root and require the result to stay under it;
+//  4. walk each existing component (Lstat): no symlink anywhere,
+//     intermediate components must be real directories, the final component
+//     may be missing (upload target) but must not be a symlink if present;
+//  5. final containment re-check (defense in depth).
+//
+// A nil/empty root is always an error (fail closed).
+func ResolvePath(root, path string) (string, error) {
+	if root == "" {
+		return "", ErrRootUnavailable
+	}
+	rel := strings.TrimPrefix(path, "/")
+	rel = filepath.Clean(rel)
+	switch rel {
+	case ".", "":
+		return root, nil // the root itself
+	case "..":
+		return "", fmt.Errorf("%w: path traversal", ErrBadPath)
+	}
+	if strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: path traversal", ErrBadPath)
+	}
+	full := filepath.Join(root, rel)
+	if r, err := filepath.Rel(root, full); err == nil && (r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator))) {
+		return "", fmt.Errorf("%w: path escapes file root", ErrBadPath)
+	}
+	// Walk the components exactly as before (Lstat each; no symlink
+	// components; real intermediate directories).
+	parts := strings.Split(rel, string(filepath.Separator))
+	prefix := root
+	for i, p := range parts {
+		prefix = filepath.Join(prefix, p)
+		isFinal := i == len(parts)-1
+		info, err := os.Lstat(prefix)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if isFinal {
+					return full, nil // target may not exist yet (upload)
+				}
+				return "", fmt.Errorf("%w: missing intermediate directory", ErrBadPath)
+			}
+			return "", fmt.Errorf("fs: %s: %w", prefix, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%w: symlink not allowed in path: %s", ErrBadPath, p)
+		}
+		if !isFinal && !info.IsDir() {
+			return "", fmt.Errorf("%w: not a directory: %s", ErrBadPath, p)
+		}
+	}
+	return full, nil
+}
 
 // Proposed defaults (D3), env-configurable via the server.
 const (
@@ -76,6 +193,9 @@ func (c Config) Filled() Config { return c.fill() }
 // component, and requires intermediate components to be real directories.
 // The final component may be missing (an upload target) but must not be a
 // symlink if it exists.
+//
+// Deprecated: kept for the few non-file-surface callers (tests, tooling).
+// The file surface uses ResolvePath (file root). New code must take a root.
 func SafePath(path string) (string, error) {
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("%w: path must be absolute", ErrBadPath)
@@ -122,11 +242,10 @@ type Stat struct {
 	IsSymlink bool
 }
 
-// StatPath returns file metadata for path. Symlinks are rejected (consistent
-// with SafePath): callers pass already-validated paths, but this is a direct
-// entry point so it re-checks.
-func StatPath(path string) (*Stat, error) {
-	clean, err := SafePath(path)
+// StatPath returns file metadata for path (root-relative; the file root
+// gates where). Symlinks are rejected (consistent with ResolvePath).
+func StatPath(root, path string) (*Stat, error) {
+	clean, err := ResolvePath(root, path)
 	if err != nil {
 		return nil, err
 	}
@@ -175,9 +294,9 @@ type Entry struct {
 
 // List returns up to cfg.MaxListEntries directory entries (sorted by name,
 // as ReadDir provides). truncated is true when the directory holds more.
-func List(dir string, cfg Config) ([]Entry, bool, error) {
+func List(root, dir string, cfg Config) ([]Entry, bool, error) {
 	cfg = cfg.fill()
-	clean, err := SafePath(dir)
+	clean, err := ResolvePath(root, dir)
 	if err != nil {
 		return nil, false, err
 	}
@@ -216,9 +335,9 @@ func List(dir string, cfg Config) ([]Entry, bool, error) {
 
 // DownloadAt reads up to cfg.MaxChunk bytes of path starting at offset.
 // done is true when there is no more data after this chunk.
-func DownloadAt(path string, offset int64, cfg Config) ([]byte, int64, bool, error) {
+func DownloadAt(root, path string, offset int64, cfg Config) ([]byte, int64, bool, error) {
 	cfg = cfg.fill()
-	clean, err := SafePath(path)
+	clean, err := ResolvePath(root, path)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -260,7 +379,7 @@ func DownloadAt(path string, offset int64, cfg Config) ([]byte, int64, bool, err
 // UploadBegin creates the upload temp file (same directory as the target, so
 // the commit rename is atomic on the same filesystem). It enforces the
 // transfer size cap up front. Returns the absolute temp path.
-func UploadBegin(target string, totalSize int64, cfg Config) (string, error) {
+func UploadBegin(root, target string, totalSize int64, cfg Config) (string, error) {
 	cfg = cfg.fill()
 	if totalSize < 0 {
 		return "", fmt.Errorf("fs: negative size %d", totalSize)
@@ -268,7 +387,7 @@ func UploadBegin(target string, totalSize int64, cfg Config) (string, error) {
 	if totalSize > cfg.MaxTransfer {
 		return "", fmt.Errorf("%w: transfer size %d exceeds cap %d", ErrCapExceeded, totalSize, cfg.MaxTransfer)
 	}
-	clean, err := SafePath(target)
+	clean, err := ResolvePath(root, target)
 	if err != nil {
 		return "", err
 	}
@@ -318,11 +437,11 @@ func UploadChunk(tempPath string, offset int64, data []byte, cfg Config) (int64,
 // UploadCommit verifies the total size, applies the requested mode, and
 // atomically renames the temp over the target. Returns the sha256 of the
 // committed file.
-func UploadCommit(tempPath, target, mode string, totalSize int64) (string, error) {
+func UploadCommit(root, tempPath, target, mode string, totalSize int64) (string, error) {
 	if err := checkTemp(tempPath); err != nil {
 		return "", err
 	}
-	cleanTarget, err := SafePath(target)
+	cleanTarget, err := ResolvePath(root, target)
 	if err != nil {
 		_ = os.Remove(tempPath)
 		return "", err
@@ -387,12 +506,12 @@ var ErrCapExceeded = errors.New("fs: size cap exceeded")
 // expected (an empty expected skips the check — but callers always send the
 // observed sha). Content is bounded by cfg.MaxEditSize (small text files).
 // Returns the new sha256.
-func EditCAS(path, expected string, content []byte, cfg Config) (string, error) {
+func EditCAS(root, path, expected string, content []byte, cfg Config) (string, error) {
 	cfg = cfg.fill()
 	if int64(len(content)) > cfg.MaxEditSize {
 		return "", fmt.Errorf("%w: edit content %d bytes exceeds cap %d", ErrCapExceeded, len(content), cfg.MaxEditSize)
 	}
-	clean, err := SafePath(path)
+	clean, err := ResolvePath(root, path)
 	if err != nil {
 		return "", err
 	}
@@ -430,13 +549,18 @@ func EditCAS(path, expected string, content []byte, cfg Config) (string, error) 
 	return hex.EncodeToString(h), nil
 }
 
-// SetPerm applies mode (octal string) and/or owner/group changes to path.
-// At least one of the three must be non-empty.
-func SetPerm(path, mode, owner, group string) error {
-	if mode == "" && owner == "" && group == "" {
+// SetPerm applies a mode change to path (root-relative; the file root gates
+// where). Ownership changes are rejected: inside the file root the agent
+// user owns everything, so mode is all that is needed (the file surface is
+// unprivileged by design — the no-escape invariant, docs/spec-file-root.md).
+func SetPerm(root, path, mode, owner, group string) error {
+	if owner != "" || group != "" {
+		return errors.New("fs: ownership changes are not allowed inside the file root (mode changes only)")
+	}
+	if mode == "" {
 		return errors.New("fs: nothing to change")
 	}
-	clean, err := SafePath(path)
+	clean, err := ResolvePath(root, path)
 	if err != nil {
 		return err
 	}
@@ -447,56 +571,12 @@ func SetPerm(path, mode, owner, group string) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("fs: symlink not allowed: %s", clean)
 	}
-	var m *os.FileMode
-	if mode != "" {
-		parsed, err := parseMode(mode)
-		if err != nil {
-			return err
-		}
-		m = &parsed
+	parsed, err := parseMode(mode)
+	if err != nil {
+		return err
 	}
-	var uid, gid uint32
-	if owner != "" {
-		u, err := user.Lookup(owner)
-		if err != nil {
-			return fmt.Errorf("fs: user %q: %w", owner, err)
-		}
-		uid, err = parseUint(u.Uid)
-		if err != nil {
-			return fmt.Errorf("fs: user %q: %w", owner, err)
-		}
-	}
-	if group != "" {
-		g, err := user.LookupGroup(group)
-		if err != nil {
-			return fmt.Errorf("fs: group %q: %w", group, err)
-		}
-		gid, err = parseUint(g.Gid)
-		if err != nil {
-			return fmt.Errorf("fs: group %q: %w", group, err)
-		}
-	}
-	if m != nil {
-		if err := os.Chmod(clean, *m); err != nil {
-			return fmt.Errorf("fs: chmod: %w", err)
-		}
-	}
-	if owner != "" || group != "" {
-		// chown(2) semantics: Go's os.Chown only changes both, so pass the
-		// current values for the unchanged side.
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			return errors.New("fs: chown unsupported on this platform")
-		}
-		if owner == "" {
-			uid = st.Uid
-		}
-		if group == "" {
-			gid = st.Gid
-		}
-		if err := os.Chown(clean, int(uid), int(gid)); err != nil {
-			return fmt.Errorf("fs: chown: %w", err)
-		}
+	if err := os.Chmod(clean, parsed); err != nil {
+		return fmt.Errorf("fs: chmod: %w", err)
 	}
 	return nil
 }
@@ -519,14 +599,6 @@ func parseMode(s string) (os.FileMode, error) {
 		return 0, fmt.Errorf("fs: bad octal mode %q", s)
 	}
 	return os.FileMode(v), nil
-}
-
-func parseUint(s string) (uint32, error) {
-	v, err := strconv.ParseUint(s, 10, 32)
-	if err != nil {
-		return 0, err
-	}
-	return uint32(v), nil
 }
 
 func hashFile(path string) ([]byte, error) {

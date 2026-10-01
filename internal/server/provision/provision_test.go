@@ -540,6 +540,11 @@ exit 0
 // quoted <<'EOF' heredoc).
 func TestInstallScriptFreshWipe(t *testing.T) {
 	fresh := buildInstallScript("abc123def456", "fullsha", wipeScript("fresh"), "127.0.0.1:8443", "ptok_0123456789abcdef")
+	// The install script must create the file root (spec-file-root):
+	// the file surface is confined to /home/partout on every host.
+	if !strings.Contains(fresh, "mkdir -p /home/partout") || !strings.Contains(fresh, "chown partout:partout /home/partout") {
+		t.Fatalf("install script missing file root setup:\n%s", fresh)
+	}
 	if !strings.Contains(fresh, "rm -rf /var/lib/partout/agent") {
 		t.Fatalf("fresh script missing data-dir wipe:\n%s", fresh)
 	}

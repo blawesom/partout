@@ -481,7 +481,7 @@ agent, or embedded — auto-detected from the installed units). It is a
 ```bash
 sudo partout uninstall --dry-run     # preview the exact removal plan
 sudo partout uninstall               # stop + disable units, remove units, env, guard, binary — KEEPS state
-sudo partout uninstall --purge       # + remove state (db, TLS, identity, spool), $HOME/.partout, user `partout`
+sudo partout uninstall --purge       # + remove state (db, TLS, identity, spool), the file root /home/partout, $HOME/.partout, user `partout`
 sudo partout uninstall --keep-binary # leave /usr/local/bin/partout in place (shared operator CLI)
 ```
 
@@ -539,6 +539,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for future output blobs — external data cache is in-DB (`eol_cache`/`vuln_cache`) |
 | `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules |
 | `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning (the listen address `:8443` is not usable by remote agents) |
+| `PARTOUT_REQUIRE_FILE_ROOT` | **false** | (file root, docs/spec-file-root.md) when true, file ops are refused to agents that report no `partout.file_root` fact (legacy/pre file-root agents). For mixed-fleet cutovers: flip on once every agent is upgraded; default off during beta |
 
 RBAC: when no token is set the server runs in **single-user local mode** (no auth);
 hierarchy viewer < operator < admin.
@@ -562,6 +563,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
 | `PARTOUT_AGENT_CLEANUP_ON_REVOKE` | **false** | when the server revokes the agent (host removed from the fleet), also remove the local credential material (`identity.json` + `tls/`) before the clean exit, leaving the machine a clean slate. Destructive, hence opt-in |
 | `PARTOUT_ELEVATE` / `--elevate` | **none** | (PRD Decision 3, host-level slice) `sudo` → the agent runs action commands (dispatched exec, PTY sessions, package apply + metadata refresh, task steps, reboot) through `sudo -n`, and retries root-only config reads (e.g. `haproxy.cfg`) via `sudo -n cat`. What may actually elevate is scoped **entirely by the host's sudoers file** (ship `deploy/sudoers/partout-agent`; fail-closed on anything unlisted); no password is ever prompted (`-n`). Requires `NoNewPrivileges=true` removed from the agent unit (sudo needs setuid). `none` (default) keeps everything unprivileged. Per-command elevation profiles (pattern-scoped, policy-constrained) are the later full Decision 3 implementation — see docs/roadmap.md |
+| `PARTOUT_FILE_ROOT` / `--file-root` | **/home/partout** | file surface root (docs/spec-file-root.md): every file-surface path (stat/list/download/upload/edit/perm, and task `file`/`template` steps) is root-relative and confined to this directory. No role, flag, or parameter can reach outside it through the file surface — outside-the-root work is a command, not a file op. The agent creates the directory (`0750`, owned by `partout`) when missing; an unusable root disables the file surface (fail closed). Reported as the `partout.file_root` fact |
 
 ### 4.3 `partout ctl` — wired
 
@@ -627,6 +629,8 @@ implementation.)
 | `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
 | `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification
 | `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; see §4.2) |
+| `PARTOUT_FILE_ROOT` | /home/partout | file surface root (wired; see §4.2) |
+| `--file-root=…` | — | agent file root (see §4.2) |
 | `--label=k=v`, `--version` | — | flags *proposed* in earlier drafts; not wired |
 
 ### 4.5 All flags (current)
@@ -634,7 +638,7 @@ implementation.)
 `--mode=server|agent|embedded|mcp`, `--port=`, `--db=`, `--data-dir=`, `--server=`,
 `--token=`, `--facts-interval=`, `--admin-token=`, `--operator-token=`,
 `--viewer-token=`, `--admin-password=`, `--tls=on|off`, `--tls-names=…`, `--ca-file=…`,
-`--elevate=none|sudo`.
+`--elevate=none|sudo`, `--file-root=…`.
 For `mcp` mode, `--token` is the caller's bearer token (not an enrollment token).
 Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 

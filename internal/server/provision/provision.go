@@ -527,6 +527,11 @@ id partout >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin partout
 mkdir -p /var/lib/partout/agent
 chown partout:partout /var/lib/partout/agent
 chmod 0750 /var/lib/partout/agent
+# File root (docs/spec-file-root.md): the file surface is confined to this
+# directory; no role or parameter can reach outside it through the file API.
+mkdir -p /home/partout
+chown partout:partout /home/partout
+chmod 0750 /home/partout
 mkdir -p /etc/partout
 umask 077
 cat > /etc/partout/agent.env <<'EOF'

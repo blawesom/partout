@@ -130,6 +130,11 @@ type Agent struct {
 	// fsCfg bounds file operations (D3 defaults; env-configurable later).
 	fsCfg fs.Config
 
+	// fileRoot is the canonical file root (docs/spec-file-root.md): every
+	// file-surface path resolves against it. Empty = file surface disabled
+	// (fail closed).
+	fileRoot string
+
 	// elevate is the host-level elevation policy (PRD Decision 3 slice):
 	// sudo mode runs action commands through `sudo -n`.
 	elevate elevate.Mode
@@ -184,6 +189,17 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		activeRunners: make(map[string]context.CancelFunc),
 		fsCfg:         fs.Config{},
 	}
+	// File root (docs/spec-file-root.md): the file surface is confined to
+	// this directory; no role, flag, or parameter can reach outside it.
+	// Unusable root → file surface disabled (fail closed), other agent
+	// functions unaffected.
+	if fr, err := fs.PrepareFileRoot(cfg.FileRoot); err != nil {
+		lg.Printf("agent: file root unavailable: %v — file surface disabled (fail closed)", err)
+	} else {
+		a.fileRoot = fr
+		lg.Printf("agent: file root: %s (all file operations are confined to this directory)", fr)
+		a.factset["partout.file_root"] = fr
+	}
 	// Elevation (PRD Decision 3, host-level slice). Config is validated at
 	// Load; this cannot fail, but keep the parse explicit.
 	a.elevate, _ = elevate.Parse(cfg.Elevate)
@@ -202,6 +218,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		}
 	}
 	a.taskExec = task.NewExecutor(a.elevate, secLookup)
+	a.taskExec.SetFileRoot(a.fileRoot)
 	a.taskRunner = task.New(a.taskExec)
 	a.jobs = jobs.New(filepath.Join(cfg.DataDir, "jobs"), a.taskExec, func(r *jobs.Report) {
 		a.sendJobResult(r)
@@ -1154,7 +1171,8 @@ func (a *Agent) sendFileOpResult(res *pb.FileOpResult) {
 }
 
 // fileOpError maps an fs error to a stable FileOpResult code: 409 conflict
-// (CAS mismatch), 413 size cap, 400 bad path, 500 other.
+// (CAS mismatch), 413 size cap, 403 path escapes the file root (the server
+// audits this as file.path_escape), 503 file root unavailable, 500 other.
 func fileOpError(op *pb.FileOp, err error) *pb.FileOpResult {
 	code := int32(500)
 	switch {
@@ -1163,7 +1181,9 @@ func fileOpError(op *pb.FileOp, err error) *pb.FileOpResult {
 	case errors.Is(err, fs.ErrCapExceeded):
 		code = 413
 	case errors.Is(err, fs.ErrBadPath):
-		code = 400
+		code = 403
+	case errors.Is(err, fs.ErrRootUnavailable):
+		code = 503
 	}
 	return &pb.FileOpResult{
 		OpId: op.OpId, Kind: op.Kind, Code: code, Error: err.Error(),
@@ -1174,11 +1194,21 @@ func fileOpError(op *pb.FileOp, err error) *pb.FileOpResult {
 // off the envelope loop so a slow transfer cannot starve CANCEL/heartbeat
 // traffic.
 func (a *Agent) execFileOp(op *pb.FileOp) {
+	// Fail closed when the file root is unavailable: no file operation may
+	// proceed without a confinement root (docs/spec-file-root.md).
+	if a.fileRoot == "" {
+		a.sendFileOpResult(&pb.FileOpResult{
+			OpId: op.OpId, Kind: op.Kind, Code: 503,
+			Error: fs.ErrRootUnavailable.Error(),
+		})
+		return
+	}
+	root := a.fileRoot
 	cfg := a.fsCfg.Filled()
 	var res *pb.FileOpResult
 	switch op.Kind {
 	case pb.FileOpKind_FILE_OP_STAT:
-		st, err := fs.StatPath(op.Path)
+		st, err := fs.StatPath(root, op.Path)
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1193,7 +1223,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_LIST:
-		entries, truncated, err := fs.List(op.Path, cfg)
+		entries, truncated, err := fs.List(root, op.Path, cfg)
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1211,7 +1241,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_DOWNLOAD:
-		data, _, done, err := fs.DownloadAt(op.Path, int64(op.Offset), cfg)
+		data, _, done, err := fs.DownloadAt(root, op.Path, int64(op.Offset), cfg)
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1222,7 +1252,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_UPLOAD_BEGIN:
-		temp, err := fs.UploadBegin(op.Path, op.TotalSize, cfg)
+		temp, err := fs.UploadBegin(root, op.Path, op.TotalSize, cfg)
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1244,7 +1274,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_UPLOAD_COMMIT:
-		sha, err := fs.UploadCommit(op.TempPath, op.Path, op.Mode, op.TotalSize)
+		sha, err := fs.UploadCommit(root, op.TempPath, op.Path, op.Mode, op.TotalSize)
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1262,7 +1292,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_EDIT_CAS:
-		newSha, err := fs.EditCAS(op.Path, op.ExpectedSha256, op.Data, cfg)
+		newSha, err := fs.EditCAS(root, op.Path, op.ExpectedSha256, op.Data, cfg)
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1273,7 +1303,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_SET_PERM:
-		if err := fs.SetPerm(op.Path, op.Mode, op.User, op.Group); err != nil {
+		if err := fs.SetPerm(root, op.Path, op.Mode, op.User, op.Group); err != nil {
 			res = fileOpError(op, err)
 		} else {
 			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 0}

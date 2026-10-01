@@ -44,16 +44,30 @@ type Controller struct {
 	// pending (0600 <opid>.part); empty = uploads fail closed on
 	// require_approval (no place to hold the body).
 	stagingDir string
+	// requireFileRoot (PARTOUT_REQUIRE_FILE_ROOT, default false): refuse
+	// file ops to agents without a file_root fact (legacy, pre file-root).
+	requireFileRoot bool
 	// opTimeout bounds one synchronous file op over the stream.
 	opTimeout time.Duration
 }
+
+// ErrLegacyFileSurface is returned when PARTOUT_REQUIRE_FILE_ROOT is set and
+// the target agent reports no file root.
+var ErrLegacyFileSurface = errors.New("files: agent has no file root (legacy agent, pre file-root) — upgrade the agent or set PARTOUT_REQUIRE_FILE_ROOT=false")
 
 // New builds a Controller.
 func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *Controller {
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Controller{st: st, h: h, sse: sseB, log: lg, opTimeout: 30 * time.Second}
+	return &Controller{
+		st:              st,
+		h:               h,
+		sse:             sseB,
+		log:             lg,
+		opTimeout:       30 * time.Second,
+		requireFileRoot: os.Getenv("PARTOUT_REQUIRE_FILE_ROOT") == "true",
+	}
 }
 
 // SetIdentity installs the server's Ed25519 signing key (signs Decisions on
@@ -165,7 +179,7 @@ func (c *Controller) Upload(ctx context.Context, agentID, path string, r io.Read
 	}
 	beginRes, err := c.doSend(ctx, agentID, beginOp)
 	if err != nil {
-		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", 0, 0, "", err.Error())
+		c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", 0, 0, "", err.Error())
 		return "", err
 	}
 	temp := beginRes.TempPath
@@ -188,11 +202,11 @@ func (c *Controller) Upload(ctx context.Context, agentID, path string, r io.Read
 			}
 			chunkRes, err := c.doSend(ctx, agentID, chunkOp)
 			if err != nil {
-				c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
+				c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
 				return "", err
 			}
 			if chunkRes.Code != 0 {
-				c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", chunkRes.Error)
+				c.audit(agentID, fileAuditKind(chunkRes.Code), "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", chunkRes.Error)
 				return "", fmt.Errorf("files: upload chunk: %s (code %d)", chunkRes.Error, chunkRes.Code)
 			}
 			offset += uint64(n)
@@ -201,7 +215,7 @@ func (c *Controller) Upload(ctx context.Context, agentID, path string, r io.Read
 			break
 		}
 		if rerr != nil {
-			c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", rerr.Error())
+			c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", rerr.Error())
 			return "", fmt.Errorf("files: read upload: %w", rerr)
 		}
 	}
@@ -213,15 +227,15 @@ func (c *Controller) Upload(ctx context.Context, agentID, path string, r io.Read
 	}
 	commitRes, err := c.doSend(ctx, agentID, commitOp)
 	if err != nil {
-		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
+		c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
 		return "", err
 	}
 	if commitRes.Code != 0 {
-		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", commitRes.Error)
+		c.audit(agentID, fileAuditKind(commitRes.Code), "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", commitRes.Error)
 		return "", fmt.Errorf("files: upload commit: %s (code %d)", commitRes.Error, commitRes.Code)
 	}
 	committed = true
-	c.audit(agentID, "upload", path, beginOp.OpId, actor, "ok", int64(offset), 0, commitRes.NewSha256, "")
+	c.audit(agentID, fileAuditKind(commitRes.Code), "upload", path, beginOp.OpId, actor, "ok", int64(offset), 0, commitRes.NewSha256, "")
 	return commitRes.NewSha256, nil
 }
 
@@ -245,19 +259,19 @@ func (c *Controller) Edit(ctx context.Context, agentID, path, expectedSHA string
 	}
 	res, err := c.doSend(ctx, agentID, op)
 	if err != nil {
-		c.audit(agentID, "edit", path, op.OpId, actor, "error", int64(len(content)), 0, "", err.Error())
+		c.audit(agentID, "file", "edit", path, op.OpId, actor, "error", int64(len(content)), 0, "", err.Error())
 		return "", err
 	}
 	state := "ok"
 	if res.Code != 0 {
 		state = opStateForCode(res.Code)
-		c.audit(agentID, "edit", path, op.OpId, actor, state, int64(len(content)), 0, "", res.Error)
+		c.audit(agentID, fileAuditKind(res.Code), "edit", path, op.OpId, actor, state, int64(len(content)), 0, "", res.Error)
 		if res.Code == 409 {
 			return "", ErrConflict
 		}
 		return "", fmt.Errorf("files: edit: %s (code %d)", res.Error, res.Code)
 	}
-	c.audit(agentID, "edit", path, op.OpId, actor, state, int64(len(content)), 0, res.NewSha256, "")
+	c.audit(agentID, fileAuditKind(res.Code), "edit", path, op.OpId, actor, state, int64(len(content)), 0, res.NewSha256, "")
 	return res.NewSha256, nil
 }
 
@@ -276,16 +290,16 @@ func (c *Controller) SetPerm(ctx context.Context, agentID, path, mode, owner, gr
 	}
 	res, err := c.doSend(ctx, agentID, op)
 	if err != nil {
-		c.audit(agentID, "perm", path, op.OpId, actor, "error", 0, 0, "", err.Error())
+		c.audit(agentID, "file", "perm", path, op.OpId, actor, "error", 0, 0, "", err.Error())
 		return err
 	}
 	state := "ok"
 	if res.Code != 0 {
 		state = opStateForCode(res.Code)
-		c.audit(agentID, "perm", path, op.OpId, actor, state, 0, 0, "", res.Error)
+		c.audit(agentID, fileAuditKind(res.Code), "perm", path, op.OpId, actor, state, 0, 0, "", res.Error)
 		return fmt.Errorf("files: perm: %s (code %d)", res.Error, res.Code)
 	}
-	c.audit(agentID, "perm", path, op.OpId, actor, state, 0, 0, "", "")
+	c.audit(agentID, "file", "perm", path, op.OpId, actor, state, 0, 0, "", "")
 	return nil
 }
 
@@ -297,6 +311,16 @@ var ErrConflict = fmt.Errorf("files: checksum mismatch (file changed)")
 // doSend dispatches one FileOp and waits for its result (no policy/audit:
 // callers do that at the right granularity).
 func (c *Controller) doSend(ctx context.Context, agentID string, op *pb.FileOp) (*pb.FileOpResult, error) {
+	// File-root gate (docs/spec-file-root.md): when enabled, file ops to an
+	// agent that reports no file root (pre-file-root / legacy agent) are
+	// refused — the server would be forwarding absolute-path semantics it
+	// can no longer reason about.
+	if c.requireFileRoot {
+		fl, err := c.st.LatestFacts(agentID)
+		if err != nil || fl.Data["partout.file_root"] == "" {
+			return nil, ErrLegacyFileSurface
+		}
+	}
 	if err := c.h.SendFileOp(agentID, op); err != nil {
 		return nil, err
 	}
@@ -319,16 +343,16 @@ func (c *Controller) do(ctx context.Context, agentID string, op *pb.FileOp, acto
 	opKind := string(op.Kind)
 	res, err := c.doSend(ctx, agentID, op)
 	if err != nil {
-		c.audit(agentID, opKind, op.Path, op.OpId, actor, "error", 0, 0, "", err.Error())
+		c.audit(agentID, "file", opKind, op.Path, op.OpId, actor, "error", 0, 0, "", err.Error())
 		return nil, err
 	}
 	state := "ok"
 	if res.Code != 0 {
 		state = opStateForCode(res.Code)
-		c.audit(agentID, opKind, op.Path, op.OpId, actor, state, 0, 0, "", res.Error)
+		c.audit(agentID, fileAuditKind(res.Code), opKind, op.Path, op.OpId, actor, state, 0, 0, "", res.Error)
 		return res, fmt.Errorf("files: %s: %s (code %d)", opKind, res.Error, res.Code)
 	}
-	c.audit(agentID, opKind, op.Path, op.OpId, actor, state, 0, 0, "", "")
+	c.audit(agentID, "file", opKind, op.Path, op.OpId, actor, state, 0, 0, "", "")
 	return res, nil
 }
 
@@ -364,12 +388,12 @@ func (c *Controller) policyGate(ctx context.Context, agentID string, op *pb.File
 	case policy.EffectRequireApproval:
 		if c.approvals == nil {
 			// Fail closed without the approvals engine.
-			c.audit(agentID, opName, op.Path, op.OpId, actor, "denied", 0, 0, "", decision.Reason)
+			c.audit(agentID, "file", opName, op.Path, op.OpId, actor, "denied", 0, 0, "", decision.Reason)
 			return fmt.Errorf("files: %s requires approval but the approvals engine is not wired; failing closed", opName)
 		}
 		return &approvalHold{class: class, decision: decision}
 	default:
-		c.audit(agentID, opName, op.Path, op.OpId, actor, "denied", 0, 0, "", decision.Reason)
+		c.audit(agentID, "file", opName, op.Path, op.OpId, actor, "denied", 0, 0, "", decision.Reason)
 		return fmt.Errorf("files: %s denied by policy: %s", opName, decision.Reason)
 	}
 }
@@ -473,7 +497,7 @@ func (c *Controller) DispatchApprovedFileOp(ctx context.Context, req *store.Appr
 		if err != nil {
 			return err
 		}
-		c.audit(req.AgentID, "upload", p.Path, dec.RunId, actor, "ok", int64(len(data)), 0, sha, "approval:"+req.ID)
+		c.audit(req.AgentID, "file", "upload", p.Path, dec.RunId, actor, "ok", int64(len(data)), 0, sha, "approval:"+req.ID)
 		return nil
 	case "edit":
 		data, err := os.ReadFile(p.Staged)
@@ -487,18 +511,18 @@ func (c *Controller) DispatchApprovedFileOp(ctx context.Context, req *store.Appr
 		}
 		res, err := c.doSend(ctx, req.AgentID, op)
 		if err != nil {
-			c.audit(req.AgentID, "edit", p.Path, op.OpId, actor, "error", int64(len(data)), 0, "", err.Error())
+			c.audit(req.AgentID, "file", "edit", p.Path, op.OpId, actor, "error", int64(len(data)), 0, "", err.Error())
 			return err
 		}
 		if res.Code != 0 {
 			state := opStateForCode(res.Code)
-			c.audit(req.AgentID, "edit", p.Path, op.OpId, actor, state, int64(len(data)), 0, "", res.Error)
+			c.audit(req.AgentID, fileAuditKind(res.Code), "edit", p.Path, op.OpId, actor, state, int64(len(data)), 0, "", res.Error)
 			if res.Code == 409 {
 				return ErrConflict
 			}
 			return fmt.Errorf("files: edit: %s (code %d)", res.Error, res.Code)
 		}
-		c.audit(req.AgentID, "edit", p.Path, op.OpId, actor, "ok", int64(len(data)), 0, res.NewSha256, "approval:"+req.ID)
+		c.audit(req.AgentID, fileAuditKind(res.Code), "edit", p.Path, op.OpId, actor, "ok", int64(len(data)), 0, res.NewSha256, "approval:"+req.ID)
 		return nil
 	case "perm":
 		op := &pb.FileOp{
@@ -508,15 +532,15 @@ func (c *Controller) DispatchApprovedFileOp(ctx context.Context, req *store.Appr
 		}
 		res, err := c.doSend(ctx, req.AgentID, op)
 		if err != nil {
-			c.audit(req.AgentID, "perm", p.Path, op.OpId, actor, "error", 0, 0, "", err.Error())
+			c.audit(req.AgentID, "file", "perm", p.Path, op.OpId, actor, "error", 0, 0, "", err.Error())
 			return err
 		}
 		if res.Code != 0 {
 			state := opStateForCode(res.Code)
-			c.audit(req.AgentID, "perm", p.Path, op.OpId, actor, state, 0, 0, "", res.Error)
+			c.audit(req.AgentID, fileAuditKind(res.Code), "perm", p.Path, op.OpId, actor, state, 0, 0, "", res.Error)
 			return fmt.Errorf("files: perm: %s (code %d)", res.Error, res.Code)
 		}
-		c.audit(req.AgentID, "perm", p.Path, op.OpId, actor, "ok", 0, 0, "", "approval:"+req.ID)
+		c.audit(req.AgentID, "file", "perm", p.Path, op.OpId, actor, "ok", 0, 0, "", "approval:"+req.ID)
 		return nil
 	default:
 		return fmt.Errorf("files: approval %s: unknown op %q", req.ID, p.Op)
@@ -534,7 +558,7 @@ func (c *Controller) uploadFromBytes(ctx context.Context, agentID, path string, 
 	}
 	beginRes, err := c.doSend(ctx, agentID, beginOp)
 	if err != nil {
-		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", 0, 0, "", err.Error())
+		c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", 0, 0, "", err.Error())
 		return "", err
 	}
 	temp := beginRes.TempPath
@@ -556,11 +580,11 @@ func (c *Controller) uploadFromBytes(ctx context.Context, agentID, path string, 
 		}
 		chunkRes, err := c.doSend(ctx, agentID, chunkOp)
 		if err != nil {
-			c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
+			c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
 			return "", err
 		}
 		if chunkRes.Code != 0 {
-			c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", chunkRes.Error)
+			c.audit(agentID, fileAuditKind(chunkRes.Code), "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", chunkRes.Error)
 			return "", fmt.Errorf("files: upload chunk: %s (code %d)", chunkRes.Error, chunkRes.Code)
 		}
 		offset += n
@@ -571,11 +595,11 @@ func (c *Controller) uploadFromBytes(ctx context.Context, agentID, path string, 
 	}
 	commitRes, err := c.doSend(ctx, agentID, commitOp)
 	if err != nil {
-		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
+		c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", err.Error())
 		return "", err
 	}
 	if commitRes.Code != 0 {
-		c.audit(agentID, "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", commitRes.Error)
+		c.audit(agentID, fileAuditKind(commitRes.Code), "upload", path, beginOp.OpId, actor, "error", int64(offset), 0, "", commitRes.Error)
 		return "", fmt.Errorf("files: upload commit: %s (code %d)", commitRes.Error, commitRes.Code)
 	}
 	committed = true
@@ -619,7 +643,18 @@ func (c *Controller) abort(ctx context.Context, agentID, path, temp string, acto
 }
 
 // audit records a files_actions row + audit event + SSE event.
-func (c *Controller) audit(agentID, opName, path, opID string, actor Actor, state string, size int64, _ int32, sha, errMsg string) {
+// fileAuditKind returns the audit event kind for an agent result code: a
+// 403 (path escapes the file root) is recorded as file.path_escape
+// (docs/spec-file-root.md); everything else is a plain file action. Policy
+// denials (pre-dispatch) stay kind "file" with state "denied".
+func fileAuditKind(code int32) string {
+	if code == 403 {
+		return "file.path_escape"
+	}
+	return "file"
+}
+
+func (c *Controller) audit(agentID, kind, opName, path, opID string, actor Actor, state string, size int64, _ int32, sha, errMsg string) {
 	var sz sql.NullInt64
 	if size > 0 {
 		sz = sql.NullInt64{Int64: size, Valid: true}
@@ -660,7 +695,7 @@ func (c *Controller) audit(agentID, opName, path, opID string, actor Actor, stat
 		"error":  errMsg,
 	})
 	_ = c.st.AppendAudit(store.AuditEvent{
-		TS: time.Now().Unix(), Kind: "file", Actor: actor.Principal,
+		TS: time.Now().Unix(), Kind: kind, Actor: actor.Principal,
 		AgentID: agentID, Payload: string(payload),
 	})
 	// SSE.

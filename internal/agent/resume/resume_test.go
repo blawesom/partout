@@ -261,13 +261,14 @@ func TestResumeAfterBootTaskKind(t *testing.T) {
 	priv := testKey(t)
 	const runID = "tr_resume1"
 
-	after := filepath.Join(dir, "after.txt")
-	// Marker as the reboot-step hook would have written it.
+	after := filepath.Join(dir, "fileroot", "after.txt")
+	// Marker as the reboot-step hook would have written it. File steps are
+	// root-relative (spec-file-root); the executor below gets this root.
 	m := &Marker{
 		RunID: runID, Kind: KindTask, TaskID: "task_1", TaskVersion: 1,
 		StartIdx: 1,
 		Steps: []*pb.TaskStep{
-			{Kind: "file", Name: "write", Path: after, Content: "resumed"},
+			{Kind: "file", Name: "write", Path: "after.txt", Content: "resumed"},
 		},
 		DoneSteps: []DoneStep{{Index: 0, Name: "echo", State: "ok", Detail: "done"}},
 		Decision:  signedDecision(priv, runID, 4),
@@ -279,6 +280,10 @@ func TestResumeAfterBootTaskKind(t *testing.T) {
 
 	tr := &taskReports{}
 	exec := task.NewExecutor(elevate.None, nil)
+	if err := os.MkdirAll(filepath.Join(dir, "fileroot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exec.SetFileRoot(filepath.Join(dir, "fileroot"))
 	r := New(store, exec, testGuard(t, 4, priv), nil, nil, nil, tr.fn(), nil)
 	r.SetBootAge(func() (time.Duration, bool) { return 30 * time.Second, true }) // booted 30s ago
 

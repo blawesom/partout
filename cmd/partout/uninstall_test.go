@@ -17,6 +17,7 @@ func mkFakeInstall(t *testing.T, units []string, etcFiles map[string]string, wit
 		unitDir:   filepath.Join(root, "etc/systemd/system"),
 		etcDir:    filepath.Join(root, "etc/partout"),
 		varDir:    filepath.Join(root, "var/lib/partout"),
+		fileRoot:  filepath.Join(root, "home/partout"),
 		homeDir:   filepath.Join(root, "home"),
 		binPath:   filepath.Join(root, "usr/local/bin/partout"),
 		guardPath: filepath.Join(root, "usr/local/sbin/partout-update-guard"),
@@ -144,6 +145,31 @@ func TestUninstallPlanPurgeRemovesStateAndUser(t *testing.T) {
 	}
 	if len(pl.kept) != 0 {
 		t.Errorf("purge plan kept %v", pl.kept)
+	}
+}
+
+// TestUninstallPlanFileRoot: the file root (operator-uploaded files,
+// spec-file-root) is kept by default and removed with --purge.
+func TestUninstallPlanFileRoot(t *testing.T) {
+	env := mkFakeInstall(t, []string{"partout-agent.service"}, nil, true, true, false, false)
+	if err := os.MkdirAll(env.fileRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Kept by default (non-purge).
+	pl, err := buildUninstallPlan(env, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(pl.kept, env.fileRoot) {
+		t.Errorf("file root not listed as kept; kept: %v", pl.kept)
+	}
+	// Purge removes it.
+	pl, err = buildUninstallPlan(env, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsStr(stepKinds(pl), "dir "+env.fileRoot) {
+		t.Errorf("purge plan missing file root removal; plan: %v", stepKinds(pl))
 	}
 }
 

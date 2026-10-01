@@ -15,6 +15,12 @@ sudo chmod 0755 /usr/local/bin/partout
 sudo useradd --system --home-dir /var/lib/partout --shell /usr/sbin/nologin partout
 sudo mkdir -p /var/lib/partout
 sudo chown partout:partout /var/lib/partout
+# File root (docs/spec-file-root.md): the file surface is confined to this
+# directory; the agent creates it when missing, but the provisioner/deploy
+# path creates it explicitly so it exists before first use.
+sudo mkdir -p /home/partout
+sudo chown partout:partout /home/partout
+sudo chmod 0750 /home/partout
 ```
 
 ### 3. Server

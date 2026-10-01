@@ -59,6 +59,7 @@ Where everything lives (for backup/restore/troubleshooting):
 | Agent identity | `/var/lib/partout/agent/identity.json` (0600) | **critical** — losing = re-enroll with new keypair |
 | Agent TLS | `/var/lib/partout/agent/tls/` (0700) | CA, CA-signed leaf (0644), private key (0600) — mTLS material *(when `PARTOUT_TLS_CA` is set)* |
 | Agent spool | `/var/lib/partout/agent/spool/` | in-flight output chunks + results buffered during a server outage (`<run_id>.sp`, 0600); replayed on reconnect |
+| **File root** | `PARTOUT_FILE_ROOT` (default `/home/partout`, 0750 partout) | the file surface is confined to this directory (docs/spec-file-root.md): operator-uploaded files, task file/template outputs; part of `--purge` on uninstall |
 | Agent config | `/etc/partout/agent.env` | env vars |
 | Provision runs | DB `provision_runs` + `provision_steps` (v0.3) | per-run state + per-step excerpts; `key_line`/`token_hash` are never serialized over the API; captured in the DB backup |
 | Audit log | DB `audit_events` + optional exported sink | append-only, indefinitely retained (PRD §9) |
@@ -277,6 +278,32 @@ host-level slice) rather than running the whole agent as root:
   elevation declared in the command spec and constrained by policy (PRD Decision
  3 full form). Tracked in docs/roadmap.md; take it up when operators need
   finer-grained grants than a per-host sudoers file.
+
+### 3.7 File root (file surface confinement)
+
+Every file-surface path (stat/list/download/upload/edit/perm, and task
+`file`/`template` steps) is **root-relative** against the agent's file root —
+default `/home/partout`, set per host via `PARTOUT_FILE_ROOT` / `--file-root`
+(docs/deployment.md §4.2). The invariant (docs/spec-file-root.md):
+
+- **Role gates WHAT; the root gates WHERE.** No role, flag, env var, or API
+  parameter — including admin — can reach a path outside the root through the
+  file surface. File access outside the root is a *command* (dispatched exec,
+  policy-gated), never a file op.
+- The agent enforces it: traversal, symlink components, and anything
+  resolving outside the root are rejected; escapes are audited
+  (`file.path_escape`, state `denied`) and returned as 403.
+- The file surface is **unprivileged**: it never elevates, and `perm` is
+  mode-only (owner/group changes are rejected).
+- An unusable root disables the file surface (fail closed); other agent
+  functions are unaffected.
+- The current root is the `partout.file_root` fact (visible on the host page;
+  the Files page shows a banner). Change the root by editing `agent.env` and
+  restarting the agent — it is deliberately not an API operation.
+- Mixed fleet: `PARTOUT_REQUIRE_FILE_ROOT=true` (server) refuses file ops to
+  agents that report no root (legacy). Default off during beta; flip it on
+  after upgrading all agents, then legacy hosts appear with a warning banner
+  until they report a root.
 
 ---
 

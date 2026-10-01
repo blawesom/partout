@@ -125,6 +125,10 @@ type Config struct {
 	TLSCertFile, TLSKeyFile string
 
 	// ---- Agent elevation (PRD Decision 3, host-level slice) ----
+	// FileRoot: agent file surface root (docs/spec-file-root.md). Empty =
+	// the hardcoded default (/home/partout). All file-surface paths are
+	// root-relative; no role, flag, or parameter can escape the root.
+	FileRoot string
 	// Elevate: none | sudo (PARTOUT_ELEVATE). "sudo" makes the agent run its
 	// action commands through `sudo -n` — scoped by the host's sudoers file
 	// (deploy/sudoers/partout-agent). Per-command elevation profiles are the
@@ -178,6 +182,7 @@ func Load() (*Config, error) {
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 		CleanupOnRevoke:       envBool("PARTOUT_AGENT_CLEANUP_ON_REVOKE"),
+		FileRoot:              os.Getenv("PARTOUT_FILE_ROOT"),
 		Elevate:               string(elevateMode),
 		Root:                  "/",
 	}

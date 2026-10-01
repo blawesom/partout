@@ -7,13 +7,19 @@ import (
 	"testing"
 
 	"github.com/blawesom/partout/internal/agent/elevate"
+	"github.com/blawesom/partout/internal/agent/fs"
 	pb "github.com/blawesom/partout/internal/proto"
 )
 
 func TestStepFile(t *testing.T) {
 	e := NewExecutor(elevate.None, nil)
 	dir := t.TempDir()
-	p := filepath.Join(dir, "test.txt")
+	root, err := prepareTestRoot(t, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetFileRoot(root)
+	p := "test.txt"
 
 	// First write → changed.
 	sr := e.Step(context.Background(), 0, &pb.TaskStep{Kind: "file", Name: "write", Path: p, Content: "hello"})
@@ -30,9 +36,20 @@ func TestStepFile(t *testing.T) {
 	if sr.State != StateChanged {
 		t.Fatalf("change content: %s (%s)", sr.State, sr.Detail)
 	}
-	if got, _ := os.ReadFile(p); string(got) != "world" {
+	if got, _ := os.ReadFile(filepath.Join(root, p)); string(got) != "world" {
 		t.Fatalf("file content = %q, want world", got)
 	}
+
+	// Path escape fails closed.
+	sr = e.Step(context.Background(), 0, &pb.TaskStep{Kind: "file", Name: "write", Path: "../../outside.txt", Content: "x"})
+	if sr.State != StateFailed {
+		t.Fatalf("escape: %s (%s), want failed", sr.State, sr.Detail)
+	}
+}
+
+func prepareTestRoot(t *testing.T, dir string) (string, error) {
+	t.Helper()
+	return fs.PrepareFileRoot(dir)
 }
 
 func TestStepCommand(t *testing.T) {

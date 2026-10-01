@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -31,7 +32,9 @@ import (
 // startFilesServer wires a stream handler + files controller on bufconn and
 // runs a fake agent that executes FILE_OP envelopes with the real agent/fs
 // package against a temp dir.
-func startFilesServer(t *testing.T) (*store.Store, *files.Controller, *grpc.ClientConn, func()) {
+// startFilesServer wires a stream handler + files controller on bufconn and
+// runs a fake agent... returns the agent's file root for test fixtures.
+func startFilesServer(t *testing.T) (*store.Store, *files.Controller, *grpc.ClientConn, string, func()) {
 	t.Helper()
 	st, err := store.New("sqlite::memory:")
 	if err != nil {
@@ -92,7 +95,9 @@ func startFilesServer(t *testing.T) (*store.Store, *files.Controller, *grpc.Clie
 		t.Fatalf("Send proof: %v", err)
 	}
 
-	// Fake agent loop: handle FILE_OP down envelopes with real fs ops.
+	// Fake agent loop: handle FILE_OP down envelopes with real fs ops,
+	// confined to a temp file root (like a real agent with PARTOUT_FILE_ROOT).
+	froot := t.TempDir()
 	fsys := agentfs.Config{}.Filled()
 	done := make(chan struct{})
 	go func() {
@@ -107,7 +112,7 @@ func startFilesServer(t *testing.T) (*store.Store, *files.Controller, *grpc.Clie
 				continue
 			}
 			var res *pb.FileOpResult
-			res, err = fakeAgentFileOp(op, fsys)
+			res, err = fakeAgentFileOp(op, froot, fsys)
 			if err != nil {
 				res = &pb.FileOpResult{OpId: op.OpId, Code: 500, Error: err.Error()}
 			}
@@ -142,15 +147,22 @@ func startFilesServer(t *testing.T) (*store.Store, *files.Controller, *grpc.Clie
 		conn.Close()
 		st.Close()
 	}
-	return st, fc, conn, cleanup
+	return st, fc, conn, froot, cleanup
 }
 
-func fakeAgentFileOp(op *pb.FileOp, cfg agentfs.Config) (*pb.FileOpResult, error) {
+func fakeAgentFileOp(op *pb.FileOp, root string, cfg agentfs.Config) (*pb.FileOpResult, error) {
+	// Mirror the agent's error-code mapping for path errors (403 = escape).
+	mapErr := func(err error) *pb.FileOpResult {
+		if errors.Is(err, agentfs.ErrBadPath) {
+			return &pb.FileOpResult{OpId: op.OpId, Code: 403, Error: err.Error()}
+		}
+		return &pb.FileOpResult{OpId: op.OpId, Code: 500, Error: err.Error()}
+	}
 	switch op.Kind {
 	case pb.FileOpKind_FILE_OP_STAT:
-		st, err := agentfs.StatPath(op.Path)
+		st, err := agentfs.StatPath(root, op.Path)
 		if err != nil {
-			return nil, err
+			return mapErr(err), nil
 		}
 		return &pb.FileOpResult{
 			OpId: op.OpId, Code: 0,
@@ -161,9 +173,9 @@ func fakeAgentFileOp(op *pb.FileOp, cfg agentfs.Config) (*pb.FileOpResult, error
 			},
 		}, nil
 	case pb.FileOpKind_FILE_OP_LIST:
-		entries, truncated, err := agentfs.List(op.Path, cfg)
+		entries, truncated, err := agentfs.List(root, op.Path, cfg)
 		if err != nil {
-			return nil, err
+			return mapErr(err), nil
 		}
 		out := &pb.FileOpResult{OpId: op.OpId, Code: 0, Truncated: truncated}
 		for _, e := range entries {
@@ -174,43 +186,43 @@ func fakeAgentFileOp(op *pb.FileOp, cfg agentfs.Config) (*pb.FileOpResult, error
 		}
 		return out, nil
 	case pb.FileOpKind_FILE_OP_DOWNLOAD:
-		data, _, done, err := agentfs.DownloadAt(op.Path, int64(op.Offset), cfg)
+		data, _, done, err := agentfs.DownloadAt(root, op.Path, int64(op.Offset), cfg)
 		if err != nil {
-			return nil, err
+			return mapErr(err), nil
 		}
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0, Data: data, Done: done}, nil
 	case pb.FileOpKind_FILE_OP_UPLOAD_BEGIN:
-		temp, err := agentfs.UploadBegin(op.Path, op.TotalSize, cfg)
+		temp, err := agentfs.UploadBegin(root, op.Path, op.TotalSize, cfg)
 		if err != nil {
-			return nil, err
+			return mapErr(err), nil
 		}
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0, TempPath: temp}, nil
 	case pb.FileOpKind_FILE_OP_UPLOAD_CHUNK:
 		w, err := agentfs.UploadChunk(op.TempPath, int64(op.Offset), op.Data, cfg)
 		if err != nil {
-			return nil, err
+			return &pb.FileOpResult{OpId: op.OpId, Code: 500, Error: err.Error()}, nil
 		}
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0, Received: uint64(w)}, nil
 	case pb.FileOpKind_FILE_OP_UPLOAD_COMMIT:
-		sha, err := agentfs.UploadCommit(op.TempPath, op.Path, op.Mode, op.TotalSize)
+		sha, err := agentfs.UploadCommit(root, op.TempPath, op.Path, op.Mode, op.TotalSize)
 		if err != nil {
-			return nil, err
+			return mapErr(err), nil
 		}
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0, NewSha256: sha}, nil
 	case pb.FileOpKind_FILE_OP_UPLOAD_ABORT:
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0}, agentfs.UploadAbort(op.TempPath)
 	case pb.FileOpKind_FILE_OP_EDIT_CAS:
-		sha, err := agentfs.EditCAS(op.Path, op.ExpectedSha256, op.Data, cfg)
+		sha, err := agentfs.EditCAS(root, op.Path, op.ExpectedSha256, op.Data, cfg)
 		if err != nil {
 			if err == agentfs.ErrConflict {
 				return &pb.FileOpResult{OpId: op.OpId, Code: 409, Error: "checksum mismatch"}, nil
 			}
-			return nil, err
+			return mapErr(err), nil
 		}
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0, NewSha256: sha}, nil
 	case pb.FileOpKind_FILE_OP_SET_PERM:
-		if err := agentfs.SetPerm(op.Path, op.Mode, op.User, op.Group); err != nil {
-			return nil, err
+		if err := agentfs.SetPerm(root, op.Path, op.Mode, op.User, op.Group); err != nil {
+			return mapErr(err), nil
 		}
 		return &pb.FileOpResult{OpId: op.OpId, Code: 0}, nil
 	default:
@@ -221,14 +233,13 @@ func fakeAgentFileOp(op *pb.FileOp, cfg agentfs.Config) (*pb.FileOpResult, error
 var actor = files.Actor{Principal: "local", Role: "local"}
 
 func TestFilesE2E(t *testing.T) {
-	st, fc, _, cleanup := startFilesServer(t)
+	st, fc, _, root, cleanup := startFilesServer(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	// Prepare a file + dir on the "agent".
-	dir := t.TempDir()
-	p := filepath.Join(dir, "hello.txt")
-	if err := os.WriteFile(p, []byte("hello files"), 0o644); err != nil {
+	// Prepare a file on the "agent" (inside its file root).
+	p := "hello.txt"
+	if err := os.WriteFile(filepath.Join(root, p), []byte("hello files"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -245,7 +256,7 @@ func TestFilesE2E(t *testing.T) {
 	}
 
 	// 2. List.
-	entries, truncated, err := fc.List(ctx, "ag_files", dir, actor)
+	entries, truncated, err := fc.List(ctx, "ag_files", "", actor)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -273,7 +284,7 @@ func TestFilesE2E(t *testing.T) {
 	}
 
 	// 4. Upload.
-	up := filepath.Join(dir, "up.bin")
+	up := "up.bin"
 	sha, err := fc.Upload(ctx, "ag_files", up, bytes.NewReader([]byte("upload-body")), 11, "0644", actor)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
@@ -281,21 +292,21 @@ func TestFilesE2E(t *testing.T) {
 	if len(sha) != 64 {
 		t.Fatalf("bad sha %q", sha)
 	}
-	got, err := os.ReadFile(up)
+	got, err := os.ReadFile(filepath.Join(root, up))
 	if err != nil || string(got) != "upload-body" {
 		t.Fatalf("uploaded content wrong: %q err=%v", got, err)
 	}
 
 	// 5. Edit (CAS).
-	up2 := filepath.Join(dir, "edit.txt")
-	os.WriteFile(up2, []byte("v1"), 0o644)
+	up2 := "edit.txt"
+	os.WriteFile(filepath.Join(root, up2), []byte("v1"), 0o644)
 	cur, _ := fc.Stat(ctx, "ag_files", up2, actor)
 	sha2, err := fc.Edit(ctx, "ag_files", up2, cur.Sha256, []byte("v2"), actor)
 	if err != nil {
 		t.Fatalf("Edit: %v", err)
 	}
 	_ = sha2
-	got2, _ := os.ReadFile(up2)
+	got2, _ := os.ReadFile(filepath.Join(root, up2))
 	if string(got2) != "v2" {
 		t.Fatalf("edit content=%q, want v2", got2)
 	}
@@ -315,8 +326,8 @@ func TestFilesE2E(t *testing.T) {
 	}
 
 	// 8. Symlink rejection (D4).
-	link := filepath.Join(dir, "link.txt")
-	if err := os.Symlink(p, link); err != nil {
+	link := "link.txt"
+	if err := os.Symlink(filepath.Join(root, p), filepath.Join(root, link)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fc.Stat(ctx, "ag_files", link, actor); err == nil {
@@ -342,10 +353,9 @@ func TestFilesE2E(t *testing.T) {
 // TestFilesPolicyDeny verifies D1: write ops require policy; a deny rule
 // blocks the upload with 403 and records an audit row.
 func TestFilesPolicyDeny(t *testing.T) {
-	st, fc, _, cleanup := startFilesServer(t)
+	st, fc, _, _, cleanup := startFilesServer(t)
 	defer cleanup()
 	ctx := context.Background()
-	dir := t.TempDir()
 
 	if err := st.CreatePolicy("pol_deny_upload", "deny-uploads", policy.Match{
 		Actions: []string{policy.ActionFileWrite},
@@ -353,7 +363,7 @@ func TestFilesPolicyDeny(t *testing.T) {
 		t.Fatalf("CreatePolicy: %v", err)
 	}
 
-	_, err := fc.Upload(ctx, "ag_files", filepath.Join(dir, "x"), bytes.NewReader([]byte("x")), 1, "0644", actor)
+	_, err := fc.Upload(ctx, "ag_files", "x", bytes.NewReader([]byte("x")), 1, "0644", actor)
 	if err == nil {
 		t.Fatal("upload should be denied")
 	}
@@ -370,6 +380,65 @@ func TestFilesPolicyDeny(t *testing.T) {
 	}
 	if denied < 1 {
 		t.Fatalf("no denied file audit event found")
+	}
+}
+
+// TestFilesPathEscape verifies the file-root no-escape invariant: a
+// traversal path is rejected by the agent (403) and audited as
+// file.path_escape (docs/spec-file-root.md).
+func TestFilesPathEscape(t *testing.T) {
+	st, fc, _, root, cleanup := startFilesServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(root, "x"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fc.Stat(ctx, "ag_files", "../../etc/passwd", actor); err == nil {
+		t.Fatal("stat outside the file root should be rejected")
+	}
+
+	events, err := st.AuditPage("", "", 0, 20, 0)
+	if err != nil {
+		t.Fatalf("AuditPage: %v", err)
+	}
+	escape := 0
+	for _, ev := range events {
+		if ev.Kind == "file.path_escape" && contains(ev.Payload, `"state":"denied"`) {
+			escape++
+		}
+	}
+	if escape < 1 {
+		t.Fatalf("no file.path_escape audit event found")
+	}
+}
+
+// TestFilesRequireFileRoot: with PARTOUT_REQUIRE_FILE_ROOT=true, file ops to
+// an agent without a file_root fact (legacy/pre file-root) are refused;
+// once the agent reports a root, ops proceed.
+func TestFilesRequireFileRoot(t *testing.T) {
+	t.Setenv("PARTOUT_REQUIRE_FILE_ROOT", "true")
+	st, fc, _, root, cleanup := startFilesServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy agent (no file_root fact): refused.
+	if _, err := fc.Stat(ctx, "ag_files", "hello.txt", actor); err == nil {
+		t.Fatal("file op to a legacy agent should be refused")
+	}
+
+	// Agent reports a file root: allowed.
+	if err := st.UpsertFacts(store.Facts{
+		AgentID: "ag_files",
+		Data:    map[string]string{"partout.file_root": root},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fc.Stat(ctx, "ag_files", "hello.txt", actor); err != nil {
+		t.Fatalf("file op after file_root fact: %v", err)
 	}
 }
 

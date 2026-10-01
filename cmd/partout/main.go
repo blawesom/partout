@@ -120,6 +120,7 @@ func main() {
 	addr := fs.String("addr", cfg.Addr, "server: bind address (empty = all interfaces; use 127.0.0.1 behind a reverse proxy)")
 	db := fs.String("db", cfg.DBPath, "server: SQLite path")
 	dataDir := fs.String("data-dir", cfg.DataDir, "agent: identity/policy dir (default ~/.partout/agent)")
+	fileRoot := fs.String("file-root", cfg.FileRoot, "agent: file surface root — all file ops are confined to this directory (default /home/partout)")
 	server := fs.String("server", cfg.ServerURL, "agent: server host:port")
 	token := fs.String("token", cfg.Token, "agent: one-time enrollment token")
 	elevateMode := fs.String("elevate", cfg.Elevate, "agent: elevation mode none|sudo (action commands run through `sudo -n`; scope is the host's sudoers file)")
@@ -148,6 +149,7 @@ func main() {
 	cfg.Addr = *addr
 	cfg.DBPath = *db
 	cfg.DataDir = *dataDir
+	cfg.FileRoot = *fileRoot
 	cfg.ServerURL = *server
 	cfg.Token = *token
 	el, err := elevate.Parse(*elevateMode)

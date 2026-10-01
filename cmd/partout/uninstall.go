@@ -42,6 +42,7 @@ type uninstallEnv struct {
 	unitDir   string // /etc/systemd/system
 	etcDir    string // /etc/partout
 	varDir    string // /var/lib/partout (default state dir)
+	fileRoot  string // /home/partout (file surface root, spec-file-root)
 	homeDir   string // $HOME (non-systemd agent data: $HOME/.partout)
 	binPath   string // /usr/local/bin/partout
 	guardPath string // /usr/local/sbin/partout-update-guard
@@ -53,6 +54,7 @@ func defaultUninstallEnv() uninstallEnv {
 		unitDir:   "/etc/systemd/system",
 		etcDir:    "/etc/partout",
 		varDir:    "/var/lib/partout",
+		fileRoot:  "/home/partout",
 		homeDir:   home,
 		binPath:   "/usr/local/bin/partout",
 		guardPath: "/usr/local/sbin/partout-update-guard",
@@ -147,6 +149,11 @@ func buildUninstallPlan(env uninstallEnv, purge, keepBinary bool) (*uninstallPla
 	var state []string
 	if pathExists(env.varDir) {
 		state = append(state, env.varDir)
+	}
+	// The file root holds operator-uploaded files (spec-file-root); it is
+	// install footprint, so purge removes it and the non-purge plan flags it.
+	if pathExists(env.fileRoot) {
+		state = append(state, env.fileRoot)
 	}
 	if customDB != "" {
 		if d := filepath.Dir(customDB); d != env.varDir && pathExists(d) {

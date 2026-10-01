@@ -769,6 +769,8 @@
         <section v-else-if="page==='files'">
           <h1 class="page">Files</h1>
           <p class="page-sub">Host file browser (M2). Reads are open to viewers; upload / edit / perm are policy-gated (<span class="mono">file.write</span> / <span class="mono">file.perm</span>) and audited. Edits are compare-and-swap — a save aborts if the file changed since you opened it.</p>
+          <div v-if="fileHost && fileRoot" class="info-box"><b>File root:</b> <span class="mono">{{ fileRoot }}</span> — every path below is relative to this directory. The no-escape invariant: no role or parameter can reach outside the root through the file surface.</div>
+          <div v-else-if="fileHost" class="warn-box"><b>Legacy agent:</b> no file root reported — the file surface on this host is not confined to a root (pre file-root agent). Upgrade the agent; with <span class="mono">PARTOUT_REQUIRE_FILE_ROOT</span> set, file ops to this host are refused.</div>
           <div class="toolbar">
             <select :value="fileHost" style="max-width:260px" @change="pickFileHost($event.target.value)">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
@@ -1804,7 +1806,7 @@
         audit: [], auditKind: "",
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
-        fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null,
+        fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null, fileRoot: "",
         updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
@@ -2531,7 +2533,7 @@
       async listFiles() {
         // /files/list requires agent_id and path (400 otherwise). Keep a host
         // selected once loaded so the page never fires a doomed request.
-        if (!this.fileHost && this.hosts.length) this.fileHost = this.hosts[0].id;
+        if (!this.fileHost && this.hosts.length) { this.fileHost = this.hosts[0].id; this.loadFileRoot(this.fileHost); }
         if (!this.fileHost) { this.fileEntries = []; return; }
         this.fileLoading = true;
         try { const q = "?agent_id=" + encodeURIComponent(this.fileHost) + "&path=" + encodeURIComponent(this.fileDir || "/"); const d = await this.api("/files/list" + q); this.fileEntries = d.entries || []; }
@@ -3252,7 +3254,9 @@
         } catch (e) { this.notify("err", "download failed: " + e.message); }
       },
       fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },
-      pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.listFiles(); },
+      pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.fileRoot = ""; this.listFiles(); this.loadFileRoot(id); },
+      // Load the selected host's file root fact (docs/spec-file-root.md).
+      async loadFileRoot(id) { try { const d = await this.api("/hosts/" + encodeURIComponent(id) + "/facts", { toast: false }); this.fileRoot = (d.facts && d.facts["partout.file_root"]) || ""; } catch (e) { this.fileRoot = ""; } },
       // ---- File dialog: view / edit-CAS / perm (M2 API was ahead of the UI) ----
       openFileDlg(f) {
         const path = joinPath(this.fileDir, f.name);
