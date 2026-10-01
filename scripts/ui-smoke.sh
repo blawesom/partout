@@ -54,6 +54,15 @@ seed() {
 echo "==> building partout"
 (cd "$REPO" && go build -o "$BIN" ./cmd/partout)
 
+echo "==> seeding service-cert fixture (nginx/caddy configs referencing a cert outside /etc/ssl)"
+# Proves service-config cert discovery: the cert lives in the workdir (not a
+# scan root), so only parsing the fake service configs can find it.
+mkdir -p "$WORK/svc"
+openssl req -x509 -newkey rsa:2048 -nodes -subj "/CN=svc-smoke" -days 30 \
+  -keyout "$WORK/svc/site.key" -out "$WORK/svc/site.pem" 2>/dev/null
+printf 'server {\n  listen 443 ssl;\n  ssl_certificate %s/site.pem;\n}\n' "$WORK/svc" > "$WORK/svc/nginx.conf"
+printf 'svc-smoke.test {\n  tls %s/site.pem %s/site.key\n}\n' "$WORK/svc" "$WORK/svc" > "$WORK/svc/Caddyfile"
+
 echo "==> starting embedded server on :$PORT"
 mkdir -p "$WORK/run"
 (
@@ -65,6 +74,8 @@ mkdir -p "$WORK/run"
     PARTOUT_DATA_DIR="$WORK/run/agent" \
     PARTOUT_MODE=embedded \
     PARTOUT_OBSERVE_FACTS_INTERVAL=2 \
+    PARTOUT_NGINX_CONF="$WORK/svc/nginx.conf" \
+    PARTOUT_CADDY_CONF="$WORK/svc/Caddyfile" \
     PARTOUT_SECRET_KEY=0123456789abcdef0123456789abcdef \
     "$BIN" > "$WORK/server.log" 2>&1
 ) &

@@ -657,6 +657,13 @@ async function main() {
   check("observe certs: real cert",
     [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("CN =")), "no cert rows");
   check("observe certs: used-by column", d.body.textContent.includes("Used by"), "no Used by column");
+  // Service-config discovery: the fixture cert (CN=svc-smoke, living outside
+  // /etc/ssl) must be found via the fake nginx/caddy configs and carry both
+  // service labels in the Used-by cell.
+  const svcRow = [...d.querySelectorAll("table.tbl tr")].find((tr) => tr.textContent.includes("CN = svc-smoke"));
+  check("observe certs: service-config cert discovered", !!svcRow, "svc-smoke cert row missing (service-config discovery broken)");
+  check("observe certs: nginx label", !!svcRow && svcRow.textContent.includes("nginx"), "nginx label missing in Used by");
+  check("observe certs: caddy label", !!svcRow && svcRow.textContent.includes("caddy"), "caddy label missing in Used by");
   await visit("#/obs-configs", 1600);
   check("observe configs renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Configs"));
   await visit("#/obs-alerts");

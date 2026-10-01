@@ -69,6 +69,11 @@ type Config struct {
 	// CertCA: trust bundle used to verify certificate chains (M5, R20).
 	// Empty = resolve from the standard system locations.
 	CertCA string
+	// NginxConf / HaproxyConf / CaddyConf: service config locations for
+	// TLS certificate discovery (M5, R20). Empty = standard locations.
+	NginxConf   string
+	HaproxyConf string
+	CaddyConf   string
 	// --- M8.1 updates (agent side) ---
 	// ReleaseKey is the base64 Ed25519 release public key this agent trusts
 	// for self-update artifacts (PARTOUT_RELEASE_KEY). A locally provisioned
@@ -144,6 +149,9 @@ func Load() (*Config, error) {
 		ServiceLabels:         os.Getenv("PARTOUT_SERVICE_LABELS"),
 		CertPaths:             os.Getenv("PARTOUT_CERT_PATHS"),
 		CertCA:                os.Getenv("PARTOUT_CERT_CA"),
+		NginxConf:             os.Getenv("PARTOUT_NGINX_CONF"),
+		HaproxyConf:           os.Getenv("PARTOUT_HAPROXY_CONF"),
+		CaddyConf:             os.Getenv("PARTOUT_CADDY_CONF"),
 		TLSCAFile:             os.Getenv("PARTOUT_TLS_CA"),
 		ReleaseKey:            os.Getenv("PARTOUT_RELEASE_KEY"),
 		AllowUnsignedReleases: envBoolDefaultTrue("PARTOUT_ALLOW_UNSIGNED_RELEASES"),

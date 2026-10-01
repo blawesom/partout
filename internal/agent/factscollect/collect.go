@@ -77,6 +77,13 @@ type Config struct {
 	// = resolve from the standard system locations; when none is found, chain
 	// verification is skipped and reported as unchecked rather than invalid.
 	CAPath string
+	// NginxConf / HaproxyConf / CaddyConf: service config locations whose
+	// referenced certificate files are collected and labeled (M5, R20).
+	// Empty = standard locations (/etc/nginx/nginx.conf, /etc/haproxy/
+	// haproxy.cfg, /etc/caddy/Caddyfile [+ caddy.json]).
+	NginxConf   string
+	HaproxyConf string
+	CaddyConf   string
 	// ObserveFactsInterval: seconds between uploads (PARTOUT_OBSERVE_FACTS_INTERVAL).
 	ObserveFactsInterval int
 }
@@ -502,6 +509,30 @@ func collectCerts(cfg *Config) *CertFacts {
 	var items []CertFact
 	seen := make(map[string]bool)
 	caPath := resolveCABundle(cfg.CAPath)
+
+	// Service-config references first: these are the certificates actually
+	// serving traffic and must be captured even when the directory walk
+	// exhausts its file budget. A referenced file may also fall inside a
+	// scan root — the seen-set dedupes, and the label is attached below
+	// regardless of which pass found the file.
+	svcRefs := discoverServiceCerts(cfg)
+	svcLabels := make(map[string][]string, len(svcRefs))
+	for _, r := range svcRefs {
+		svcLabels[r.Path] = append(svcLabels[r.Path], r.Service)
+	}
+	for _, r := range svcRefs {
+		if len(items) >= maxCertFiles || seen[r.Path] {
+			continue
+		}
+		if st, err := os.Stat(r.Path); err != nil || st.Size() > maxCertFileSize {
+			continue // referenced but absent (or not a cert file)
+		}
+		seen[r.Path] = true
+		if cf := parseCert(r.Path, caPath); cf != nil {
+			items = append(items, *cf)
+		}
+	}
+
 	// When caPath is empty (no trust bundle on this host) chain verification is
 	// skipped for every cert and reported as unchecked, not as a broken chain.
 	for _, dir := range certPaths {
@@ -516,6 +547,11 @@ func collectCerts(cfg *Config) *CertFacts {
 			if cf := parseCert(f, caPath); cf != nil {
 				items = append(items, *cf)
 			}
+		}
+	}
+	for i := range items {
+		if ls, ok := svcLabels[items[i].Path]; ok {
+			items[i].Labels = append(items[i].Labels, ls...)
 		}
 	}
 	if len(items) == 0 {

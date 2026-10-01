@@ -501,6 +501,9 @@ func (a *Agent) sendObserveFacts(ctx context.Context) {
 		ServiceLabels:        a.cfg.ServiceLabels,
 		CertPaths:            a.cfg.CertPaths,
 		CAPath:               a.cfg.CertCA,
+		NginxConf:            a.cfg.NginxConf,
+		HaproxyConf:          a.cfg.HaproxyConf,
+		CaddyConf:            a.cfg.CaddyConf,
 		ObserveFactsInterval: a.cfg.ObserveFactsInterval,
 	}
 	ch := make(chan *factscollect.Facts, 1)

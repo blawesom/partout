@@ -1527,7 +1527,10 @@
                   <td class="mono">{{ row.cert.key_type || '—' }}</td>
                   <td>{{ row.cert.self_signed ? 'yes' : 'no' }}</td>
                   <td>
-                    <a v-for="u in certUsedBy(row)" :key="u.kind+u.label" @click.prevent="go('obs/configs?host='+row.host_id+'&kind='+u.kind)" style="display:inline-block">{{ u.kind }}·{{ u.label }}</a>
+                    <template v-for="u in certUsedBy(row)" :key="u.kind+'|'+u.label+'|'+(u.link?1:0)">
+                      <a v-if="u.link" @click.prevent="go('obs/configs?host='+row.host_id+'&kind='+u.kind)" style="display:inline-block">{{ u.kind }}·{{ u.label }}</a>
+                      <span v-else class="mono" style="display:inline-block">{{ u.kind }}</span>
+                    </template>
                     <span v-if="!certUsedBy(row).length" class="muted">—</span>
                   </td>
                 </tr>
@@ -3027,15 +3030,20 @@
         const n = row.unit.name;
         return (n === "haproxy" || n === "nginx") ? "obs/configs?host=" + row.host_id + "&kind=" + n : "";
       },
-      // Configs referencing this cert's path (listeners' TLS / vhost ssl_certificate).
+      // Configs referencing this cert's path (listeners' TLS / vhost ssl_certificate),
+      // plus agent-side service-config discovery labels (caddy, and paths the
+      // topology parsers didn't capture).
       certUsedBy(row) {
         const out = [];
         const path = row.cert.path;
         if (!path) return out;
         for (const c of this.certsConfigs) {
           if (c.host_id !== row.host_id) continue;
-          if (c.haproxy) for (const l of (c.haproxy.listeners || [])) if (l.tls === path) out.push({ kind: "haproxy", label: ":" + l.port });
-          if (c.nginx) for (const v of (c.nginx.vhosts || [])) if (v.tls_cert === path) out.push({ kind: "nginx", label: v.server_name || "vhost" });
+          if (c.haproxy) for (const l of (c.haproxy.listeners || [])) if (l.tls === path) out.push({ kind: "haproxy", label: ":" + l.port, link: true });
+          if (c.nginx) for (const v of (c.nginx.vhosts || [])) if (v.tls_cert === path) out.push({ kind: "nginx", label: v.server_name || "vhost", link: true });
+        }
+        for (const lb of (row.cert.labels || [])) {
+          if (!out.some(u => u.kind === lb)) out.push({ kind: lb, label: "config", link: false });
         }
         return out;
       },
