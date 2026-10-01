@@ -99,6 +99,11 @@ type Config struct {
 	// UpdateRestartCmd is executed after a successful binary swap
 	// (PARTOUT_UPDATE_RESTART_CMD); default is the systemd unit restart.
 	UpdateRestartCmd string
+	// CleanupOnRevoke (PARTOUT_AGENT_CLEANUP_ON_REVOKE, default off): when
+	// the server revokes the agent (host removed from the fleet), remove the
+	// local credential material (identity.json + tls/) before exiting, so the
+	// machine is left a clean slate. Destructive, hence opt-in.
+	CleanupOnRevoke bool
 	// TLSCAFile: path to the server root CA (PEM); enables HTTPS
 	// enrollment + mTLS stream.
 	TLSCAFile string
@@ -146,6 +151,7 @@ func Load() (*Config, error) {
 		SecurityScanS:         envInt("PARTOUT_SECURITY_SCAN_S", 21600),
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
+		CleanupOnRevoke:       envBool("PARTOUT_AGENT_CLEANUP_ON_REVOKE"),
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err

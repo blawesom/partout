@@ -180,6 +180,16 @@ func main() {
 		}
 	case "agent":
 		if err := runAgent(ctx, cfg, lg); err != nil {
+			if errors.Is(err, agent.ErrRevoked) {
+				// The server removed this host. Stop cleanly (exit 0, not a
+				// crashloop) and, if opted in, wipe local credential material
+				// so the machine is a clean slate. Never Fatal here.
+				if cfg.CleanupOnRevoke {
+					cleanupAgentMaterial(cfg, lg)
+				}
+				lg.Printf("agent: revoked by server (host removed); exiting cleanly")
+				return
+			}
 			if err != context.Canceled {
 				lg.Fatal(err)
 			}
@@ -723,6 +733,22 @@ func runAgent(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	return ag.Run(ctx)
 }
 
+// cleanupAgentMaterial removes the agent's local credential material
+// (identity.json + the tls/ leaf + CA) so a revoked host is left a clean
+// slate. Called only when PARTOUT_AGENT_CLEANUP_ON_REVOKE is set.
+func cleanupAgentMaterial(cfg *config.Config, lg *log.Logger) {
+	for _, p := range []string{
+		filepath.Join(cfg.DataDir, "identity.json"),
+		filepath.Join(cfg.DataDir, "tls"),
+	} {
+		if err := os.RemoveAll(p); err != nil {
+			lg.Printf("agent: cleanup %s: %v", p, err)
+		} else {
+			lg.Printf("agent: removed local credential material %s", p)
+		}
+	}
+}
+
 // persistTLSMaterial writes the agent's TLS material (CA, leaf, private key)
 // under <dataDir>/tls/ with 0600 permissions on the key. The private key
 // never leaves the host.
@@ -886,12 +912,21 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 	<-ctx.Done()
 	wg.Wait()
 
-	// Return the first non-nil, non-canceled error.
+	// Return the first non-nil, non-canceled error. A revoked local agent
+	// (its host was removed from the fleet) is not a server failure: the
+	// control plane keeps serving the fleet, only its own membership ended.
 	if e := <-serverErr; e != nil && !errors.Is(e, context.Canceled) {
 		return e
 	}
-	if e := <-agentErr; e != nil && !errors.Is(e, context.Canceled) {
-		return e
+	if e := <-agentErr; e != nil {
+		switch {
+		case errors.Is(e, context.Canceled), errors.Is(e, agent.ErrRevoked):
+			if errors.Is(e, agent.ErrRevoked) {
+				lg.Printf("embedded: local agent revoked (host removed); server continues without fleet membership")
+			}
+		default:
+			return e
+		}
 	}
 	return ctx.Err()
 }

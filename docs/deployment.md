@@ -505,6 +505,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_ALLOW_UNSIGNED_RELEASES` | **true (beta)** | override the unsigned-release posture; **GA sets this to false** (signed-only) |
 | `PARTOUT_UPDATE_HEALTH_S` | **60** | (M8.1) post-swap health window: the new binary must boot and reconnect within this many seconds, else the update is marked unhealthy and rolled back (crashloop guard) |
 | `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
+| `PARTOUT_AGENT_CLEANUP_ON_REVOKE` | **false** | when the server revokes the agent (host removed from the fleet), also remove the local credential material (`identity.json` + `tls/`) before the clean exit, leaving the machine a clean slate. Destructive, hence opt-in |
 
 ### 4.3 `partout ctl` — wired
 

@@ -199,6 +199,11 @@ func (h *Handler) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to delete host", nil)
 		return
 	}
+	// Tell a live agent it was removed so it stops itself (its client-side
+	// close ends the stream). Harmless when the agent is already offline.
+	if h.streamH != nil {
+		h.streamH.RevokeAgent(id, "host deleted")
+	}
 	actor, _ := h.actorFor(r)
 	h.audit("host.deleted", actor, map[string]string{"agent_id": id})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})

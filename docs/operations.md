@@ -125,18 +125,25 @@ Step-by-step bring-up, also referenced in deployment §6:
 - **Enroll / provision**: preferred (v0.3) — `partout ctl provision new --host user@host`
   (PRD R17): the server installs and starts the agent over the operator's existing fleet
   SSH; confirm the host-key fingerprint for hosts new to `known_hosts` (the run pauses at
-  `key_confirm` until an admin confirms). Re-provisioning an installed host replaces the
-  binary and unit and **keeps** the existing `identity.json` (idempotent in-place update).
-  To force a brand-new identity, remove `/var/lib/partout/agent/identity.json` on the host
-  first (the destructive `--mode fresh` wipe is not wired yet — architecture §3.5). Manual
-  alternative: mint a short-TTL token → run enrollment on the host.
+  `key_confirm` until an admin confirms). `fresh` mode (default) is a **destructive wipe**:
+  it stops + disables any existing `partout-agent` unit and removes its identity + env, so
+  the reinstall enrolls as a brand-new agent. `--mode update` keeps the existing
+  `identity.json` (idempotent in-place update). Manual alternative: mint a short-TTL token →
+  run enrollment on the host.
   Tags/roles assigned. Agent writes `identity.json` (0600); server marks `connected`.
 - **Tag / role / group**: done in the UI, API, or via an MCP tool. Groups are saved
   selectors (PRD §5.1).
-- **Revoke / decommission**: `DELETE /api/v1/agents/{id}` → stream closed, cascade-delete
-  purges all host rows (PRD R7). The agent's `identity.json` on the host is useless
-  (re-enrollment requires a fresh keypair). Keep a clean-up playbook: after revocation,
-  remove any leftover tasks/jobs/policies targeting the host.
+- **Remove / revoke**: `DELETE /api/v1/hosts/{id}` (admin) — UI “Remove host”,
+  `partout ctl hosts delete <id>`, or the MCP `delete_host` tool. The server deletes the
+  agent row (cascade-delete purges the host's runs, sessions, files, facts, tags, roles —
+  PRD R7) and, if the agent is still streaming, pushes a `REVOKE` envelope: the agent logs
+  “revoked by server” and exits **cleanly (exit 0, no systemd crashloop)**. Removal doubles
+  as revocation — the store row is gone, so the agent can never re-authenticate again, even
+  a rogue one holding its private key. The machine's files are untouched by default; set
+  `PARTOUT_AGENT_CLEANUP_ON_REVOKE=1` on the agent to also wipe its local `identity.json` +
+  `tls/` on revoke (destructive, opt-in). To reuse the machine, re-provision it in `fresh`
+  mode. Keep a clean-up playbook: after removal, remove any leftover tasks/jobs/policies
+  targeting the host.
 
 ### 3.2 RBAC & users
 

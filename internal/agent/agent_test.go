@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -176,6 +177,80 @@ func (w *testLogWriter) close() { w.closed.Store(true) }
 // test is done, so a lingering goroutine cannot log post-test.
 func newTestLogger(w *testLogWriter, prefix string) *log.Logger {
 	return log.New(w, prefix, 0)
+}
+
+// TestAgentRunRevoked is the E2E for the removal revocation loop: deleting a
+// host makes the server push the REVOKE envelope to the live stream, and the
+// agent's Run returns ErrRevoked (so main can exit cleanly, not crashloop).
+func TestAgentRunRevoked(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	sseB := sse.New()
+	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gs := grpc.NewServer()
+	h.Register(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	id, err := identity.LoadOrGenerate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_rev", UUID: id.UUID,
+		ED25519Pub: id.Ed25519PubB64(), X25519Pub: id.X25519PubB64(),
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	agentCfg := &config.Config{
+		Mode:          "agent",
+		ServerURL:     lis.Addr().String(),
+		DataDir:       t.TempDir(),
+		FactsInterval: 3600,
+		Elevate:       "none",
+		Root:          "/",
+	}
+	ag := agent.New(id, agentCfg, log.New(io.Discard, "agent: ", 0))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- ag.Run(ctx) }()
+
+	// Wait for the agent to connect.
+	deadline := time.Now().Add(5 * time.Second)
+	for h.AgentSession("ag_rev") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("agent did not connect within 5s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Remove the host the way the API does: the store row is gone and the
+	// live stream is told via RevokeAgent.
+	if err := st.DeleteAgent("ag_rev"); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+	h.RevokeAgent("ag_rev", "host deleted")
+
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, agent.ErrRevoked) {
+			t.Fatalf("Run = %v, want ErrRevoked", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent Run did not return after revoke within 5s")
+	}
 }
 
 // TestOfflineSpoolReplay is the M1 E2E for offline spooling

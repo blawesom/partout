@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -53,6 +54,113 @@ func TestAgentLifecycle(t *testing.T) {
 	}
 	if _, err := db.Agent("ag_x"); err == nil {
 		t.Fatal("expected not found after delete")
+	}
+}
+
+// TestDeleteAgentCascades pins the host-removal cleanup contract (PRD R7/B3):
+// deleting an agent must purge every per-host row, null the provisioning
+// history, and leave the fleet-wide rows (executions, secrets, audit) intact.
+// A future FK change to ON DELETE SET NULL (or a dropped cascade) breaks this.
+func TestDeleteAgentCascades(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+
+	const ag = "ag_casc"
+	if err := db.UpsertAgent(Agent{ID: ag, UUID: "u_casc", ED25519Pub: "e", X25519Pub: "x"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	// Seed every per-host table that references agents(id).
+	if err := db.UpsertFacts(Facts{AgentID: ag, TS: 1, Data: map[string]string{"host.name": "casc"}}); err != nil {
+		t.Fatalf("UpsertFacts: %v", err)
+	}
+	if err := db.SetTag(ag, "env", "prod"); err != nil {
+		t.Fatalf("SetTag: %v", err)
+	}
+	if err := db.SetRole(ag, "web"); err != nil {
+		t.Fatalf("SetRole: %v", err)
+	}
+	if err := db.CreateExecution(Execution{ID: "ex_c", Selector: "all", Cmd: "true", State: "pending", Created: 1}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	if err := db.CreateExecutionRun(ExecutionRun{ID: "run_c", ExecutionID: "ex_c", AgentID: ag, State: "queued", Created: 1, Updated: 1}); err != nil {
+		t.Fatalf("CreateExecutionRun: %v", err)
+	}
+	if err := db.CreateSession(Session{ID: "sess_c", AgentID: ag, Cmd: "/bin/sh"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := db.AppendSessionRecord("sess_c", 0, []byte("x")); err != nil {
+		t.Fatalf("AppendSessionRecord: %v", err)
+	}
+	if err := db.InsertFileAction(FileAction{ID: "fa_c", AgentID: ag, Op: "list", Path: "/tmp", State: "ok", Code: 0}); err != nil {
+		t.Fatalf("InsertFileAction: %v", err)
+	}
+	if err := db.CreateSecret(Secret{ID: "sec_c", Name: "c", Created: 1, Updated: 1}, SecretVersion{ID: "sv_c", SecretID: "sec_c", Version: 1, Ciphertext: []byte("ct"), Created: 1}); err != nil {
+		t.Fatalf("CreateSecret: %v", err)
+	}
+	if err := db.RecordSecretBinding(SecretBinding{ID: "bind_c", SecretID: "sec_c", Version: 1, AgentID: ag, Ref: "run_c", Ts: 1}); err != nil {
+		t.Fatalf("RecordSecretBinding: %v", err)
+	}
+	if err := db.CreateProvisionRun(ProvisionRun{ID: "prov_c", Host: "h", Mode: "fresh", State: "done", AgentID: ag}); err != nil {
+		t.Fatalf("CreateProvisionRun: %v", err)
+	}
+	if err := db.AppendAudit(AuditEvent{TS: 1, Kind: "exec.dispatch", Actor: "admin", AgentID: ag}); err != nil {
+		t.Fatalf("AppendAudit: %v", err)
+	}
+
+	if err := db.DeleteAgent(ag); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+
+	// Cascade-deleted: every per-host row is gone.
+	if f, err := db.LatestFacts(ag); !errors.Is(err, ErrNotFound) {
+		t.Errorf("host_facts not cascaded (f=%v err=%v), want not-found", f, err)
+	}
+	if tags, _ := db.Tags(ag); len(tags) != 0 {
+		t.Errorf("host_tags = %v, want empty", tags)
+	}
+	if roles, _ := db.Roles(ag); len(roles) != 0 {
+		t.Errorf("host_roles = %v, want empty", roles)
+	}
+	if r, err := db.GetExecutionRun("run_c"); err != nil || r != nil {
+		t.Errorf("execution_runs not cascaded (r=%v err=%v)", r, err)
+	}
+	if _, err := db.GetSession("sess_c"); err == nil {
+		t.Error("sessions not cascaded")
+	}
+	if recs, _ := db.ListSessionRecords("sess_c"); len(recs) != 0 {
+		t.Errorf("session_records = %d rows, want 0", len(recs))
+	}
+	var faCount int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM files_actions WHERE agent_id=?`, ag).Scan(&faCount); err != nil {
+		t.Fatalf("count files_actions: %v", err)
+	}
+	if faCount != 0 {
+		t.Errorf("files_actions = %d rows, want 0", faCount)
+	}
+	if binds, _ := db.ListSecretBindings("sec_c", 100); len(binds) != 0 {
+		t.Errorf("secret_bindings = %d rows, want 0", len(binds))
+	}
+
+	// Nulled, not deleted: provisioning history survives, host link removed.
+	prov, err := db.ProvisionRun("prov_c")
+	if err != nil {
+		t.Fatalf("provision_runs should survive delete: %v", err)
+	}
+	if prov.AgentID != "" {
+		t.Errorf("provision_runs.agent_id = %q, want nulled", prov.AgentID)
+	}
+
+	// Fleet-wide rows are untouched: the execution parent, the secret, and audit.
+	if _, err := db.GetExecution("ex_c"); err != nil {
+		t.Errorf("executions parent should survive: %v", err)
+	}
+	if _, err := db.GetSecret("sec_c"); err != nil {
+		t.Errorf("secrets should survive: %v", err)
+	}
+	audits, _ := db.ListAudit("", 100)
+	if len(audits) != 1 {
+		t.Errorf("audit_events = %d rows, want 1 (immutable log kept)", len(audits))
 	}
 }
 

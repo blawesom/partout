@@ -2200,7 +2200,7 @@
       async removeHost() {
         const id = this.p1;
         const label = this.hostNameById(id);
-        if (!await this.askConfirm({ title: "Remove host", body: "This deletes the agent and all its data (runs, facts, tags, roles). The host can never rejoin with its current identity.", mono: label + " (" + id + ")", confirmLabel: "Remove host", variant: "danger", requireText: id })) return;
+        if (!await this.askConfirm({ title: "Remove host", body: "This deletes the agent and all its data (runs, sessions, files, facts, tags, roles) and revokes it from the fleet — the host can never rejoin with its current identity. To reuse the machine, re-provision it in fresh mode.", mono: label + " (" + id + ")", confirmLabel: "Remove host", variant: "danger", requireText: id })) return;
         try {
           await this.api("/hosts/" + encodeURIComponent(id), { method: "DELETE" });
           this.notify("ok", "host removed");

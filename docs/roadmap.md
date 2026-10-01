@@ -234,6 +234,37 @@ tooltip** for the `overflow:hidden` truncated cells (sha256, errors, step
 output) that a CSS `::after` tooltip can't reach, plus the remaining `title=`
 sites. See `docs/ui-guidelines.md` §23–24.
 
+### Host removal: revocation loop + pinned cleanup contract
+
+Removing a host was already a DB cascade (PRD R7/B3) — this closes the loop on the
+live side and pins the contract:
+
+- **Server sends `REVOKE` on delete** (`stream.RevokeAgent`): the proto envelope and
+  the agent-side handler existed but were never used. Now, when an admin deletes a
+  host whose agent is still streaming, the server pushes `REVOKE` (with reason) and
+  the agent stops itself — its client-side close ends the stream. A disconnected
+  agent has nothing to tell; the store row is gone, so the next handshake is
+  rejected (removal doubles as revocation). Queued offline work for the agent is
+  dropped at delete time.
+- **Agent exits cleanly on revoke**: `Run` returns `ErrRevoked` → `main` exits **0**
+  (previously `lg.Fatal` → exit 1 → systemd restart → enroll fails → crashloop, which
+  is why the server couldn't send REVOKE). Opt-in
+  `PARTOUT_AGENT_CLEANUP_ON_REVOKE=1` also removes local `identity.json` + `tls/`
+  before exit (machine = clean slate; destructive, hence off by default).
+- **Embedded mode survives its own revocation**: deleting the server's co-located
+  host stops only the agent half; the control plane keeps serving the fleet.
+- **Cascade contract pinned** by `TestDeleteAgentCascades`: facts/tags/roles,
+  execution runs, sessions (+records), file actions, secret bindings all
+  cascade-delete; `provision_runs` survives with `agent_id` nulled; executions,
+  secrets, and the audit log are untouched. A future FK change to `SET NULL`
+  breaks this test.
+
+**Follow-up (not built): machine decommission.** Removal cleans the server's view but
+never the machine: the agent binary, `identity.json`, and systemd unit stay on the
+host. A `provision decommission <host>` — the reverse of the 5-step install, over
+fleet SSH through the same key-confirm gate (stop+disable unit, remove binary/identity/
+env/unit files) — would close the full lifecycle. M8.2-scale; build on demand.
+
 ### M6 — Observe: alert engine (shipped)
 
 Done (R23/R25 — the engine that makes observe data actionable; PRD Decision 16: server-side only):
