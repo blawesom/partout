@@ -471,7 +471,43 @@ token would. Tokens are stored only as SHA-256 hashes. v1 deviations (A20):
 no browser-login grant (this codebase is bearer-token-based), no refresh
 tokens.
 
----
+### 3.11 Uninstall (one command, local)
+
+`partout uninstall` removes Partout from the machine it runs on (server,
+agent, or embedded — auto-detected from the installed units). It is a
+**local** operation: no server round-trip, no `--server`/`--token`.
+
+```bash
+sudo partout uninstall --dry-run     # preview the exact removal plan
+sudo partout uninstall               # stop + disable units, remove units, env, guard, binary — KEEPS state
+sudo partout uninstall --purge       # + remove state (db, TLS, identity, spool), $HOME/.partout, user `partout`
+sudo partout uninstall --keep-binary # leave /usr/local/bin/partout in place (shared operator CLI)
+```
+
+Like `apt remove` vs `apt purge`: the default keeps the state directory
+(`/var/lib/partout` — db, TLS, identity, filestaging; plus any custom
+`PARTOUT_DB_PATH` dir from `/etc/partout/server.env` and `PARTOUT_DATA_DIR`
+from `agent.env`) so a re-install or a later decision can recover it. The
+plan is printed before anything is touched; `--dry-run` changes nothing.
+
+- **Ordering is safe**: units stop + disable first, then unit files, then
+  `daemon-reload`, then env files, then state (on `--purge`), then the
+  binary. A failed `systemctl stop` aborts the run — state is never removed
+  while a live process may own it. The `partout` system user is removed last
+  (`--purge` only, only after state is gone).
+- **Remote uninstall of a managed host**: `partout uninstall --purge`
+tolerates the first SIGTERM (its own `systemctl stop` makes systemd signal
+the whole agent cgroup), so it also works when dispatched over the fleet:
+  `partout ctl run --agent <id> -- sudo partout uninstall --purge` (or the
+  same command in the web UI). The exec result may truncate as the agent
+  shuts down — expected; verify from the next `hosts` poll (the host will
+  be gone/revoked).
+- **Docker installs**: the container's state is the volume — stop the
+  container, `docker rm` it, and drop the volume. `partout uninstall` runs
+  inside the container image only if you want the in-container files
+cleaned up the same way.
+- The server-side half of removing a host (delete the fleet row, revoke the
+  credential) is `partout ctl hosts delete <id>` — see operations.md §3.1.
 
 ## 4. Configuration reference
 

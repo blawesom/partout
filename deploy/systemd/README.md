@@ -87,6 +87,21 @@ sudo sed -i '/^PARTOUT_TOKEN=/d' /etc/partout/agent.env
 sudo systemctl restart partout-agent.service
 ```
 
+## Uninstall
+
+One command, local to the machine (deployment §3.11 for the full reference):
+
+```bash
+sudo partout uninstall --dry-run   # preview
+sudo partout uninstall             # stop + remove units/env/binary, keep /var/lib/partout
+sudo partout uninstall --purge     # also remove state (db, TLS, identity) + user partout
+```
+
+On a managed host the same command can be dispatched from the server
+(`partout ctl run --agent <id> -- sudo partout uninstall --purge`); removing
+the host from the fleet itself is `partout ctl hosts delete <id>` (revocation,
+separate from the local uninstall).
+
 ## TLS / mTLS (optional; server runs `PARTOUT_TLS=on`)
 
 1. **Enable on the server**: set `PARTOUT_TLS=on` in `/etc/partout/server.env` (and

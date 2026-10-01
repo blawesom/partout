@@ -144,6 +144,13 @@ Step-by-step bring-up, also referenced in deployment §6:
   `tls/` on revoke (destructive, opt-in). To reuse the machine, re-provision it in `fresh`
   mode. Keep a clean-up playbook: after removal, remove any leftover tasks/jobs/policies
   targeting the host.
+- **Full uninstall (local or remote)**: to remove Partout entirely from a machine
+  (units, env, state, binary, user) run `sudo partout uninstall --purge` on it —
+  `--dry-run` previews the plan first; the default (no `--purge`) keeps the state
+  dir (deployment.md §3.11). For a managed host you don't have shell access to,
+  dispatch it through the fleet: `partout ctl run --agent <id> -- sudo partout
+  uninstall --purge` (the command survives its own cgroup SIGTERM), or revoke
+  first (`hosts delete`) then give the operator the one-liner for the console.
 
 ### 3.2 RBAC & users
 
