@@ -1470,6 +1470,17 @@
             <button v-if="svcFAny" class="btn sm" @click="svcClearF()">Clear filters</button>
             <span class="muted small">· filter on the column headers (filters combine with AND)</span>
           </div>
+          <div v-if="svcFAny" class="toolbar" style="background:var(--brand-subtle);border:1px solid var(--border)">
+            <span class="muted small">⚡ target:</span>
+            <code class="mono">{{ svcTarget }}</code>
+            <button class="btn sm" @click="svcCopySel()">Copy</button>
+            <button class="btn sm" :disabled="!isOperator" @click="svcNewAlert()">New alert…</button>
+            <span class="muted small" style="margin:0 6px">·</span>
+            <span class="muted small">save as group:</span>
+            <input v-model="svcGroupName" placeholder="group name" class="mono" style="width:110px" />
+            <button class="btn sm" :disabled="!isOperator || !svcGroupName.trim() || svcGroupBusy" @click="svcSaveGroup()"><span v-if="svcGroupBusy" class="spin"></span>Save group</button>
+            <span class="muted small">→ then use <code class="mono">group:&lt;name&gt;</code> as the selector in tasks, jobs &amp; alerts</span>
+          </div>
           <div class="card">
             <table class="tbl">
               <thead><tr>
@@ -1810,7 +1821,7 @@
         mcpInfo: null, mcpClients: [],
         extStatus: null, extBusy: false,
         security: [], secBusy: false, secPatchBusy: false,
-        services: [], svcF: { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" }, svcDetail: null,
+        services: [], svcF: { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" }, svcDetail: null, svcGroupName: "", svcGroupBusy: false, alertPrefill: null,
         certs: [], certDays: "", certHost: "", certQ: "", certsConfigs: [],
         configs: [], cfgKind: "", cfgHost: "",
         pw: { current: "", next: "" }, pwMsg: "", pwErr: "",
@@ -1824,6 +1835,9 @@
       // rows (the API returns the full unpaginated list). Facets are the
       // distinct values actually present, so every option is reachable.
       svcFAny() { return Object.values(this.svcF).some((v) => v !== ""); },
+      // Selectors target hosts: a host filter pins one; otherwise the
+      // filtered set spans the whole fleet ("all" is a valid selector).
+      svcTarget() { return this.svcF.host ? "host:" + this.svcF.host : "all"; },
       svcRows() {
         const f = this.svcF;
         return this.services.filter((row) => {
@@ -2315,7 +2329,15 @@
           case "secrets": await this.loadSecrets(); break;
           case "policies": await this.loadPolicies(); await this.loadPreset(); break;
           case "approvals": await this.loadApprovals(); break;
-          case "obs-alerts": await this.loadAlerts(); this.loadRules(); break;
+          case "obs-alerts": await this.loadAlerts(); this.loadRules();
+            if (this.alertPrefill) {
+              const p = this.alertPrefill; this.alertPrefill = null;
+              this.newRuleForm();
+              this.ruleForm.selector = p.selector;
+              this.ruleForm.kind = p.kind;
+              this.notify("info", "Rule form pre-filled from the Services filter — name it, review, then save", 6000);
+            }
+            break;
           case "mcp": await this.loadMcp(); this.loadMcpClients(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
@@ -3109,6 +3131,41 @@
       svcKey(row) { return row.host_id + "/" + row.unit.name; },
       toggleSvcDetail(key) { this.svcDetail = this.svcDetail === key ? null : key; },
       svcClearF() { this.svcF = { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" }; },
+      async svcCopySel() {
+        const sel = this.svcTarget;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(sel); }
+          else throw new Error("no clipboard API");
+          this.notify("ok", "selector copied: " + sel);
+        } catch (e) {
+          const ta = document.createElement("textarea");
+          ta.value = sel; ta.style.position = "fixed"; ta.style.opacity = "0";
+          document.body.appendChild(ta); ta.select();
+          let ok = false;
+          try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
+          document.body.removeChild(ta);
+          if (ok) this.notify("ok", "selector copied: " + sel);
+          else this.notify("err", "copy failed — the selector is: " + sel, 8000);
+        }
+      },
+      svcNewAlert() {
+        // Suggest the rule kind that matches what the filter shows: a
+        // failed-state view maps to service_failed; an active view to
+        // service_restarting (watch the running ones for restart loops).
+        const kind = this.svcF.state === "active" ? "service_restarting" : "service_failed";
+        this.alertPrefill = { selector: this.svcTarget, kind };
+        this.go("obs-alerts");
+      },
+      async svcSaveGroup() {
+        const name = (this.svcGroupName || "").trim();
+        if (!name) return;
+        this.svcGroupBusy = true;
+        try {
+          await this.api("/groups", { body: { name, selector: this.svcTarget } });
+          this.notify("ok", "group \"" + name + "\" saved — selector: group:" + name);
+          this.svcGroupName = "";
+        } catch (e) { /* toast shown by api() */ } finally { this.svcGroupBusy = false; }
+      },
       // last-run verdict for the Exit column: systemd's Result= word plus the
       // exit code when numeric. "success"/absent (never run or still up) and
       // clean stops render as a dash rather than noise.

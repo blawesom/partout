@@ -680,6 +680,28 @@ async function main() {
   w.__partout.svcClearF();
   await sleep(200);
   check("services: clear restores all rows", w.__partout.svcRows.length === totalSvc, "clear did not restore");
+  // Action bar: the filtered set converts into a host selector.
+  w.__partout.svcF.unit = firstSvc.unit.name;
+  await sleep(200);
+  check("services: action bar shows target", [...d.querySelectorAll("code")].some((c) => c.textContent.trim() === "all"), "target selector not shown");
+  w.__partout.svcGroupName = "smoke-svc-group";
+  await sleep(250); // let Vue re-render :disabled before clicking
+  const saveGroupBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("Save group"));
+  if (saveGroupBtn) saveGroupBtn.click();
+  await sleep(700);
+  check("services: group saved (input cleared)", w.__partout.svcGroupName === "", "group save did not complete");
+  // Host filter pins the target; New alert jumps to Alerts with the rule form pre-filled.
+  w.__partout.svcF.host = firstSvc.host_id;
+  await sleep(200);
+  check("services: host filter pins target", [...d.querySelectorAll("code")].some((c) => c.textContent.trim() === "host:" + firstSvc.host_id), "target not pinned to host");
+  const newAlertBtn = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("New alert"));
+  if (newAlertBtn) newAlertBtn.click();
+  await sleep(1500);
+  check("alerts: rule pre-filled from services filter", w.__partout.page === "obs-alerts" && w.__partout.ruleForm && w.__partout.ruleForm.selector === "host:" + firstSvc.host_id, "ruleForm not prefilled: " + JSON.stringify(w.__partout.ruleForm && { sel: w.__partout.ruleForm.selector, kind: w.__partout.ruleForm.kind }));
+  w.__partout.ruleForm = null;
+  w.__partout.svcF = { unit: "", host: "", state: "", enabled: "", exit: "", restart: "", label: "" };
+  w.__partout.go("obs-services");
+  await sleep(900);
   // Row click expands the detail row (description/pid/fragment/last-start).
   const svcRowEl = d.querySelector("table.tbl tbody tr");
   if (svcRowEl) svcRowEl.click();
