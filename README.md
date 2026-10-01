@@ -178,7 +178,7 @@ partout ctl audit --kind policy.deny --limit 50
 
 The full command set: `auth · enroll-token · hosts · run · exec · audit · policy ·
 preset · approvals · alerts · provision · ca · tls · files · sessions · jobs · tasks ·
-playbooks · packages · secrets · update · db-backup · external-data` (plus the
+playbooks · packages · cve · services · secrets · update · db-backup · external-data` (plus the
 top-level `partout doctor`, `partout selftest`, and `partout update`). `partout ctl
 help` prints the full reference.
 

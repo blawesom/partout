@@ -51,6 +51,7 @@ commands:
   hosts                    list hosts (id, state, version, last seen, tags)
   run --selector S -- CMD [ARGS...]  dispatch a command, wait, show per-run output
   exec EXEC_ID             show execution detail + output
+  exec cancel EXEC_ID      cancel a running execution
   audit [--kind K] [--actor A] [--limit N]   show audit log
   policy <list|create|delete>                manage policy deny rules
   preset <show|status|apply> first-boot fleet defaults (safety-net policies + alerts);
@@ -62,6 +63,7 @@ commands:
   tls <status|rotate>      mTLS leaf status / rotate agent leaves
   files stat  --agent A --path P             show file metadata
   files list  --agent A --dir D              directory listing
+  files download --agent A --path P [--out F]  fetch a file to stdout or a local path
   files upload --agent A --path P --file F  upload a local file (base64) to agent
   files edit  --agent A --path P --file F   compare-and-swap rewrite (needs sha)
   files perm  --agent A --path P --mode M   change file mode/ownership
@@ -73,8 +75,11 @@ commands:
   update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
            release signing + the one-command fleet update (M8.1)
   packages <updates|apply|actions> --agent A  OS package updates (apt/dnf; dry-run first)
+  cve <list|scan> [--agent A] [--min-cvss F] [--json]  package CVE findings (OSV);
+                           exit 1 if any finding matches — CI/cron gate
+  services [--agent A] [--state S] [--name N]   systemd units across the fleet
   tasks <list|create|show|run|runs|run-show>   versioned task templates
-  playbooks <list|create>      multi-host playbooks (run them via 'tasks run')
+  playbooks <list|create|run>  multi-host playbooks; run fans the pinned task out to the selector
   jobs <list|create|show|delete|run|runs|list-runs>  scheduled jobs (cron, agent-side)
   external-data <status|refresh|host-eol>   OS end-of-life data
   db-backup <db> <out>       atomic hot DB snapshot (local; no server round-trip)
@@ -175,6 +180,10 @@ commands:
 		c.cmdUpdate(rest)
 	case "packages":
 		c.cmdPackages(rest)
+	case "cve":
+		c.cmdCVE(rest)
+	case "services":
+		c.cmdServices(rest)
 	case "tasks":
 		c.cmdTasks(rest)
 	case "playbooks":
@@ -962,16 +971,29 @@ func (c *ctl) cmdRun(args []string) {
 func (c *ctl) cmdExec(args []string) {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	fs.Parse(args)
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: partout ctl exec EXEC_ID")
+	switch fs.Arg(0) {
+	case "cancel":
+		if fs.NArg() < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl exec cancel EXEC_ID")
+			os.Exit(2)
+		}
+		var res map[string]any
+		if err := c.do("POST", "/api/v1/executions/"+url.PathEscape(fs.Arg(1))+"/cancel", nil, &res); err != nil {
+			fatal(err)
+		}
+		b, _ := json.Marshal(res)
+		fmt.Println(string(b))
+	case "":
+		fmt.Fprintln(os.Stderr, "usage: partout ctl exec EXEC_ID   (or: exec cancel EXEC_ID)")
 		os.Exit(2)
+	default:
+		execID := fs.Arg(0)
+		var detail map[string]any
+		if err := c.do("GET", "/api/v1/executions/"+execID, nil, &detail); err != nil {
+			fatal(err)
+		}
+		c.showExecution(execID, detail)
 	}
-	execID := fs.Arg(0)
-	var detail map[string]any
-	if err := c.do("GET", "/api/v1/executions/"+execID, nil, &detail); err != nil {
-		fatal(err)
-	}
-	c.showExecution(execID, detail)
 }
 
 func (c *ctl) cmdAudit(args []string) {
@@ -1586,7 +1608,7 @@ func reorderGlobalFlags(args []string) []string {
 
 func (c *ctl) cmdFiles(args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "ctl: files subcommand required (stat|list|upload|edit|perm)")
+		fmt.Fprintln(os.Stderr, "ctl: files subcommand required (stat|list|download|upload|edit|perm)")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -1594,6 +1616,8 @@ func (c *ctl) cmdFiles(args []string) {
 		c.cmdFileStat(args[1:])
 	case "list":
 		c.cmdFileList(args[1:])
+	case "download":
+		c.cmdFileDownload(args[1:])
 	case "upload":
 		c.cmdFileUpload(args[1:])
 	case "edit":
@@ -1654,6 +1678,51 @@ func (c *ctl) cmdFileList(args []string) {
 	w.Flush()
 	if result.Truncated {
 		fmt.Fprintln(os.Stderr, "(list truncated — more entries in directory)")
+	}
+}
+
+func (c *ctl) cmdFileDownload(args []string) {
+	fs := flag.NewFlagSet("files download", flag.ExitOnError)
+	var agent, path, out string
+	fs.StringVar(&agent, "agent", "", "agent host ID")
+	fs.StringVar(&path, "path", "", "absolute path on the agent")
+	fs.StringVar(&out, "out", "", "local output file (default: stdout)")
+	fs.Parse(args)
+	if agent == "" || path == "" {
+		fmt.Fprintln(os.Stderr, "usage: partout ctl files download --agent A --path P [--out F]")
+		os.Exit(2)
+	}
+	req, err := http.NewRequest("GET", c.base+"/api/v1/files/download?agent_id="+url.PathEscape(agent)+"&path="+url.PathEscape(path), nil)
+	if err != nil {
+		fatal(err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		fatal(fmt.Errorf("files download: %w", err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		fmt.Fprintf(os.Stderr, "ctl: files download: %d: %s\n", resp.StatusCode, strings.TrimSpace(string(b)))
+		os.Exit(1)
+	}
+	var dst io.Writer = os.Stdout
+	if out != "" {
+		f, err := os.Create(out)
+		if err != nil {
+			fatal(err)
+		}
+		defer f.Close()
+		dst = f
+	}
+	if _, err := io.Copy(dst, resp.Body); err != nil {
+		fatal(err)
+	}
+	if out != "" {
+		fmt.Fprintf(os.Stderr, "wrote %s\n", out)
 	}
 }
 
@@ -2134,6 +2203,167 @@ func (c *ctl) cmdPackages(args []string) {
 	}
 }
 
+// ---- cve (M5.1 package-CVE scan) ------------------------------------------
+
+// cmdCVE views or re-runs the fleet's package-CVE scan (server-side OSV
+// correlation over each agent's pending updates).
+//
+// Exit codes: 0 = no finding matches the filter, 1 = at least one matches
+// (so `partout ctl cve --min-cvss 7` is a ready-made CI/cron gate),
+// 2 = usage error.
+func (c *ctl) cmdCVE(args []string) {
+	sub := "list"
+	if len(args) > 0 && (args[0] == "list" || args[0] == "scan") {
+		sub, args = args[0], args[1:]
+	}
+	fs := flag.NewFlagSet("cve", flag.ExitOnError)
+	agent := fs.String("agent", "", "only this agent")
+	minCVSS := fs.Float64("min-cvss", 0, "only findings with max CVSS >= N (e.g. 7)")
+	asJSON := fs.Bool("json", false, "raw JSON output")
+	fs.Parse(args)
+	switch sub {
+	case "list", "":
+		if c.cveList(*agent, *minCVSS, *asJSON) > 0 {
+			os.Exit(1)
+		}
+	case "scan":
+		var res map[string]any
+		if err := c.do("POST", "/api/v1/security/scan", nil, &res); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("scanned %d host(s)\n", int(num(res["scanned"])))
+		if c.cveList(*agent, *minCVSS, *asJSON) > 0 {
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "usage: partout ctl cve <list|scan> [--agent A] [--min-cvss F] [--json]")
+		os.Exit(2)
+	}
+}
+
+// cveList renders GET /security under the given filters and returns the
+// number of findings shown (drives the CI exit code).
+func (c *ctl) cveList(agent string, minCVSS float64, asJSON bool) int {
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := c.do("GET", "/api/v1/security", nil, &page); err != nil {
+		fatal(err)
+	}
+	hosts := page.Items
+	n := 0
+	if asJSON {
+		out := make([]map[string]any, 0, len(hosts))
+		for _, h := range hosts {
+			if agent != "" && strval(h["agent_id"]) != agent {
+				continue
+			}
+			fs, _ := h["findings"].([]any)
+			kept := make([]any, 0, len(fs))
+			for _, it := range fs {
+				f, _ := it.(map[string]any)
+				if num(f["max_cvss"]) >= minCVSS {
+					kept = append(kept, f)
+					n++
+				}
+			}
+			if len(kept) == 0 && (minCVSS > 0 || agent != "") {
+				continue // filtered clean — noise under a CI filter
+			}
+			out = append(out, map[string]any{
+				"agent_id": h["agent_id"], "scanned_at": h["scanned_at"],
+				"updates_total": h["updates_total"], "security_updates": h["security_updates"],
+				"findings": kept,
+			})
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return n
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	shown := 0
+	for _, h := range hosts {
+		if agent != "" && strval(h["agent_id"]) != agent {
+			continue
+		}
+		fs, _ := h["findings"].([]any)
+		rows := make([]map[string]any, 0, len(fs))
+		for _, it := range fs {
+			f, _ := it.(map[string]any)
+			if num(f["max_cvss"]) >= minCVSS {
+				rows = append(rows, f)
+			}
+		}
+		if len(rows) == 0 && minCVSS > 0 {
+			continue // clean under the filter — noise
+		}
+		shown++
+		fmt.Fprintf(w, "%s   (scanned %s, %d update(s), %d security)\n",
+			strval(h["agent_id"]), unixTime(int64(num(h["scanned_at"]))),
+			int(num(h["updates_total"])), int(num(h["security_updates"])))
+		if len(rows) == 0 {
+			fmt.Fprintln(w, "  clean")
+			continue
+		}
+		fmt.Fprintln(w, "  PKG\tINSTALLED\tAVAILABLE\tCVSS\tVULNS\tCVE/ADVISORY IDS")
+		for _, f := range rows {
+			n++
+			fmt.Fprintf(w, "  %s\t%s\t%s\t%.1f\t%d\t%s\n",
+				strval(f["pkg"]), strval(f["installed"]), strval(f["available"]),
+				num(f["max_cvss"]), int(num(f["vuln_count"])), strval(f["vuln_ids"]))
+		}
+	}
+	w.Flush()
+	if shown == 0 {
+		if len(hosts) == 0 {
+			fmt.Println("no scanned hosts (run: partout ctl cve scan)")
+		} else {
+			fmt.Println("no findings match the filter — fleet is clean for these criteria")
+		}
+	}
+	return n
+}
+
+// ---- services (observe: systemd units) -------------------------------------
+
+func (c *ctl) cmdServices(args []string) {
+	fs := flag.NewFlagSet("services", flag.ExitOnError)
+	agent := fs.String("agent", "", "only this agent")
+	state := fs.String("state", "", "only this state (e.g. running, stopped)")
+	name := fs.String("name", "", "exact unit name")
+	fs.Parse(args)
+	q := url.Values{}
+	if *agent != "" {
+		q.Set("agent_id", *agent)
+	}
+	if *state != "" {
+		q.Set("state", *state)
+	}
+	if *name != "" {
+		q.Set("name", *name)
+	}
+	var page struct {
+		Count int              `json:"count"`
+		Items []map[string]any `json:"items"`
+	}
+	if err := c.do("GET", "/api/v1/services?"+q.Encode(), nil, &page); err != nil {
+		fatal(err)
+	}
+	items := page.Items
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "HOST\tUNIT\tSTATE\tENABLED\t")
+	for _, it := range items {
+		u, _ := it["unit"].(map[string]any)
+		enabled := "no"
+		if b, _ := u["enabled"].(bool); b {
+			enabled = "yes"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", strval(it["host_id"]), strval(u["name"]), strval(u["state"]), enabled)
+	}
+	w.Flush()
+	fmt.Printf("\n%d unit(s)\n", len(items))
+}
+
 func (c *ctl) cmdTasks(args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: partout ctl tasks <list|create|show|run|runs|run-show>")
@@ -2269,6 +2499,32 @@ func (c *ctl) cmdPlaybooks(args []string) {
 		}
 		b, _ := json.Marshal(out)
 		fmt.Println(string(b))
+
+	case "run":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: partout ctl playbooks run <playbook_id>")
+			os.Exit(2)
+		}
+		var res map[string]any
+		if err := c.do("POST", "/api/v1/playbooks/"+url.PathEscape(args[1])+"/run", nil, &res); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		runs, _ := res["runs"].([]any)
+		errs, _ := res["errors"].([]any)
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "RUN_ID\tAGENT\tSTATE")
+		for _, it := range runs {
+			r, _ := it.(map[string]any)
+			fmt.Fprintf(w, "%s\t%s\t%s\n", strval(r["run_id"]), strval(r["agent_id"]), strval(r["state"]))
+		}
+		w.Flush()
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "error: %v\n", e)
+		}
+		if len(errs) > 0 {
+			os.Exit(1)
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: playbooks: unknown subcommand %q\n", args[0])
