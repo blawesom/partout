@@ -87,6 +87,42 @@ sudo sed -i '/^PARTOUT_TOKEN=/d' /etc/partout/agent.env
 sudo systemctl restart partout-agent.service
 ```
 
+## Elevation (optional; agent runs privileged operations)
+
+The agent runs as the unprivileged `partout` user by default (PRD Decision 3). That
+means it **cannot** install/manage packages, start/stop services, reboot, or read
+root-only config files (e.g. `haproxy.cfg`). To enable those without running the
+whole agent as root, turn on host-level elevation:
+
+```bash
+# 1) Install the sudoers scope (fail-closed: nothing elevates unless listed)
+sudo install -m 0440 -o root -g root deploy/sudoers/partout-agent /etc/sudoers.d/partout-agent
+sudo visudo -cf /etc/sudoers.d/partout-agent
+
+# 2) Enable elevation in the agent env
+sudo sed -i 's/^# PARTOUT_ELEVATE=.*/PARTOUT_ELEVATE=sudo/' /etc/partout/agent.env
+
+# 3) sudo needs setuid — the unit's NoNewPrivileges blocks it. Remove that line.
+sudo sed -i '/^NoNewPrivileges=true/d' /etc/systemd/system/partout-agent.service
+sudo systemctl daemon-reload
+sudo systemctl restart partout-agent
+```
+
+What elevates (all via `sudo -n`, non-interactive, no password): dispatched
+exec, PTY sessions (a root terminal), package apply + metadata refresh, task
+steps (command/package/service/user/group/reboot), and root-only config-file
+reads for the observe layer. Everything else stays as `partout`. A command with
+no matching sudoers entry **fails closed** with a normal non-zero exit — the
+dispatch/surface reports it like any failed command. The shipped drop-in also
+passes custom environment through (`!env_reset`), so `partout ctl run --env
+K=V` works on elevated commands out of the box — trade-off and how to
+re-tighten later: operations.md §3.6. Per-command elevation
+profiles (pattern-scoped, policy-constrained) are the later full Decision 3
+implementation (see docs/roadmap.md).
+
+If you don't need privilege on a host, leave `PARTOUT_ELEVATE` unset: the agent
+stays fully unprivileged.
+
 ## Uninstall
 
 One command, local to the machine (deployment §3.11 for the full reference):

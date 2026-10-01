@@ -7,7 +7,9 @@ package factscollect
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -16,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/blawesom/partout/internal/agent/elevate"
 )
 
 // Kind identifies the observation domain.
@@ -86,6 +90,11 @@ type Config struct {
 	CaddyConf   string
 	// ObserveFactsInterval: seconds between uploads (PARTOUT_OBSERVE_FACTS_INTERVAL).
 	ObserveFactsInterval int
+	// Elevate: host-level elevation policy (PRD Decision 3 slice). In sudo
+	// mode, config-file reads that fail with a permission error retry via
+	// `sudo -n cat` (scoped by the host's sudoers file) so root-owned
+	// configs (e.g. haproxy.cfg) still produce facts.
+	Elevate elevate.Mode
 }
 
 // Fill returns a config with defaults filled in.
@@ -467,11 +476,11 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 		h.Version = extractVersion(out)
 	}
 	// Config SHA256
-	if sha, err := fileSHA256(cfgPath); err == nil {
+	if sha, err := fileSHA256(cfgPath, cfg.Elevate); err == nil {
 		h.ConfigSHA256 = sha
 	}
 	// Topology: lightweight parsing
-	h.Backends, h.Listeners = parseHAProxyTopology(cfgPath)
+	h.Backends, h.Listeners = parseHAProxyTopology(cfgPath, cfg.Elevate)
 	return h
 }
 
@@ -500,11 +509,11 @@ func collectNginx(cfg *Config) *NginxConfig {
 		n.Version = extractVersion(out)
 	}
 	// Config SHA256
-	if sha, err := fileSHA256(cfgPath); err == nil {
+	if sha, err := fileSHA256(cfgPath, cfg.Elevate); err == nil {
 		n.ConfigSHA256 = sha
 	}
 	// Topology: lightweight parsing
-	n.Vhosts = parseNginxVhosts(cfgPath)
+	n.Vhosts = parseNginxVhosts(cfgPath, cfg.Elevate)
 	return n
 }
 
@@ -1027,34 +1036,25 @@ func extractVersion(s string) string {
 	return ""
 }
 
-func fileSHA256(path string) (string, error) {
-	// Lightweight: use sha256sum if available, else openssl.
-	if _, err := exec.LookPath("sha256sum"); err == nil {
-		if out, err := runOutput(certExecTimeout, "sha256sum", path); err == nil {
-			if fields := strings.Fields(out); len(fields) > 0 {
-				return fields[0], nil
-			}
-		}
-	}
-	// Fallback: openssl
-	out, err := runOutput(certExecTimeout, "openssl", "dgst", "-sha256", path)
+// fileSHA256 returns the SHA-256 of path. Under the given elevation policy,
+// a permission error on the direct read retries via `sudo -n cat` so
+// root-owned configs still get a hash.
+func fileSHA256(path string, m elevate.Mode) (string, error) {
+	data, err := elevate.ReadFile(m, path)
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(out)
-	if len(fields) > 1 {
-		return fields[len(fields)-1], nil
-	}
-	return "", fmt.Errorf("sha256sum not available")
+	s := sha256.Sum256(data)
+	return hex.EncodeToString(s[:]), nil
 }
 
 // parseHAProxyTopology does lightweight regex/line-based parsing of the
 // haproxy config to extract backends, servers, frontends, TLS bindings.
 // No full YAML parsing dependency — just line scanning.
-func parseHAProxyTopology(path string) ([]BackendFact, []ListenerFact) {
+func parseHAProxyTopology(path string, m elevate.Mode) ([]BackendFact, []ListenerFact) {
 	var backends []BackendFact
 	var listeners []ListenerFact
-	data, err := os.ReadFile(path)
+	data, err := elevate.ReadFile(m, path)
 	if err != nil {
 		return backends, listeners
 	}
@@ -1103,8 +1103,8 @@ func parseHAProxyTopology(path string) ([]BackendFact, []ListenerFact) {
 // parses each one. The scan is line-based with brace-depth tracking so that a
 // nested block (location, if) does not terminate the server block early.
 // `include`d files are not followed (best-effort topology, arch §7.2).
-func parseNginxVhosts(path string) []VHostFact {
-	data, err := os.ReadFile(path)
+func parseNginxVhosts(path string, m elevate.Mode) []VHostFact {
+	data, err := elevate.ReadFile(m, path)
 	if err != nil {
 		return nil
 	}

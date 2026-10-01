@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/agent/guardrail"
 	"github.com/blawesom/partout/internal/agent/jobs"
 	"github.com/blawesom/partout/internal/agent/task"
@@ -56,7 +57,7 @@ func signedDecision(priv ed25519.PrivateKey, runID string, v uint64) *pb.Decisio
 // reboot command.
 func fakeRebootExecutor(t *testing.T, rebootErr error) (*task.Executor, *bool) {
 	t.Helper()
-	e := task.NewExecutor(nil)
+	e := task.NewExecutor(elevate.None, nil)
 	e.SetRebootFlush(0)
 	called := false
 	e.SetRebootCmd(func() error {
@@ -277,7 +278,7 @@ func TestResumeAfterBootTaskKind(t *testing.T) {
 	}
 
 	tr := &taskReports{}
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	r := New(store, exec, testGuard(t, 4, priv), nil, nil, nil, tr.fn(), nil)
 	r.SetBootAge(func() (time.Duration, bool) { return 30 * time.Second, true }) // booted 30s ago
 
@@ -329,7 +330,7 @@ func TestResumeAfterBootJobKind(t *testing.T) {
 	}
 
 	jr := &jobReports{}
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	r := New(store, exec, testGuard(t, 2, priv), nil, nil, jr.fn(), nil, nil)
 	r.SetBootAge(func() (time.Duration, bool) { return 5 * time.Second, true })
 
@@ -367,7 +368,7 @@ func TestResumeStaleMarkerNoReboot(t *testing.T) {
 	}
 
 	tr := &taskReports{}
-	r := New(store, task.NewExecutor(nil), testGuard(t, 1, priv), nil, nil, nil, tr.fn(), nil)
+	r := New(store, task.NewExecutor(elevate.None, nil), testGuard(t, 1, priv), nil, nil, nil, tr.fn(), nil)
 	r.SetBootAge(func() (time.Duration, bool) { return 2 * time.Hour, true })
 
 	r.ResumePending()
@@ -405,7 +406,7 @@ func TestResumeGuardNotLoadedDefers(t *testing.T) {
 	// Guard with no bundle loaded: resume must defer (keep the marker).
 	g := guardrail.NewGuard("agent_1", t.TempDir())
 	tr := &taskReports{}
-	r := New(store, task.NewExecutor(nil), g, nil, nil, nil, tr.fn(), nil)
+	r := New(store, task.NewExecutor(elevate.None, nil), g, nil, nil, nil, tr.fn(), nil)
 	r.SetBootAge(func() (time.Duration, bool) { return 30 * time.Second, true })
 
 	r.ResumePending()
@@ -440,7 +441,7 @@ func TestResumeDeniedByPolicy(t *testing.T) {
 	}
 
 	tr := &taskReports{}
-	r := New(store, task.NewExecutor(nil), testGuard(t, 2, priv), nil, nil, nil, tr.fn(), nil)
+	r := New(store, task.NewExecutor(elevate.None, nil), testGuard(t, 2, priv), nil, nil, nil, tr.fn(), nil)
 	r.SetBootAge(func() (time.Duration, bool) { return 30 * time.Second, true })
 
 	r.ResumePending()

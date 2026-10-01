@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/agent/guardrail"
 	"github.com/blawesom/partout/internal/agent/task"
 	"github.com/blawesom/partout/internal/policy"
@@ -62,7 +63,7 @@ func echoAssignment(jobID string) *Assignment {
 // persisted (including the signed decision), and re-loaded on restart.
 func TestSchedulerApplyAndPersist(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	s := New(tmp, exec, nil, nil)
 
 	a := &Assignment{
@@ -86,7 +87,7 @@ func TestSchedulerApplyAndPersist(t *testing.T) {
 	}
 
 	// Simulate a restart: load from disk into a fresh scheduler.
-	s2 := New(tmp, task.NewExecutor(nil), nil, nil)
+	s2 := New(tmp, task.NewExecutor(elevate.None, nil), nil, nil)
 	if err := s2.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestSchedulerApplyAndPersist(t *testing.T) {
 // TestSchedulerBadCron verifies a bad cron expression is rejected.
 func TestSchedulerBadCron(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	s := New(tmp, exec, nil, nil)
 
 	a := &Assignment{JobID: "job_1", Cron: "not-a-cron", TaskID: "task_1"}
@@ -139,7 +140,7 @@ func waitForReport(reports *[]*Report, mu *sync.Mutex, n int, t *testing.T) {
 // fires the task and reports success.
 func TestSchedulerRunNow(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	priv := testKey(t)
 
 	var mu sync.Mutex
@@ -180,7 +181,7 @@ func TestSchedulerRunNow(t *testing.T) {
 // without a signed decision (e.g. pre-upgrade legacy) never executes.
 func TestSchedulerFireNoDecisionDenied(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	priv := testKey(t)
 
 	var mu sync.Mutex
@@ -213,7 +214,7 @@ func TestSchedulerFireNoDecisionDenied(t *testing.T) {
 // present but no guard is available to verify it.
 func TestSchedulerFireNoGuardDenied(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	priv := testKey(t)
 
 	var mu sync.Mutex
@@ -247,7 +248,7 @@ func TestSchedulerFireNoGuardDenied(t *testing.T) {
 // must be re-saved to re-authorize).
 func TestSchedulerFireStaleBundleDenied(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	priv := testKey(t)
 
 	var mu sync.Mutex
@@ -281,7 +282,7 @@ func TestSchedulerFireStaleBundleDenied(t *testing.T) {
 // signature (wrong key) is rejected.
 func TestSchedulerFireBadSignatureDenied(t *testing.T) {
 	tmp := t.TempDir()
-	exec := task.NewExecutor(nil)
+	exec := task.NewExecutor(elevate.None, nil)
 	priv := testKey(t)
 	other := testKey(t)
 

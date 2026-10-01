@@ -24,6 +24,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/blawesom/partout/internal/agent/elevate"
 )
 
 // PkgUpdate is one package's update status.
@@ -63,12 +65,14 @@ type Backend interface {
 }
 
 // SelectBackend picks the correct distro backend from os-release facts.
-func SelectBackend(facts map[string]string) Backend {
+// m is the host-level elevation policy: in sudo mode the mutating calls
+// (Apply, and the metadata refresh inside List) run through `sudo -n`.
+func SelectBackend(facts map[string]string, m elevate.Mode) Backend {
 	switch facts["host.distro"] {
 	case "ubuntu", "debian", "linuxmint", "pop":
-		return &aptBackend{}
+		return &aptBackend{mode: m}
 	case "rhel", "centos", "rocky", "alma", "fedora", "ol":
-		return &dnfBackend{}
+		return &dnfBackend{mode: m}
 	default:
 		return &noopBackend{}
 	}
@@ -78,7 +82,9 @@ func SelectBackend(facts map[string]string) Backend {
 // apt / apt-get backend
 // ---------------------------------------------------------------------------
 
-type aptBackend struct{}
+type aptBackend struct {
+	mode elevate.Mode
+}
 
 // aptInstRe matches `apt-get upgrade -s` install lines (apt 2.6/2.7):
 // "Inst name:arch (old, ...) -> (new, ...)"
@@ -90,6 +96,13 @@ var aptInstRe = regexp.MustCompile(`Inst\s+(\S+?):(\S+)\s+\(([^,]+),[^)]*\)\s*->
 var aptInstBrkRe = regexp.MustCompile(`^Inst\s+(\S+)\s+\[([^\]]+)\]\s+\((\S+)(?:\s|$)`)
 
 func (a *aptBackend) List(ctx context.Context) ([]PkgUpdate, error) {
+	// Best-effort metadata refresh so the simulation sees current lists:
+	// the agent user cannot write /var/lib/apt/lists, so in sudo mode this
+	// runs elevated. Failure is not fatal — stale lists still produce a
+	// (possibly outdated) update list.
+	if a.mode == elevate.Sudo {
+		_, _ = a.mode.RunCmd(ctx, "apt-get", "-qq", "update").CombinedOutput()
+	}
 	out, err := run(ctx, time.Minute, "apt-get", "-o", "Dpkg::Progress-Focus=full", "-s", "upgrade")
 	if err != nil {
 		return nil, fmt.Errorf("apt-get upgrade -s: %w", err)
@@ -107,11 +120,13 @@ func (a *aptBackend) DryRun(ctx context.Context) (string, error) {
 
 func (a *aptBackend) Apply(ctx context.Context) error {
 	// Run non-interactive: DEBIAN_FRONTEND=noninteractive, auto-confirm.
-	cmd := exec.CommandContext(ctx, "apt-get", "-o", "Dpkg::Progress-Focus=full",
+	// Elevated in sudo mode (installing packages is root work); the shipped
+	// sudoers drop-in passes the caller environment through (!env_reset).
+	c := a.mode.RunCmd(ctx, "apt-get", "-o", "Dpkg::Progress-Focus=full",
 		"-y", "-o", "Dpkg::Options::=--force-confdef",
 		"-o", "Dpkg::Options::=--force-confold", "upgrade")
-	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-	out, err := cmd.CombinedOutput()
+	c.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	out, err := c.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("apt-get upgrade: %w: %s", err, string(out))
 	}
@@ -205,9 +220,17 @@ func parseDpkgQuery(b []byte) []PkgUpdate {
 // dnf / yum backend
 // ---------------------------------------------------------------------------
 
-type dnfBackend struct{}
+type dnfBackend struct {
+	mode elevate.Mode
+}
 
 func (d *dnfBackend) List(ctx context.Context) ([]PkgUpdate, error) {
+	// Best-effort metadata refresh (elevated in sudo mode): a non-privileged
+	// dnf cannot write its metadata cache, so stale metadata would make the
+	// update list go stale forever. Failure is not fatal.
+	if d.mode == elevate.Sudo {
+		_, _ = d.mode.RunCmd(ctx, "dnf", "-q", "makecache").CombinedOutput()
+	}
 	out, err := run(ctx, time.Minute, "dnf", "check-update")
 	if err != nil {
 		// dnf check-update returns 100 if updates available; that's OK.
@@ -231,9 +254,10 @@ func (d *dnfBackend) DryRun(ctx context.Context) (string, error) {
 }
 
 func (d *dnfBackend) Apply(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "dnf", "-y", "upgrade")
-	cmd.Env = append(os.Environ(), "LANG=en_US.UTF-8")
-	out, err := cmd.CombinedOutput()
+	// Elevated in sudo mode (upgrading packages is root work).
+	c := d.mode.RunCmd(ctx, "dnf", "-y", "upgrade")
+	c.Env = append(os.Environ(), "LANG=en_US.UTF-8")
+	out, err := c.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("dnf upgrade: %w: %s", err, string(out))
 	}

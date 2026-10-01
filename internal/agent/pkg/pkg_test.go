@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"context"
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestSelectBackend(t *testing.T) {
 	}
 	for _, c := range cases {
 		facts := map[string]string{"host.distro": c.distro}
-		b := SelectBackend(facts)
+		b := SelectBackend(facts, elevate.None)
 		switch c.want {
 		case "apt":
 			if _, ok := b.(*aptBackend); !ok {

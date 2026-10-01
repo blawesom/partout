@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+
+	"github.com/blawesom/partout/internal/agent/elevate"
 )
 
 // MaxChunkSize is the max PTY output chunk streamed up (64 KiB, A3).
@@ -37,11 +39,14 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	onResult ResultFunc
+	// elevate: in sudo mode sessions start as `sudo -n -- name args...`
+	// (a root terminal, scoped by the host's sudoers file).
+	elevate elevate.Mode
 }
 
 // NewManager creates a Manager; onResult is invoked on each session exit.
-func NewManager(onResult ResultFunc) *Manager {
-	return &Manager{sessions: make(map[string]*Session), onResult: onResult}
+func NewManager(elevate elevate.Mode, onResult ResultFunc) *Manager {
+	return &Manager{sessions: make(map[string]*Session), onResult: onResult, elevate: elevate}
 }
 
 // Open starts a PTY session running name+args with the given window size.
@@ -51,7 +56,8 @@ func (m *Manager) Open(sessionID, name string, args []string,
 	env map[string]string, cols, rows int32,
 	onData func(sessionID string, data []byte),
 ) error {
-	cmd := exec.Command(name, args...)
+	n, a := m.elevate.Run(name, args...)
+	cmd := exec.Command(n, a...)
 	cmd.Env = cleanEnv(env, cols, rows)
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{

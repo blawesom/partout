@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/agent/exec"
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/agent/factscollect"
@@ -128,6 +129,10 @@ type Agent struct {
 
 	// fsCfg bounds file operations (D3 defaults; env-configurable later).
 	fsCfg fs.Config
+
+	// elevate is the host-level elevation policy (PRD Decision 3 slice):
+	// sudo mode runs action commands through `sudo -n`.
+	elevate elevate.Mode
 }
 
 // New builds an Agent. The identity must already be enrolled (server-side row
@@ -179,6 +184,12 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		activeRunners: make(map[string]context.CancelFunc),
 		fsCfg:         fs.Config{},
 	}
+	// Elevation (PRD Decision 3, host-level slice). Config is validated at
+	// Load; this cannot fail, but keep the parse explicit.
+	a.elevate, _ = elevate.Parse(cfg.Elevate)
+	if a.elevate == elevate.Sudo {
+		lg.Printf("agent: ELEVATION ENABLED (sudo -n) — action commands run elevated per the host's sudoers file; observe reads fall back to `sudo cat` on permission errors")
+	}
 	// Task runner (M3, PRD §5.5): secrets lookup uses the E2E cache.
 	var secLookup func(ref string, version int64) (string, error)
 	if secCache != nil {
@@ -190,7 +201,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 			return v, nil
 		}
 	}
-	a.taskExec = task.NewExecutor(secLookup)
+	a.taskExec = task.NewExecutor(a.elevate, secLookup)
 	a.taskRunner = task.New(a.taskExec)
 	a.jobs = jobs.New(filepath.Join(cfg.DataDir, "jobs"), a.taskExec, func(r *jobs.Report) {
 		a.sendJobResult(r)
@@ -244,7 +255,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 			a.sendJobResult, a.sendTaskResult, a.log)
 	}
 	// Session manager uses a closure that can reach the agent instance.
-	a.sessions = session.NewManager(func(sid string, exitCode int32, state string, durationMs int64) {
+	a.sessions = session.NewManager(a.elevate, func(sid string, exitCode int32, state string, durationMs int64) {
 		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
 		a.sendUpEnvelopeNoSpool(&pb.Envelope{
 			Kind: pb.EnvelopeKind_SESSION_RESULT,
@@ -506,6 +517,7 @@ func (a *Agent) sendObserveFacts(ctx context.Context) {
 		HaproxyConf:          a.cfg.HaproxyConf,
 		CaddyConf:            a.cfg.CaddyConf,
 		ObserveFactsInterval: a.cfg.ObserveFactsInterval,
+		Elevate:              a.elevate,
 	}
 	ch := make(chan *factscollect.Facts, 1)
 	go func() { ch <- factscollect.Collect(cfg) }()
@@ -970,6 +982,19 @@ func (a *Agent) postConnectUpdateCheck() {
 	})
 }
 
+// runElevated runs a dispatched command under the agent's elevation policy:
+// in sudo mode the command is executed as `sudo -n -- cmd args...` so the
+// host's sudoers file is the authority on what may run elevated. The
+// agent log records the elevated form (PRD: privileged commands are
+// recorded in full).
+func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []string, cwd string, env map[string]string, timeoutS int32, onChunk exec.Callback) (*exec.Result, error) {
+	n, a2 := a.elevate.Run(cmdName, args...)
+	if a.elevate == elevate.Sudo {
+		a.log.Printf("agent: run %s (ELEVATED: sudo -n -- %s)", runID, strings.Join(a2, " "))
+	}
+	return exec.Run(ctx, n, a2, cwd, env, timeoutS, onChunk)
+}
+
 // execCommand runs a command, streaming output chunks, then the result.
 // While the stream is down, output is routed to the offline spool and
 // replayed on reconnect (architecture §3.4).  Once a run's output first
@@ -1027,7 +1052,7 @@ func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
 		})
 	}
 
-	res, err := exec.Run(ctx, cmd.Cmd, cmd.Args, cmd.Cwd, cmd.Env, cmd.TimeoutS, onChunk)
+	res, err := a.runElevated(ctx, cmd.RunId, cmd.Cmd, cmd.Args, cmd.Cwd, cmd.Env, cmd.TimeoutS, onChunk)
 	if err != nil {
 		res = &exec.Result{State: "failed", ExitCode: -1}
 	}
@@ -1270,7 +1295,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 // pkgBackend selects the agent's package backend from the current fact set.
 // The backend is stateless, so a fresh instance is safe to create per op.
 func (a *Agent) pkgBackend() pkg.Backend {
-	return pkg.SelectBackend(a.factset)
+	return pkg.SelectBackend(a.factset, a.elevate)
 }
 
 // sendPkgResult sends a PkgResult up the stream (no spooling: pkg ops are

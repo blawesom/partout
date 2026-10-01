@@ -81,8 +81,9 @@ agent doesn't collect a restart counter yet; A21). **Web UI**: the Alerts page
 now renders live firing alerts (the rule-management UI is M7).
 New env var: `PARTOUT_ALERT_TICK_S`.
 
-**Not yet wired:** elevation (`PARTOUT_ELEVATE`/`PARTOUT_ROOT` are hardcoded
-`none`/`/`), the Postgres backend, the OAuth2 browser-login grant + refresh
+**Not yet wired:** per-command elevation profiles (PRD Decision 3 full form —
+pattern-scoped, policy-constrained; the host-level `PARTOUT_ELEVATE=sudo` slice
+is wired, §4.2), the Postgres backend, the OAuth2 browser-login grant + refresh
 tokens (post-v1, A20), MCP session-read tools, and the M6.1 alert kinds
 (`service_restarting` et al.; A21).
 **Web UI is shipped** (v0.5): open the main
@@ -509,6 +510,8 @@ cleaned up the same way.
 - The server-side half of removing a host (delete the fleet row, revoke the
   credential) is `partout ctl hosts delete <id>` — see operations.md §3.1.
 
+---
+
 ## 4. Configuration reference
 
 All configuration is env + flags (PRD R15). Precedence: **flag > env > default**.
@@ -558,6 +561,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_UPDATE_HEALTH_S` | **60** | (M8.1) post-swap health window: the new binary must boot and reconnect within this many seconds, else the update is marked unhealthy and rolled back (crashloop guard) |
 | `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
 | `PARTOUT_AGENT_CLEANUP_ON_REVOKE` | **false** | when the server revokes the agent (host removed from the fleet), also remove the local credential material (`identity.json` + `tls/`) before the clean exit, leaving the machine a clean slate. Destructive, hence opt-in |
+| `PARTOUT_ELEVATE` / `--elevate` | **none** | (PRD Decision 3, host-level slice) `sudo` → the agent runs action commands (dispatched exec, PTY sessions, package apply + metadata refresh, task steps, reboot) through `sudo -n`, and retries root-only config reads (e.g. `haproxy.cfg`) via `sudo -n cat`. What may actually elevate is scoped **entirely by the host's sudoers file** (ship `deploy/sudoers/partout-agent`; fail-closed on anything unlisted); no password is ever prompted (`-n`). Requires `NoNewPrivileges=true` removed from the agent unit (sudo needs setuid). `none` (default) keeps everything unprivileged. Per-command elevation profiles (pattern-scoped, policy-constrained) are the later full Decision 3 implementation — see docs/roadmap.md |
 
 ### 4.3 `partout ctl` — wired
 
@@ -622,15 +626,15 @@ implementation.)
 | `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`)
 | `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
 | `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification
-| `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; hardcoded `none`) |
-| `PARTOUT_ROOT` | `/` | agent fs/exec root prefix (containers; hardcoded `/`) |
+| `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; see §4.2) |
 | `--label=k=v`, `--version` | — | flags *proposed* in earlier drafts; not wired |
 
 ### 4.5 All flags (current)
 
 `--mode=server|agent|embedded|mcp`, `--port=`, `--db=`, `--data-dir=`, `--server=`,
 `--token=`, `--facts-interval=`, `--admin-token=`, `--operator-token=`,
-`--viewer-token=`, `--admin-password=`, `--tls=on|off`, `--tls-names=…`, `--ca-file=…`.
+`--viewer-token=`, `--admin-password=`, `--tls=on|off`, `--tls-names=…`, `--ca-file=…`,
+`--elevate=none|sudo`.
 For `mcp` mode, `--token` is the caller's bearer token (not an enrollment token).
 Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 

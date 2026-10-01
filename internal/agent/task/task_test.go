@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	pb "github.com/blawesom/partout/internal/proto"
 )
 
 func TestStepFile(t *testing.T) {
-	e := NewExecutor(nil)
+	e := NewExecutor(elevate.None, nil)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "test.txt")
 
@@ -35,7 +36,7 @@ func TestStepFile(t *testing.T) {
 }
 
 func TestStepCommand(t *testing.T) {
-	e := NewExecutor(nil)
+	e := NewExecutor(elevate.None, nil)
 	// Successful command.
 	sr := e.Step(context.Background(), 0, &pb.TaskStep{Kind: "command", Name: "true", Command: "true"})
 	if sr.State != StateOK {
@@ -54,7 +55,7 @@ func TestStepCommand(t *testing.T) {
 }
 
 func TestStepGuardSkipped(t *testing.T) {
-	e := NewExecutor(nil)
+	e := NewExecutor(elevate.None, nil)
 	e.SetFacts(map[string]string{"host.distro": "ubuntu"})
 
 	// Guard false → skipped.
@@ -86,7 +87,7 @@ func TestStepGuardSkipped(t *testing.T) {
 }
 
 func TestStepAssert(t *testing.T) {
-	e := NewExecutor(nil)
+	e := NewExecutor(elevate.None, nil)
 	e.SetFacts(map[string]string{"host.distro": "ubuntu"})
 	sr := e.Step(context.Background(), 0, &pb.TaskStep{Kind: "assert", Expr: "host.distro == 'ubuntu'"})
 	if sr.State != StateOK {
@@ -99,7 +100,7 @@ func TestStepAssert(t *testing.T) {
 }
 
 func TestRunnerStopsOnFail(t *testing.T) {
-	e := NewExecutor(nil)
+	e := NewExecutor(elevate.None, nil)
 	r := New(e)
 	run := &pb.TaskRun{
 		Steps: []*pb.TaskStep{
@@ -121,7 +122,7 @@ func TestRunnerStopsOnFail(t *testing.T) {
 }
 
 func TestRunnerSkipped(t *testing.T) {
-	e := NewExecutor(nil)
+	e := NewExecutor(elevate.None, nil)
 	e.SetFacts(map[string]string{"host.distro": "ubuntu"})
 	r := New(e)
 	run := &pb.TaskRun{

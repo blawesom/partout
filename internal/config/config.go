@@ -6,7 +6,7 @@
 //
 // Scope: only the settings the v0.1 binary actually enforces. The wider
 // surface (retention, spool, MCP, H2C, secret key, SSH provisioning dir, log
-// level, split gRPC listener, elevation) is planned — see
+// level, split gRPC listener) is planned — see
 // docs/deployment.md §4 "Planned, not wired yet" — and intentionally not
 // parsed here: an env var that is documented but never read is a false
 // promise. Add a variable here only when its feature lands.
@@ -18,6 +18,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/blawesom/partout/internal/agent/elevate"
 )
 
 // Config is the validated runtime configuration for one process.
@@ -122,11 +124,16 @@ type Config struct {
 	// Persisted after a TLS enrollment, reloaded on later starts.
 	TLSCertFile, TLSKeyFile string
 
-	// ---- Reserved (elevation, M1+) ----
-	// Elevate/Root are part of the agent's runtime contract but elevation
-	// is not implemented yet; main.go hardcodes "none"/"/" until it lands.
-	// Not parsed from the environment on purpose.
-	Elevate, Root string
+	// ---- Agent elevation (PRD Decision 3, host-level slice) ----
+	// Elevate: none | sudo (PARTOUT_ELEVATE). "sudo" makes the agent run its
+	// action commands through `sudo -n` — scoped by the host's sudoers file
+	// (deploy/sudoers/partout-agent). Per-command elevation profiles are the
+	// later full Decision 3 implementation. Validated here; stored normalized
+	// ("" -> "none").
+	Elevate string
+	// Root is reserved for the full elevation implementation (target home
+	// for elevated runs); unused by the host-level slice.
+	Root string
 }
 
 // Load reads configuration from the environment and returns the validated
@@ -135,6 +142,10 @@ func Load() (*Config, error) {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PARTOUT_MODE")))
 	if mode == "" {
 		mode = "server"
+	}
+	elevateMode, err := elevate.Parse(os.Getenv("PARTOUT_ELEVATE"))
+	if err != nil {
+		return nil, err
 	}
 	c := &Config{
 		Mode:                  mode,
@@ -167,6 +178,8 @@ func Load() (*Config, error) {
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 		CleanupOnRevoke:       envBool("PARTOUT_AGENT_CLEANUP_ON_REVOKE"),
+		Elevate:               string(elevateMode),
+		Root:                  "/",
 	}
 	if err := c.Validate(); err != nil {
 		return nil, err

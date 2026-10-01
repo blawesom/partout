@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"math/big"
 	"os"
 	"os/exec"
@@ -539,7 +540,7 @@ backend webservers
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	backends, listeners := parseHAProxyTopology(cfg)
+	backends, listeners := parseHAProxyTopology(cfg, elevate.None)
 	if len(backends) == 0 {
 		t.Errorf("no backends parsed from %s", content)
 	}
@@ -556,7 +557,7 @@ backend webservers
 }
 
 func TestParseHAProxyTopologyMissingFile(t *testing.T) {
-	backends, listeners := parseHAProxyTopology(filepath.Join(t.TempDir(), "nope.cfg"))
+	backends, listeners := parseHAProxyTopology(filepath.Join(t.TempDir(), "nope.cfg"), elevate.None)
 	if backends != nil || listeners != nil {
 		t.Errorf("missing config returned %v/%v, want nil/nil", backends, listeners)
 	}
@@ -872,7 +873,7 @@ http {
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	vhosts := parseNginxVhosts(cfg)
+	vhosts := parseNginxVhosts(cfg, elevate.None)
 	if len(vhosts) != 2 {
 		t.Fatalf("parsed %d vhosts, want 2: %+v", len(vhosts), vhosts)
 	}
@@ -899,7 +900,7 @@ http {
 }
 
 func TestParseNginxVhostsMissingFile(t *testing.T) {
-	if got := parseNginxVhosts(filepath.Join(t.TempDir(), "nope.conf")); got != nil {
+	if got := parseNginxVhosts(filepath.Join(t.TempDir(), "nope.conf"), elevate.None); got != nil {
 		t.Errorf("missing file = %+v, want nil", got)
 	}
 }

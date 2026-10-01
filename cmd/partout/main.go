@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/blawesom/partout/internal/agent"
+	"github.com/blawesom/partout/internal/agent/elevate"
 	agentfacts "github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
@@ -121,6 +122,7 @@ func main() {
 	dataDir := fs.String("data-dir", cfg.DataDir, "agent: identity/policy dir (default ~/.partout/agent)")
 	server := fs.String("server", cfg.ServerURL, "agent: server host:port")
 	token := fs.String("token", cfg.Token, "agent: one-time enrollment token")
+	elevateMode := fs.String("elevate", cfg.Elevate, "agent: elevation mode none|sudo (action commands run through `sudo -n`; scope is the host's sudoers file)")
 	factsEvery := fs.Int("facts-interval", cfg.FactsInterval, "agent: facts refresh seconds")
 	adminTok := fs.String("admin-token", cfg.AdminToken, "server: RBAC admin bearer token")
 	opTok := fs.String("operator-token", cfg.OperatorToken, "server: RBAC operator bearer token")
@@ -148,6 +150,12 @@ func main() {
 	cfg.DataDir = *dataDir
 	cfg.ServerURL = *server
 	cfg.Token = *token
+	el, err := elevate.Parse(*elevateMode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "partout: %v\n", err)
+		os.Exit(2)
+	}
+	cfg.Elevate = string(el)
 	cfg.FactsInterval = *factsEvery
 	cfg.AdminToken = *adminTok
 	cfg.OperatorToken = *opTok
@@ -171,8 +179,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Set reserved fields that are not exposed as flags.
-	cfg.Elevate = "none"
+	// Elevation is agent-side: the server and mcp modes never run local
+	// action commands, so they stay at the parsed value (inert there).
 	cfg.Root = "/"
 
 	lg := log.New(os.Stderr, fmt.Sprintf("partout[%s]: ", cfg.Mode), log.LstdFlags)

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/agent/guardrail"
 	agentjobs "github.com/blawesom/partout/internal/agent/jobs"
 	"github.com/blawesom/partout/internal/agent/task"
@@ -130,7 +131,7 @@ func newFakeAgent(t *testing.T, h *stream.Handler, st *store.Store, lis *bufconn
 		agentID: agentID, id: id, s: client, conn: conn,
 	}
 	fa.guard = guardrail.NewGuard(id.UUID, t.TempDir())
-	fa.sched = agentjobs.New(t.TempDir(), task.NewExecutor(nil), func(r *agentjobs.Report) {
+	fa.sched = agentjobs.New(t.TempDir(), task.NewExecutor(elevate.None, nil), func(r *agentjobs.Report) {
 		fa.sendMu.Lock()
 		defer fa.sendMu.Unlock()
 		_ = s.Send(&pb.Envelope{

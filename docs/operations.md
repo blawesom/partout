@@ -238,6 +238,46 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   need short-lived offline access: `offline_ttl=300` (5 min) on the binding — the agent
   caches an encrypted copy for that window, versioned + audited.
 
+### 3.6 Agent elevation (privileged operations)
+
+The agent runs as the unprivileged `partout` user by default. Out of the box it
+**cannot** install/upgrade packages, start/stop services, reboot, or read
+root-only config files — those operations fail closed with a normal non-zero
+exit. When a host needs them, enable host-level elevation (PRD Decision 3,
+host-level slice) rather than running the whole agent as root:
+
+- **Enable** (per host, three steps):
+  1. Install the sudoers scope: `sudo install -m 0440 -o root -g root
+     deploy/sudoers/partout-agent /etc/sudoers.d/partout-agent && sudo visudo -cf
+     /etc/sudoers.d/partout-agent`.
+  2. Set `PARTOUT_ELEVATE=sudo` in `/etc/partout/agent.env`.
+  3. Remove `NoNewPrivileges=true` from the agent unit (sudo needs setuid), then
+     `systemctl daemon-reload && systemctl restart partout-agent`.
+- **Scope lives in sudoers, not the binary.** Nothing elevates unless the
+  operator-installed drop-in lists the exact command. The shipped default covers
+  the fixed surface (package management, reboot, observe config reads); the
+  **dispatch tier is opt-in** — arbitrary `partout ctl run` commands stay
+  unprivileged until you add `Cmnd_Alias PARTOUT_DISPATCH` entries. Keep that
+  list as tight as the fleet's work allows; it is the host's privilege grant.
+- **Failure is visible and ordinary.** An unlisted command exits non-zero
+  (sudo: "not allowed"); the exec surface shows that output. A denied elevated
+  config read is logged by the observe collector and the fact is simply absent.
+- **Env for elevated commands**: the shipped drop-in enables passthrough
+  (`Defaults:partout !env_reset`), so dispatched commands with `--env K=V`
+  see their variables out of the box. Note the trade: this means every
+  elevated command accepts any caller-set environment (e.g. `LD_PRELOAD`
+  survives). To re-tighten later: remove that line and use a scoped
+  `env_keep` allowlist or per-command `SETENV` (finer-grained env
+  management is a later item — docs/roadmap.md #19). The package surface
+  works either way (`DEBIAN_FRONTEND`/`LANG` are on the env_keep list).
+- **Revert**: remove the sudoers file + `PARTOUT_ELEVATE`, restore
+  `NoNewPrivileges=true`, restart. The agent is unprivileged again immediately;
+  no state is affected.
+- **Later (not in this slice):** per-command elevation profiles — pattern-scoped
+  elevation declared in the command spec and constrained by policy (PRD Decision
+ 3 full form). Tracked in docs/roadmap.md; take it up when operators need
+  finer-grained grants than a per-host sudoers file.
+
 ---
 
 ## 4. Maintenance

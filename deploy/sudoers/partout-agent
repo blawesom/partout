@@ -1,0 +1,60 @@
+# /etc/sudoers.d/partout-agent — elevation scope for the Partout agent
+#
+# Install:
+#   sudo install -m 0440 -o root -g root partout-agent /etc/sudoers.d/partout-agent
+#   sudo visudo -cf /etc/sudoers.d/partout-agent   # syntax check BEFORE relying on it
+#
+# Then set PARTOUT_ELEVATE=sudo in /etc/partout/agent.env, remove the
+# NoNewPrivileges line from /etc/systemd/system/partout-agent.service, and
+# restart the unit (see deploy/systemd/README.md "Elevation").
+#
+# How it works: with PARTOUT_ELEVATE=sudo the agent prefixes its action
+# commands (dispatched exec, PTY sessions, package apply, task steps,
+# reboot) with `sudo -n`. Nothing elevates unless listed here — every other
+# command fails closed with a normal non-zero exit. Non-interactive only:
+# no password is ever prompted or cached.
+#
+# The agent runs as the `partout` user; adjust the user name if yours
+# differs.
+#
+# ---------------------------------------------------------------------------
+# Fixed surface: package management + reboot + observe config reads.
+# These match the exact commands the agent invokes.
+Cmnd_Alias PARTOUT_PKG    = /usr/bin/apt-get *, /usr/bin/dnf *, /usr/bin/yum *
+Cmnd_Alias PARTOUT_REBOOT = /usr/bin/systemctl reboot, /usr/bin/shutdown -r now, \
+                            /usr/sbin/reboot, /usr/bin/reboot
+# Observe-layer config reads (the agent retries `sudo -n cat <path>` when a
+# direct read fails with EACCES). Extend for your own PARTOUT_*_CONF paths.
+Cmnd_Alias PARTOUT_READ   = /usr/bin/cat /etc/haproxy/haproxy.cfg, \
+                            /usr/bin/cat /etc/nginx/nginx.conf, \
+                            /usr/bin/cat /etc/caddy/Caddyfile, \
+                            /usr/bin/cat /etc/caddy/caddy.json
+# Keep the env vars the package backends set (debconf must stay
+# non-interactive; LANG keeps dnf output parseable). Redundant while
+# !env_reset is on below — kept so the package surface still works if you
+# re-tighten to env_reset later.
+Defaults:partout env_keep += "DEBIAN_FRONTEND LANG"
+
+# Env passthrough (default in this drop-in, v0.9.x): sudo's env_reset would
+# otherwise strip custom variables from elevated commands, so `--env K=V`
+# dispatched commands work out of the box. This widens every grant below to
+# "any environment the caller sets" (e.g. LD_PRELOAD survives) — accepted
+# for now; finer-grained control (per-command SETENV, scoped env_keep,
+# per-variable policy) is tracked as a later item (docs/roadmap.md #19).
+Defaults:partout !env_reset
+
+partout ALL=(root) NOPASSWD: PARTOUT_PKG, PARTOUT_REBOOT, PARTOUT_READ
+
+# ---------------------------------------------------------------------------
+# Dispatch tier (opt-in): binaries your fleet commands may run elevated.
+# The default scope above does NOT cover arbitrary dispatched commands —
+# `partout ctl run ...` then fails closed on anything not listed. Add the
+# exact commands you need, e.g.:
+#
+#   Cmnd_Alias PARTOUT_DISPATCH = /usr/bin/systemctl *, /usr/bin/journalctl *
+#   (then add PARTOUT_DISPATCH to the rule above)
+#
+# To re-tighten env passthrough later (finer-grained management): remove
+# `Defaults:partout !env_reset` and either extend the env_keep allowlist
+# with the specific vars you need, or use SETENV: on individual commands,
+# e.g. `SETENV: /usr/bin/mytool`. See docs/roadmap.md #19.

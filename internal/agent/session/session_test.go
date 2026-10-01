@@ -1,6 +1,7 @@
 package session
 
 import (
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +49,7 @@ func (r *resultCh) snapshot() map[string]string {
 
 func TestOpenAndRun(t *testing.T) {
 	rc := newResultCh()
-	m := NewManager(rc.fn)
+	m := NewManager(elevate.None, rc.fn)
 	defer m.KillAll()
 
 	var mu sync.Mutex
@@ -79,7 +80,7 @@ func TestOpenAndRun(t *testing.T) {
 
 func TestSessionInput(t *testing.T) {
 	rc := newResultCh()
-	m := NewManager(rc.fn)
+	m := NewManager(elevate.None, rc.fn)
 	defer m.KillAll()
 
 	var mu sync.Mutex
@@ -120,7 +121,7 @@ func TestSessionInput(t *testing.T) {
 
 func TestSessionResize(t *testing.T) {
 	rc := newResultCh()
-	m := NewManager(rc.fn)
+	m := NewManager(elevate.None, rc.fn)
 	defer m.KillAll()
 
 	if err := m.Open("s1", "echo", []string{"ok"}, nil, 80, 24, func(sessionID string, data []byte) {}); err != nil {
@@ -140,7 +141,7 @@ func TestSessionResize(t *testing.T) {
 
 func TestSessionKillAll(t *testing.T) {
 	rc := newResultCh()
-	m := NewManager(rc.fn)
+	m := NewManager(elevate.None, rc.fn)
 
 	if err := m.Open("s1", "sleep", []string{"30"}, nil, 80, 24, func(sessionID string, data []byte) {}); err != nil {
 		t.Fatalf("open: %v", err)
@@ -178,7 +179,7 @@ func TestSessionKillAll(t *testing.T) {
 
 func TestCloseInterrupted(t *testing.T) {
 	rc := newResultCh()
-	m := NewManager(rc.fn)
+	m := NewManager(elevate.None, rc.fn)
 	defer m.KillAll()
 
 	if err := m.Open("s1", "sleep", []string{"30"}, nil, 80, 24, func(sessionID string, data []byte) {}); err != nil {
@@ -193,7 +194,7 @@ func TestCloseInterrupted(t *testing.T) {
 }
 
 func TestOpenBadCommand(t *testing.T) {
-	m := NewManager(func(sessionID string, exitCode int32, state string, durationMs int64) {})
+	m := NewManager(elevate.None, func(sessionID string, exitCode int32, state string, durationMs int64) {})
 	defer m.KillAll()
 	err := m.Open("s1", "/no/such/binary", nil, nil, 80, 24, func(sessionID string, data []byte) {})
 	if err == nil {
@@ -202,7 +203,7 @@ func TestOpenBadCommand(t *testing.T) {
 }
 
 func TestOpenDuplicateSession(t *testing.T) {
-	m := NewManager(func(sessionID string, exitCode int32, state string, durationMs int64) {})
+	m := NewManager(elevate.None, func(sessionID string, exitCode int32, state string, durationMs int64) {})
 	defer m.KillAll()
 	if err := m.Open("s1", "sleep", []string{"30"}, nil, 80, 24, func(sessionID string, data []byte) {}); err != nil {
 		t.Fatalf("open: %v", err)
