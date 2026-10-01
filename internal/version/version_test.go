@@ -38,3 +38,26 @@ func TestIsNewer(t *testing.T) {
 		t.Error("older version must not be newer")
 	}
 }
+
+func TestEqual(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"0.9.4", "v0.9.4", true},
+		{"v0.9.4", "0.9.4", true},
+		{"v0.9.4", "v0.9.4", true},
+		{"0.9.4", "0.9.4", true},
+		{" 0.9.4 ", "v0.9.4", true}, // whitespace tolerated
+		{"0.9.4", "0.9.3", false},
+		{"1.0", "1.0.0", false},        // identity, not ordering: Compare sees these as equal, Equal must not
+		{"0.9.0-beta", "0.9.0", false}, // trailing tags are different versions
+		{"v1", "v", false},
+		{"", "v", false},
+	}
+	for _, c := range cases {
+		if got := Equal(c.a, c.b); got != c.want {
+			t.Errorf("Equal(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}

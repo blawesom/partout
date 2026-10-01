@@ -24,6 +24,7 @@ import (
 
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/release"
+	"github.com/blawesom/partout/internal/version"
 )
 
 // Marker is the on-disk record of an in-flight update. It is plain
@@ -281,7 +282,9 @@ func PostBootCheck(markerPath, currentVersion string) (Marker, bool, error) {
 	if err != nil || !ok {
 		return Marker{}, false, err
 	}
-	if currentVersion == m.TargetVersion {
+	// v-insensitive: a v-prefixed registered release ("v0.9.4") must match
+	// the binary's un-prefixed stamp ("0.9.4") — see version.Equal.
+	if version.Equal(currentVersion, m.TargetVersion) {
 		return m, true, nil // healthy boot of the new version
 	}
 	// Mismatch: roll back to N-1 (best effort) and clear the marker.

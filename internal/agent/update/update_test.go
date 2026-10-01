@@ -234,6 +234,19 @@ func TestPostBootCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// v-prefix mismatch of placement (registered "v0.9.4", binary stamps
+	// "0.9.4") must count as MATCHING — the field case that used to roll
+	// back a healthy update.
+	_ = WriteMarker(markerPath, Marker{
+		TargetVersion: "v0.9.4", ReleaseID: "rel_1", PrevBinary: prev, StartedAt: time.Now().Unix(),
+	})
+	if _, ok, _ := PostBootCheck(markerPath, "0.9.4"); !ok {
+		t.Error("v-prefixed target vs un-prefixed current version: should match")
+	}
+	if err := RemoveMarker(markerPath); err != nil {
+		t.Fatal(err)
+	}
+
 	// Mismatched version → N-1 restored, marker cleared, ok=false.
 	_ = WriteMarker(markerPath, Marker{
 		TargetVersion: "v9", ReleaseID: "rel_1", PrevBinary: prev, StartedAt: time.Now().Unix(),

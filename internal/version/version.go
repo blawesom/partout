@@ -61,3 +61,22 @@ func normalize(v string) []int {
 // IsNewer reports whether release version a is newer than the host's
 // current version b.
 func IsNewer(a, b string) bool { return Compare(a, b) > 0 }
+
+// Equal reports whether a and b denote the same version, ignoring a
+// leading "v" (a release tag is "v0.9.4" while the binary stamp and
+// registered release versions are "0.9.4"). This is an IDENTITY check,
+// deliberately stricter than Compare: "0.9.0-beta" and "0.9.0" are not
+// equal here (normalize would compare them as equal prefixes, which is
+// right for ordering but wrong for "is this the version we swapped in").
+func Equal(a, b string) bool {
+	ca, cb := canonical(a), canonical(b)
+	if ca == "" || cb == "" {
+		return false // an empty/unparseable side can never match
+	}
+	return ca == cb
+}
+
+func canonical(v string) string {
+	v = strings.TrimSpace(v)
+	return strings.TrimPrefix(v, "v")
+}

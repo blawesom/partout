@@ -160,6 +160,19 @@ func (h *Handler) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Reject a leading "v" outright (not silently stripped): the release
+	// key signs the EXACT version string ("version|arch|kind|sha256"), and
+	// the stamped binary reports without the v ("partout 0.9.4"). A v-prefixed
+	// registration would be a different signature row AND desync the boot
+	// guard's version match (it once rolled back a healthy update over
+	// exactly this mismatch) — so the operator must sign and register with
+	// the stamp form. Legacy v-prefixed rows keep working: the boot
+	// guard/agent compare v-insensitively (version.Equal).
+	if strings.HasPrefix(m.Version, "v") {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"version must not carry a leading \"v\" (register \""+strings.TrimPrefix(m.Version, "v")+"\", matching the binary stamp and the signed manifest)", nil)
+		return
+	}
 	if _, err := h.st.GetReleaseByVer(m.Version, m.Arch, m.Kind); err == nil {
 		writeError(w, http.StatusConflict, "conflict",
 			"release "+m.Version+" ("+m.Arch+", "+m.Kind+") already exists", nil)

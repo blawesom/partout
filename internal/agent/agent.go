@@ -38,6 +38,7 @@ import (
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/spool"
+	"github.com/blawesom/partout/internal/version"
 
 	pb "github.com/blawesom/partout/internal/proto"
 )
@@ -941,7 +942,10 @@ func (a *Agent) postConnectUpdateCheck() {
 	if err != nil || !ok {
 		return
 	}
-	if m.TargetVersion != facts.Version {
+	// v-insensitive (a registered "v0.9.4" must clear the marker after the
+	// binary boots as "0.9.4"); on any real mismatch the Run() boot check
+	// owns the rollback path.
+	if !version.Equal(m.TargetVersion, facts.Version) {
 		return // the Run() boot check handles the mismatch case
 	}
 	if err := agentupdate.RemoveMarker(markerPath); err != nil {

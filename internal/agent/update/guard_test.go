@@ -100,6 +100,45 @@ func TestUpdateGuardScript(t *testing.T) {
 		}
 	})
 
+	// Field regression: the binary stamp never carries a leading "v"
+	// ("partout 0.9.4") while a release may be registered as "v0.9.4".
+	// Exact equality misread the healthy new version as a failed update
+	// and rolled back. Both v-placement directions must be accepted.
+	t.Run("v-prefixed target matches un-prefixed binary stamp", func(t *testing.T) {
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "partout")
+		data := filepath.Join(dir, "data")
+		ran := filepath.Join(dir, "ran")
+		os.MkdirAll(data, 0o755)
+		writeFakeBinary(t, bin, "0.9.4") // stamped binary (no v)
+		marker := filepath.Join(data, "update.json")
+		writeMarkerFile(t, marker, "v0.9.4", 10, filepath.Join(dir, "partout.old")) // registered with v
+		out := runGuard(t, script, bin, data, ran)
+		b, _ := os.ReadFile(ran)
+		if !strings.Contains(string(b), "RAN 0.9.4") {
+			t.Fatalf("healthy new binary did not run (rolled back over a v-prefix mismatch?): %q (guard: %s)", b, out)
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatalf("marker should remain for the healthy new version: %v", err)
+		}
+	})
+
+	t.Run("un-prefixed target matches v-prefixed binary report", func(t *testing.T) {
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "partout")
+		data := filepath.Join(dir, "data")
+		ran := filepath.Join(dir, "ran")
+		os.MkdirAll(data, 0o755)
+		writeFakeBinary(t, bin, "v9.9") // a build that reports WITH the v
+		marker := filepath.Join(data, "update.json")
+		writeMarkerFile(t, marker, "9.9", 10, filepath.Join(dir, "partout.old"))
+		out := runGuard(t, script, bin, data, ran)
+		b, _ := os.ReadFile(ran)
+		if !strings.Contains(string(b), "RAN v9.9") {
+			t.Fatalf("healthy new binary did not run: %q (guard: %s)", b, out)
+		}
+	})
+
 	t.Run("stale marker rolls back to N-1", func(t *testing.T) {
 		dir := t.TempDir()
 		bin := filepath.Join(dir, "partout")

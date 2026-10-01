@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -179,7 +180,7 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 	srv := httptest.NewServer(apiH)
 	t.Cleanup(srv.Close)
 
-	artifact, m, sigB64 := signedArtifact(t, "v0.9.0", "agent")
+	artifact, m, sigB64 := signedArtifact(t, "0.9.0", "agent")
 
 	// Upload → 201.
 	code, e := labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
@@ -202,7 +203,7 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 	}
 	items, _ := list["items"].([]any)
 	row, _ := items[0].(map[string]any)
-	if row["version"] != "v0.9.0" || row["kind"] != "agent" || row["sha256"] != m.SHA256 {
+	if row["version"] != "0.9.0" || row["kind"] != "agent" || row["sha256"] != m.SHA256 {
 		t.Errorf("row = %v", row)
 	}
 	if _, hasArtifact := row["artifact"]; hasArtifact {
@@ -211,8 +212,22 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 
 	// Get by id → 200.
 	code, got := labelsReq(t, "GET", srv.URL+"/api/v1/updates/releases/"+rid, "")
-	if code != http.StatusOK || got["version"] != "v0.9.0" {
+	if code != http.StatusOK || got["version"] != "0.9.0" {
 		t.Fatalf("get = %d %v", code, got)
+	}
+
+	// A v-prefixed version is rejected at registration: it would be a
+	// different signature row AND desync the boot guard's version match
+	// (the field rollback). The operator must sign and register the stamp
+	// form ("0.9.0").
+	vArt, mv, sigV := signedArtifact(t, "v0.9.1", "agent")
+	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
+		releaseUploadBody(mv, sigV, vArt))
+	if code != http.StatusBadRequest {
+		t.Fatalf("v-prefixed upload = %d, want 400: %v", code, e)
+	}
+	if !strings.Contains(fmt.Sprint(e["message"]), "leading") {
+		t.Errorf("v-rejection message should mention the leading-v rule: %v", e["message"])
 	}
 
 	// Artifact → bytes match and integrity headers are present.
@@ -248,13 +263,13 @@ func TestUpdateReleaseLifecycle(t *testing.T) {
 	}
 
 	// Garbage signature → 400.
-	badSig := releaseUploadBody(release.Manifest{Version: "v0.9.1", Arch: m.Arch, Kind: m.Kind, SHA256: m.SHA256}, "!!not-base64!!", artifact)
+	badSig := releaseUploadBody(release.Manifest{Version: "0.9.1", Arch: m.Arch, Kind: m.Kind, SHA256: m.SHA256}, "!!not-base64!!", artifact)
 	if code, _ = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases", badSig); code != http.StatusBadRequest {
 		t.Errorf("bad signature = %d, want 400", code)
 	}
 
 	// Bad kind → 400.
-	badKind := releaseUploadBody(release.Manifest{Version: "v0.9.2", Arch: m.Arch, Kind: "daemon", SHA256: m.SHA256}, sigB64, artifact)
+	badKind := releaseUploadBody(release.Manifest{Version: "0.9.2", Arch: m.Arch, Kind: "daemon", SHA256: m.SHA256}, sigB64, artifact)
 	if code, _ = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases", badKind); code != http.StatusBadRequest {
 		t.Errorf("bad kind = %d, want 400", code)
 	}
@@ -313,7 +328,7 @@ func TestUpdateReleaseUnsignedBeta(t *testing.T) {
 	srv := httptest.NewServer(apiH)
 	t.Cleanup(srv.Close)
 
-	artifact, m, _ := signedArtifact(t, "v0.9.1", "agent")
+	artifact, m, _ := signedArtifact(t, "0.9.1", "agent")
 
 	// Flag off (default in tests) → unsigned upload refused.
 	code, e := labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
@@ -343,7 +358,7 @@ func TestUpdateReleaseUnsignedBeta(t *testing.T) {
 	}
 
 	// A signed upload still works with the flag on (verification unchanged).
-	art2, m2, sigB64 := signedArtifact(t, "v0.9.2", "agent")
+	art2, m2, sigB64 := signedArtifact(t, "0.9.2", "agent")
 	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
 		releaseUploadBody(m2, sigB64, art2))
 	if code != http.StatusCreated {
@@ -374,7 +389,7 @@ func TestUploadAutoDraftRollout(t *testing.T) {
 	apiH.SetUpdates(m)
 	apiH.SetAutoDraftRollouts(true)
 
-	artifact, mRel, sig := signedArtifact(t, "v1.0.0", "agent")
+	artifact, mRel, sig := signedArtifact(t, "1.0.0", "agent")
 	code, e := labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
 		releaseUploadBody(mRel, sig, artifact))
 	if code != http.StatusCreated {
@@ -408,7 +423,7 @@ func TestUploadAutoDraftRollout(t *testing.T) {
 	}
 
 	// A newer release pre-arms a second draft (the first run is live).
-	artifact2, m2, sig2 := signedArtifact(t, "v1.0.1", "agent")
+	artifact2, m2, sig2 := signedArtifact(t, "1.0.1", "agent")
 	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
 		releaseUploadBody(m2, sig2, artifact2))
 	if code != http.StatusCreated {
@@ -420,7 +435,7 @@ func TestUploadAutoDraftRollout(t *testing.T) {
 
 	// Flag off: release stored, no draft.
 	apiH.SetAutoDraftRollouts(false)
-	artifact3, m3, sig3 := signedArtifact(t, "v1.0.2", "agent")
+	artifact3, m3, sig3 := signedArtifact(t, "1.0.2", "agent")
 	code, e = labelsReq(t, "POST", srv.URL+"/api/v1/updates/releases",
 		releaseUploadBody(m3, sig3, artifact3))
 	if code != http.StatusCreated {

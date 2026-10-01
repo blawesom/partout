@@ -355,6 +355,9 @@ func (m *Manager) resolveRelease(id, version string) (store.Release, error) {
 	if version == "" {
 		return store.Release{}, fmt.Errorf("updates: a release_id or version is required")
 	}
+	// Releases are stored without a leading "v"; an operator may type the
+	// tag form ("v0.9.4") — normalize before lookup.
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
 	// Version without arch: take the only agent release at that version.
 	var found store.Release
 	var foundAny bool

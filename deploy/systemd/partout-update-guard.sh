@@ -40,6 +40,14 @@ now="$(date +%s)"
 age=$(( now - ${started:-$now} ))
 curver="$("$BIN" --version 2>/dev/null | awk '{print $NF}')"
 
+# Compare v-insensitively: the binary stamp never carries a leading "v"
+# ("partout 0.9.4") while a registered release version may ("v0.9.4").
+# Exact equality misread a healthy v-prefixed target as a failed update
+# and rolled back; mirror internal/version.Equal (strip one leading v).
+strip_v() { case "$1" in v*) printf '%s' "${1#v}" ;; *) printf '%s' "$1" ;; esac; }
+curver="$(strip_v "$curver")"
+target="$(strip_v "$target")"
+
 if [ "$curver" = "$target" ] && [ "$age" -le $(( HEALTH_S + GRACE_S )) ]; then
 	# New binary within the health window: first boot after the swap. The
 	# agent clears the marker on its first successful connect.
