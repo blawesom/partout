@@ -275,6 +275,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// otherwise a random password is generated, persisted to <db dir>/admin_password.txt
 	// (0600), and the operator is told to rotate it after first login.
 	authC := serverauth.New(st, lg)
+	adminSource := "" // "" = existing users; "env" / a file path = first run
 	if exists, _ := st.AnyPrincipal(); !exists {
 		pw := cfg.AdminPassword
 		var pwFile string
@@ -292,8 +293,10 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 			return fmt.Errorf("bootstrap admin: %w", err)
 		}
 		if pwFile != "" {
+			adminSource = pwFile
 			lg.Printf("FIRST RUN: admin user 'admin' created; initial password in %s (0600) — log in and change it, then delete the file", pwFile)
 		} else {
+			adminSource = "env"
 			lg.Printf("FIRST RUN: admin user 'admin' created from PARTOUT_ADMIN_PASSWORD")
 		}
 		// Seed the fleet-management defaults (safety-net policies +
@@ -654,7 +657,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	} else {
 		lg.Printf("gRPC + REST + SSE on %s:%d, db %s", cfg.Addr, cfg.Port, cfg.DBPath)
 	}
-	lg.Printf("→ open %s://%s:%d/ in your browser (sign in as 'admin')", scheme, displayHost(cfg.Addr), cfg.Port)
+	lg.Print(firstRunBlock(scheme, displayHost(cfg.Addr), cfg.Port, adminSource, serveTLS, cfg.Addr))
 
 	// shutdownDone is closed once the gRPC server has fully stopped and the
 	// listening socket is released. Callers that restart on the same port
@@ -825,6 +828,10 @@ func serverCertNames(tlsNames string) []string {
 // loopback.  On process shutdown (SIGTERM / SIGINT), both sides shut down
 // gracefully.
 func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
+	// ectx lets the failure watchers below unwind BOTH halves when one dies
+	// after startup (a server-half death is not survivable; nothing serves).
+	ectx, ecancel := context.WithCancel(ctx)
+	defer ecancel()
 	// The embedded agent talks to the co-located server over loopback.
 	agentCfg := *cfg
 	agentCfg.ServerURL = fmt.Sprintf("127.0.0.1:%d", cfg.Port)
@@ -858,7 +865,7 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		serverErr <- runServer(ctx, cfg, lg)
+		serverErr <- runServer(ectx, cfg, lg)
 	}()
 
 	// ---- wait for readiness ------------------------------------------------
@@ -871,7 +878,7 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 	// (e.g. the port is already in use), surface THAT error instead of
 	// polling /healthz for 30s and reporting a misleading timeout.
 	readyCh := make(chan error, 1)
-	go func() { readyCh <- waitForReady(ctx, base, cfg.Port, agentCfg.TLSCAFile, lg) }()
+	go func() { readyCh <- waitForReady(ectx, base, cfg.Port, agentCfg.TLSCAFile, lg) }()
 	select {
 	case err := <-readyCh:
 		if err != nil {
@@ -928,27 +935,58 @@ func runEmbedded(ctx context.Context, cfg *config.Config, lg *log.Logger) error 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		agentErr <- runAgent(ctx, &agentCfg, lg)
+		agentErr <- runAgent(ectx, &agentCfg, lg)
 	}()
 
-	// ---- wait for shutdown --------------------------------------------------
+	// ---- surface half-failures when they happen, not at shutdown ----------
+	// Both halves write their result to a buffered channel; without a concurrent
+	// watch, an embedded process whose agent half failed at startup keeps
+	// serving with an EMPTY fleet and the error only appears on Ctrl-C
+	// (roadmap item 21b). The watchers log the failure the moment it lands,
+	// stash it for the exit code, and — for a *server* death after readiness,
+	// where nothing serves anymore — cancel ectx to unwind both halves instead
+	// of hanging until shutdown.
+	var serverFail, agentFail error
+	serverFailSeen := make(chan struct{})
+	agentFailSeen := make(chan struct{})
+	go func() {
+		defer close(serverFailSeen)
+		serverFail = <-serverErr
+		if serverFail != nil && !errors.Is(serverFail, context.Canceled) {
+			lg.Printf("embedded: SERVER FAILED after startup: %v — shutting down (the control plane is dead; this is not survivable)", serverFail)
+			ecancel()
+		}
+	}()
+	go func() {
+		defer close(agentFailSeen)
+		agentFail = <-agentErr
+		if agentFail != nil && !errors.Is(agentFail, context.Canceled) && !errors.Is(agentFail, agent.ErrRevoked) {
+			lg.Printf("embedded: LOCAL AGENT FAILED: %v — the server keeps serving the fleet, but this host will NOT appear in it", agentFail)
+		}
+	}()
+
+	// ---- wait for shutdown (or a fatal server-half failure) ----------------
 	<-ctx.Done()
+	ecancel() // release the watchers' ectx references / both halves
 	wg.Wait()
+	<-serverFailSeen
+	<-agentFailSeen
 
 	// Return the first non-nil, non-canceled error. A revoked local agent
 	// (its host was removed from the fleet) is not a server failure: the
 	// control plane keeps serving the fleet, only its own membership ended.
-	if e := <-serverErr; e != nil && !errors.Is(e, context.Canceled) {
-		return e
+	// (The values come from the watchers above — the channels are consumed.)
+	if serverFail != nil && !errors.Is(serverFail, context.Canceled) {
+		return serverFail
 	}
-	if e := <-agentErr; e != nil {
+	if agentFail != nil {
 		switch {
-		case errors.Is(e, context.Canceled), errors.Is(e, agent.ErrRevoked):
-			if errors.Is(e, agent.ErrRevoked) {
+		case errors.Is(agentFail, context.Canceled), errors.Is(agentFail, agent.ErrRevoked):
+			if errors.Is(agentFail, agent.ErrRevoked) {
 				lg.Printf("embedded: local agent revoked (host removed); server continues without fleet membership")
 			}
 		default:
-			return e
+			return agentFail
 		}
 	}
 	return ctx.Err()
@@ -977,6 +1015,43 @@ func runMCP(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 
 // waitForReady polls /healthz until it returns 200 or the context is done.
 // When TLS is on it uses caFile as the root CA for verification.
+// firstRunBlock renders the startup "next steps" block: everything a
+// first-time operator needs on one screen — where the UI is, where the admin
+// password came from, the TLS posture (with the loopback/plain-HTTP caveat
+// doctor warns about), and the three-step path into the product. adminSource:
+// "" = existing users; "env" = PARTOUT_ADMIN_PASSWORD; otherwise the path of
+// the generated admin_password.txt.
+func firstRunBlock(scheme, host string, port int, adminSource string, tlsOn bool, bindAddr string) string {
+	var b strings.Builder
+	b.WriteString("──────────────────────────────────────────────────────────────────────\n")
+	fmt.Fprintf(&b, " Partout %s is running.\n\n", agentfacts.Version)
+	fmt.Fprintf(&b, "   UI        %s://%s:%d/   (sign in as 'admin')\n", scheme, host, port)
+	switch {
+	case adminSource == "env":
+		b.WriteString("   Password  set via PARTOUT_ADMIN_PASSWORD\n")
+	case adminSource == "":
+		b.WriteString("   Password  existing local users (change it under Account)\n")
+	default:
+		fmt.Fprintf(&b, "   Password  generated into %s (0600) — log in, change it, then delete the file\n", adminSource)
+	}
+	if tlsOn {
+		b.WriteString("   TLS       on — local root CA; agents need it as PARTOUT_TLS_CA (`partout ctl ca`)\n")
+	} else if loopbackOnly(bindAddr) {
+		b.WriteString("   TLS       off — plain HTTP on loopback (local-dev posture)\n")
+	} else {
+		b.WriteString("   TLS       OFF — plain HTTP on all interfaces: the admin password and session\n")
+		b.WriteString("             tokens cross the network in cleartext. Set PARTOUT_TLS=on, or bind\n")
+		b.WriteString("             PARTOUT_ADDR=127.0.0.1 behind a TLS proxy. (partout doctor warns.)\n")
+	}
+	b.WriteString("\n Next steps\n")
+	b.WriteString("   1. Onboard a host       UI: Fleet → + Add host (one-time token or the SSH wizard)\n")
+	b.WriteString("   2. Review the guardrails UI: Policies / Alerts (a preset is seeded on first run)\n")
+	b.WriteString("   3. Keep the fleet current UI: Updates (upload a release → canary rollout)\n")
+	b.WriteString("\n Pre-flight future starts with: partout doctor\n")
+	b.WriteString("──────────────────────────────────────────────────────────────────────")
+	return b.String()
+}
+
 func displayHost(addr string) string {
 	// The address to show the operator for opening the UI. A wildcard bind
 	// (0.0.0.0/::) means "all interfaces"; 127.0.0.1 is the safe local

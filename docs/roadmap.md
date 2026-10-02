@@ -609,18 +609,18 @@ All remain *proposed* in `docs/deployment.md` until shipped.
     resolve stranded runs (or model `interrupted` as its own aggregate state — the
     ui-guidelines §9 visual vocabulary already distinguishes them).
 
-21. **Onboarding polish — first-run output + embedded-mode error surfacing** (the
-    "tracked separately" note in the doctor section above, now actually tracked):
-    (a) a plain `./partout` first start ends with the "open <url> in your browser"
-    line but says nothing about the TLS posture (doctor warns; the server log does
-    not) or where the generated admin password landed when `PARTOUT_ADMIN_PASSWORD`
-    was not set — a short "next steps" block (URL, credentials source, TLS posture
-    + the PARTOUT_TLS hint) would close the loop; (b) in embedded mode a *server*-half
-    start failure is surfaced properly (it aborts with `embedded: server failed to
-    start`), but an *agent*-half failure after the running banner is only read at
-    shutdown — the process keeps serving with an empty fleet and the error appears
-    only on Ctrl-C. The agent-half error should be watched concurrently and logged
-    (and possibly fatal) at failure time.
+21. ~~**Onboarding polish — first-run output + embedded-mode error surfacing**~~
+    ✅ **shipped**: (a) the server startup log ends with a **first-run next-steps
+    block** — UI URL, admin-credentials source (`PARTOUT_ADMIN_PASSWORD` / the
+    generated `admin_password.txt` path / existing users), the TLS posture
+    (including the plain-HTTP-exposed cleartext warning with both remedies, the
+    same condition doctor warns on), the three-step path into the product, and
+    the `partout doctor` pointer (`firstRunBlock`, unit-tested); (b) embedded
+    mode now watches both halves concurrently: an **agent-half** failure after
+    the running banner is logged the moment it lands (`LOCAL AGENT FAILED —
+    the server keeps serving, but this host will NOT appear in it`) and a
+    **server-half** death after readiness logs and unwinds the whole process
+    (nothing serves anymore) instead of hanging until shutdown.
 ### Polish items (closed this cycle)
 
 - **v0.7.3 — deployment-feedback fixes** (from `DEPLOYMENT_FEEDBACK.md`, ccc.laplane.net
