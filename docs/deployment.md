@@ -522,7 +522,7 @@ agent, or embedded — auto-detected from the installed units). It is a
 
 ```bash
 sudo partout uninstall --dry-run     # preview the exact removal plan
-sudo partout uninstall               # stop + disable units, remove units, env, guard, binary — KEEPS state
+sudo partout uninstall               # stop + disable units, remove units, env, guard, backup script, binary — KEEPS state
 sudo partout uninstall --purge       # + remove state (db, TLS, identity, spool), the file root /home/partout, $HOME/.partout, user `partout`
 sudo partout uninstall --keep-binary # leave /usr/local/bin/partout in place (shared operator CLI)
 ```
@@ -537,7 +537,10 @@ plan is printed before anything is touched; `--dry-run` changes nothing.
   `daemon-reload`, then env files, then state (on `--purge`), then the
   binary. A failed `systemctl stop` aborts the run — state is never removed
   while a live process may own it. The `partout` system user is removed last
-  (`--purge` only, only after state is gone).
+  (`--purge` only, only after state is gone). Install footprint is removed
+  with the units it belongs to: the agent's update guard and the server's
+  `/usr/local/sbin/partout-backup.sh` (installed with the backup timer by
+  `install-server.sh` / `deploy/systemd`).
 - **Remote uninstall of a managed host**: `partout uninstall --purge`
 tolerates the first SIGTERM (its own `systemctl stop` makes systemd signal
 the whole agent cgroup), so it also works when dispatched over the fleet:

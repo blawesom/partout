@@ -39,25 +39,27 @@ import (
 
 // uninstallEnv holds the well-known install locations. Overridable in tests.
 type uninstallEnv struct {
-	unitDir   string // /etc/systemd/system
-	etcDir    string // /etc/partout
-	varDir    string // /var/lib/partout (default state dir)
-	fileRoot  string // /home/partout (file surface root, spec-file-root)
-	homeDir   string // $HOME (non-systemd agent data: $HOME/.partout)
-	binPath   string // /usr/local/bin/partout
-	guardPath string // /usr/local/sbin/partout-update-guard
+	unitDir          string // /etc/systemd/system
+	etcDir           string // /etc/partout
+	varDir           string // /var/lib/partout (default state dir)
+	fileRoot         string // /home/partout (file surface root, spec-file-root)
+	homeDir          string // $HOME (non-systemd agent data: $HOME/.partout)
+	binPath          string // /usr/local/bin/partout
+	guardPath        string // /usr/local/sbin/partout-update-guard (agent self-update)
+	backupScriptPath string // /usr/local/sbin/partout-backup.sh (server backup timer)
 }
 
 func defaultUninstallEnv() uninstallEnv {
 	home, _ := os.UserHomeDir()
 	return uninstallEnv{
-		unitDir:   "/etc/systemd/system",
-		etcDir:    "/etc/partout",
-		varDir:    "/var/lib/partout",
-		fileRoot:  "/home/partout",
-		homeDir:   home,
-		binPath:   "/usr/local/bin/partout",
-		guardPath: "/usr/local/sbin/partout-update-guard",
+		unitDir:          "/etc/systemd/system",
+		etcDir:           "/etc/partout",
+		varDir:           "/var/lib/partout",
+		fileRoot:         "/home/partout",
+		homeDir:          home,
+		binPath:          "/usr/local/bin/partout",
+		guardPath:        "/usr/local/sbin/partout-update-guard",
+		backupScriptPath: "/usr/local/sbin/partout-backup.sh",
 	}
 }
 
@@ -177,6 +179,12 @@ func buildUninstallPlan(env uninstallEnv, purge, keepBinary bool) (*uninstallPla
 	}
 	if len(present) > 0 && pathExists(env.guardPath) {
 		pl.add(uStep{kind: "file", path: env.guardPath, detail: "remove update guard"})
+	}
+	// The backup script is install footprint of the server deploy path
+	// (install-server.sh / deploy/systemd) — remove it with the units, like
+	// the guard. It only exists where the backup timer was installed.
+	if len(present) > 0 && pathExists(env.backupScriptPath) {
+		pl.add(uStep{kind: "file", path: env.backupScriptPath, detail: "remove backup script"})
 	}
 	if len(present) > 0 {
 		pl.add(uStep{kind: "reload", detail: "systemctl daemon-reload"})

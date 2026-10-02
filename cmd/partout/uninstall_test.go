@@ -14,13 +14,14 @@ func mkFakeInstall(t *testing.T, units []string, etcFiles map[string]string, wit
 	t.Helper()
 	root := t.TempDir()
 	env := uninstallEnv{
-		unitDir:   filepath.Join(root, "etc/systemd/system"),
-		etcDir:    filepath.Join(root, "etc/partout"),
-		varDir:    filepath.Join(root, "var/lib/partout"),
-		fileRoot:  filepath.Join(root, "home/partout"),
-		homeDir:   filepath.Join(root, "home"),
-		binPath:   filepath.Join(root, "usr/local/bin/partout"),
-		guardPath: filepath.Join(root, "usr/local/sbin/partout-update-guard"),
+		unitDir:          filepath.Join(root, "etc/systemd/system"),
+		etcDir:           filepath.Join(root, "etc/partout"),
+		varDir:           filepath.Join(root, "var/lib/partout"),
+		fileRoot:         filepath.Join(root, "home/partout"),
+		homeDir:          filepath.Join(root, "home"),
+		binPath:          filepath.Join(root, "usr/local/bin/partout"),
+		guardPath:        filepath.Join(root, "usr/local/sbin/partout-update-guard"),
+		backupScriptPath: filepath.Join(root, "usr/local/sbin/partout-backup.sh"),
 	}
 	for _, u := range units {
 		if err := os.MkdirAll(env.unitDir, 0o755); err != nil {
@@ -61,6 +62,22 @@ func mkFakeInstall(t *testing.T, units []string, etcFiles map[string]string, wit
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(env.guardPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A backup unit implies its ExecStart script — mirror a real server
+	// install (deploy/systemd / install-server.sh ship them together).
+	hasBackupUnit := false
+	for _, u := range units {
+		if u == "partout-backup.service" || u == "partout-backup.timer" {
+			hasBackupUnit = true
+		}
+	}
+	if hasBackupUnit {
+		if err := os.MkdirAll(filepath.Dir(env.backupScriptPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(env.backupScriptPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -105,6 +122,7 @@ func TestUninstallPlanServerDefaultKeepsData(t *testing.T) {
 		"unit-file " + filepath.Join(env.unitDir, "partout-server.service"),
 		"file " + filepath.Join(env.etcDir, "server.env"),
 		"file " + env.binPath,
+		"file " + env.backupScriptPath, // install footprint of the backup timer
 		"reload ",
 	} {
 		if !containsStr(kinds, want) {
@@ -259,7 +277,7 @@ func TestUninstallPlanCustomDBPath(t *testing.T) {
 
 func TestUninstallExecuteOrderAndEffects(t *testing.T) {
 	env := mkFakeInstall(t,
-		[]string{"partout-server.service"},
+		[]string{"partout-server.service", "partout-backup.timer"},
 		map[string]string{"server.env": "PARTOUT_TOKEN_ADMIN=x\n"},
 		true, true, false, false)
 	pl, err := buildUninstallPlan(env, true, false)
@@ -301,12 +319,14 @@ func TestUninstallExecuteOrderAndEffects(t *testing.T) {
 		t.Errorf("userdel called though `id partout` failed: %v", calls)
 	}
 
-	// effects: unit file, env file + dir, binary, state dir all gone
+	// effects: unit file, env file + dir, binary, state dir all gone; the
+	// backup script (install footprint of the backup timer) is removed too.
 	for _, p := range []string{
 		filepath.Join(env.unitDir, "partout-server.service"),
 		env.etcDir,
 		env.binPath,
 		env.varDir,
+		env.backupScriptPath,
 	} {
 		if pathExists(p) {
 			t.Errorf("%s should have been removed", p)

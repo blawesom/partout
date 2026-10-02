@@ -577,6 +577,9 @@ supervised swap's job, not the installer's). Verified by
 preservation, version refusal, port/db rewrites, dry-run, and a REAL server
 started from the installed unit via a mock systemctl that parses the
 installed ExecStart/EnvironmentFile). Deployment §3.1/§6 lead with it.
+`partout uninstall` removes the installer's full footprint, including
+`/usr/local/sbin/partout-backup.sh` (the backup timer's ExecStart script —
+previously orphaned by uninstall).
 
 Carried (still proposed): Docker image + compose (server; the per-host agent
 stays a bare binary on systemd — containerizing it is a non-goal), cloud-init
