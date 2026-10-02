@@ -10,7 +10,8 @@ execute against, configure, patch, and orchestrate work across Linux hosts — s
 auditably, and verifiably — with a web UI and an MCP server for AI assistants.
 
 It ships as a single self-hosted binary (no editions, everything free) with an embedded
-observe layer, a full write/control path, and a tamper-resilient audit log.
+observe layer, a full write/control path, and an append-only audit log (a cryptographic
+hash-chain is a documented post-v1 enhancement, PRD Decision 5).
 
 ## The problem it solves
 
@@ -18,7 +19,7 @@ Running a fleet of Linux hosts today means scattered, fragile tooling: `ssh` + c
 commands (no policy, no audit, nothing to replay), one-off scripts, and a monitoring patchwork.
 There is no single system that **reads** (is a service up? is a cert about to expire? does this
 config match the rest of the fleet?), **writes** (run a command, ship a file, apply a package,
-schedule a job), and **proves it** (a tamper-resilient audit trail + live alerts) — with safety
+schedule a job), and **proves it** (an append-only audit trail + live alerts) — with safety
 rails on the way through.
 
 Partout unifies that loop — **observe → act → verify** — in one place:

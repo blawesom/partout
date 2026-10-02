@@ -312,8 +312,12 @@ A **task** is a small, idempotent, ordered list of steps. Steps are **intent**, 
   journal (package version before/after).
 - **Vulnerability-driven prioritization**: installed packages are correlated against public
   vulnerability feeds (§6.3) so updates are ranked by severity, not alphabetically.
-- OS end-of-support data (from endoflife.date, §6.3) now also **gates** patch automation: an
-  `ended` host is flagged and defaults to "require approval" for upgrades.
+- OS end-of-support data (from endoflife.date, §6.3) is computed per host
+  (`supported / ending_soon / ended`, `GET /api/v1/hosts/{id}/eol`) and surfaces in the
+  Updates UI and CLI, so an `ended` host is visible before it is patched. **Wiring that
+  state into the patch path itself — an `ended` host defaulting to `require_approval` for
+  upgrades — is planned, not yet implemented**; today the flag is informational and
+  policy rules do not match on it.
 
 **Acceptance criteria:**
 - `list-updates` ranks by CVE severity, not alphabetically.

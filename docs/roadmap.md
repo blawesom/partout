@@ -591,6 +591,27 @@ All remain *proposed* in `docs/deployment.md` until shipped.
 18. Postgres backend; then **M8 — Distribution & self-update** (M8.1 signed fleet updates: release store + signatures, agent self-swap with rollback, rollout orchestration, auto job-decision re-issue; M8.2 Docker/compose, cloud-init, Helm, status page). See the M8 section.
 19. **~~Elevation — full Decision 3 (per-command profiles) + finer-grained env control.~~** ✅ **Policy engine shipped (next release, post-v0.9.5):** the **elevation policy** (`PARTOUT_ELEVATION_POLICY`: one .json or a *.json drop-in dir) is now the single source of truth for what the agent runs elevated — pattern-scoped rules (exact args, verb×unit `systemctl` grants, file-glob reads, per-rule env) — and `partout ctl elevation <show|check|install-sudoers>` renders the sudoers drop-in **from the same policy** (visudo-checked before install; `check` detects drift via a `policy-sha256` header). With a policy loaded + `PARTOUT_ELEVATE=sudo`, a matching command elevates and a non-matching one runs unprivileged (logged); no policy = legacy drop-in decides. Policy-generated drop-ins keep `env_reset` ON (per-rule env renders as `SETENV:`, retiring the legacy blanket `!env_reset` for generated files). The observe layer now reports a root-only config as **not readable** (never mislabeled *invalid*) and validates elevated when the policy authorizes the validator. Example: `deploy/elevation/elevation-web.json.example`. **Remaining** (take up when operators ask): `PARTOUT_ROOT` (elevated target home); elevation visibility on the exec/audit UI surface (a per-run "elevated/not in scope" badge); per-command profiles declared in the server-side command spec (PRD Decision 3 + arch §6.6); and optionally even finer env management (scoped `env_keep` allowlists beyond per-rule `SETENV`). See operations.md §3.6.
 
+
+20. **1.0 gate — `interrupted` must not read as `failed` in the execution aggregate**
+    (arch §3.4 known limitation, shipped through v0.9.x): a disconnect momentarily
+    finalizes the execution `failed`/`partial` before the spooled replay re-finalizes
+    it, and a job/task failure policy watching the transient state would wrongly retry.
+    Fix: keep the execution `running` while any run is `interrupted`, with a bound to
+    resolve stranded runs (or model `interrupted` as its own aggregate state — the
+    ui-guidelines §9 visual vocabulary already distinguishes them).
+
+21. **Onboarding polish — first-run output + embedded-mode error surfacing** (the
+    "tracked separately" note in the doctor section above, now actually tracked):
+    (a) a plain `./partout` first start ends with the "open <url> in your browser"
+    line but says nothing about the TLS posture (doctor warns; the server log does
+    not) or where the generated admin password landed when `PARTOUT_ADMIN_PASSWORD`
+    was not set — a short "next steps" block (URL, credentials source, TLS posture
+    + the PARTOUT_TLS hint) would close the loop; (b) in embedded mode a *server*-half
+    start failure is surfaced properly (it aborts with `embedded: server failed to
+    start`), but an *agent*-half failure after the running banner is only read at
+    shutdown — the process keeps serving with an empty fleet and the error appears
+    only on Ctrl-C. The agent-half error should be watched concurrently and logged
+    (and possibly fatal) at failure time.
 ### Polish items (closed this cycle)
 
 - **v0.7.3 — deployment-feedback fixes** (from `DEPLOYMENT_FEEDBACK.md`, ccc.laplane.net

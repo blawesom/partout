@@ -85,13 +85,13 @@ Status legend: **✅ real** · **🟡 shape mismatch** · **🔵 planned** (PRD 
 | Sidebar shell, brand, port badge | listen config (`:8443`) | ✅ | S0 |
 | User card (name + role) | `GET /api/v1/auth/me` → `username`, `role` | 🟡 no display name / job title | S0 |
 | `FLEET` nav items | PRD §11 pages | 🟡 mock's names are invented (see §5 glossary) | S0 |
-| `LABELS` | `host_tags` table exists, **zero writers, zero endpoints** | ⛔ always empty | **dropped** |
+| `LABELS` | `host_tags` + `host_roles`: full CRUD shipped — `PUT/DELETE /api/v1/hosts/{id}/tags|roles`, `ctl hosts tag/role`, MCP `set_host_tag`/`add_host_role`…; host-detail UI edits them; `tag:`/`role:` selectors resolve | ✅ (shipped v0.7/M8.1 — the original ⛔ "dropped" verdict is obsolete) | S1+ |
 | `GROUPS` | `GET/POST /api/v1/groups` (groups are named selectors) | ✅ no rename/delete | S1 |
 | Breadcrumb `Fleet › host` | `GET /api/v1/hosts/{id}` | ✅ | S1 |
 | Host tabs | overview (none) · updates ✅ · audit ✅ | 🟡 audit filter is global, not per-host | S1–S3 |
 | Fleet Health cards | `GET /api/v1/hosts` → `state` | 🟡 mock's state names are wrong; count is a client roll-up | S1 |
 | `382` hosts | cursor-paginated list, default limit 100 | 🟡 **no summary endpoint** — accepted, fleet is tens (§13) | S1 |
-| `Active Alerts` | `internal/server/observe` has no thresholds/alert store yet; UI shows a labeled **M6 not-yet-available** placeholder page | 🔵 M6 (R25) — placeholder shipped | S6 |
+| `Active Alerts` | alert engine (M6, `internal/server/observe`): `GET /api/v1/alerts` + rules CRUD + SSE `alert.firing`/`alert.resolved`; the **Alerts page** is live with rule management, and nav badges count firing alerts | ✅ (shipped v0.6.5/v0.7) | S6 |
 | `Services` | `GET /api/v1/services`; rendered as the Observe · Services page (state, labels, restart, memory) | ✅ (data page; M5 facts) | S7 |
 | `Certificates` | `GET /api/v1/certificates`; Observe · Certificates page (expiry, chain status, key, self-signed) | ✅ (data page; M5 facts) | S7 |
 | `Configs` | `GET /api/v1/configs`; Observe · Configs page (validity, backends/vhosts topology) | ✅ (data page; M5 facts) | S7 |
@@ -109,10 +109,12 @@ Status legend: **✅ real** · **🟡 shape mismatch** · **🔵 planned** (PRD 
 
 ### Selector grammar caveat
 
-`internal/selector` supports `all`, `host:`, `tag:`, `role:`, `group:` (arch A12). Because
-nothing populates `host_tags` or agent roles, **the UI must not offer `tag:` / `role:`
-shortcuts** — they resolve empty. Offer `host:` and `group:` only, and let free-form selector
-text pass through to the server unchanged (the UI never re-implements the grammar).
+`internal/selector` supports `all`, `host:`, `tag:`, `role:`, `group:` (arch A12). Tags
+and roles have had full CRUD since v0.7/M8.1 (REST, CLI, MCP, host-detail UI), so
+`tag:`/`role:` predicates resolve against real data. The UI still never re-implements the
+grammar: selectors are free-form text passed to the server unchanged, with
+server-authoritative resolution previews (B2) and host/group shortcuts where a concrete
+list helps.
 
 ---
 
@@ -543,13 +545,18 @@ tags/labels API (dropped).
 
 ## 15. Deferred / out of scope
 
-- **Labels/tags** — dropped; the `host_tags` table has no writers. `tag:`/`role:` selector
-  predicates are not surfaced in the UI until a tag store exists.
-- **Active Alerts** — M6 (R25); `internal/server/observe` is empty. Alert rules, evaluation, firing/resolved states.
-- **Cross-fact correlation (R21)** — cert→config→service cross-links are rendered (S7); full automated correlation analytics remain deferred.
-- **Approvals engine** — M4; `require_approval` behaves as deny today.
-- **Real diffs** — B5.
-- **Dark theme** — tokens defined, not built.
+Shipped since this list was written (kept here as history, not as open work):
+**labels/tags** (full CRUD since v0.7/M8.1), **Active Alerts** (M6 alert engine + live
+Alerts page, v0.6.5/v0.7), **the approvals engine** (M4 — `require_approval` parks the
+action and admins approve/deny; the mockup's `Approve & Apply` flow is the Approvals
+page), and **dark theme** (§7 — built, topbar toggle, OS default, per-browser persist).
+
+Still deferred:
+
+- **Cross-fact correlation analytics (R21)** — cert→config→service cross-links are
+  rendered (S7, navigable in the UI); automated correlation analytics remain deferred.
+- **Real diffs** — B5 (unified-diff / per-package change records from `packages`);
+  today the Updates page renders the `dry_summary` string, captioned as a summary.
 - **PWA / offline** — later polish.
 - **Photo avatars** — initials chips; no principals directory for non-admins.
 - **Mobile-first layouts** — floor is ~1280px.

@@ -209,12 +209,13 @@ message Envelope {
 | Policy bundle mismatch | agent-side deny (see §5.3); alert + bundle refresh request |
 | Clock skew > 300 s | handshake rejected; remediation is NTP (see ops doc) |
 
-> **Known M1 limitation (fix in M3).** `interrupted` currently counts as a failure when
+> **Known limitation (shipped through v0.9.x; tracked for the 1.0 gate — see roadmap
+> "Next steps").** `interrupted` currently counts as a failure when
 > the execution aggregate is computed, so a disconnect momentarily reports the execution
 > as `failed` before the replayed result re-finalizes it to its true state. That is
 > tolerable for human-driven ad-hoc commands, but a job/task failure policy acting on the
-> transient state would wrongly retry or remediate. M3 must either keep the execution
-> `running` while any run is `interrupted` (with a bound to resolve stranded runs), or
+> transient state would wrongly retry or remediate. The fix is to keep the execution
+> `running` while any run is `interrupted` (with a bound to resolve stranded runs), or to
 > model `interrupted` as its own execution state.
 
 ### 3.5 Host provisioning (PRD R17, C10; Decision 11)
@@ -1445,8 +1446,11 @@ the operator's cluster manager owns availability, and the design keeps the serve
 - **Unit**: selector grammar; policy evaluator (exhaustive precedence table); `when` AST parser
   + evaluator; spool mem/disk/drop-oldest transitions; HKDF/AEAD helpers; cron resolution.
 - **Integration**: in-process server + **fake agent** over a real gRPC transport (test
-  listener) — handshake, reconnect, spool replay, ack/timeout, policy mismatch deny;
-  **dialect parity**: full migration + repository suite run against SQLite **and** Postgres.
+  listener) — handshake, reconnect, spool replay, ack/timeout, policy mismatch deny. The
+  migration + repository suites run against **SQLite only today**: the Postgres backend
+  is not yet compiled in (`store.Open` rejects the dialect), so the planned dialect-parity
+  matrix (same suite against both engines in CI) starts when that backend lands (PRD R9;
+  deferred since M0 — roadmap item 18).
 - **Live SSH** (`//go:build live`, `PARTOUT_LIVE_SSH=1`): `internal/sshutil` runs against a
   **real sshd** (opt-in; manual CI job). This exists because fake ssh binaries implement
   ssh's *intended* semantics and therefore cannot catch real-world divergence — notably
