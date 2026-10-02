@@ -826,6 +826,33 @@ async function main() {
     check("confirm: cancel closes", !inst.confirmBox.open, "dialog not closed on cancel");
   }
 
+  // --- Session expiry: toast + route preservation + return on re-login ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const savedTok = inst.token;
+    await visit("#/audit", 400);
+    // The real 401 path: an invalidated token (server restart, 12h expiry)
+    // must trigger the expiry flow through api(), not just the helper.
+    inst.token = "bogus-token";
+    try { await inst.api("/alerts"); } catch (e) { /* 401 throws */ }
+    await sleep(250);
+    check("session: real 401 triggers expiry", !inst.token, "token not cleared on 401");
+    check("session: expired toast shown", [...d.querySelectorAll(".toast")].some((x) => x.textContent.includes("Session expired")), "no expired toast");
+    check("session: signed out", !d.querySelector(".shell"), "still logged in after expiry");
+    check("session: return route recorded", inst._returnRoute === "audit", "_returnRoute=" + JSON.stringify(inst._returnRoute));
+    inst.token = savedTok; // re-login (the login form path calls afterLogin)
+    await inst.afterLogin();
+    await sleep(500);
+    check("session: returned to previous page", (w.location.hash || "").includes("audit"), "hash=" + w.location.hash);
+    check("session: shell restored", !!d.querySelector(".shell"), "shell missing after re-login");
+    check("session: return route cleared after use", inst._returnRoute === "", "_returnRoute not cleared");
+    // Explicit sign-out must NOT keep a return route (different intent).
+    await visit("#/audit", 300);
+    inst.signOut(); await sleep(200);
+    check("session: explicit sign-out keeps no return route", inst._returnRoute === "", "explicit sign-out kept _returnRoute");
+    inst.token = savedTok; await inst.afterLogin(); await sleep(400); // restore for later checks
+  }
+
   // --- Login page: first-run password hint (render the logged-out view) ---
   if (w.__partout) {
     const savedToken = w.__partout.token;

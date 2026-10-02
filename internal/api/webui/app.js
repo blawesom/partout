@@ -1811,6 +1811,7 @@
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
+        _returnRoute: "", // route to return to after session-expiry re-login
         confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", _resolve: null },
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
@@ -2094,7 +2095,7 @@
           if (wantToast) this.notify("err", "network error: " + (e && e.message ? e.message : "request failed"));
           throw new ApiError(0, "network error", "network_error", null);
         }
-        if (res.status === 401) { this.signOut(); throw new ApiError(401, "unauthorized"); }
+        if (res.status === 401) { this.sessionExpired(); throw new ApiError(401, "unauthorized"); }
         if (res.status === 503) {
           this.refreshCaps();
           if (wantToast) this.notify("err", "feature disabled in this build (503)");
@@ -2267,9 +2268,30 @@
         } catch (e) { this.loginErr = "login failed: " + e.message; }
         finally { this.loginBusy = false; }
       },
-      async afterLogin() { await Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups()]); this.startSSE(); this.loadPageData(); },
+      async afterLogin() {
+        // Return the operator to where an expired session interrupted them
+        // (sessionExpired records the route before signing out). Cleared on
+        // use and on explicit sign-out, so it never goes stale.
+        const back = this._returnRoute || ""; this._returnRoute = "";
+        if (back && back !== "fleet") this.go(back);
+        await Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups()]); this.startSSE(); this.loadPageData();
+      },
+      // Sign-out because the session token was rejected (401): keep the
+      // operator's place so sign-in returns them to what they were doing,
+      // and say why — a silent drop to the login page reads as a bug, and a
+      // server restart (12h in-memory sessions) invalidates everyone.
+      // Idempotent: the sign-out itself triggers unauthenticated page loads
+      // whose 401s re-enter this path — the first capture wins, and a second
+      // toast would just be noise.
+      sessionExpired() {
+        if (!this.token) return;
+        const here = this.route || ""; // signOut clears the slot; capture first
+        this.signOut();
+        this._returnRoute = here;
+        this.notify("warn", "Session expired — sign in to continue", 8000);
+      },
       signOut() {
-        this.token = ""; localStorage.removeItem(LS_TOKEN); this.me = null;
+        this.token = ""; localStorage.removeItem(LS_TOKEN); this.me = null; this._returnRoute = "";
         this.stopSSE(); this.sseStatus = "disconnected"; this.sseWasConnected = false; this.go("fleet");
       },
       async changePassword() {
@@ -3460,7 +3482,11 @@
       window.addEventListener("keydown", this.onGlobalKey);
       if (this.token) {
         Promise.all([this.refreshCaps(), this.loadMe(), this.loadGroups(), this.loadVersion()]).then(() => {
-          if (!this.me) { this.signOut(); return; }
+          // A 401 already went through sessionExpired (token cleared, toast,
+          // return route kept) — don't sign out again and wipe the slot. Only
+          // a still-held token (e.g. server unreachable on load) takes the
+          // plain sign-out path.
+          if (!this.me) { if (this.token) this.signOut(); return; }
           this.ensureNavExpanded();
           this.startSSE(); this.loadPageData(); this.loadNavBadges();
         });

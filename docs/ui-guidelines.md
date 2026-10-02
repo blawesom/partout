@@ -383,6 +383,16 @@ tell the operator whether anything executed at all.
 - **One SSE subscription**, `GET /api/v1/events`, established after login, authenticated
   with the session token as `?token=<jwt>` (EventSource cannot set headers). Pages filter
   event kinds; they never open their own stream. No polling, ever.
+- **Session expiry is explained, not silent.** Any API 401 goes through
+  `sessionExpired()`: a warn toast ("Session expired — sign in to continue")
+  explains the drop to the login page, and the interrupted route is captured
+  (`_returnRoute`, first capture wins) so a successful sign-in returns the
+  operator to the page they were on — a 12h in-memory session (and every server
+  restart, including the one `partout update` just drove) otherwise logs
+  everyone out mid-task with no explanation and no way back. Idempotent: the
+  sign-out itself triggers unauthenticated page loads whose 401s re-enter the
+  path, so the guard (`!token → return`) keeps the first route and one toast.
+  Explicit sign-out keeps no return route (different intent).
 - **Stale-data banner.** If the stream drops *after* a real connection (`sseWasConnected`
   && `sseStatus !== 'connected'`), a persistent **stale banner** appears ("Live updates
   paused — data may be stale") and the data tables dim (`.sse-stale`). This prevents an
