@@ -1449,8 +1449,10 @@ the operator's cluster manager owns availability, and the design keeps the serve
   listener) — handshake, reconnect, spool replay, ack/timeout, policy mismatch deny. The
   migration + repository suites run against **SQLite only today**: the Postgres backend
   is not yet compiled in (`store.Open` rejects the dialect), so the planned dialect-parity
-  matrix (same suite against both engines in CI) starts when that backend lands (PRD R9;
-  deferred since M0 — roadmap item 18).
+  matrix (same suite against both engines in CI) starts when that backend lands.
+  **Decision (v0.9.6): Postgres is post-v1** — SQLite is the 1.0 engine (PRD R9,
+  roadmap item 18); the abstraction and single-migration-version discipline stay in
+  place so the second dialect is additive, not a rewrite.
 - **Live SSH** (`//go:build live`, `PARTOUT_LIVE_SSH=1`): `internal/sshutil` runs against a
   **real sshd** (opt-in; manual CI job). This exists because fake ssh binaries implement
   ssh's *intended* semantics and therefore cannot catch real-world divergence — notably

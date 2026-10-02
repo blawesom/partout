@@ -115,7 +115,7 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R6 | **Per-agent rate limiting** (token bucket) | Applies to both event upload and command dispatch. |
 | R7 | **Revoke/delete/edit-label** agent lifecycle | Cascade delete of all host-scoped rows. |
 | R8 | **`agent_id` on all entities** + cascade | Every command/file/job/package row carries `agent_id`. |
-| R9 | **Storage engines** (SQLite default, optional Postgres, one migration version) | One dialect abstraction; replaceable-server rationale. |
+| R9 | **Storage engines** (SQLite default, optional Postgres, one migration version) | One dialect abstraction; replaceable-server rationale. **Decision (v0.9.6): Postgres is post-v1** — SQLite is the 1.0 engine. |
 | R10 | **REST v1 + SSE broker** | New handlers for the control surface; shared broker fan-out. |
 | R11 | **MCP server** (stdio + Streamable HTTP, OAuth2 PKCE) | Monitoring read tools; adds **write** tools under policy. |
 | R12 | **UI stack** (Vue 3 + TS + Pinia + Tailwind + uPlot + PWA) | Vue 3 + TS + Pinia + Tailwind + uPlot + PWA; new pages. |

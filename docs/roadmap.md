@@ -368,8 +368,10 @@ Ordering (each step is independently shippable):
      `PARTOUT_RELEASE_KEY` provisioned stays strict-signed (unsigned refused).
      Directives carry `unsigned` (proto field 8); the UI labels such releases
      `unsigned (beta)`; `update.apply`/`update.dispatch` audits record
-     `unsigned: true`. sha256 verification is unchanged in all cases. **GA gate:**
-     flip the default to false and require signatures in the one-command flow.
+     `unsigned: true`. sha256 verification is unchanged in all cases. **GA gate**
+     (decision, v0.9.6: the default stays ON through the beta — there is no
+     v1.0.0 yet; flipping it is part of the v1.0.0 release itself, together
+     with requiring signatures in the one-command flow).
 2. **Agent self-swap with rollback** (canary on one host proves it) — ✅ **shipped**
    (`UPDATE_DIRECTIVE`/`UPDATE_RESULT` stream envelopes; `POST /api/v1/updates/apply`
    canary dispatch, admin+, audited `update.apply`/`update.result`, SSE
@@ -597,7 +599,7 @@ All remain *proposed* in `docs/deployment.md` until shipped.
 17a. ~~**M6 — Alert engine**~~ ✅ Done (v0.6.5) — see the M6 section above (rules, evaluation, dedup, SSE, API/CLI/MCP, live Alerts page).
 17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit over the real interval between counter movements (not the 30 s alert tick, which inflated the rate ~10×), holds the rate while a loop continues (no firing/resolved flapping between facts uploads), folds counter resets, and ignores units whose collector failed; fires ≥ `service_restart_rate_per_hour` (default 10), resolves after 10 min quiet.
 17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js), and write actions (jobs CRUD, package apply/dry-run, provision start/key-confirm/cancel). See the M7 section above.
-18. Postgres backend; then **M8 — Distribution & self-update** (M8.1 signed fleet updates: release store + signatures, agent self-swap with rollback, rollout orchestration, auto job-decision re-issue; M8.2 Docker/compose, cloud-init, Helm, status page). See the M8 section.
+18. **Postgres backend — decision (v0.9.6): post-v1.** SQLite is the 1.0 storage engine (WAL, single writer — fine to ~10k hosts per the capacity targets); the Postgres dialect ships after 1.0, at which point the migration-parity CI matrix from arch §14 starts. The original sequencing then (M8.1 signed fleet updates: release store + signatures, agent self-swap with rollback, rollout orchestration, auto job-decision re-issue; M8.2 Docker/compose, cloud-init, Helm, status page). See the M8 section.
 19. **~~Elevation — full Decision 3 (per-command profiles) + finer-grained env control.~~** ✅ **Policy engine shipped (next release, post-v0.9.5):** the **elevation policy** (`PARTOUT_ELEVATION_POLICY`: one .json or a *.json drop-in dir) is now the single source of truth for what the agent runs elevated — pattern-scoped rules (exact args, verb×unit `systemctl` grants, file-glob reads, per-rule env) — and `partout ctl elevation <show|check|install-sudoers>` renders the sudoers drop-in **from the same policy** (visudo-checked before install; `check` detects drift via a `policy-sha256` header). With a policy loaded + `PARTOUT_ELEVATE=sudo`, a matching command elevates and a non-matching one runs unprivileged (logged); no policy = legacy drop-in decides. Policy-generated drop-ins keep `env_reset` ON (per-rule env renders as `SETENV:`, retiring the legacy blanket `!env_reset` for generated files). The observe layer now reports a root-only config as **not readable** (never mislabeled *invalid*) and validates elevated when the policy authorizes the validator. Example: `deploy/elevation/elevation-web.json.example`. **Remaining** (take up when operators ask): `PARTOUT_ROOT` (elevated target home); elevation visibility on the exec/audit UI surface (a per-run "elevated/not in scope" badge); per-command profiles declared in the server-side command spec (PRD Decision 3 + arch §6.6); and optionally even finer env management (scoped `env_keep` allowlists beyond per-rule `SETENV`). See operations.md §3.6.
 
 
