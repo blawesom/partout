@@ -2484,11 +2484,52 @@
       paletteRun() { const it = this.paletteItems[this.paletteIdx]; if (it) this.paletteGo(it); },
       paletteGo(it) { this.closePalette(); this.go(it.kind === "host" ? "host/" + it.key : it.key); },
       onGlobalKey(e) {
-        if (e.key === "Escape" && this.confirmBox.open) { this.confirmBoxNo(); return; }
+        if (e.key === "Escape") {
+          // Every dismissible overlay closes on Esc (ux Q2), innermost first.
+          if (this.confirmBox.open) { this.confirmBoxNo(); return; }
+          if (this.paletteOpen) { this.closePalette(); return; }
+          if (this.groupForm) { this.groupForm = null; return; }
+          if (this.helpBox) { this.helpBox = ""; return; }
+          if (this.addHostOpen) { this.closeAddHost(); return; }
+          if (this.provWiz.open) { this.provWizClose(); return; }
+        }
+        // Tab trap (ux Q2): while any overlay is open, Tab/Shift-Tab cycle
+        // within the topmost one — the background stays reachable otherwise.
+        if (e.key === "Tab") {
+          const ov = this.topOverlayEl();
+          if (!ov) return;
+          const focusables = [...ov.querySelectorAll("button, input, select, textarea, a[href]")].filter((el) => !el.disabled);
+          if (!focusables.length) return;
+          const first = focusables[0], last = focusables[focusables.length - 1];
+          const active = document.activeElement;
+          if (e.shiftKey && (active === first || !ov.contains(active))) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && (active === last || !ov.contains(active))) { e.preventDefault(); first.focus(); }
+        }
         if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
           e.preventDefault();
           if (this.paletteOpen) this.closePalette(); else this.openPalette();
         }
+      },
+      // The topmost open overlay (DOM order = stacking order here), or null.
+      topOverlayEl() {
+        const ovs = [...document.querySelectorAll(".overlay")];
+        return ovs.length ? ovs[ovs.length - 1] : null;
+      },
+      // Focus management for dialogs (ux Q2): focus moves into the dialog on
+      // open (first control), returns to the opener on close.
+      dialogFocus() {
+        this._dialogOpener = (document.activeElement && document.activeElement !== document.body) ? document.activeElement : null;
+        this.$nextTick(() => {
+          const ov = this.topOverlayEl();
+          if (!ov) return;
+          const first = [...ov.querySelectorAll("input, select, textarea, button")].find((el) => !el.disabled);
+          if (first) first.focus();
+        });
+      },
+      dialogBlur() {
+        const opener = this._dialogOpener;
+        this._dialogOpener = null;
+        if (opener && document.contains(opener)) opener.focus();
       },
       async refreshCaps() { try { this.caps = await this.api("/capabilities"); } catch (e) { this.caps = {}; } },
       async loadVersion() { try { const d = await this.api("/version"); this.serverVersion = d.version || ""; } catch (e) { } },
@@ -3945,6 +3986,13 @@
       page() { if (this.page !== "session") this._destroyTerm(); this.ensureNavExpanded(); this.loadPageData(); },
       p1() { if (["host", "exec", "session"].includes(this.page)) this.loadPageData(); },
       paletteQ() { this.paletteIdx = 0; },
+      // Dialog focus management (ux Q2): focus moves in when a dialog opens
+      // and returns to the opener when it closes.
+      "confirmBox.open"(v) { if (v) this.dialogFocus(); else this.dialogBlur(); },
+      groupForm(v) { if (v) this.dialogFocus(); else this.dialogBlur(); },
+      helpBox(v) { if (v) this.dialogFocus(); else this.dialogBlur(); },
+      addHostOpen(v) { if (v) this.dialogFocus(); else this.dialogBlur(); },
+      "provWiz.open"(v) { if (v) this.dialogFocus(); else this.dialogBlur(); },
       // Same-page query change (cross-link, e.g. obs/certs → obs/certs?host=x):
       // the page/p1 watchers don't fire, so re-sync filters and reload.
       route(nv, ov) {

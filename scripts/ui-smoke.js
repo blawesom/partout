@@ -1177,6 +1177,43 @@ async function main() {
     }
   }
 
+  // --- Modal focus management (ux Q2): focus-in, Esc, Tab trap, restore ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const key = (k, opts) => new w.KeyboardEvent("keydown", Object.assign({ key: k, bubbles: true }, opts || {}));
+    await visit("#/fleet", 400);
+    const trigger = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("+ Add host"));
+    if (!trigger) { check("focus: trigger button", false, "no + Add host"); }
+    else {
+      trigger.focus();
+      inst.openAddHost();
+      await sleep(300);
+      const ov = d.querySelector(".overlay");
+      check("focus: moves into the dialog on open", !!ov && ov.contains(d.activeElement), "active=" + (d.activeElement || {}).tagName);
+      // Tab trap: focus the last control, Tab wraps to the first.
+      const focusables = [...ov.querySelectorAll("button, input, select, textarea, a[href]")].filter((el) => !el.disabled);
+      const last = focusables[focusables.length - 1];
+      last.focus();
+      d.body.dispatchEvent(key("Tab"));
+      await sleep(80);
+      check("focus: Tab wraps inside the dialog", d.activeElement === focusables[0], "active=" + (d.activeElement || {}).textContent);
+      // Shift-Tab from the first wraps to the last.
+      focusables[0].focus();
+      d.body.dispatchEvent(key("Tab", { shiftKey: true }));
+      await sleep(80);
+      check("focus: Shift-Tab wraps back", d.activeElement === last, "active=" + (d.activeElement || {}).textContent);
+      // Esc closes any overlay.
+      d.body.dispatchEvent(key("Escape"));
+      await sleep(200);
+      check("focus: Esc closes the dialog", !inst.addHostOpen, "addHost still open");
+      check("focus: returns to the opener on close", d.activeElement === trigger, "active=" + (d.activeElement || {}).textContent);
+      // Esc closes the help dialog too.
+      inst.openHelp("selector"); await sleep(250);
+      d.body.dispatchEvent(key("Escape")); await sleep(150);
+      check("focus: Esc closes the help dialog", !inst.helpBox, "help still open");
+    }
+  }
+
   // --- Body-ported JS tooltip (data-jtip) on truncated cells ---
   if (w.__partout) {
     const inst = w.__partout;

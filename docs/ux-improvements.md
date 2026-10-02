@@ -90,10 +90,8 @@ at the time of writing (they drift; the mechanism descriptions are the durable p
 - **`--text-faint: #94a3b8` on white ≈ 2.6–3.0:1 — fails WCAG AA (4.5:1)** — and it is
   used for *meaningful* metadata (host ids, captions, table metadata), not decoration
   (→ quick win Q1).
-- **No focus management in modals**: dialogs do not move focus on open, do not trap Tab
-  (background content stays reachable), and do not restore focus on close. Verified: only
-  the palette input, the login field, and the terminal ever call `.focus()`. Esc works on
-  the confirm dialog only (→ quick win Q2).
+- ~~**No focus management in modals**~~ ✅ fixed (Q2): focus-in on open, focus
+  restore on close, Esc on every overlay, Tab trap in the topmost dialog.
 - Tables lack `scope`/captions; overlays lack `role="dialog"` / `aria-modal`.
 
 ### IA · Host-centric workflow fragmentation — high value, later
@@ -114,7 +112,7 @@ will jank (→ later item L5, and the modularization L7 that sits under it).
 | # | Win | Effort | Notes |
 |---|---|---|---|
 | Q1 | ~~**Contrast fix**~~ ✅ **shipped**: light `--text-faint` `#94a3b8`→`#64748b` (≈4.75:1 on white), dark `#64748b`→`#94a3b8` (≈6.6:1 on slate-900) — both themes now pass AA for the meaningful text faint carries; pinned by `TestUIShape_ContrastTokens` | hours | One token pair + a shape test; fixed a real WCAG AA failure |
-| Q2 | **Modal focus basics**: focus the first control on open (confirm/input/add-host/wizard), Esc closes every dialog, focus returns to the opener; a full Tab-trap is ~20 more lines — do both | ~½ day | Largest a11y gain per line; `askConfirm`/`askInput` already centralize the plumbing |
+| Q2 | ~~**Modal focus basics**~~ ✅ **shipped** (with the full trap): focus moves to the first control when any dialog opens (confirm/input/select, add-host, group form, help, wizard) and returns to the opener on close; Esc closes every dismissible overlay innermost-first; Tab/Shift-Tab cycle within the topmost overlay (background unreachable while a dialog is open) | ~½ day | Smoke-verified: focus-in, Tab wrap, Shift-Tab wrap, Esc close, opener restore |
 | Q3 | ~~**Selector autocomplete + cheat-sheet**~~ ✅ **shipped**: a `<datalist id="selector-suggestions">` fed from live fleet data (all, group:, role:, tag:, host:) attached to every selector input (Execute, job form, rollout form, secrets), plus a self-contained `?` grammar help dialog (selector + cron kinds — offline-capable, no CDN) | ~½ day | Verified by the smoke harness (datalist options from live data, help opens/closes with grammar content) |
 | Q4 | ~~**Re-run from Recent executions**~~ ✅ **shipped**: a ↻ Re-run button on execution rows prefills the Execute form (cmd/args/selector/timeout) — the first-command-nudge pattern (prefill, never auto-run) | hours | Smoke-verified against the seeded execution: prefilled values + "nothing auto-executed" |
 | Q5 | ~~**Audit pagination + actor/time filters**~~ ✅ **shipped**: actor + time-range (1h/24h/7d/30d) filters, a "shown N" count, and "Load more" cursor paging (`next_cursor`); the empty state says "for these filters" when filtered. The API always supported all of it — the UI silently truncated at page one before | ~½ day | Smoke-verified against 140+ real audit rows: second page present, Load-more appends, actor filter empties honestly for a non-actor |

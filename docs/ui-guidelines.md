@@ -881,6 +881,11 @@ target (host id, fingerprint, release) so the operator sees what's affected.
   echoed the secret in cleartext). The job/task host picker and group-create
   prompts remain native `prompt()` for now (multi-field forms, add-on-request).
 - `Esc` or Cancel resolves `false` for `askConfirm`, `null` for `askInput`.
+- **Focus management** (every overlay): focus moves to the first control on open
+  and returns to the opener on close; `Esc` closes any dismissible overlay
+  (innermost first); Tab/Shift-Tab cycle within the topmost overlay — the
+  background is unreachable while a dialog is open (keyboard trap by design,
+  released on close).
 
 The host-key **confirm** in the provision flow now renders the fingerprint in
 the `mono` block (previously it was `\n`-separated text in a native
