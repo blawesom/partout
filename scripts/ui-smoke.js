@@ -674,6 +674,18 @@ async function main() {
   await visit("#/provision");
   check("provision: new-run card", d.body.textContent.includes("New run"), "new-run card missing");
   check("provision: seeded run row", rowsWithText(d, "nobody@127.0.0.1") > 0, "run row missing");
+  // Batch onboard: two REAL runs against unreachable hosts (fail fast at
+  // connect, like the seeded one) — one POST per line, each its own run.
+  {
+    check("batch: card renders", d.body.textContent.includes("Batch onboard") && !!d.querySelector("textarea"), "batch card missing");
+    w.__partout.batchText = "nobody2@127.0.0.1\nnobody3@127.0.0.1";
+    await sleep(150);
+    check("batch: line count in CTA", [...d.querySelectorAll("button")].some((b) => /Start 2 runs/.test(b.textContent)), "CTA does not count lines");
+    await w.__partout.startBatch();
+    await sleep(400);
+    check("batch: summary names both runs", /Started 2 runs/.test(w.__partout.batchMsg || "") && (w.__partout.batchMsg || "").includes("nobody2@127.0.0.1"), "msg=" + (w.__partout.batchMsg || "").slice(0, 80));
+    check("batch: runs appear in the table", rowsWithText(d, "nobody2@127.0.0.1") > 0 && rowsWithText(d, "nobody3@127.0.0.1") > 0, "batch run rows missing");
+  }
   check("provision: fingerprint column", d.body.textContent.includes("Key fingerprint"), "fingerprint column missing");
   check("provision: started column", d.body.textContent.includes("Started") && /(now|\d+\w+ ago)/.test(d.body.textContent), "Started column or relative time missing");
   {

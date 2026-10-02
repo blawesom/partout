@@ -768,6 +768,16 @@ with Confirm/Deny, the enrolled result + host link, and close). `TestIdentitySta
 (`internal/sshutil`) pin the shared key-detection; `TestProvisionREST`
 asserts the `ssh-status` endpoint shape.
 
+**Batch onboard (hosts 2..N).** Next to the quick New-run form, a Batch card:
+one `user@host` per line (same mode select), and Start issues one
+`POST /provision-runs` per non-empty line — each host is its own run with its
+own key-confirm gate and five steps, appearing in the runs table with live SSE
+steps like any other run. Per-line failures (invalid host, and so on) are
+collected and reported without aborting the batch; the summary names every
+started run id. The server-side run machinery is unchanged — this is pure
+fan-out over it (`scripts/fleet-provision-e2e.sh` proves the concurrent path
+on real machines).
+
 ## 22. First-run UI affordances
 
 Five small surfaces make a brand-new server self-explanatory:

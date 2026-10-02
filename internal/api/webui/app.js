@@ -1479,6 +1479,19 @@
             <p class="muted small" style="margin-top:8px">{{ provModeHint }}</p>
             <div v-if="provMsg" class="info-box" style="margin-top:8px">{{ provMsg }}</div>
           </div>
+          <div class="card" style="margin-bottom:12px">
+            <div class="head"><h2>Batch onboard</h2><p class="cap">Hosts 2..N: one <span class="mono">user@host</span> per line — each becomes its own run (own key-confirm gate, own steps).</p></div>
+            <textarea v-model="batchText" class="mono" rows="4" placeholder="deploy@web01&#10;deploy@web02&#10;root@db01" style="width:100%;max-width:420px" :disabled="!isAdmin"></textarea>
+            <div class="toolbar" style="margin-top:8px">
+              <select v-model="batchMode">
+                <option value="fresh" title="fresh: clean slate — stops and removes any existing partout agent + identity on the host, then enrolls a brand-new agent">fresh</option>
+                <option value="join" title="join: non-destructive in-place binary update for a host that already has an enrolled agent (identity preserved)">join</option>
+              </select>
+              <button class="btn primary sm" :disabled="!isAdmin || !batchLines.length || !!batchBusy" @click="startBatch()"><span v-if="batchBusy" class="spin"></span>Start {{ batchLines.length }} run{{ batchLines.length===1?'':'s' }}</button>
+              <span v-if="!isAdmin" class="muted small">requires admin role</span>
+            </div>
+            <div v-if="batchMsg" class="info-box" style="margin-top:8px">{{ batchMsg }}</div>
+          </div>
           <div class="card">
             <div class="head"><h2>Runs</h2><div class="spacer"></div><button class="btn sm" @click="loadProvRuns">Refresh</button></div>
             <table class="tbl">
@@ -1942,6 +1955,7 @@
         ahCa: "", ahCaErr: "", ahCaBusy: false, // server root CA for TLS-mode recipes
         ahKnownIds: null, ahWatchStarted: 0, ahConnect: "idle", ahHostId: "", // connection watch
         provRuns: [],
+        batchText: "", batchMode: "fresh", batchBusy: false, batchMsg: "",
         provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
@@ -2029,6 +2043,12 @@
       // Wizard live view: the run's last state change is >2 min old and it is
       // not terminal — it may be stuck (a server restart mid-run is reaped at
       // boot; anything else deserves an explicit hint instead of "Connecting…").
+      // Batch onboarding: hosts 2..N are the same POST per line; each run is
+      // independent (own key-confirm gate, own five steps) and shows up in the
+      // runs table with live SSE steps like any other run.
+      batchLines() {
+        return this.batchText.split("\n").map((l) => l.trim()).filter(Boolean);
+      },
       provWizStalled() {
         const r = this.provWiz.run;
         return !!(r && !this.provTerminal(r.state) && r.updated && Date.now() / 1000 - r.updated > 120);
@@ -2909,6 +2929,26 @@
           this.provHost = "";
           this.loadProvRuns();
         } catch (e) { this.provMsg = "Provision failed: " + e.message; } finally { this.provBusy = false; }
+      },
+      // Batch onboarding: one provision run per non-empty line. Per-line
+      // failures (invalid host, rate limits) are collected, not fatal — the
+      // runs that did start keep going.
+      async startBatch() {
+        const lines = this.batchLines;
+        if (!lines.length || !this.isAdmin) return;
+        this.batchBusy = true; this.batchMsg = "Starting " + lines.length + " run" + (lines.length === 1 ? "" : "s") + "…";
+        const started = [], failed = [];
+        for (const host of lines) {
+          try {
+            const d = await this.api("/provision-runs", { method: "POST", body: { host, mode: this.batchMode } });
+            started.push(host + " (" + (d.id || "?") + ")");
+          } catch (e) { failed.push(host + ": " + e.message); }
+        }
+        this.batchMsg = "Started " + started.length + " run" + (started.length === 1 ? "" : "s") + ": " + started.join(", ") +
+          (failed.length ? " · failed: " + failed.join("; ") : "") + " — watch them in the runs table below.";
+        if (started.length) { this.notify("ok", started.length + " provision run(s) started"); this.loadProvRuns(); }
+        if (failed.length) this.notify("err", failed.length + " line(s) failed to start");
+        this.batchBusy = false;
       },
       // --- Onboarding wizard (guided SSH provisioning) ---
       openProvWizard() {
