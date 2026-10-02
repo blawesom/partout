@@ -160,6 +160,9 @@ also runs a periodic **security scan** (default every 6 h,
 `PARTOUT_SECURITY_SCAN_S`) that correlates each host's packages against OSV
 CVE data — see the fleet Security card on the Updates page.
 
+New here? **[docs/getting-started.md](docs/getting-started.md)** is the guided
+5-minute walkthrough (first host, first command, the audit check).
+
 For systemd units, Docker/compose, cloud-init, and Helm, see [docs/deployment.md](docs/deployment.md).
 
 ### Deployment notes
@@ -215,6 +218,7 @@ help` prints the full reference.
 
 | Doc | What it covers |
 |---|---|
+| [docs/getting-started.md](docs/getting-started.md) | **Guided 5-minute walkthrough**: first host, first command, the audit check |
 | [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions |
 | [docs/roadmap.md](docs/roadmap.md) | **Milestone plan & status** (M0–M8.1 done; 1.0 in preparation) + shipped feature deep-dives |
 | [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, storage, security, testing |
