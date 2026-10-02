@@ -86,6 +86,23 @@ pattern-scoped, policy-constrained; the host-level `PARTOUT_ELEVATE=sudo` slice
 is wired, §4.2), the Postgres backend, the OAuth2 browser-login grant + refresh
 tokens (post-v1, A20), MCP session-read tools, and the M6.1 alert kinds
 (`service_restarting` et al.; A21).
+**What v0.9.6 adds (PRD Decision 3, full elevation):** the **elevation policy** —
+a declarative per-host scope (`PARTOUT_ELEVATION_POLICY`: one `.json` or a
+`*.json` drop-in dir) that decides which commands the agent runs elevated, and
+`partout ctl elevation <show|check|install-sudoers>` that renders the sudoers
+drop-in **from the same policy** (single source of truth; `check` detects
+drift, `install-sudoers` is visudo-checked before touching the system). With a
+policy loaded and `PARTOUT_ELEVATE=sudo`, a matching command runs elevated and
+a non-matching one runs unprivileged (logged); no policy = legacy
+(drop-in decides). The observe layer now reports a root-only config
+(`haproxy.cfg` 0640) as **"not readable"** instead of mislabeling it *invalid*,
+and validates it elevated when the policy authorizes the validator. `systemctl`
+grants are per-unit-pattern (restart/reload/… on `haproxy*`, `partout-*`, …).
+Policy-generated drop-ins keep `env_reset` ON; env-bearing rules render as
+`SETENV:` on that grant only (the legacy drop-in's blanket `!env_reset` is
+retired for generated files). Example policy:
+`deploy/elevation/elevation-web.json.example`. New env var:
+`PARTOUT_ELEVATION_POLICY`; new local CLI: `partout ctl elevation`.
 **Web UI is shipped** (v0.5): open the main
 listener in a browser and log in — the fleet, execute, audit, and M1–M6 data pages (including
 Observe · Services/Certificates/Configs/Alerts) are live. Remaining UI scope:
@@ -345,9 +362,10 @@ TLS variant: add `--ca-file /etc/partout/ca.crt` (or `PARTOUT_TLS_CA` in the env
 the agent then enrolls over HTTPS and stores its CA-signed leaf + key under
 `<data dir>/tls/` (key 0600), and reconnects over mTLS on later starts.
 
-> *Proposed (not wired):* elevation (`--elevate=sudoers`, scoped sudoers profiles,
-> PRD Decision 3) — the binary hardcodes elevation off (`none`). Docker-host,
-> air-gapped and non-systemd manual paths follow the same env + flags (§4).
+> *Elevation (PRD Decision 3):* wired — `PARTOUT_ELEVATE=sudo` + the
+> elevation policy (`PARTOUT_ELEVATION_POLICY`, `partout ctl elevation`;
+> operations.md §3.6). Docker-host, air-gapped and non-systemd manual paths
+> follow the same env + flags (§4).
 
 ### 3.3 Docker — server *(proposed — no artifacts in repo)*
 
@@ -565,7 +583,8 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_UPDATE_HEALTH_S` | **60** | (M8.1) post-swap health window: the new binary must boot and reconnect within this many seconds, else the update is marked unhealthy and rolled back (crashloop guard) |
 | `PARTOUT_UPDATE_RESTART_CMD` | **systemctl restart partout-agent** | (M8.1) command run after a successful binary swap to (re)start the agent |
 | `PARTOUT_AGENT_CLEANUP_ON_REVOKE` | **false** | when the server revokes the agent (host removed from the fleet), also remove the local credential material (`identity.json` + `tls/`) before the clean exit, leaving the machine a clean slate. Destructive, hence opt-in |
-| `PARTOUT_ELEVATE` / `--elevate` | **none** | (PRD Decision 3, host-level slice) `sudo` → the agent runs action commands (dispatched exec, PTY sessions, package apply + metadata refresh, task steps, reboot) through `sudo -n`, and retries root-only config reads (e.g. `haproxy.cfg`) via `sudo -n cat`. What may actually elevate is scoped **entirely by the host's sudoers file** (ship `deploy/sudoers/partout-agent`; fail-closed on anything unlisted); no password is ever prompted (`-n`). Requires `NoNewPrivileges=true` removed from the agent unit (sudo needs setuid). `none` (default) keeps everything unprivileged. Per-command elevation profiles (pattern-scoped, policy-constrained) are the later full Decision 3 implementation — see docs/roadmap.md |
+| `PARTOUT_ELEVATE` / `--elevate` | **none** | (PRD Decision 3) `sudo` → the agent runs action commands (dispatched exec, PTY sessions, package apply + metadata refresh, task steps, reboot) through `sudo -n`, and retries root-only config reads (e.g. `haproxy.cfg`) via `sudo -n cat`. With an elevation policy loaded, the policy is the agent-side scope (matching commands elevate, others run unprivileged); the host's sudoers file — rendered from the same policy by `partout ctl elevation install-sudoers` — is the kernel-enforced wall. No password is ever prompted (`-n`). Requires `NoNewPrivileges=true` removed from the agent unit (sudo needs setuid). `none` (default) keeps everything unprivileged. See `PARTOUT_ELEVATION_POLICY` and operations.md §3.6 |
+| `PARTOUT_ELEVATION_POLICY` / `--elevation-policy` | *(empty)* | (PRD Decision 3, full) path to the elevation policy — one `.json` file or a directory of `*.json` drop-ins (merged in filename order). The pattern-scoped scope of elevated commands: exact args (`haproxy -c -f …`), verb×unit grants (`systemctl restart haproxy*`), file-glob reads (`cat /etc/nginx/*`), per-rule env (rendered as `SETENV:`). `partout ctl elevation show|check|install-sudoers` works on it. Empty = legacy (hand-installed sudoers drop-in decides) |
 | `PARTOUT_FILE_ROOT` / `--file-root` | **/home/partout** | file surface root (docs/spec-file-root.md): every file-surface path (stat/list/download/upload/edit/perm, and task `file`/`template` steps) is root-relative and confined to this directory. No role, flag, or parameter can reach outside it through the file surface — outside-the-root work is a command, not a file op. The agent creates the directory (`0750`, owned by `partout`) when missing; an unusable root disables the file surface (fail closed). Reported as the `partout.file_root` fact |
 
 ### 4.3 `partout ctl` — wired
@@ -632,6 +651,7 @@ implementation.)
 | `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
 | `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification
 | `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; see §4.2) |
+| `PARTOUT_ELEVATION_POLICY` | *(empty)* | elevation policy file / `*.json` dir (Decision 3 full; `partout ctl elevation`) |
 | `PARTOUT_FILE_ROOT` | /home/partout | file surface root (wired; see §4.2) |
 | `--file-root=…` | — | agent file root (see §4.2) |
 | `--label=k=v`, `--version` | — | flags *proposed* in earlier drafts; not wired |

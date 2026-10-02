@@ -74,6 +74,9 @@ commands:
   secrets <list|create|rotate|revoke|delete>   managed secrets (values write-only)
   update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
            release signing + the one-command fleet update (M8.1)
+  elevation <show|check|install-sudoers>
+           elevation policy (PRD Decision 3): view the loaded scope, detect
+           sudoers drift, and render/install the sudoers drop-in from it
   packages <updates|apply|actions> --agent A  OS package updates (apt/dnf; dry-run first)
   cve <list|scan> [--agent A] [--min-cvss F] [--json]  package CVE findings (OSV);
                            exit 1 if any finding matches — CI/cron gate
@@ -103,7 +106,7 @@ commands:
 
 	// db-backup and the local update subcommands (keygen/sign/verify) need no
 	// server round-trip; every other command needs the server address.
-	localOnly := fs.Arg(0) == "db-backup" || fs.Arg(0) == "help" ||
+	localOnly := fs.Arg(0) == "db-backup" || fs.Arg(0) == "help" || fs.Arg(0) == "elevation" ||
 		(fs.Arg(0) == "update" && (fs.Arg(1) == "keygen" || fs.Arg(1) == "sign" || fs.Arg(1) == "verify"))
 	if *server == "" && !localOnly {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
@@ -178,6 +181,8 @@ commands:
 		c.cmdSecrets(rest)
 	case "update":
 		c.cmdUpdate(rest)
+	case "elevation":
+		cmdElevation(rest)
 	case "packages":
 		c.cmdPackages(rest)
 	case "cve":
@@ -232,6 +237,47 @@ func dbBackup(dbPath, out string) error {
 	}
 	defer st.Close()
 	return st.BackupTo(out)
+}
+
+func cmdElevation(args []string) {
+	usage := func() {
+		fmt.Fprintln(os.Stderr, `usage: partout ctl elevation <show|check|install-sudoers>
+
+  show                load the policy; print effective rules + source files
+  check               re-render the drop-in and diff it against the installed file
+  install-sudoers     render + visudo-check + install the drop-in (needs root;
+                      'sudo partout ctl elevation install-sudoers')
+
+flags:
+  --policy P          policy file or *.json drop-in dir
+                      (default $PARTOUT_ELEVATION_POLICY, else /etc/partout/elevation.d)
+  --sudoers-path P    target drop-in (default /etc/sudoers.d/partout-agent)
+  --user U            service user for the grants (default partout)
+  --dry-run           install-sudoers: print the rendered drop-in, install nothing`)
+		os.Exit(2)
+	}
+	if len(args) == 0 {
+		usage()
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("elevation "+sub, flag.ExitOnError)
+	policy := fs.String("policy", envOr("PARTOUT_ELEVATION_POLICY", "/etc/partout/elevation.d"), "policy file or *.json drop-in dir")
+	sudoersPath := fs.String("sudoers-path", "/etc/sudoers.d/partout-agent", "target sudoers drop-in")
+	user := fs.String("user", "partout", "service user for the grants")
+	dryRun := fs.Bool("dry-run", false, "install-sudoers: print instead of installing")
+	fs.Parse(rest)
+
+	switch sub {
+	case "show":
+		elevationShow(*policy)
+	case "check":
+		elevationCheck(*policy, *sudoersPath, *user)
+	case "install-sudoers":
+		elevationInstall(*policy, *sudoersPath, *user, *dryRun)
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: unknown elevation command %q\n", sub)
+		usage()
+	}
 }
 
 func (c *ctl) cmdCA() {

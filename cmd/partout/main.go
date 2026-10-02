@@ -124,6 +124,7 @@ func main() {
 	server := fs.String("server", cfg.ServerURL, "agent: server host:port")
 	token := fs.String("token", cfg.Token, "agent: one-time enrollment token")
 	elevateMode := fs.String("elevate", cfg.Elevate, "agent: elevation mode none|sudo (action commands run through `sudo -n`; scope is the host's sudoers file)")
+	elevPolicy := fs.String("elevation-policy", cfg.ElevationPolicy, "agent: elevation policy file or *.json drop-in dir (PRD Decision 3); sudoers is rendered from it via `partout ctl elevation install-sudoers`")
 	factsEvery := fs.Int("facts-interval", cfg.FactsInterval, "agent: facts refresh seconds")
 	adminTok := fs.String("admin-token", cfg.AdminToken, "server: RBAC admin bearer token")
 	opTok := fs.String("operator-token", cfg.OperatorToken, "server: RBAC operator bearer token")
@@ -158,6 +159,7 @@ func main() {
 		os.Exit(2)
 	}
 	cfg.Elevate = string(el)
+	cfg.ElevationPolicy = *elevPolicy
 	cfg.FactsInterval = *factsEvery
 	cfg.AdminToken = *adminTok
 	cfg.OperatorToken = *opTok

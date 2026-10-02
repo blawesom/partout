@@ -36,8 +36,9 @@ incident response, capacity, compliance, and a go-live checklist.
 >   approvals engine, full policy surface, and MCP server are still to come.
 > - **Web UI shipped (v0.5)**: open the main listener in a browser and log in
 >   (`docs/deployment.md` §6 step 8). `partout ctl` / REST / SSE remain available for scripts.
-> - Not wired (planned, see deployment §4.4): `PARTOUT_ELEVATE`/`PARTOUT_ROOT` (elevation
->   hardcoded `none`), `PARTOUT_SPOOL_*`, `PARTOUT_RETENTION_*` (except
+> - Not wired (planned, see deployment §4.4): `PARTOUT_ROOT` (elevation target home —
+>   elevation itself is wired: `PARTOUT_ELEVATE` + the policy, §3.6),
+>   `PARTOUT_SPOOL_*`, `PARTOUT_RETENTION_*` (except
 >   `PARTOUT_SESSION_RETENTION_DAYS`), `PARTOUT_MAX_*`, `PARTOUT_MCP_ENABLED`,
 >   `PARTOUT_LOG_LEVEL`.
 
@@ -244,41 +245,69 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
 The agent runs as the unprivileged `partout` user by default. Out of the box it
 **cannot** install/upgrade packages, start/stop services, reboot, or read
 root-only config files — those operations fail closed with a normal non-zero
-exit. When a host needs them, enable host-level elevation (PRD Decision 3,
-host-level slice) rather than running the whole agent as root:
+exit. When a host needs them, enable elevation (PRD Decision 3) rather than
+running the whole agent as root.
 
-- **Enable** (per host, three steps):
-  1. Install the sudoers scope: `sudo install -m 0440 -o root -g root
-     deploy/sudoers/partout-agent /etc/sudoers.d/partout-agent && sudo visudo -cf
-     /etc/sudoers.d/partout-agent`.
-  2. Set `PARTOUT_ELEVATE=sudo` in `/etc/partout/agent.env`.
-  3. Remove `NoNewPrivileges=true` from the agent unit (sudo needs setuid), then
+**The elevation policy is the single source of truth.** One declarative file
+(`PARTOUT_ELEVATION_POLICY`: a single `.json`, or a dir of `*.json` drop-ins)
+decides what the agent runs elevated, and `partout ctl elevation` renders the
+host's sudoers drop-in from the same policy — so the agent's belief and the
+kernel's wall can be kept, and checked, in sync. Example
+(`deploy/elevation/elevation-web.json.example`):
+
+```json
+{
+  "rules": [
+    {"allow": "systemctl", "verbs": ["status", "show", "restart", "reload", "try-restart"],
+     "units": ["haproxy*", "nginx*", "caddy*", "partout-*"]},
+    {"allow": "haproxy", "args": ["-c", "-f", "/etc/haproxy/haproxy.cfg"]},
+    {"allow": "nginx", "args": ["-t"]},
+    {"allow": "cat", "files": ["/etc/haproxy/*", "/etc/nginx/*", "/etc/caddy/*"]},
+    {"allow": "apt-get|dnf", "args": ["-y", "install", "*"], "env": ["DEBIAN_FRONTEND", "LANG"]}
+  ]
+}
+```
+
+- **Enable** (per host):
+  1. Install the policy: `sudo install -m 0644 -o root -g root
+     elevation-web.json.example /etc/partout/elevation.d/10-web.json` (edit to
+     the fleet's actual scope first).
+  2. Render + install the sudoers wall (visudo-checked before it touches the
+     system): `sudo partout ctl elevation install-sudoers`.
+  3. Set `PARTOUT_ELEVATE=sudo` in `/etc/partout/agent.env`; remove
+     `NoNewPrivileges=true` from the agent unit (sudo needs setuid), then
      `systemctl daemon-reload && systemctl restart partout-agent`.
-- **Scope lives in sudoers, not the binary.** Nothing elevates unless the
-  operator-installed drop-in lists the exact command. The shipped default covers
-  the fixed surface (package management, reboot, observe config reads); the
-  **dispatch tier is opt-in** — arbitrary `partout ctl run` commands stay
-  unprivileged until you add `Cmnd_Alias PARTOUT_DISPATCH` entries. Keep that
-  list as tight as the fleet's work allows; it is the host's privilege grant.
-- **Failure is visible and ordinary.** An unlisted command exits non-zero
-  (sudo: "not allowed"); the exec surface shows that output. A denied elevated
-  config read is logged by the observe collector and the fact is simply absent.
-- **Env for elevated commands**: the shipped drop-in enables passthrough
-  (`Defaults:partout !env_reset`), so dispatched commands with `--env K=V`
-  see their variables out of the box. Note the trade: this means every
-  elevated command accepts any caller-set environment (e.g. `LD_PRELOAD`
-  survives). To re-tighten later: remove that line and use a scoped
-  `env_keep` allowlist or per-command `SETENV` (finer-grained env
-  management is a later item — docs/roadmap.md #19). The package surface
-  works either way (`DEBIAN_FRONTEND`/`LANG` are on the env_keep list).
-- **Revert**: remove the sudoers file + `PARTOUT_ELEVATE`, restore
-  `NoNewPrivileges=true`, restart. The agent is unprivileged again immediately;
-  no state is affected.
-- **Later (not in this slice):** per-command elevation profiles — pattern-scoped
-  elevation declared in the command spec and constrained by policy (PRD Decision
- 3 full form). Tracked in docs/roadmap.md; take it up when operators need
-  finer-grained grants than a per-host sudoers file.
-
+  4. Verify: `partout ctl elevation show` (effective scope) and
+     `partout ctl elevation check` (policy ↔ installed drop-in drift).
+- **Semantics.** With a policy loaded and `PARTOUT_ELEVATE=sudo`, the policy is
+  the agent-side authority: a matching command runs elevated; a non-matching
+  one runs **unprivileged** (the agent log says so) instead of being pushed
+  through sudo on faith. sudoers remains the kernel-enforced wall either way.
+  Without a policy (or `PARTOUT_ELEVATE=none`) it is legacy: the
+  hand-installed drop-in decides, or nothing elevates.
+- **Observe layer.** A root-only config (e.g. `haproxy.cfg` at 0640) is
+  reported as **"not readable"**, never mislabeled "invalid". If the policy
+  authorizes the validator (`haproxy -c -f …` / `nginx -t`) and a `cat` grant
+  for the file, validation and facts run elevated and the config is still
+  proven (in)valid.
+- **Scope stays tight.** `systemctl` grants are per-unit-pattern (`haproxy*`,
+  `partout-*`, …); dispatched commands outside the scope fail with an ordinary
+  permission error and the log explains why. Add the exact commands the fleet
+  needs — the policy is the host's privilege grant.
+- **Env for elevated commands**: env_reset stays ON; a rule that needs
+  environment declares it (`"env": [...]`) and it is rendered as `SETENV:` on
+  that grant only. The legacy drop-in's blanket `!env_reset` is retired for
+  policy-generated files (roadmap #19 history).
+- **Drift is detected, not hidden.** `partout ctl elevation check` re-renders
+  from the policy and diffs the installed file (a `policy-sha256` header line
+  makes even a hand "fix" visible). Reinstall after any policy edit.
+- **Revert**: remove the policy + sudoers file + `PARTOUT_ELEVATE`, restore
+  `NoNewPrivileges=true`, restart. The agent is unprivileged again
+  immediately; no state is affected.
+- **Legacy drop-in** (`deploy/sudoers/partout-agent`): still supported as the
+  no-policy fallback (its `!env_reset` trade and dispatch tier apply as
+  documented there). New installs should use the policy flow — the drop-in is
+  then generated, and `elevation check` keeps it honest.
 ### 3.7 File root (file surface confinement)
 
 Every file-surface path (stat/list/download/upload/edit/perm, and task

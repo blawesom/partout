@@ -117,6 +117,12 @@ type Agent struct {
 	// to prevent (architecture §3.4).
 	spoolErr error
 
+	// elevationErr is set if the configured elevation policy could not be
+	// loaded (malformed JSON, bad rule). Run fails fast on it: an
+	// unparseable scope is a config error the operator must fix, not
+	// something to run with silently drifted scope.
+	elevationErr error
+
 	// activeMu guards activeRunners.  Each entry is a context.CancelFunc for
 	// a run in progress.  The server CANCEL envelope uses this map to kill
 	// an in-flight process.
@@ -138,6 +144,10 @@ type Agent struct {
 	// elevate is the host-level elevation policy (PRD Decision 3 slice):
 	// sudo mode runs action commands through `sudo -n`.
 	elevate elevate.Mode
+
+	// elevation is the loaded elevation policy (PARTOUT_ELEVATION_POLICY);
+	// nil = legacy behavior (the hand-installed sudoers drop-in decides).
+	elevation *elevate.Policy
 }
 
 // New builds an Agent. The identity must already be enrolled (server-side row
@@ -205,6 +215,16 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	a.elevate, _ = elevate.Parse(cfg.Elevate)
 	if a.elevate == elevate.Sudo {
 		lg.Printf("agent: ELEVATION ENABLED (sudo -n) — action commands run elevated per the host's sudoers file; observe reads fall back to `sudo cat` on permission errors")
+	}
+	// Elevation policy (PRD Decision 3, full slice): the agent-side scope
+	// that sudoers is generated from. nil = legacy (drop-in decides).
+	// A malformed policy fails the agent at startup (fail fast in Run).
+	if pol, perr := elevate.Load(cfg.ElevationPolicy); perr != nil {
+		lg.Printf("agent: ELEVATION POLICY UNAVAILABLE: %v", perr)
+		a.elevationErr = fmt.Errorf("elevation policy: %w", perr)
+	} else if pol != nil {
+		a.elevation = pol
+		lg.Printf("agent: elevation policy loaded (%d rules from %s) — %s", len(pol.Rules), strings.Join(pol.Source(), ", "), describeElevation(pol))
 	}
 	// Task runner (M3, PRD §5.5): secrets lookup uses the E2E cache.
 	var secLookup func(ref string, version int64) (string, error)
@@ -298,6 +318,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	// disconnect, so results would be silently lost (architecture §3.4).
 	if a.spoolErr != nil {
 		return fmt.Errorf("agent: offline spool unavailable: %w", a.spoolErr)
+	}
+	// A malformed elevation policy is a startup error, not a drift to run
+	// with: the operator pointed at a scope file and it did not parse.
+	if a.elevationErr != nil {
+		return fmt.Errorf("agent: %w", a.elevationErr)
 	}
 	// M8.1: resolve the in-flight update marker BEFORE connecting (once per
 	// process). A version mismatch here means the boot guard already rolled
@@ -535,6 +560,7 @@ func (a *Agent) sendObserveFacts(ctx context.Context) {
 		CaddyConf:            a.cfg.CaddyConf,
 		ObserveFactsInterval: a.cfg.ObserveFactsInterval,
 		Elevate:              a.elevate,
+		Elevation:            a.elevation,
 	}
 	ch := make(chan *factscollect.Facts, 1)
 	go func() { ch <- factscollect.Collect(cfg) }()
@@ -999,12 +1025,37 @@ func (a *Agent) postConnectUpdateCheck() {
 	})
 }
 
+// describeElevation summarizes a policy for the startup log.
+func describeElevation(p *elevate.Policy) string {
+	seen := map[string]bool{}
+	var bins []string
+	for _, r := range p.Rules {
+		for _, a := range strings.Split(r.Allow, "|") {
+			if a = strings.TrimSpace(a); a != "" && !seen[a] {
+				seen[a] = true
+				bins = append(bins, a)
+			}
+		}
+	}
+	if len(bins) == 0 {
+		return "no rules (nothing elevates)"
+	}
+	return "grants: " + strings.Join(bins, ", ")
+}
+
 // runElevated runs a dispatched command under the agent's elevation policy:
-// in sudo mode the command is executed as `sudo -n -- cmd args...` so the
-// host's sudoers file is the authority on what may run elevated. The
-// agent log records the elevated form (PRD: privileged commands are
-// recorded in full).
+// in sudo mode WITHOUT a policy the command is executed as
+// `sudo -n -- cmd args...` so the host's sudoers file is the authority on
+// what may run elevated (legacy). In sudo mode WITH a policy, the policy is
+// the agent-side authority: a matching command runs elevated, a non-matching
+// one runs UNPRIVILEGED (the log says so; the command still runs — sudoers
+// remains the kernel-enforced wall). The agent log records the elevated form
+// (PRD: privileged commands are recorded in full).
 func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []string, cwd string, env map[string]string, timeoutS int32, onChunk exec.Callback) (*exec.Result, error) {
+	if a.elevate == elevate.Sudo && a.elevation != nil && a.elevation.Check(cmdName, args) == elevate.Denied {
+		a.log.Printf("agent: run %s (%s) NOT in elevation scope — running unprivileged; add a policy rule to elevate it", runID, strings.Join(append([]string{cmdName}, args...), " "))
+		return exec.Run(ctx, cmdName, args, cwd, env, timeoutS, onChunk)
+	}
 	n, a2 := a.elevate.Run(cmdName, args...)
 	if a.elevate == elevate.Sudo {
 		a.log.Printf("agent: run %s (ELEVATED: sudo -n -- %s)", runID, strings.Join(a2, " "))

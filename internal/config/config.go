@@ -134,10 +134,17 @@ type Config struct {
 	FileRoot string
 	// Elevate: none | sudo (PARTOUT_ELEVATE). "sudo" makes the agent run its
 	// action commands through `sudo -n` — scoped by the host's sudoers file
-	// (deploy/sudoers/partout-agent). Per-command elevation profiles are the
-	// later full Decision 3 implementation. Validated here; stored normalized
-	// ("" -> "none").
+	// (deploy/sudoers/partout-agent) or by the loaded elevation policy.
+	// Validated here; stored normalized ("" -> "none").
 	Elevate string
+	// ElevationPolicy: path to the elevation policy — one .json file or a
+	// directory of *.json drop-ins (PARTOUT_ELEVATION_POLICY). The
+	// pattern-scoped scope of elevated commands (PRD Decision 3, full
+	// slice): the agent runs a command elevated only when a rule matches,
+	// and `partout ctl elevation install-sudoers` renders the sudoers
+	// drop-in from it (single source of truth). Empty = legacy behavior
+	// (the hand-installed drop-in decides).
+	ElevationPolicy string
 	// Root is reserved for the full elevation implementation (target home
 	// for elevated runs); unused by the host-level slice.
 	Root string
@@ -187,6 +194,7 @@ func Load() (*Config, error) {
 		CleanupOnRevoke:       envBool("PARTOUT_AGENT_CLEANUP_ON_REVOKE"),
 		FileRoot:              os.Getenv("PARTOUT_FILE_ROOT"),
 		Elevate:               string(elevateMode),
+		ElevationPolicy:       os.Getenv("PARTOUT_ELEVATION_POLICY"),
 		Root:                  "/",
 	}
 	if err := c.Validate(); err != nil {

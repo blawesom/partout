@@ -110,10 +110,18 @@ func classifyExitError(stderr string) error {
 // with a permission error, it retries via `sudo -n cat`. This is how the
 // observe layer reads root-owned config files (e.g. haproxy.cfg) without the
 // agent running as root.
-func ReadFile(m Mode, path string) ([]byte, error) {
+//
+// When a policy is loaded, the elevated retry is gated on it: the retry only
+// happens if a rule covers `cat <path>` (fail closed — the legacy
+// drop-in-scoped retry is the no-policy fallback). A nil policy keeps the
+// legacy behavior of retrying on every EACCES in Sudo mode.
+func ReadFile(m Mode, p *Policy, path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err == nil || m != Sudo || !os.IsPermission(err) {
 		return b, err
+	}
+	if p != nil && p.Check("cat", []string{path}) != Elevated {
+		return nil, err
 	}
 	return elevatedOutput(path)
 }

@@ -98,21 +98,38 @@ sudo systemctl restart partout-agent.service
 The agent runs as the unprivileged `partout` user by default (PRD Decision 3). That
 means it **cannot** install/manage packages, start/stop services, reboot, or read
 root-only config files (e.g. `haproxy.cfg`). To enable those without running the
-whole agent as root, turn on host-level elevation:
+whole agent as root, turn on elevation. **Prefer the policy flow** (single source
+of truth; the sudoers file is rendered from the policy):
 
 ```bash
-# 1) Install the sudoers scope (fail-closed: nothing elevates unless listed)
-sudo install -m 0440 -o root -g root deploy/sudoers/partout-agent /etc/sudoers.d/partout-agent
-sudo visudo -cf /etc/sudoers.d/partout-agent
-
-# 2) Enable elevation in the agent env
+# 1) Install the elevation policy (edit to your fleet's scope first)
+sudo mkdir -p /etc/partout/elevation.d
+sudo install -m 0644 -o root -g root deploy/elevation/elevation-web.json.example /etc/partout/elevation.d/10-web.json
+# 2) Render + install the sudoers wall (visudo-checked before it touches the system)
+sudo partout ctl elevation install-sudoers
+# 3) Enable elevation in the agent env
 sudo sed -i 's/^# PARTOUT_ELEVATE=.*/PARTOUT_ELEVATE=sudo/' /etc/partout/agent.env
-
-# 3) sudo needs setuid — the unit's NoNewPrivileges blocks it. Remove that line.
+# 4) sudo needs setuid — the unit's NoNewPrivileges blocks it. Remove that line.
 sudo sed -i '/^NoNewPrivileges=true/d' /etc/systemd/system/partout-agent.service
 sudo systemctl daemon-reload
 sudo systemctl restart partout-agent
+# 5) Verify scope + drift
+partout ctl elevation show
+partout ctl elevation check
 ```
+
+`PARTOUT_ELEVATION_POLICY` (or `--elevation-policy`) points the agent at the
+policy; default lookup is `/etc/partout/elevation.d`. With a policy loaded and
+`PARTOUT_ELEVATE=sudo`, a matching command runs elevated and a non-matching one
+runs unprivileged (the agent log says so); sudoers remains the kernel wall.
+After any policy edit: re-run step 2, then `elevation check`.
+
+**Legacy drop-in (no policy):** `deploy/sudoers/partout-agent` still works —
+install it by hand (`sudo install -m 0440 -o root -g root … /etc/sudoers.d/partout-agent`
++ `visudo -cf`), set `PARTOUT_ELEVATE=sudo`, do steps 4–5 minus the policy.
+Its scope is the file's contents (fail-closed) and it carries the wider
+`!env_reset` env passthrough; `elevation check` only applies to
+policy-generated files. See docs/operations.md §3.6.
 
 What elevates (all via `sudo -n`, non-interactive, no password): dispatched
 exec, PTY sessions (a root terminal), package apply + metadata refresh, task

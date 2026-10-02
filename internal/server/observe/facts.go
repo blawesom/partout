@@ -176,9 +176,12 @@ type HAProxyConfig struct {
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
 	// ConfigError: haproxy -c output when invalid (bounded by the agent).
-	ConfigError string         `json:"config_error,omitempty"`
-	Backends    []BackendFact  `json:"backends"`
-	Listeners   []ListenerFact `json:"listeners"`
+	ConfigError string `json:"config_error,omitempty"`
+	// ConfigReadable: nil = unknown (older agent); false = root-only file,
+	// not necessarily invalid — the UI must say "not readable".
+	ConfigReadable *bool          `json:"config_readable,omitempty"`
+	Backends       []BackendFact  `json:"backends"`
+	Listeners      []ListenerFact `json:"listeners"`
 }
 
 // NginxConfig is nginx's config fact set.
@@ -189,8 +192,10 @@ type NginxConfig struct {
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
 	// ConfigError: nginx -t output when invalid (bounded by the agent).
-	ConfigError string      `json:"config_error,omitempty"`
-	Vhosts      []VHostFact `json:"vhosts"`
+	ConfigError string `json:"config_error,omitempty"`
+	// ConfigReadable: see HAProxyConfig.ConfigReadable.
+	ConfigReadable *bool       `json:"config_readable,omitempty"`
+	Vhosts         []VHostFact `json:"vhosts"`
 }
 
 // BackendFact is one haproxy backend's server state.

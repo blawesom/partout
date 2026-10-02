@@ -1,6 +1,13 @@
 # /etc/sudoers.d/partout-agent — elevation scope for the Partout agent
 #
-# Install:
+# LEGACY FALLBACK: the preferred flow is the elevation policy
+# (deploy/elevation/elevation-web.json.example + PARTOUT_ELEVATION_POLICY),
+# from which `sudo partout ctl elevation install-sudoers` GENERATES this
+# file (visudo-checked; `elevation check` detects drift). Use this
+# hand-written drop-in only when no policy is configured — the agent then
+# runs every action command through `sudo -n` and this file decides.
+#
+# Install (legacy flow):
 #   sudo install -m 0440 -o root -g root partout-agent /etc/sudoers.d/partout-agent
 #   sudo visudo -cf /etc/sudoers.d/partout-agent   # syntax check BEFORE relying on it
 #

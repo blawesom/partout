@@ -90,11 +90,17 @@ type Config struct {
 	CaddyConf   string
 	// ObserveFactsInterval: seconds between uploads (PARTOUT_OBSERVE_FACTS_INTERVAL).
 	ObserveFactsInterval int
-	// Elevate: host-level elevation policy (PRD Decision 3 slice). In sudo
-	// mode, config-file reads that fail with a permission error retry via
-	// `sudo -n cat` (scoped by the host's sudoers file) so root-owned
-	// configs (e.g. haproxy.cfg) still produce facts.
+	// Elevate: host-level elevation mode (PRD Decision 3). In sudo mode,
+	// config-file reads that fail with a permission error retry via
+	// `sudo -n cat` (scoped by the host's sudoers file, or by the loaded
+	// policy when one is set) so root-owned configs (e.g. haproxy.cfg)
+	// still produce facts.
 	Elevate elevate.Mode
+	// Elevation: the loaded elevation policy (PARTOUT_ELEVATION_POLICY).
+	// nil = legacy behavior (the hand-installed drop-in decides). When set
+	// and the mode is sudo, agent-internal privileged commands (config
+	// validation, elevated reads) run only when a rule matches.
+	Elevation *elevate.Policy
 }
 
 // Fill returns a config with defaults filled in.
@@ -390,10 +396,17 @@ type HAProxyConfig struct {
 	ConfigValid  bool   `json:"config_valid"`
 	// ConfigError carries the validator's (haproxy -c) output when
 	// ConfigValid is false, so the UI can explain *why* instead of just
-	// showing a red badge. Bounded by capConfigError.
-	ConfigError string         `json:"config_error,omitempty"`
-	Backends    []BackendFact  `json:"backends"`
-	Listeners   []ListenerFact `json:"listeners"`
+	// showing a red badge. Bounded by capConfigError. Empty when the
+	// validator never ran (ConfigReadable == false, not authorized).
+	ConfigError string `json:"config_error,omitempty"`
+	// ConfigReadable: the agent user can open the config file directly.
+	// nil = unknown (older agent, or file absent); false = root-only file —
+	// the config is NOT necessarily invalid, the agent just cannot see it
+	// (the UI must say so instead of mislabeling it invalid); true = readable
+	// (validation ran as the agent user or via an authorized elevation).
+	ConfigReadable *bool          `json:"config_readable,omitempty"`
+	Backends       []BackendFact  `json:"backends"`
+	Listeners      []ListenerFact `json:"listeners"`
 }
 
 // NginxConfig is nginx's config fact set.
@@ -404,8 +417,10 @@ type NginxConfig struct {
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
 	// ConfigError: nginx -t output on failure (see HAProxyConfig).
-	ConfigError string      `json:"config_error,omitempty"`
-	Vhosts      []VHostFact `json:"vhosts"`
+	ConfigError string `json:"config_error,omitempty"`
+	// ConfigReadable: see HAProxyConfig.ConfigReadable.
+	ConfigReadable *bool       `json:"config_readable,omitempty"`
+	Vhosts         []VHostFact `json:"vhosts"`
 }
 
 // BackendFact is one haproxy backend's server state.
@@ -450,6 +465,16 @@ func collectConfigs(cfg *Config) *ConfigFacts {
 	return f
 }
 
+// probeReadable reports whether the agent user can open path. A var so
+// tests can stub EACCES without chmod acrobatics.
+var probeReadable = func(path string) error {
+	f, err := os.Open(path)
+	if err == nil {
+		f.Close()
+	}
+	return err
+}
+
 // collectHAProxy runs haproxy -c for validation and parses topology.
 func collectHAProxy(cfg *Config) *HAProxyConfig {
 	cfg = cfg.Fill()
@@ -464,24 +489,64 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 		Present:    true,
 		ConfigFile: cfgPath,
 	}
-	// Validate: haproxy -c (bounded: a wedged binary must not stall collection)
-	// — capture the output on failure so the UI can explain the invalid state.
-	if out, err := runOutput(configExecTimeout, "haproxy", "-c", "-f", cfgPath); err == nil {
-		h.ConfigValid = true
-	} else {
-		h.ConfigError = capConfigError(out)
+	// Readability first: a root-only cfg is not evidence of an invalid
+	// config — running the validator as the agent user would just report
+	// "Permission denied" and the UI would mislabel a healthy service.
+	readable := probeReadable(cfgPath) == nil
+	h.ConfigReadable = &readable
+
+	// Validate: haproxy -c (bounded: a wedged binary must not stall
+	// collection) — capture the output on failure so the UI can explain
+	// the invalid state.
+	validateArgs := []string{"-c", "-f", cfgPath}
+	runValidator := func(elevated bool) (string, error) {
+		if !elevated {
+			return runOutput(configExecTimeout, "haproxy", validateArgs...)
+		}
+		n, a := cfg.Elevate.Run("haproxy", validateArgs...)
+		return runOutput(configExecTimeout, n, a...)
+	}
+	switch {
+	case readable:
+		if out, err := runValidator(false); err == nil {
+			h.ConfigValid = true
+		} else {
+			h.ConfigError = capConfigError(out)
+		}
+	case cfg.Elevation != nil && authorizedElevated(cfg, "haproxy", validateArgs):
+		// Not directly readable, but the policy authorizes elevated
+		// validation: the validator runs as root and the config can still
+		// be proven (in)valid. ConfigReadable stays false — the file
+		// itself is root-only.
+		if out, err := runValidator(true); err == nil {
+			h.ConfigValid = true
+		} else {
+			h.ConfigError = capConfigError(out)
+		}
+	default:
+		// Unreadable and not authorized: skip validation entirely and let
+		// the UI say "not readable" instead of "invalid".
 	}
 	// Version: haproxy -v
 	if out, err := runOutput(configExecTimeout, "haproxy", "-v"); err == nil {
 		h.Version = extractVersion(out)
 	}
 	// Config SHA256
-	if sha, err := fileSHA256(cfgPath, cfg.Elevate); err == nil {
+	if sha, err := fileSHA256(cfgPath, cfg.Elevate, cfg.Elevation); err == nil {
 		h.ConfigSHA256 = sha
 	}
 	// Topology: lightweight parsing
-	h.Backends, h.Listeners = parseHAProxyTopology(cfgPath, cfg.Elevate)
+	h.Backends, h.Listeners = parseHAProxyTopology(cfgPath, cfg.Elevate, cfg.Elevation)
 	return h
+}
+
+// authorizedElevated reports whether the loaded policy authorizes (name,
+// args) to run elevated in Sudo mode. A nil policy is never authorized
+// here — the legacy drop-in is not derived from anything the agent knows.
+func authorizedElevated(cfg *Config, name string, args []string) bool {
+	return cfg.Elevate == elevate.Sudo &&
+		cfg.Elevation != nil &&
+		cfg.Elevation.Check(name, args) == elevate.Elevated
 }
 
 // collectNginx runs nginx -t for validation and extracts vhost topology.
@@ -498,23 +563,46 @@ func collectNginx(cfg *Config) *NginxConfig {
 		Present:    true,
 		ConfigFile: cfgPath,
 	}
+	// Readability first (see collectHAProxy): a root-only nginx.conf is not
+	// evidence of an invalid config.
+	readable := probeReadable(cfgPath) == nil
+	n.ConfigReadable = &readable
+
 	// Validate: nginx -t — capture output on failure (see HAProxyConfig).
-	if out, err := runOutput(configExecTimeout, "nginx", "-t"); err == nil {
-		n.ConfigValid = true
-	} else {
-		n.ConfigError = capConfigError(out)
+	switch {
+	case readable:
+		if out, err := runOutput(configExecTimeout, "nginx", "-t"); err == nil {
+			n.ConfigValid = true
+		} else {
+			n.ConfigError = capConfigError(out)
+		}
+	case authorizedElevated(cfg, "nginx", []string{"-t"}):
+		if out, err := runOutputElevated(cfg, configExecTimeout, "nginx", "-t"); err == nil {
+			n.ConfigValid = true
+		} else {
+			n.ConfigError = capConfigError(out)
+		}
+	default:
+		// Unreadable and not authorized: skip, UI says "not readable".
 	}
 	// Version: nginx -v (writes to stderr)
 	if out, err := runOutput(configExecTimeout, "nginx", "-v"); err == nil {
 		n.Version = extractVersion(out)
 	}
 	// Config SHA256
-	if sha, err := fileSHA256(cfgPath, cfg.Elevate); err == nil {
+	if sha, err := fileSHA256(cfgPath, cfg.Elevate, cfg.Elevation); err == nil {
 		n.ConfigSHA256 = sha
 	}
 	// Topology: lightweight parsing
-	n.Vhosts = parseNginxVhosts(cfgPath, cfg.Elevate)
+	n.Vhosts = parseNginxVhosts(cfgPath, cfg.Elevate, cfg.Elevation)
 	return n
+}
+
+// runOutputElevated runs name+args through the agent's elevation prefix
+// (sudo -n in Sudo mode) and captures combined output.
+func runOutputElevated(cfg *Config, timeout time.Duration, name string, args ...string) (string, error) {
+	n, a := cfg.Elevate.Run(name, args...)
+	return runOutput(timeout, n, a...)
 }
 
 // ---- Cert facts (R20) ----------------------------------------------------
@@ -1039,8 +1127,8 @@ func extractVersion(s string) string {
 // fileSHA256 returns the SHA-256 of path. Under the given elevation policy,
 // a permission error on the direct read retries via `sudo -n cat` so
 // root-owned configs still get a hash.
-func fileSHA256(path string, m elevate.Mode) (string, error) {
-	data, err := elevate.ReadFile(m, path)
+func fileSHA256(path string, m elevate.Mode, p *elevate.Policy) (string, error) {
+	data, err := elevate.ReadFile(m, p, path)
 	if err != nil {
 		return "", err
 	}
@@ -1051,10 +1139,10 @@ func fileSHA256(path string, m elevate.Mode) (string, error) {
 // parseHAProxyTopology does lightweight regex/line-based parsing of the
 // haproxy config to extract backends, servers, frontends, TLS bindings.
 // No full YAML parsing dependency — just line scanning.
-func parseHAProxyTopology(path string, m elevate.Mode) ([]BackendFact, []ListenerFact) {
+func parseHAProxyTopology(path string, m elevate.Mode, p *elevate.Policy) ([]BackendFact, []ListenerFact) {
 	var backends []BackendFact
 	var listeners []ListenerFact
-	data, err := elevate.ReadFile(m, path)
+	data, err := elevate.ReadFile(m, p, path)
 	if err != nil {
 		return backends, listeners
 	}
@@ -1103,8 +1191,8 @@ func parseHAProxyTopology(path string, m elevate.Mode) ([]BackendFact, []Listene
 // parses each one. The scan is line-based with brace-depth tracking so that a
 // nested block (location, if) does not terminate the server block early.
 // `include`d files are not followed (best-effort topology, arch §7.2).
-func parseNginxVhosts(path string, m elevate.Mode) []VHostFact {
-	data, err := elevate.ReadFile(m, path)
+func parseNginxVhosts(path string, m elevate.Mode, p *elevate.Policy) []VHostFact {
+	data, err := elevate.ReadFile(m, p, path)
 	if err != nil {
 		return nil
 	}

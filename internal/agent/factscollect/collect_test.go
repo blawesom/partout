@@ -522,6 +522,44 @@ func TestParseCertMissingFile(t *testing.T) {
 	}
 }
 
+func TestCollectHAProxyUnreadableConfig(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything; EACCES path not exercisable")
+	}
+	if _, err := exec.LookPath("haproxy"); err != nil {
+		t.Skip("haproxy not installed")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "haproxy.cfg")
+	if err := os.WriteFile(cfgPath, []byte("frontend f\n    bind :80\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfgPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(cfgPath, 0o600)
+
+	// Root-only config: the agent user cannot read it. The validator must
+	// NOT run (it would report "Permission denied" and the UI would
+	// mislabel a healthy service) — instead the fact says "not readable".
+	f := collectHAProxy(&Config{HaproxyConf: cfgPath})
+	if f == nil {
+		t.Fatal("collectHAProxy = nil")
+	}
+	if f.ConfigReadable == nil || *f.ConfigReadable {
+		t.Errorf("ConfigReadable = %v, want false", f.ConfigReadable)
+	}
+	if f.ConfigValid {
+		t.Error("ConfigValid = true, want false (validator never ran)")
+	}
+	if f.ConfigError != "" {
+		t.Errorf("ConfigError = %q, want empty (no validator output)", f.ConfigError)
+	}
+	if f.ConfigSHA256 != "" || len(f.Backends) != 0 {
+		t.Errorf("sha256/topology should be unavailable on an unreadable config: %q %+v", f.ConfigSHA256, f.Backends)
+	}
+}
+
 func TestParseHAProxyTopology(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "haproxy.cfg")
@@ -540,7 +578,7 @@ backend webservers
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	backends, listeners := parseHAProxyTopology(cfg, elevate.None)
+	backends, listeners := parseHAProxyTopology(cfg, elevate.None, nil)
 	if len(backends) == 0 {
 		t.Errorf("no backends parsed from %s", content)
 	}
@@ -557,7 +595,7 @@ backend webservers
 }
 
 func TestParseHAProxyTopologyMissingFile(t *testing.T) {
-	backends, listeners := parseHAProxyTopology(filepath.Join(t.TempDir(), "nope.cfg"), elevate.None)
+	backends, listeners := parseHAProxyTopology(filepath.Join(t.TempDir(), "nope.cfg"), elevate.None, nil)
 	if backends != nil || listeners != nil {
 		t.Errorf("missing config returned %v/%v, want nil/nil", backends, listeners)
 	}
@@ -873,7 +911,7 @@ http {
 	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	vhosts := parseNginxVhosts(cfg, elevate.None)
+	vhosts := parseNginxVhosts(cfg, elevate.None, nil)
 	if len(vhosts) != 2 {
 		t.Fatalf("parsed %d vhosts, want 2: %+v", len(vhosts), vhosts)
 	}
@@ -900,7 +938,7 @@ http {
 }
 
 func TestParseNginxVhostsMissingFile(t *testing.T) {
-	if got := parseNginxVhosts(filepath.Join(t.TempDir(), "nope.conf"), elevate.None); got != nil {
+	if got := parseNginxVhosts(filepath.Join(t.TempDir(), "nope.conf"), elevate.None, nil); got != nil {
 		t.Errorf("missing file = %+v, want nil", got)
 	}
 }

@@ -66,7 +66,7 @@ func TestReadFileDirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range []Mode{None, Sudo} {
-		b, err := ReadFile(m, p)
+		b, err := ReadFile(m, nil, p)
 		if err != nil || string(b) != "hello" {
 			t.Errorf("ReadFile(%v) = %q, %v; want hello, nil", m, b, err)
 		}
@@ -87,11 +87,11 @@ func TestReadFileFallbackOnPermission(t *testing.T) {
 	defer os.Chmod(p, 0o600)
 
 	// none: plain permission error, no elevation attempted.
-	if _, err := ReadFile(None, p); !os.IsPermission(err) {
+	if _, err := ReadFile(None, nil, p); !os.IsPermission(err) {
 		t.Errorf("ReadFile(None) err = %v, want permission error", err)
 	}
 
-	// sudo: falls back to the (stubbed) elevated read.
+	// sudo, no policy (legacy): falls back to the (stubbed) elevated read.
 	orig := elevatedOutput
 	t.Cleanup(func() { elevatedOutput = orig })
 	elevatedOutput = func(path string) ([]byte, error) {
@@ -100,17 +100,47 @@ func TestReadFileFallbackOnPermission(t *testing.T) {
 		}
 		return []byte("top-secret"), nil
 	}
-	b, err := ReadFile(Sudo, p)
+	b, err := ReadFile(Sudo, nil, p)
 	if err != nil || string(b) != "top-secret" {
-		t.Errorf("ReadFile(Sudo) = %q, %v; want top-secret via fallback", b, err)
+		t.Errorf("ReadFile(Sudo, nil policy) = %q, %v; want top-secret via fallback", b, err)
 	}
 
-	// sudo + elevated denial surfaces ErrDenied (stub returns what
-	// classifyExitError would produce for a sudoers denial).
+	// sudo + policy: the retry is gated — a non-matching path is refused
+	// (fail closed) even though sudo mode is on.
+	pol, err := LoadPolicyJSON([]byte(`{"rules":[{"allow":"cat","files":["/etc/nginx/*"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	elevatedOutput = func(path string) ([]byte, error) {
+		called = true
+		return []byte("x"), nil
+	}
+	if _, err := ReadFile(Sudo, pol, p); !os.IsPermission(err) {
+		t.Errorf("ReadFile(Sudo, policy without match) err = %v, want permission error", err)
+	}
+	if called {
+		t.Error("elevated read attempted for a path the policy does not cover")
+	}
+
+	// sudo + policy: a matching path still gets the elevated retry.
+	elevatedOutput = func(path string) ([]byte, error) {
+		return []byte("top-secret"), nil
+	}
+	pol2, err := LoadPolicyJSON([]byte(`{"rules":[{"allow":"cat","files":["` + p + `"]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = ReadFile(Sudo, pol2, p)
+	if err != nil || string(b) != "top-secret" {
+		t.Errorf("ReadFile(Sudo, matching policy) = %q, %v; want top-secret", b, err)
+	}
+
+	// sudo + policy + elevated denial surfaces ErrDenied.
 	elevatedOutput = func(path string) ([]byte, error) {
 		return nil, classifyExitError("sudo: user is not allowed to execute /usr/bin/cat")
 	}
-	_, err = ReadFile(Sudo, p)
+	_, err = ReadFile(Sudo, pol2, p)
 	if !errors.Is(err, ErrDenied) {
 		t.Errorf("ReadFile(Sudo) err = %v, want ErrDenied", err)
 	}

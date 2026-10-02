@@ -1599,7 +1599,7 @@
           <div class="card" v-for="(c,i) in configs" :key="i">
             <div class="head">
               <h2>{{ c.kind }} <span class="muted mono small" v-if="c.haproxy || c.nginx">· {{ (c.haproxy||c.nginx).version }}</span></h2>
-              <span class="badge" :title="cfgErr(c) || (c.haproxy||c.nginx).config_file || ''" :class="((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'ok':'bad'">{{ ((c.haproxy||c.nginx) && (c.haproxy||c.nginx).config_valid)?'valid':'invalid' }}</span>
+              <span class="badge" :title="cfgState(c).title" :class="cfgState(c).cls">{{ cfgState(c).t }}</span>
               <a @click.prevent="go('obs/services?host='+c.host_id+'&name='+c.kind)" :title="c.kind + ' service'" style="font-size:12px">◈ {{ c.kind }} service</a>
               <div class="spacer"></div>
               <span class="muted mono small">{{ hostNameById(c.host_id) }}</span>
@@ -3202,6 +3202,21 @@
       },
       // config_error text when the validator failed ("" when valid/unknown).
       cfgErr(c) { const x = c.haproxy || c.nginx; return (x && !x.config_valid && x.config_error) ? x.config_error : ""; },
+      // Config badge state. A root-only config (config_readable === false) is
+      // NOT necessarily invalid — the agent just cannot see it; say so (warn)
+      // instead of mislabeling a healthy service. Older agents omit the
+      // field entirely: legacy valid/invalid behavior.
+      cfgState(c) {
+        const x = c.haproxy || c.nginx;
+        if (!x) return { t: "—", cls: "neutral", title: "" };
+        if (x.config_readable === false) {
+          if (x.config_valid) return { t: "valid (elevated)", cls: "ok", title: "validated via an authorized elevation; the file itself is root-only" };
+          return { t: "not readable", cls: "warn", title: "config file is root-only (the partout user cannot read it) — not necessarily invalid. Add an elevation policy rule (e.g. 'haproxy' + args ['-c','-f',cfg] and a 'cat' grant) then: sudo partout ctl elevation install-sudoers — or grant read access." };
+        }
+        return x.config_valid
+          ? { t: "valid", cls: "ok", title: x.config_file || "" }
+          : { t: "invalid", cls: "bad", title: this.cfgErr(c) || x.config_file || "" };
+      },
       async loadCerts() {
         try {
           const d = await this.api("/certificates" + buildQ({ agent_id: this.certHost, days_remaining_lt: this.certDays }));
