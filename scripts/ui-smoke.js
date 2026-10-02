@@ -1110,6 +1110,46 @@ async function main() {
     const pinp = [...d.querySelectorAll(".overlay .fld input")].find((x) => x.type === "password");
     check("input dialog: password-typed secret input", !!pinp, "rotate input not password-typed");
     inst.confirmBoxNo(); await ip3; await sleep(80);
+    // askSelect (ux Q7): the host-picker dialog. With >1 host the picker must
+    // offer a dropdown; confirm resolves the chosen id, cancel resolves null.
+    {
+      const savedHosts = inst.hosts.slice();
+      inst.hosts = savedHosts.concat([{ id: "ag_second", state: "connected" }]); // 2 hosts -> picker path
+      const jp = inst.pickHost("Run job on which host?");
+      await sleep(200);
+      const sel = d.querySelector(".overlay .fld select");
+      check("select dialog: host dropdown renders", !!sel && [...sel.querySelectorAll("option")].length === 2, "no/short dropdown");
+      if (sel) { sel.value = "ag_second"; sel.dispatchEvent(new w.Event("change", { bubbles: true })); }
+      await sleep(80);
+      const rb = [...d.querySelectorAll(".overlay button")].find((b) => b.textContent.trim() === "Run");
+      if (rb) rb.click();
+      const got = await jp; await sleep(100);
+      check("select dialog: confirm resolves the chosen host", got === "ag_second", "resolved " + JSON.stringify(got));
+      const jp2 = inst.pickHost("Again");
+      await sleep(150);
+      inst.confirmBoxNo();
+      const got2 = await jp2; await sleep(80);
+      check("select dialog: cancel resolves null", got2 === null, "resolved " + JSON.stringify(got2));
+      inst.hosts = savedHosts;
+    }
+    // Group create (ux Q7): the dialog form replaces two prompt()s.
+    {
+      await visit("#/fleet", 400);
+      const gb = [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "+ Group");
+      check("group form: entry button", !!gb, "no + Group");
+      if (gb) gb.click();
+      await sleep(200);
+      const dlg = [...d.querySelectorAll(".overlay .dialog")].find((x) => x.textContent.includes("New group"));
+      check("group form: dialog renders with selector autocomplete", !!dlg && !!dlg.querySelector("input[list='selector-suggestions']"), "no group dialog / no datalist");
+      inst.groupForm.name = ""; inst.groupForm.selector = ""; await sleep(120);
+      const cb = [...d.querySelectorAll(".overlay button")].find((b) => b.textContent.trim() === "Create group");
+      check("group form: create disabled until filled", cb && cb.disabled, "create enabled on empty form");
+      inst.groupForm.name = "smokegrp"; inst.groupForm.selector = "role:smoke"; await sleep(120);
+      check("group form: create enabled when filled", cb && !cb.disabled, "create still disabled");
+      if (cb) cb.click();
+      await sleep(600);
+      check("group form: group created via the dialog", (inst.groups || []).some((g) => g.name === "smokegrp"), "group not created");
+    }
   }
 
   // --- Body-ported JS tooltip (data-jtip) on truncated cells ---

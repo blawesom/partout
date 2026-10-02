@@ -401,6 +401,12 @@
         <span>{{ confirmBox.inputLabel }}</span>
         <input v-model="confirmBox.input" :type="confirmBox.inputType" :placeholder="confirmBox.inputPlaceholder" @keyup.enter="confirmBoxYes()" />
       </div>
+      <div v-if="confirmBox.selectLabel" class="fld" style="margin-top:10px">
+        <span>{{ confirmBox.selectLabel }}</span>
+        <select v-model="confirmBox.selectValue" @keyup.enter="confirmBoxYes()">
+          <option v-for="o in confirmBox.selectOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </div>
       <div class="toolbar" style="margin-top:16px">
         <div class="spacer"></div>
         <button class="btn sm" @click="confirmBoxNo()" style="margin-right:8px">Cancel</button>
@@ -449,6 +455,22 @@
         </table>
         <p class="muted small" style="margin-top:10px">Scheduled jobs run on each agent's own clock (a server outage does not stop them); the server resolves the selector to concrete hosts when the job is saved.</p>
       </template>
+    </div>
+  </div>
+  <!-- ============ GROUP CREATE (dialog form, replaces prompt()) ============ -->
+  <div class="overlay" v-if="groupForm && loggedIn" @click.self="groupForm=null">
+    <div class="dialog card" style="max-width:480px">
+      <div class="head"><h2>New group</h2><div class="spacer"></div>
+        <button class="btn sm" @click="groupForm=null" aria-label="close">✕</button></div>
+      <p class="cap">A group is a named selector — it shows in the sidebar as a fleet scope.</p>
+      <label class="fld"><span>Name</span><input v-model="groupForm.name" class="mono" placeholder="db" @keyup.enter="createGroup()" /></label>
+      <label class="fld"><span>Selector <a class="gs-link" @click.prevent="openHelp('selector')" title="selector syntax">?</a></span>
+        <input v-model="groupForm.selector" class="mono" list="selector-suggestions" placeholder="all | role:db | host:ag_x" @keyup.enter="createGroup()" /></label>
+      <div class="toolbar" style="margin-top:14px">
+        <div class="spacer"></div>
+        <button class="btn sm" @click="groupForm=null" style="margin-right:8px">Cancel</button>
+        <button class="btn primary sm" :disabled="!groupForm.name.trim() || !groupForm.selector.trim() || groupForm.busy" @click="createGroup()"><span v-if="groupForm.busy" class="spin"></span>Create group</button>
+      </div>
     </div>
   </div>
   <!-- ============ COMMAND PALETTE (⌘K / Ctrl-K) ============ -->
@@ -640,7 +662,7 @@
             <div class="head"><h2>Hosts</h2>
               <input v-model="fleetFilter" class="fleet-filter" placeholder="Filter by name, id, role…" />
               <div class="spacer"></div>
-              <button class="btn sm" @click="createGroup" :disabled="!isOperator">+ Group</button>
+              <button class="btn sm" @click="openGroupForm()" :disabled="!isOperator">+ Group</button>
               <button class="btn primary sm" @click="openAddHost" :disabled="!isOperator">+ Add host</button>
             </div>
             <table class="tbl">
@@ -1964,6 +1986,7 @@
         me: null, caps: {}, loginForm: { username: "", password: "" },
         loginErr: "", loginBusy: false, userMenu: false,
         helpBox: "", // "" | "selector" | "cron" — the grammar help dialog
+        groupForm: null, // {open, name, selector, busy} — the group-create dialog
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
         // Captured from the real location at mount; data so the smoke
         // harness can drive the cleartextLogin branches.
@@ -3044,7 +3067,7 @@
       askConfirm(opts) {
         const o = Object.assign({ title: "Are you sure?", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "" }, opts || {});
         return new Promise((resolve) => {
-          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: o.requireText, value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", _resolve: resolve, _isInput: false };
+          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: o.requireText, value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", selectLabel: "", selectOptions: [], selectValue: "", _resolve: resolve, _isInput: false };
         });
       },
       // askInput: the same shared dialog, but with a free-text (optionally
@@ -3054,12 +3077,20 @@
       askInput(opts) {
         const o = Object.assign({ title: "Input", body: "", mono: "", confirmLabel: "OK", variant: "primary", inputLabel: "Value", inputPlaceholder: "", inputType: "text", initial: "" }, opts || {});
         return new Promise((resolve) => {
-          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: "", value: "", inputLabel: o.inputLabel, inputPlaceholder: o.inputPlaceholder, inputType: o.inputType, input: o.initial, _resolve: resolve, _isInput: true };
+          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: "", value: "", inputLabel: o.inputLabel, inputPlaceholder: o.inputPlaceholder, inputType: o.inputType, input: o.initial, selectLabel: "", selectOptions: [], selectValue: "", _resolve: resolve, _isInput: true };
+        });
+      },
+      // askSelect: the shared dialog with a dropdown (host pickers). Resolves
+      // the chosen value on confirm, null on cancel/Esc.
+      askSelect(opts) {
+        const o = Object.assign({ title: "Select", body: "", mono: "", confirmLabel: "OK", variant: "primary", selectLabel: "Choose", selectOptions: [], initial: "" }, opts || {});
+        return new Promise((resolve) => {
+          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: "", value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", selectLabel: o.selectLabel, selectOptions: o.selectOptions, selectValue: o.initial || (o.selectOptions[0] && o.selectOptions[0].value) || "", _resolve: resolve, _isInput: true, _isSelect: true };
         });
       },
       confirmBoxYes() {
         const r = this.confirmBox._resolve, isInput = this.confirmBox._isInput;
-        const val = (this.confirmBox.input || "").trim();
+        const val = this.confirmBox._isSelect ? this.confirmBox.selectValue : (this.confirmBox.input || "").trim();
         this.confirmBox.open = false;
         if (r) r(isInput ? val : true);
       },
@@ -3369,7 +3400,7 @@
       async runTask(t) {
         if (!this.hosts.length) { this.notify("info", "No hosts available to run this task on."); return; }
         const agent = this.hosts.length === 1 ? this.hosts[0].id
-          : prompt("Run task " + t.name + " on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
+          : await this.pickHost("Run task " + t.name + " on which host?");
         if (!agent) return;
         this.taskBusy = t.id; this.taskMsg = "";
         this.taskNote[t.id] = { kind: "info", text: "Dispatching on " + agent + "…" };
@@ -3573,7 +3604,7 @@
       async runJob(job) {
         // POST /jobs/{id}/run requires an explicit agent_id.
         if (!this.hosts.length) { this.notify("info", "No hosts available to run this job on."); return; }
-        const agent = this.hosts.length === 1 ? this.hosts[0].id : prompt("Run on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
+        const agent = this.hosts.length === 1 ? this.hosts[0].id : await this.pickHost("Run job " + job.name + " on which host?");
         if (!agent) return;
         this.jobRunBusy = job.id; this.jobErr = "";
         this.jobNote[job.id] = { kind: "info", text: "Dispatching on " + agent + "…" };
@@ -3589,6 +3620,13 @@
       // Grammar help dialog (ux Q3/Q6): selector / cron syntax, self-contained
       // so it works offline (the webui is deliberately CDN-free).
       openHelp(kind) { this.helpBox = kind; },
+      // pickHost: the shared-dialog host picker replacing the last native
+      // prompt()s (ux Q7). Returns the chosen agent id, or null on cancel.
+      // Single-host fleets skip the dialog entirely (nothing to choose).
+      async pickHost(title) {
+        const opts = this.hosts.map((h) => ({ value: h.id, label: (this.hostName(h) || h.id) + " (" + h.id + ")" }));
+        return await this.askSelect({ title, body: "", confirmLabel: "Run", variant: "primary", selectLabel: "Host", selectOptions: opts });
+      },
       // Re-run from Recent executions (ux Q4): prefill the form with a past
       // command — the first-command-nudge pattern: nothing auto-executes,
       // the operator presses Run.
@@ -3807,10 +3845,22 @@
         try { await navigator.clipboard.writeText(this.ahCmd); this.notify("ok", "copied to clipboard"); }
         catch (e) { this.notify("err", "copy failed — select the text manually"); }
       },
+      // Group create (ux Q7): a small dialog form replaces the last two
+      // native prompt()s — name + selector (with autocomplete) in one place.
+      openGroupForm() {
+        if (!this.isOperator) return;
+        this.groupForm = { open: true, name: "", selector: "all", busy: false };
+      },
       async createGroup() {
-        const name = prompt("Group name:"); if (!name) return;
-        const selector = prompt("Selector (all | host:ag_x | group:db):", "all"); if (!selector) return;
-        try { await this.api("/groups", { body: { name, selector } }); this.notify("ok", "group \"" + name + "\" created"); this.loadGroups(); } catch (e) { /* toast shown by api() */ }
+        const f = this.groupForm;
+        if (!f || !f.name.trim() || !f.selector.trim()) return;
+        f.busy = true;
+        try {
+          await this.api("/groups", { body: { name: f.name.trim(), selector: f.selector.trim() } });
+          this.notify("ok", "group \"" + f.name.trim() + "\" created");
+          this.groupForm = null;
+          this.loadGroups();
+        } catch (e) { /* toast shown by api() */ } finally { if (this.groupForm) this.groupForm.busy = false; }
       },
       async deleteSecret(n) { if (await this.askConfirm({ title: "Delete secret", body: "Hosts referencing this secret must be updated.", mono: n, confirmLabel: "Delete secret", variant: "danger", requireText: n })) { try { await this.api("/secrets/" + encodeURIComponent(n), { method: "DELETE" }); this.notify("ok", "secret deleted"); this.loadSecrets(); } catch (e) { /* toast shown by api() */ } } },
       async createSecret() {

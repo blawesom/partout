@@ -55,10 +55,9 @@ at the time of writing (they drift; the mechanism descriptions are the durable p
 
 ### H4 · Consistency & standards — low/medium
 
-- **Native `prompt()`s remain** in three flows: the job and task "run on which host?"
-  pickers (app.js ~3312, ~3516) and group-create's two prompts (name + selector, ~3738).
-  The deny-reason and secret-rotate prompts were already replaced by the shared typed
-  dialog; these are the remainder (→ quick win Q7).
+- ~~**Native `prompt()`s remain** in the job/task host pickers and group-create~~
+  ✅ fixed (Q7): `askSelect()` host picker + a group-create dialog form. No native
+  `prompt()` remains in the SPA.
 - Feedback is deliberately tri-modal (global toast / row note / page message) — documented
   in ui-guidelines §10 and consistent so far; watch it as surfaces multiply.
 
@@ -121,7 +120,7 @@ will jank (→ later item L5, and the modularization L7 that sits under it).
 | Q4 | ~~**Re-run from Recent executions**~~ ✅ **shipped**: a ↻ Re-run button on execution rows prefills the Execute form (cmd/args/selector/timeout) — the first-command-nudge pattern (prefill, never auto-run) | hours | Smoke-verified against the seeded execution: prefilled values + "nothing auto-executed" |
 | Q5 | **Audit pagination + actor/time filters**: send `actor`/`since`, add "Load more" via `next_cursor` — the API already supports all of it | ~½ day | The UI silently truncates today |
 | Q6 | ~~**Docs links in-app**~~ ✅ **shipped**: "Docs ↗" in the user menu (repo docs, new tab); the grammar help dialog (Q3) covers the cron/selector field hints self-contained and offline. The `when` help lands with a when-field in the task form (none exists yet) | hours | The walkthrough exists; now the product points at it |
-| Q7 | **Replace the remaining `prompt()`s** (job/task host picker, group create) with the shared dialog + a host `<select>` | ~½ day | Closes the H4 consistency finding; `askInput` exists to extend |
+| Q7 | ~~**Replace the remaining `prompt()`s**~~ ✅ **shipped**: `askSelect()` extends the shared dialog with a dropdown; the job/task host pickers use it (`pickHost`, single-host fleets skip the dialog), and group-create is a proper dialog form (name + selector with autocomplete, disabled-until-filled). No native `prompt()` remains in the SPA | ~½ day | Smoke-verified: dropdown renders/chooses/cancels; the group form creates a real group |
 
 ## 5. Later-version areas (ranked by UX value)
 
