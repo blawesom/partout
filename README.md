@@ -104,19 +104,36 @@ non-zero on a hard failure — the "start it and see" step, made visible:
 ./partout doctor && ./partout   # doctor reports exactly what would stop a start
 ```
 
+> **Plain HTTP is the default — and loopback-only is the safe default.** A fresh
+> server binds **all interfaces** with **no TLS**, so the login password and session
+> tokens cross the network in cleartext the moment you reach it from another
+> machine. `partout doctor` warns about exactly this. For anything beyond this
+> machine, do one of:
+>
+> - `PARTOUT_TLS=on` — bootstraps a local root CA; the server then serves HTTPS
+>   and the agent stream gets mTLS (no per-host cert work), or
+> - `PARTOUT_ADDR=127.0.0.1` — keep it on loopback behind your own TLS-terminating
+>   reverse proxy (Caddy/nginx/HAProxy patterns in [docs/deployment.md](docs/deployment.md) §1.3).
+>
+> The browser also warns: the login page shows an amber banner when it is served
+> over cleartext from a non-loopback host.
+
 **Fastest path — one-process demo.** Server **and** a co-located local agent; the fleet is
 populated the moment you open the UI. No enrollment token or second process needed.
 
 ```bash
 PARTOUT_MODE=embedded PARTOUT_ADMIN_PASSWORD='change-me-123' ./partout
 # → open http://localhost:8443, sign in as admin / change-me-123
+# (loopback + plaintext is the local-dev posture; add PARTOUT_TLS=on to try HTTPS)
 ```
 
-**Server + agent (multiple hosts).**
+**Server + agent (multiple hosts).** TLS on from the start — the CA is bootstrapped
+on first run and the agent picks it up at enrollment (`partout ctl ca` fetches it for
+existing hosts):
 
 ```bash
-# 1) Start the server
-PARTOUT_PORT=8443 PARTOUT_DB_PATH=./partout.db PARTOUT_MODE=server \
+# 1) Start the server with TLS
+PARTOUT_TLS=on PARTOUT_PORT=8443 PARTOUT_DB_PATH=./partout.db PARTOUT_MODE=server \
   PARTOUT_ADMIN_PASSWORD='change-me-123' PARTOUT_TOKEN_ADMIN='cli-admin-token' ./partout
 
 # 2) Mint a one-time enrollment token
@@ -124,8 +141,12 @@ PARTOUT_SERVER=localhost:8443 PARTOUT_CTL_TOKEN='cli-admin-token' ./partout ctl 
 # → token: par_enr_…
 
 # 3) Run the agent on the host you want to manage
-PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' ./partout --mode=agent
+PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' \
+  PARTOUT_TLS_CA=<the server CA — `partout ctl ca` prints it> ./partout --mode=agent
 ```
+
+If you deliberately want plaintext (air-gapped lab, SSH tunnel, testing), the same
+flow works without `PARTOUT_TLS`/`PARTOUT_TLS_CA` — but keep it on loopback.
 
 The host appears in the **Fleet** page; Observe facts fill in after the first upload.
 
