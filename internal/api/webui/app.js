@@ -408,6 +408,49 @@
       </div>
     </div>
   </div>
+  <!-- ============ GRAMMAR HELP (selector / cron) ============ -->
+  <datalist id="selector-suggestions">
+    <option v-for="s in selectorSuggestions" :key="s" :value="s" />
+  </datalist>
+  <div class="overlay" v-if="helpBox && loggedIn" @click.self="helpBox=''">
+    <div class="dialog card" style="max-width:600px">
+      <div class="head"><h2>{{ helpTitle }}</h2><div class="spacer"></div>
+        <button class="btn sm" @click="helpBox=''" aria-label="close">✕</button></div>
+      <template v-if="helpBox==='selector'">
+        <table class="tbl">
+          <thead><tr><th style="width:180px">Selector</th><th>Matches</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">all</td><td>every host in the fleet</td></tr>
+            <tr><td class="mono">host:ag_x…</td><td>one host by id (repeatable)</td></tr>
+            <tr><td class="mono">tag:env=prod</td><td>hosts with tag <span class="mono">env=prod</span> (<span class="mono">tag:env</span> = key present, any value)</td></tr>
+            <tr><td class="mono">role:web</td><td>hosts carrying the role</td></tr>
+            <tr><td class="mono">group:db</td><td>a saved group (a named selector — Groups card on the Fleet page)</td></tr>
+            <tr><td class="mono">a,b,c</td><td>intersection (AND). No OR in v1 — compose with groups instead.</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small" style="margin-top:10px">The server resolves selectors: the preview on the Execute page shows the exact host set before anything dispatches, and an empty result is an error — never a silent no-op.</p>
+      </template>
+      <template v-else-if="helpBox==='cron'">
+        <pre class="console" style="margin:0">┌───────────── minute (0–59)
+│ ┌───────────── hour (0–23)
+│ │ ┌───────────── day of month (1–31)
+│ │ │ ┌───────────── month (1–12)
+│ │ │ │ ┌───────────── day of week (0–6, Sun=0)
+│ │ │ │ │
+* * * * *</pre>
+        <table class="tbl" style="margin-top:10px">
+          <thead><tr><th style="width:180px">Examples</th><th>Runs</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">0 3 * * *</td><td>daily at 03:00</td></tr>
+            <tr><td class="mono">*/5 * * * *</td><td>every 5 minutes</td></tr>
+            <tr><td class="mono">0 9 * * 1-5</td><td>weekdays at 09:00</td></tr>
+            <tr><td class="mono">30 2 1 * *</td><td>02:30 on the 1st of each month</td></tr>
+          </tbody>
+        </table>
+        <p class="muted small" style="margin-top:10px">Scheduled jobs run on each agent's own clock (a server outage does not stop them); the server resolves the selector to concrete hosts when the job is saved.</p>
+      </template>
+    </div>
+  </div>
   <!-- ============ COMMAND PALETTE (⌘K / Ctrl-K) ============ -->
   <div class="overlay palette-overlay" v-if="paletteOpen && loggedIn" @click.self="closePalette()">
     <div class="dialog card palette">
@@ -534,6 +577,7 @@
         <div v-if="userMenu" @click="userMenu=false" style="position:fixed;inset:0;z-index:40;background:rgba(15,23,42,.25)">
           <div style="position:absolute;bottom:70px;left:12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px;min-width:180px">
             <div class="nav-item" @click.stop="userMenu=false; go('account')">Account</div>
+            <div class="nav-item" style="padding:0"><a href="https://github.com/blawesom/partout/tree/main/docs" target="_blank" rel="noopener" style="display:block;padding:7px 10px;color:var(--text)">Docs ↗</a></div>
             <div class="nav-item" @click.stop="signOut">Sign out</div>
           </div>
         </div>
@@ -697,8 +741,8 @@
           <p class="page-sub">Run a command across a selector. Resolution is server-authoritative.</p>
           <div class="card">
             <div class="toolbar">
-              <label class="fld" style="flex:0 0 260px;margin:0"><span>Selector</span>
-                <input v-model="exSel" class="mono" placeholder="all · host:ag_x · group:db" @keyup.enter="previewSelector" /></label>
+              <label class="fld" style="flex:0 0 260px;margin:0"><span>Selector <a class="gs-link" @click.prevent="openHelp('selector')" title="selector syntax">?</a></span>
+                <input v-model="exSel" class="mono" list="selector-suggestions" placeholder="all · host:ag_x · group:db" @keyup.enter="previewSelector" /></label>
               <button class="btn sm" @click="previewSelector" :disabled="previewLoading || !exSel">
                 <span v-if="previewLoading" class="spin"></span> Resolve
               </button>
@@ -932,8 +976,8 @@
                     <option v-for="t in tasks" :key="t.id" :value="t.id">{{ t.name }} ({{ t.id }})</option>
                   </select>
                 </label>
-                <label class="fld"><span>Cron</span><input v-model="jobForm.cron" class="mono" placeholder="0 3 * * *" /></label>
-                <label class="fld"><span>Selector</span><input v-model="jobForm.selector" class="mono" placeholder="all | role:db | host:ag_x" /></label>
+                <label class="fld"><span>Cron <a class="gs-link" @click.prevent="openHelp('cron')" title="cron syntax">?</a></span><input v-model="jobForm.cron" class="mono" placeholder="0 3 * * *" /></label>
+                <label class="fld"><span>Selector <a class="gs-link" @click.prevent="openHelp('selector')" title="selector syntax">?</a></span><input v-model="jobForm.selector" class="mono" list="selector-suggestions" placeholder="all | role:db | host:ag_x" /></label>
               </div>
               <div class="toolbar" style="margin-top:10px">
                 <label class="lbl" style="margin:0"><input type="checkbox" v-model="jobForm.enabled" /> enabled</label>
@@ -1246,7 +1290,7 @@
               <div class="head"><h2>New rollout</h2><div class="spacer"></div><button class="btn sm" @click="loadRuns">Refresh runs</button></div>
               <div class="form-row" style="align-items:flex-end">
                 <label class="fld" style="flex:1"><span>Release</span><select v-model="runForm.release_id"><option value="" disabled>choose…</option><option v-for="r in releases.filter(x => x.kind==='agent')" :key="r.id" :value="r.id">{{ r.version }} ({{ r.arch }})</option></select></label>
-                <label class="fld" style="flex:1"><span>Selector</span><input v-model="runForm.selector" class="mono" placeholder="all" /></label>
+                <label class="fld" style="flex:1"><span>Selector <a class="gs-link" @click.prevent="openHelp('selector')" title="selector syntax">?</a></span><input v-model="runForm.selector" class="mono" list="selector-suggestions" placeholder="all" /></label>
                 <label class="fld"><span>Canary</span><input v-model.number="runForm.canary" type="number" min="0" style="width:70px" /></label>
                 <label class="fld"><span>Wave %</span><input v-model.number="runForm.wave" type="number" min="1" max="100" style="width:70px" /></label>
                 <button class="btn primary" :disabled="!isAdmin || !runForm.release_id || !runForm.selector || runBusy" @click="createRun"><span v-if="runBusy" class="spin"></span> Start run</button>
@@ -1304,7 +1348,7 @@
             <div class="form-row" style="align-items:flex-end">
               <label class="fld"><span>Name</span><input v-model="secretForm.name" class="mono" placeholder="db-password" /></label>
               <label class="fld" style="flex:1"><span>Value</span><input v-model="secretForm.value" type="password" placeholder="secret value" /></label>
-              <label class="fld"><span>Selector</span><input v-model="secretForm.selector" placeholder="all" /></label>
+              <label class="fld"><span>Selector <a class="gs-link" @click.prevent="openHelp('selector')" title="selector syntax">?</a></span><input v-model="secretForm.selector" list="selector-suggestions" placeholder="all" /></label>
               <button class="btn primary" :disabled="!isAdmin || !secretForm.name || !secretForm.value || secretBusy" @click="createSecret">Create secret</button>
             </div>
           </div>
@@ -1918,6 +1962,7 @@
         theme: document.documentElement.dataset.theme || "light",
         me: null, caps: {}, loginForm: { username: "", password: "" },
         loginErr: "", loginBusy: false, userMenu: false,
+        helpBox: "", // "" | "selector" | "cron" — the grammar help dialog
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
         // Captured from the real location at mount; data so the smoke
         // harness can drive the cleartextLogin branches.
@@ -2066,6 +2111,20 @@
         return rows.filter(r => !r.present).map(r => r.name).join(", ");
       },
       locationHost() { return (typeof location !== "undefined" && location.host) ? location.host : "server:8443"; },
+      // Selector autocomplete (ux Q3): every valid selector construct the
+      // operator could type, derived from live fleet data already on the
+      // client. Feeds the <datalist> attached to every selector input.
+      selectorSuggestions() {
+        const out = ["all"];
+        for (const g of this.groups || []) out.push("group:" + g.name);
+        const roles = new Set(), tags = new Set();
+        for (const h of this.hosts || []) {
+          for (const r of (h.roles || [])) roles.add("role:" + r);
+          for (const k of Object.keys(h.tags || {})) tags.add("tag:" + k);
+        }
+        return [...out, ...[...roles].sort(), ...[...tags].sort(), ...(this.hosts || []).map((h) => "host:" + h.id)];
+      },
+      helpTitle() { return this.helpBox === "selector" ? "Selector syntax" : this.helpBox === "cron" ? "Cron syntax" : "Help"; },
       // True when the SPA itself was served over cleartext HTTP from a host
       // that is not loopback: the login password (and every later session
       // token) crosses the network unencrypted. Mirror of the doctor TLS
@@ -3526,6 +3585,9 @@
         } catch (e) { this.jobNote[job.id] = { kind: "err", text: e.message }; } finally { this.jobRunBusy = ""; }
       },
       dismissNote(map, id) { delete map[id]; },
+      // Grammar help dialog (ux Q3/Q6): selector / cron syntax, self-contained
+      // so it works offline (the webui is deliberately CDN-free).
+      openHelp(kind) { this.helpBox = kind; },
       // Body-ported tooltip for overflow-hidden truncated cells (ui-guidelines
       // §23): the CSS ::after tooltip is clipped by the very cell it decorates,
       // so those sites carry data-jtip and this single floating element shows

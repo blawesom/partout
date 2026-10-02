@@ -320,6 +320,53 @@ async function main() {
 
   await visit("#/execute");
   check("execute: run button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Run command")));
+  // Selector autocomplete + grammar help (ux Q3/Q6): the datalist carries
+  // every valid construct from LIVE fleet data; the ? opens the help dialog.
+  {
+    const dl = d.querySelector("datalist#selector-suggestions");
+    const opts = dl ? [...dl.querySelectorAll("option")].map((o) => o.value) : [];
+    check("selector: datalist attached to the Execute input", !!d.querySelector("input[list='selector-suggestions']"), "no list= on exSel");
+    check("selector: suggestions from live fleet data",
+      opts.includes("all") && opts.some((v) => v.startsWith("group:")) && opts.some((v) => v.startsWith("host:ag_")) && opts.some((v) => v.startsWith("role:")),
+      "opts=" + opts.slice(0, 6).join(","));
+    const q = [...d.querySelectorAll("a")].find((a) => a.textContent.trim() === "?" && a.getAttribute("title") === "selector syntax");
+    check("selector: ? affordance present", !!q, "no ? beside selector");
+    if (q) q.click();
+    await sleep(200);
+    const help = d.querySelector(".overlay .dialog");
+    check("selector: help dialog opens with the grammar",
+      !!help && /Selector syntax/.test(help.textContent) && /host:ag_x/.test(help.textContent) && /never a silent no-op/.test(help.textContent),
+      "help dialog content wrong");
+    const hx = help && [...help.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "close");
+    if (hx) hx.click();
+    await sleep(150);
+    check("selector: help dialog closes", !d.body.textContent.includes("Selector syntax"), "help did not close");
+    // Cron help from the job form.
+    await visit("#/jobs", 500);
+    const nb = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("New job"));
+    if (nb) nb.click();
+    await sleep(250);
+    const cq = [...d.querySelectorAll("a")].find((a) => a.getAttribute("title") === "cron syntax");
+    check("cron: ? affordance in the job form", !!cq, "no cron ?");
+    if (cq) cq.click();
+    await sleep(200);
+    check("cron: help dialog shows the five fields",
+      /minute \(0/.test(d.body.textContent) && /day of week/.test(d.body.textContent) && /every 5 minutes/.test(d.body.textContent),
+      "cron help content wrong");
+    w.__partout.helpBox = "";
+    if (w.__partout.jobForm) w.__partout.jobForm = null;
+    await sleep(150);
+  }
+  // Docs link in the user menu (ux Q6) — opens the repo docs, new tab.
+  {
+    const ub = d.querySelector(".usercard");
+    if (ub) ub.click();
+    await sleep(150);
+    const docs = [...d.querySelectorAll("a")].find((a) => a.textContent.includes("Docs") && a.getAttribute("target") === "_blank");
+    check("docs: user menu links the docs", !!docs && /github.com\/blawesom\/partout\/tree\/main\/docs/.test(docs.getAttribute("href") || ""), "no docs link");
+    w.__partout.userMenu = false;
+    await sleep(100);
+  }
 
   await visit("#/audit");
   check("audit renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Audit"));
