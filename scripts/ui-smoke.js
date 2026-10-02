@@ -337,12 +337,50 @@ async function main() {
   check("jobs: task column", rowsWithText(d, "task_task_") > 0, "task column empty");
   check("jobs: new job button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("New job")), "no New job button");
   check("jobs: edit/runs/delete actions", [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Edit") && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Runs") && [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Delete"), "job actions missing");
+  // Row-level dispatch feedback: run the seeded job (single embedded host —
+  // no prompt) and assert the outcome lands in a note row under the affected
+  // job, not only in a global toast. Then dismiss it.
+  if (w.__partout) {
+    const j = w.__partout.jobs.find((x) => x.name === "nightly df");
+    if (!j) { check("jobs: seeded job for dispatch", false, "nightly df not in jobs list"); }
+    else {
+      // Slow the API round-trip so the busy window (and the row spinner)
+      // is observable — the embedded server otherwise answers faster than
+      // the harness can assert.
+      const origApi = w.__partout.api.bind(w.__partout);
+      w.__partout.api = async (path, opts) => { await sleep(700); return origApi(path, opts); };
+      const p = w.__partout.runJob(j);
+      await sleep(300);
+      check("jobs: dispatch spinner on the row", [...d.querySelectorAll("button .spin")].some((s) => s.closest("button") && s.closest("button").textContent.includes("Run now")), "no spinner on Run now while busy");
+      await p;
+      w.__partout.api = origApi;
+      await sleep(300);
+      const note = [...d.querySelectorAll("tr")].find((tr) => tr.classList.contains("row-note"));
+      check("jobs: dispatch outcome on the affected row", !!note && /Run started on|parked on approval/.test(note.textContent), "row note missing: " + (note ? note.textContent.slice(0, 80) : "none"));
+      const dismiss = note && [...note.querySelectorAll("button")].find((b) => b.textContent.trim() === "Dismiss");
+      if (dismiss) dismiss.click();
+      await sleep(200);
+      check("jobs: dispatch note dismissable", ![...d.querySelectorAll("tr")].some((tr) => tr.classList.contains("row-note")), "note not dismissed");
+    }
+  }
 
   await visit("#/tasks");
   check("tasks: name", rowsWithText(d, "check disk") > 0, "task name missing");
   check("tasks: description", rowsWithText(d, "df -h") > 0, "task description missing");
   check("tasks: playbooks card", d.body.textContent.includes("Playbooks"));
   check("tasks: run action", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Run")), "no Run button");
+  // Row-level dispatch feedback for tasks: same note-row pattern as jobs.
+  if (w.__partout) {
+    const t = w.__partout.tasks.find((x) => x.name === "check disk");
+    if (!t) { check("tasks: seeded task for dispatch", false, "check disk not in tasks list"); }
+    else {
+      await w.__partout.runTask(t); await sleep(300);
+      const note = [...d.querySelectorAll("tr")].find((tr) => tr.classList.contains("row-note"));
+      check("tasks: dispatch outcome on the affected row", !!note && /Started on|parked on approval/.test(note.textContent), "row note missing: " + (note ? note.textContent.slice(0, 80) : "none"));
+      if (note) { const dd = [...note.querySelectorAll("button")].find((b) => b.textContent.trim() === "Dismiss"); if (dd) dd.click(); }
+      await sleep(200);
+    }
+  }
   check("tasks: recent runs card", d.body.textContent.includes("Recent task runs"), "runs card missing");
   check("tasks: new-task create button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create…")), "no New task button");
 

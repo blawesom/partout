@@ -229,12 +229,17 @@ Four UX fixes aimed at the moments where the UI previously misled an operator:
 - **Actionable empty states.** Create-able lists offer a primary CTA in their
   empty state (Jobs → New job, Tasks → Create task, rules → New rule).
 
-**Follow-ups (not in this release):** (a) **row-level async feedback** —
-surface a dispatch's progress on the affected table row (like the provision
-inline step detail) rather than a separate message box; (b) a **body-ported JS
-tooltip** for the `overflow:hidden` truncated cells (sha256, errors, step
-output) that a CSS `::after` tooltip can't reach, plus the remaining `title=`
-sites. See `docs/ui-guidelines.md` §23–24.
+**Follow-ups:** (a) ~~**row-level async feedback** — surface a dispatch's
+progress on the affected table row (like the provision inline step detail)
+rather than a separate message box~~ ✅ **shipped** for the dispatch surfaces:
+jobs Run now, tasks Run…, playbooks Run render an inline note row under the
+affected row (dispatching… → started/parked-on-approval/failed, dismissable)
+plus a spinner on the row-action button while busy (alert-rule toggles too);
+other write rows (policies/users/secrets deletes) still use the global toast —
+add the note row there if operators ask. (b) a **body-ported JS tooltip** for
+the `overflow:hidden` truncated cells (sha256, errors, step output) that a CSS
+`::after` tooltip can't reach, plus the remaining `title=` sites. See
+`docs/ui-guidelines.md` §23–24.
 
 ### Host removal: revocation loop + pinned cleanup contract
 

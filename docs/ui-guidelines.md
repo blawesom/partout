@@ -409,6 +409,15 @@ tell the operator whether anything executed at all.
   create, the empty state offers a primary CTA that opens the create form
   (Jobs → “+ New job”, Tasks → “Create task”, Alerts rules → “+ New rule”).
   System-generated lists (alerts, audit, sessions) stay informational.
+- **Row-level dispatch feedback.** A write that targets one row (a job/task/
+  playbook dispatch) reports on the affected row, not only in a global toast:
+  the row's action button shows a spinner while the request is in flight, and
+  an inline note row under the affected row (`.row-note`, the provision
+  step-detail pattern) carries the outcome — “Dispatching on <host>…” →
+  “Run started on <host> (run X, state Y)” / “Parked on approval <id>…” /
+  the error text — with a Dismiss control. The note map (`jobNote`,
+  `taskNote`) is keyed by row id, so concurrent dispatches on different rows
+  each get their own note.
 - **Event → UI map:**
 
 | Kind | Consumer |

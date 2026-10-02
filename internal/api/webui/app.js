@@ -822,7 +822,8 @@
             <table class="tbl">
               <thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Schedule</th><th>Selector</th><th>Enabled</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="j in jobs" :key="j.id">
+                <template v-for="j in jobs" :key="j.id">
+                <tr>
                   <td class="mono">{{ j.id }}</td>
                   <td>{{ j.name }}</td>
                   <td class="mono">{{ j.task_id }}<template v-if="j.task_version">@{{ j.task_version }}</template></td>
@@ -830,12 +831,20 @@
                   <td class="mono">{{ j.selector }}</td>
                   <td>{{ j.enabled ? 'yes' : 'no' }}</td>
                   <td style="white-space:nowrap">
-                    <button class="btn sm" :disabled="!isOperator || jobRunBusy===j.id" @click="runJob(j)">Run now</button>
+                    <button class="btn sm" :disabled="!isOperator || jobRunBusy===j.id" @click="runJob(j)"><span v-if="jobRunBusy===j.id" class="spin"></span>Run now</button>
                     <button class="btn sm" :disabled="!isOperator" @click="editJob(j)">Edit</button>
                     <button class="btn sm" :disabled="!isOperator" @click="showJobRuns(j.id)">Runs</button>
                     <button class="btn danger sm" :disabled="!isOperator" @click="deleteJob(j)">Delete</button>
                   </td>
                 </tr>
+                <tr v-if="jobNote[j.id]" class="row-note">
+                  <td colspan="7"><div class="prov-inline">
+                    <span v-if="jobNote[j.id].kind==='err'" class="err-box" style="margin:0">{{ jobNote[j.id].text }}</span>
+                    <span v-else class="muted small">{{ jobNote[j.id].text }}</span>
+                    <button class="btn sm" style="margin-left:8px" @click="dismissNote(jobNote, j.id)">Dismiss</button>
+                  </div></td>
+                </tr>
+                </template>
                 <tr v-if="!jobs.length && !pageLoading"><td colspan="7"><div class="empty"><div class="big">▦</div>No jobs.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="newJobForm()">+ New job</button></div></div></td></tr>
               </tbody>
             </table>
@@ -944,10 +953,19 @@
               <h2>Tasks</h2><p class="cap">Versioned step lists</p>
               <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Description</th><th></th></tr></thead>
                 <tbody>
-                  <tr v-for="t in tasks" :key="t.id">
+                  <template v-for="t in tasks" :key="t.id">
+                  <tr>
                     <td class="mono">{{ t.id }}</td><td>{{ t.name }}</td><td class="muted">{{ t.description || '—' }}</td>
-                    <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runTask(t)">Run…</button></td>
+                    <td><button class="btn sm" :disabled="!isOperator || taskBusy===t.id" @click="runTask(t)"><span v-if="taskBusy===t.id" class="spin"></span>Run…</button></td>
                   </tr>
+                  <tr v-if="taskNote[t.id]" class="row-note">
+                    <td colspan="4"><div class="prov-inline">
+                      <span v-if="taskNote[t.id].kind==='err'" class="err-box" style="margin:0">{{ taskNote[t.id].text }}</span>
+                      <span v-else class="muted small">{{ taskNote[t.id].text }}</span>
+                      <button class="btn sm" style="margin-left:8px" @click="dismissNote(taskNote, t.id)">Dismiss</button>
+                    </div></td>
+                  </tr>
+                  </template>
                   <tr v-if="!tasks.length && !pageLoading"><td colspan="4"><div class="empty"><div class="big">▦</div>No tasks.<div style="margin-top:10px"><button class="btn sm" :disabled="!isOperator" @click="openTaskForm()">Create task</button></div></div></td></tr>
                 </tbody>
               </table>
@@ -956,12 +974,21 @@
               <h2>Playbooks</h2><p class="cap">Task + selector, fan-out run</p>
               <table class="tbl"><thead><tr><th>ID</th><th>Name</th><th>Task</th><th>Selector</th><th></th></tr></thead>
                 <tbody>
-                  <tr v-for="p in playbooks" :key="p.id">
+                  <template v-for="p in playbooks" :key="p.id">
+                  <tr>
                     <td class="mono">{{ p.id }}</td><td>{{ p.name }}</td>
                     <td class="mono">{{ p.task_id }}<template v-if="p.task_version">@{{ p.task_version }}</template></td>
                     <td class="mono">{{ p.selector || '—' }}</td>
-                    <td><button class="btn sm" :disabled="!isOperator || !!taskBusy" @click="runPlaybook(p)">Run</button></td>
+                    <td><button class="btn sm" :disabled="!isOperator || taskBusy===p.id" @click="runPlaybook(p)"><span v-if="taskBusy===p.id" class="spin"></span>Run</button></td>
                   </tr>
+                  <tr v-if="taskNote[p.id]" class="row-note">
+                    <td colspan="5"><div class="prov-inline">
+                      <span v-if="taskNote[p.id].kind==='err'" class="err-box" style="margin:0">{{ taskNote[p.id].text }}</span>
+                      <span v-else class="muted small">{{ taskNote[p.id].text }}</span>
+                      <button class="btn sm" style="margin-left:8px" @click="dismissNote(taskNote, p.id)">Dismiss</button>
+                    </div></td>
+                  </tr>
+                  </template>
                   <tr v-if="!playbooks.length && !pageLoading"><td colspan="5"><div class="empty">No playbooks.</div></td></tr>
                 </tbody>
               </table>
@@ -1698,7 +1725,7 @@
                     <td>{{ r.severity }}</td>
                     <td>{{ r.enabled ? 'yes' : 'no' }}</td>
                     <td style="white-space:nowrap">
-                      <button class="btn sm" :disabled="!isOperator || ruleBusy===r.id" @click="toggleRule(r)">{{ r.enabled ? 'Disable' : 'Enable' }}</button>
+                      <button class="btn sm" :disabled="!isOperator || ruleBusy===r.id" @click="toggleRule(r)"><span v-if="ruleBusy===r.id" class="spin"></span>{{ r.enabled ? 'Disable' : 'Enable' }}</button>
                       <button class="btn sm" :disabled="!isOperator" @click="editRule(r)">Edit</button>
                       <button class="btn danger sm" :disabled="!isOperator" @click="deleteRule(r.id)">Delete</button>
                     </td>
@@ -1824,11 +1851,11 @@
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null, fileRoot: "",
-        updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null,
+        updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null, jobNote: {}, // per-job dispatch outcome, rendered under the affected row
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null, pkgChecked: {},
-        tasks: [], playbooks: [], updates: [],
+        tasks: [], playbooks: [], updates: [], taskNote: {}, // per-task/playbook dispatch outcome, rendered under the affected row
         secrets: [], policies: [], users: [], presetStatus: null,
         secretForm: { name: "", value: "", selector: "all" }, secretBusy: false,
         userForm: { username: "", password: "", role: "operator" }, userBusy: false,
@@ -3117,25 +3144,29 @@
           : prompt("Run task " + t.name + " on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
         if (!agent) return;
         this.taskBusy = t.id; this.taskMsg = "";
+        this.taskNote[t.id] = { kind: "info", text: "Dispatching on " + agent + "…" };
         try {
           const d = await this.api("/tasks/" + encodeURIComponent(t.id) + "/run", { method: "POST", body: { agent_id: agent } });
+          // Row-level outcome (the roadmap's dispatch-progress-on-the-row);
+          // the page-level taskMsg is kept for the runs table context.
           if (d.state === "approval_required") {
-            this.taskMsg = "Task run parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page).";
+            this.taskNote[t.id] = { kind: "info", text: "Parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page)." };
           } else {
-            this.taskMsg = "Task " + t.name + " started on " + agent + " (run " + (d.run_id || "") + ", state " + (d.state || "") + ").";
+            this.taskNote[t.id] = { kind: "info", text: "Started on " + agent + " (run " + (d.run_id || "?") + ", state " + (d.state || "?") + ")." };
           }
           this.loadTaskRuns();
-        } catch (e) { this.taskMsg = "Task run failed: " + e.message; } finally { this.taskBusy = ""; }
+        } catch (e) { this.taskNote[t.id] = { kind: "err", text: e.message }; } finally { this.taskBusy = ""; }
       },
       async runPlaybook(p) {
         this.taskBusy = p.id; this.taskMsg = "";
+        this.taskNote[p.id] = { kind: "info", text: "Dispatching across " + (p.selector || "its selector") + "…" };
         try {
           const d = await this.api("/playbooks/" + encodeURIComponent(p.id) + "/run", { method: "POST", body: {} });
           const runs = (d.runs || []).map(r => r.agent_id + "=" + r.state).join(", ");
           const errs = (d.errors || []).join("; ");
-          this.taskMsg = "Playbook " + p.name + ": " + (runs || "no matching hosts") + (errs ? " · errors: " + errs : "");
+          this.taskNote[p.id] = { kind: errs ? "err" : "info", text: "Playbook " + p.name + ": " + (runs || "no matching hosts") + (errs ? " · errors: " + errs : "") };
           this.loadTaskRuns();
-        } catch (e) { this.taskMsg = "Playbook run failed: " + e.message; } finally { this.taskBusy = ""; }
+        } catch (e) { this.taskNote[p.id] = { kind: "err", text: e.message }; } finally { this.taskBusy = ""; }
       },
       async loadTaskRuns() { try { const d = await this.api("/tasks/runs"); this.taskRuns = d.items || d || []; } catch (e) { this.taskRuns = []; } },
       async showTaskRun(id) {
@@ -3315,11 +3346,16 @@
         const agent = this.hosts.length === 1 ? this.hosts[0].id : prompt("Run on which host?\n" + this.hosts.map(h => h.id).join("\n"), this.hosts[0].id);
         if (!agent) return;
         this.jobRunBusy = job.id; this.jobErr = "";
+        this.jobNote[job.id] = { kind: "info", text: "Dispatching on " + agent + "…" };
         try {
           const d = await this.api("/jobs/" + encodeURIComponent(job.id) + "/run", { method: "POST", body: { agent_id: agent } });
-          if (d && d.state === "approval_required") this.jobErr = "Run parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page).";
-        } catch (e) { this.jobErr = e.message; } finally { this.jobRunBusy = ""; }
+          // Row-level outcome: the note under the affected row is the primary
+          // feedback (the roadmap's "dispatch progress on the row").
+          if (d && d.state === "approval_required") this.jobNote[job.id] = { kind: "info", text: "Run parked on approval " + (d.approval_id || "") + " — an admin must approve it (Approvals page)." };
+          else this.jobNote[job.id] = { kind: "info", text: "Run started on " + agent + " (run " + ((d && d.run_id) || "?") + ", state " + ((d && d.state) || "?") + ")." };
+        } catch (e) { this.jobNote[job.id] = { kind: "err", text: e.message }; } finally { this.jobRunBusy = ""; }
       },
+      dismissNote(map, id) { delete map[id]; },
       openFile(f) { if (f.is_dir) { this.fileDir = joinPath(this.fileDir, f.name); this.listFiles(); } },
       async downloadFile(f) {
         const path = joinPath(this.fileDir, f.name);
