@@ -131,6 +131,76 @@ func TestDoctorReleaseKey(t *testing.T) {
 	}
 }
 
+func TestDoctorTLSPlainBind(t *testing.T) {
+	// Loopback + TLS off: still informational (local dev posture).
+	cfg := newTestConfig() // Addr 127.0.0.1
+	r := &doctorResult{}
+	checkTLS(cfg, r)
+	if r.fails != 0 || r.warns != 0 {
+		t.Fatalf("loopback + tls off should stay info, got %+v", r.checks)
+	}
+	if len(r.checks) != 1 || r.checks[0].level != dinfo {
+		t.Fatalf("want one info check, got %+v", r.checks)
+	}
+
+	// All interfaces (the default, empty addr) + TLS off: warn — the admin
+	// password and session tokens would cross the network in cleartext.
+	for _, exposed := range []string{"", "0.0.0.0", "::", "203.0.113.7", "example.com"} {
+		cfg2 := newTestConfig()
+		cfg2.Addr = exposed
+		r2 := &doctorResult{}
+		checkTLS(cfg2, r2)
+		if r2.warns != 1 || r2.fails != 0 {
+			t.Fatalf("addr %q + tls off should warn exactly once, got %+v", exposed, r2.checks)
+		}
+		detail := r2.checks[0].detail
+		// The warning must name both remedies so it is actionable.
+		if !strings.Contains(detail, "PARTOUT_TLS") || !strings.Contains(detail, "PARTOUT_ADDR") {
+			t.Fatalf("addr %q: warning should name PARTOUT_TLS and PARTOUT_ADDR remedies, got %q", exposed, detail)
+		}
+	}
+
+	// Loopback spellings that must keep the quiet info level.
+	for _, lo := range []string{"127.0.0.1", "::1", "localhost"} {
+		cfg3 := newTestConfig()
+		cfg3.Addr = lo
+		r3 := &doctorResult{}
+		checkTLS(cfg3, r3)
+		if r3.warns != 0 {
+			t.Fatalf("addr %q + tls off should not warn (loopback), got %+v", lo, r3.checks)
+		}
+	}
+
+	// TLS on: unchanged path (SAN-name warnings), independent of the bind.
+	cfgOn := newTestConfig()
+	cfgOn.TLS = true
+	cfgOn.Addr = ""
+	rOn := &doctorResult{}
+	checkTLS(cfgOn, rOn)
+	if rOn.fails != 0 {
+		t.Fatalf("tls on should never fail here, got %+v", rOn.checks)
+	}
+}
+
+func TestLoopbackOnly(t *testing.T) {
+	cases := map[string]bool{
+		"":            false, // default = all interfaces
+		"0.0.0.0":     false,
+		"::":          false,
+		"203.0.113.7": false,
+		"example.com": false,
+		"127.0.0.1":   true,
+		"::1":         true,
+		"localhost":   true, // RFC 6761 reserves it as loopback
+		"Localhost":   true,
+	}
+	for addr, want := range cases {
+		if got := loopbackOnly(addr); got != want {
+			t.Errorf("loopbackOnly(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
 func TestDoctorResultCounting(t *testing.T) {
 	r := &doctorResult{}
 	r.add(dok, "a", "")

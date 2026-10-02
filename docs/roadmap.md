@@ -169,7 +169,9 @@ First-run diagnostics that used to surface as a confusing startup failure
 (most often: a listener port already taken) are now checkable up front.
 `partout doctor` inspects the current host against the effective server
 config and reports pass/fail for: port free, DB dir writable, TLS mode +
-SANs, admin auth (warns that a first-run password will be generated),
+SANs (**plain HTTP on a non-loopback bind now warns** — the admin password and
+session tokens would cross the network in cleartext; it stays informational
+on loopback), admin auth (warns that a first-run password will be generated),
 outbound reachability of the OSV + EOL data feeds (warn only — the security
 scan / EOL features degrade offline), the SSH identity key host provisioning
 would use, and the fleet-update release key. No changes, no server started.

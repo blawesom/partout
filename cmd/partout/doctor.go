@@ -180,7 +180,16 @@ func checkDBWritable(cfg *config.Config, r *doctorResult) {
 
 func checkTLS(cfg *config.Config, r *doctorResult) {
 	if !cfg.TLS {
-		r.add(dinfo, "tls", "off (plain HTTP; set PARTOUT_TLS=on for a local root CA)")
+		// Plain HTTP is fine on loopback (local dev) but a silent credential
+		// exposure on a reachable interface: the login password and every
+		// session token would cross the network in cleartext. The default bind
+		// is all interfaces, so this is the state a first-run operator is most
+		// likely to be in — warn loudly instead of noting it in passing.
+		if loopbackOnly(cfg.Addr) {
+			r.add(dinfo, "tls", "off (plain HTTP on loopback; set PARTOUT_TLS=on for a local root CA)")
+		} else {
+			r.add(dwarn, "tls", "off — plain HTTP on "+orAll(cfg.Addr)+": the admin password and session tokens cross the network in cleartext (set PARTOUT_TLS=on, or PARTOUT_ADDR=127.0.0.1 behind a TLS proxy)")
+		}
 		return
 	}
 	if strings.TrimSpace(cfg.TLSNames) == "" {
@@ -291,6 +300,23 @@ func orAll(s string) string {
 		return "* (all interfaces)"
 	}
 	return s
+}
+
+// loopbackOnly reports whether the bind address confines the listener to the
+// local host. An empty addr (the default) binds all interfaces and is NOT
+// loopback; "localhost" is special-cased as loopback (RFC 6761 reserves it);
+// any other hostname is conservatively treated as reachable (doctor reports,
+// it does not resolve).
+func loopbackOnly(addr string) bool {
+	a := strings.TrimSpace(strings.ToLower(addr))
+	if a == "" {
+		return false
+	}
+	if a == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(a)
+	return ip != nil && ip.IsLoopback()
 }
 
 func formatPort(p int) string { return fmt.Sprintf("%d", p) }

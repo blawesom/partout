@@ -696,7 +696,9 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 0. **Pre-flight the server host:** `partout doctor` (mode/addr/port/db/tls-taken
    from the same env/flag config the server uses). It reports pass/fail for the
    things that otherwise surface as a confusing start failure — port free, DB
-   dir writable, TLS mode + SANs, admin auth, outbound OSV/EOL reachability
+   dir writable, TLS mode + SANs (**plain HTTP on a non-loopback bind warns**:
+   credentials would cross the network in cleartext; loopback stays info),
+   admin auth, outbound OSV/EOL reachability
    (warn only), the provisioning SSH key, and the fleet-update release key —
    and exits non-zero on a hard failure. Run it before first start and after a
    config change: `partout doctor && ./partout`.
