@@ -1,7 +1,10 @@
 # Partout — Web UI Definition & Guidelines
 
-**Status:** v0.6 — UI implemented (S0 shell + data pages for M1–M6, incl. live Alerts list). This document is the
-definition; `internal/api/webui/` is the build. (The slice table below is the original plan; ✅ marks what has since shipped.)
+**Status:** v0.9.5 — UI implemented (S0 shell + data pages for M1–M8.1: Fleet, Execute,
+Observe (Services/Certificates/Configs/Alerts), Updates (releases + rollout runs),
+Files (view/edit/upload/perm), Sessions, Jobs, Tasks, Secrets, Policies, Approvals,
+Provision, Users, MCP). This document is the definition; `internal/api/webui/` is
+the build. (The slice table below is the original plan; ✅ marks what has since shipped.)
 **Companion docs:** `docs/ui-design.png` (north-star mockup), `PRD.md` (§3 principles, §11 Frontend,
 §15.1 decisions), `docs/architecture.md` (§10.1 API, §10.2 SSE, §11 Frontend),
 `docs/deployment.md` (§4 config)
@@ -470,13 +473,20 @@ Slices follow **implementation progress**, not the mockup's ambition. Fleet-scal
 **tens of hosts** (≤ ~200). Client-side roll-up and client-side filtering are accepted at this
 scale; revisit if fleet size grows.
 
-**Implementation status (v0.7):** S0 (shell, login, capabilities, SSE) is built. Data pages are
-live for the M1–M7 backend: Fleet, Execute (with B2 selector preview + live per-host output),
+**Implementation status (v0.9.5):** S0 (shell, login, capabilities, SSE) is built. Data pages
+are
+live for the M1–M8.1 backend: Fleet (with pending host-key confirmations as toast + nav
+badge), Execute (with B2 selector preview + live per-host output),
 Audit, Sessions (with **live xterm.js PTY** — open/attach, input over REST, output over SSE,
-close→replay), Files, Jobs (**create/edit/delete + run history**), Tasks (with **task/playbook
-run actions** + run inspection), Updates (**package apply / dry-run + action history**), Secrets,
+close→replay), Files (**view/edit-CAS, upload, perm controls** — jailed to the file root),
+Jobs (**create/edit/delete + run history**), Tasks (with **task/playbook
+run actions** + run inspection), Updates (**M8.1 fleet releases + rollout runs**: seeded
+store, run creation with canary/wave, per-host states, retry/skip/abort; package
+apply / dry-run + action history on the host page), Secrets,
 Policies, Approvals, MCP, Provision (**start a run, confirm/deny the host key, cancel, live
-step detail over SSE**), Users, and the four Observe pages (Services, Certificates, Configs,
+step detail over SSE**), Users, and the four Observe pages (Services (with the honest
+action bar: role + target per service), Certificates, Configs (valid / **not readable** /
+invalid tri-state badge with validator output),
 Alerts) — the **Alerts page now includes the full rule-management UI** (create/edit/enable/
 disable/delete all rule kinds), **cert→config→service cross-links** are navigable, and **config
 drift (R22)** is surfaced as the `config_drift` alert rule. All slices S0–S7 are built; the only

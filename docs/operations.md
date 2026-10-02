@@ -1,8 +1,8 @@
 # Partout — Operations
 
-**Status:** Draft v0.6 — day-2 runbook for the control plane. Reflects the current
-implementation (M0–M6 complete, Web UI shipped, M7-remainder in progress) where stated;
-steps for features that ship later are marked *(proposed)*.
+**Status:** v0.9.5 — day-2 runbook for the control plane. Reflects the current
+implementation (M0–M8.1 complete, Web UI shipped) where stated; steps for features
+that ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
 
 Day-2 guide for the Partout control plane: first-time setup, daily operations, backups, upgrades,

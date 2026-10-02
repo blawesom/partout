@@ -24,6 +24,12 @@ def curl(method, path, body=None, token=None):
         return json.loads(r.read() or b"null")
 
 os.makedirs(OUT, exist_ok=True)
+# Configs page: a root-only haproxy.cfg (chmod 000) so the shot shows the
+# "not readable" badge (Decision 3 observe fix) rather than "valid".
+shot_cfg = os.path.join(WORK, "haproxy.cfg")
+with open(shot_cfg, "w") as f:
+    f.write("frontend web\n    bind *:443\n")
+os.chmod(shot_cfg, 0)
 srv = None
 try:
     subprocess.run([GO, "build", "-o", BIN, "./cmd/partout"], cwd=REPO, check=True)
@@ -33,6 +39,7 @@ try:
         "PARTOUT_ADMIN_PASSWORD": "shot-pass", "PARTOUT_TOKEN_ADMIN": "shot-token",
         "PARTOUT_PORT": str(PORT),
         "PARTOUT_DB_PATH": os.path.join(run, "p.db"), "PARTOUT_DATA_DIR": os.path.join(run, "agent"),
+        "PARTOUT_HAPROXY_CONF": shot_cfg,
         "PARTOUT_MODE": "embedded"}, stdout=logf, stderr=subprocess.STDOUT)
     for _ in range(60):
         try:
@@ -71,6 +78,7 @@ try:
             ("#/fleet",    "fleet.png"),
             ("#/execute",  "execute.png"),
             ("#/obs/services", "services.png"),
+            ("#/obs/configs",  "configs.png"),
             ("#/obs/alerts",   "alerts.png"),
         ]
         for route, fname in shots:

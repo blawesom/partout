@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.6 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine (implementation-level design)
+**Status:** Draft v0.9.5 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine + M7 write actions + M8.1 fleet updates + Decision 3 elevation policy (implementation-level design; §6.1 elevation/fs/config and §12.2 reflect the shipped implementation)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and
@@ -174,7 +174,7 @@ message Envelope {
 
 | Kind | Carries |
 |---|---|
-| `CommandEnvelope` | full exec spec (cmd/args/cwd/env/user/timeout/elevation profile/stdin) + `Decision` (below) + `secret_refs` |
+| `CommandEnvelope` | full exec spec (cmd/args/cwd/env/user/timeout/stdin) + `Decision` (below) + `secret_refs` — elevation is host-side (agent elevation policy, §6.1), not part of the envelope |
 | `SessionOpen` / `SessionInput` / `SessionResize` / `SessionClose` | PTY control |
 | `FileOp` | upload chunk / download request / edit CAS / stat / perm change |
 | `SchedulePush` | resolved per-host schedules for a job (cron+tz, overlap/failure policy, task ref) |
@@ -648,6 +648,9 @@ group:webservers               # a saved group (named selector)
   labelled by the operator). Refresh: 5 min.
   (b) **config**: `haproxy -c` / `nginx -t` for validity; line-based topology parsing
   (backends, frontends, vhosts, TLS bindings). Config sha256 for drift detection.
+  Readability is probed first: a root-only config (e.g. `haproxy.cfg` at 0640) is
+  reported `config_readable: false` — *"not readable"*, never mislabeled *invalid* —
+  and validation runs elevated when the elevation policy authorizes the validator.
   Refresh: 15 min or on file mtime change. (c) **cert**: openssl x509 for subject, issuer,
   expiry, SANs, chain status, key type. Discovery from config TLS paths + default cert
   dirs, bounded per collection. Refresh: 1 hour. All three feed into the FactsBatch stream
@@ -659,17 +662,31 @@ group:webservers               # a saved group (named selector)
   at `/host` (deployment §3.4). Output chunked ≤ 64 KiB
   **(proposed)**, streamed, never buffered whole. Cancellation ladder: SIGTERM → 5 s grace →
   SIGKILL **(proposed)**; timeout default 30 s, configurable, hard cap.
-- **elevation** (PRD Decision 3) — the agent executes `sudo -n -u <target> -- <cmd>` only when
-  the command matches a named **elevation profile** (pattern-scoped, declared in the command
-  spec and constrained by policy). Precedence: per-command > host-level `--elevate`; `sudoers`
-  wins over `sudo` at any level. Host-level `--elevate=none` (default **(proposed**) / `sudoers`
-  / `sudo`) sets the floor; per-command can only tighten.
+- **elevation** (PRD Decision 3, **implemented** — host-level slice + policy engine):
+  `PARTOUT_ELEVATE=none` (default) | `sudo`. In `sudo` mode the agent prefixes action
+  commands (dispatched exec, PTY sessions, package apply, task steps, reboot) with
+  `sudo -n -- <cmd>` — non-interactive, no password ever prompted or cached. The **elevation
+  policy** (`PARTOUT_ELEVATION_POLICY`: one `.json` or a `*.json` drop-in dir) is the
+  agent-side, pattern-scoped scope — rules are exact args (`haproxy -c -f …`), verb×unit
+  grants (`systemctl restart haproxy*`), or file-glob reads (`cat /etc/nginx/*`), with
+  optional per-rule env. A matching command runs elevated; a non-matching one runs
+  **unprivileged** (logged) rather than being pushed through sudo on faith. The sudoers
+  drop-in is rendered **from the same policy** (`partout ctl elevation
+  install-sudoers`, visudo-checked; `elevation check` detects drift via a `policy-sha256`
+  header) and remains the kernel-enforced wall. With no policy the legacy behavior holds:
+  every action command goes through `sudo -n` and the hand-installed drop-in decides.
+  Config reads (`ReadFile`) retry via `sudo -n cat` on EACCES — gated by the policy when
+  one is loaded. `PARTOUT_ROOT` (elevated target home / per-command profiles declared in
+  the server-side command spec) remains the later full-Decision-3 surface.
 - **fs** (M2, implemented) — atomic writes (temp + rename), stat, CAS edit (compare-and-swap
   on sha256), chunked upload (256 KiB), chunked download (resumable offset), size caps
   (256 MiB transfer / 1 MiB edit / 2048 list entries), no symlink traversal across the
   transfer boundary (PRD §5.3, D4: any symlink component in the path is rejected; absolute
   paths only; intermediate components must be real directories). `SafePath` is the single
-  choke point every op calls before touching the filesystem.
+  choke point every op calls before touching the filesystem. The whole surface is jailed
+  to the **file root** (`PARTOUT_FILE_ROOT`, default `/home/partout`; docs/spec-file-root.md):
+  every path is root-relative and confined; an unusable root disables the surface
+  (fail closed).
 - **session** (M2, implemented) — PTY session manager over `creack/pty`. `Open` spawns the
   command in a PTY at the requested cols/rows, sanitizes the environment, and wires a
   single read-loop that pumps 64 KiB chunks to the server (up `SESSION_DATA`) and, when the
@@ -1346,15 +1363,16 @@ agent:    writes identity.json (0600); [TLS] persists ca.crt/agent.crt/key.pem (
 ### 12.2 Privileged command (end-to-end)
 
 ```
-UI:     command with elevation profile "pkgadmin" (pattern-scoped)
-server: RBAC ok → selector ok → policy: match "prod-db-elevation"?
+UI:     dispatch `apt-get -y install nginx` (selector: role:web)
+server: RBAC ok → selector ok → policy: match "prod-no-unapproved-pkgs"?
         → require_approval → approval_request created → operator approves (exact payload)
         → audit rows (execution + runs, queued)
         → CommandEnvelope + signed Decision{bundle_v17, allow, rules:[…]}
 agent:  verify Decision signature (server pubkey) → bundle_version == cached (17) ✓
         re-evaluate rules locally over (host tags, action, elevation, command) ✓
-        command matches elevation profile "pkgadmin" pattern ✓ (host --elevate=sudoers)
-        exec: sudo -n -u root -- apt-get install …  (full command recorded, no redaction)
+        elevation policy: rule `apt-get|dnf` args `-y install *` matches ✓
+        → runElevated: sudo -n -- apt-get -y install nginx   (full command logged)
+        (a non-matching command would run unprivileged + logged, never silently elevated)
         stream output chunks → CommandResult{exit 0}
 server: persist, SSE broadcast, audit rows finalized (approver + executor principals)
 ```

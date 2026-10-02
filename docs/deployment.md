@@ -1,13 +1,16 @@
 # Partout — Deployment
 
-**Status:** v0.8.0 — reflects the current implementation (M0–M8.1 complete: Web UI,
-M4 approvals + MCP + OAuth2, M6.1 alert rule kinds, v0.7.x in-stream mTLS rotation /
-offline down-queue dispatch / provisioning fresh+join modes / `partout --version`,
-and **M8.1 signed fleet updates**: release store + Ed25519 signatures, agent
-self-swap with auto-rollback, canary→wave rollout orchestration, supervised server
-update via `partout selftest` + `scripts/update-server.sh`, and the one-command
-`partout update`). Sections marked *proposed* describe planned work that is not yet
-wired into the binary.
+**Status:** v0.9.5 (v0.9.6 in development) — reflects the current implementation
+(M0–M8.1 complete: Web UI, M4 approvals + MCP + OAuth2, M6.1 alert rule kinds,
+v0.7.x in-stream mTLS rotation / offline down-queue dispatch / provisioning
+fresh+join modes / `partout --version`, **M8.1 fleet updates**: release store +
+Ed25519 signatures (opt-in in beta — the default is the GitHub-release flow with
+SHA-256SUMS + version stamp), agent self-swap with auto-rollback, canary→wave
+rollout orchestration, supervised server update via `partout selftest` +
+`scripts/update-server.sh`, the one-command `partout update`, **v0.9.x**: one-command
+uninstall, host-level elevation + the full Decision 3 elevation policy, and the
+jailed file surface). Sections marked *proposed* describe planned work that is not
+yet wired into the binary.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
 

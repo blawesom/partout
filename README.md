@@ -1,8 +1,9 @@
 # Partout
 
-> **Status: beta (v0.9.2)** — the full feature set (observe, execute, patch, update
-> rollouts, MCP) is available and self-hosted; expect the occasional rough edge and
-> occasional breaking change before 1.0. Back up your `partout.db` regularly.
+> **Status: beta (v0.9.5; v0.9.6 in development)** — the full feature set (observe,
+> execute, patch, update rollouts, MCP) is available and self-hosted; expect the
+> occasional rough edge and occasional breaking change before 1.0. Back up your
+> `partout.db` regularly.
 
 **Partout** is a remote host-management control plane: one Go binary to discover, observe,
 execute against, configure, patch, and orchestrate work across Linux hosts — safely,
@@ -79,6 +80,7 @@ approvals, provisioning, users, and the Observe pages (Services, Certificates, C
 |---|---|
 | ![Fleet](docs/screenshots/fleet.png) | ![Execute](docs/screenshots/execute.png) |
 | ![Services](docs/screenshots/services.png) | ![Alerts](docs/screenshots/alerts.png) |
+| ![Configs](docs/screenshots/configs.png) | ![Updates](docs/screenshots/updates-runs.png) |
 
 ## Quick start
 
