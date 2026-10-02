@@ -829,9 +829,25 @@ async function main() {
   // --- Login page: first-run password hint (render the logged-out view) ---
   if (w.__partout) {
     const savedToken = w.__partout.token;
+    const savedProto = w.__partout.locProtocol, savedHost = w.__partout.locHostname;
     w.__partout.token = ""; // loggedIn is computed from token -> login page renders
     await sleep(300);
     check("login: first-run password hint", d.body.textContent.includes("First run?") && d.body.textContent.includes("admin_password.txt"), "login hint missing");
+    // Cleartext warning: the smoke server is loopback http, so no banner must
+    // show by default; a non-loopback http origin must show it; https never.
+    check("login: no cleartext warning on loopback", !d.querySelector(".login-card .warn-box"), "warn-box rendered on loopback http");
+    w.__partout.locHostname = "192.168.1.20"; await sleep(150);
+    check("login: cleartext warning on non-loopback http", !!d.querySelector(".login-card .warn-box") && d.body.textContent.includes("not encrypted"), "no warn-box on exposed http");
+    w.__partout.locProtocol = "https:"; w.__partout.locHostname = "192.168.1.20"; await sleep(150);
+    check("login: no cleartext warning on https", !d.querySelector(".login-card .warn-box"), "warn-box rendered on https");
+    w.__partout.locProtocol = savedProto; w.__partout.locHostname = savedHost;
+    // The loopback predicate itself (shared with the computed) — all spellings.
+    const lo = w.__partout.isLoopbackHost;
+    check("login: isLoopbackHost matrix",
+      lo("") === true && lo("localhost") === true && lo("LOCALHOST") === true && lo("app.localhost") === true &&
+      lo("127.0.0.1") === true && lo("::1") === true && lo("[::1]") === true &&
+      lo("192.168.1.20") === false && lo("example.com") === false && lo("203.0.113.7") === false,
+      "isLoopbackHost matrix failed");
     w.__partout.token = savedToken; // restore -> shell renders again
     await sleep(400);
     check("login: restored to shell", !!d.querySelector(".shell"), "shell not restored after re-login");

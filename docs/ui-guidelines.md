@@ -718,8 +718,19 @@ asserts the `ssh-status` endpoint shape.
 
 ## 22. First-run UI affordances
 
-Two small surfaces make a brand-new server self-explanatory:
+Three small surfaces make a brand-new server self-explanatory:
 
+- **Login page — cleartext warning.** When the page itself was served over
+  plain `http:` from a non-loopback host, an amber warn-box sits above the
+  sign-in form: the password and every session token would cross the network
+  unencrypted; it names the remedy (`PARTOUT_TLS=on` — a local root CA is
+  bootstrapped on first run — or a TLS proxy) and asks for a reload after.
+  Loopback origins (`localhost`, `127.0.0.1`, `::1`, `*.localhost`, or a bare
+  host) and any `https:` origin show nothing — this is the browser-side mirror
+  of `partout doctor`'s plain-HTTP bind warning, for the operator who never
+  ran doctor. `cleartextLogin` is a computed over `locProtocol`/`locHostname`
+  captured from the real `location` at mount (data fields so the smoke
+  harness can drive all three branches).
 - **Login page — first-run password hint.** Below the sign-in form: “First
   run? Sign in as `admin`. If you did not set `PARTOUT_ADMIN_PASSWORD`, the
   generated password was written to `admin_password.txt` next to the database
@@ -737,7 +748,11 @@ Two small surfaces make a brand-new server self-explanatory:
 Guards: `scripts/ui-smoke.js` (checklist: clears `hosts` on the fleet page →
 asserts the card + the primary onboarding CTA → `dismissGettingStarted()` →
 asserts it is gone; login hint: clears `token` to render the logged-out view → asserts
-the hint → restores `token` → asserts the shell returns).
+the hint → restores `token` → asserts the shell returns; cleartext: asserts no
+warn-box on the loopback smoke origin → fakes a non-loopback http origin → asserts
+the warn-box → fakes https → asserts it is gone, plus the `isLoopbackHost` matrix)
+and `TestUIShape_CleartextLoginBanner` (pins the binding, the computed, and the
+`PARTOUT_TLS=on` remedy against silent removal).
 
 ## 23. Tooltip mechanism (`data-tip`)
 

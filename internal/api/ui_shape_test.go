@@ -521,6 +521,42 @@ func TestUIShape_AddHostSurface(t *testing.T) {
 	}
 }
 
+// TestUIShape_CleartextLoginBanner guards the login-page cleartext warning:
+// when the SPA was served over plain http from a non-loopback host, the login
+// card must show a warn-box telling the operator the password would cross
+// the network unencrypted (the browser-side mirror of doctor's TLS warning).
+// This pins the template binding + the computed + the loopback predicate so a
+// refactor cannot silently drop the warning; the rendered behavior is
+// exercised by scripts/ui-smoke.js (loopback, exposed-http, https branches).
+func TestUIShape_CleartextLoginBanner(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, `v-if="cleartextLogin" class="warn-box"`) {
+		t.Error("app.js: login card lost the cleartext warn-box binding")
+	}
+	if !strings.Contains(s, "not encrypted") {
+		t.Error("app.js: cleartext warning lost its message text")
+	}
+	if !strings.Contains(s, "cleartextLogin() {") {
+		t.Error("app.js: cleartextLogin computed missing")
+	}
+	// The computed must consult the captured protocol/host, not a stale copy.
+	if !strings.Contains(s, "this.locProtocol !== \"http:\"") {
+		t.Error("app.js: cleartextLogin no longer checks the http protocol")
+	}
+	if !strings.Contains(s, "isLoopbackHost(") {
+		t.Error("app.js: isLoopbackHost predicate missing (used by cleartextLogin)")
+	}
+	// The remedies must be actionable: name the env var.
+	if !strings.Contains(s, "PARTOUT_TLS=on") {
+		t.Error("app.js: cleartext warning does not name PARTOUT_TLS=on")
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

@@ -390,6 +390,12 @@
         <div class="logo">P</div>
         <div><div class="word">Partout</div><div class="sub">Fleet Management</div></div>
       </div>
+      <div v-if="cleartextLogin" class="warn-box" style="margin-bottom:14px">
+        ⚠ This connection is not encrypted. Your password and session tokens
+        will cross the network in cleartext. Enable TLS on the server
+        (<span class="mono">PARTOUT_TLS=on</span> — a local root CA is bootstrapped on first run)
+        or put it behind a TLS proxy, then reload this page.
+      </div>
       <form @submit.prevent="doLogin">
         <label class="fld"><span>Username</span><input v-model="loginForm.username" autocomplete="username" autofocus /></label>
         <label class="fld"><span>Password</span><input v-model="loginForm.password" type="password" autocomplete="current-password" /></label>
@@ -1798,6 +1804,9 @@
         me: null, caps: {}, loginForm: { username: "", password: "" },
         loginErr: "", loginBusy: false, userMenu: false,
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
+        // Captured from the real location at mount; data so the smoke
+        // harness can drive the cleartextLogin branches.
+        locProtocol: "", locHostname: "",
         sseStatus: "disconnected", sseWasConnected: false, pageLoading: false,
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
@@ -1930,6 +1939,16 @@
         return rows.filter(r => !r.present).map(r => r.name).join(", ");
       },
       locationHost() { return (typeof location !== "undefined" && location.host) ? location.host : "server:8443"; },
+      // True when the SPA itself was served over cleartext HTTP from a host
+      // that is not loopback: the login password (and every later session
+      // token) crosses the network unencrypted. Mirror of the doctor TLS
+      // warning — the browser is the other place an operator can learn this.
+      // locProtocol/locHostname are captured from the real location at mount
+      // (and are data so the smoke harness can drive both branches).
+      cleartextLogin() {
+        if (this.locProtocol !== "http:") return false;
+        return !this.isLoopbackHost(this.locHostname);
+      },
       ahCmd() {
         if (!this.ahToken) return "";
         return "PARTOUT_SERVER=" + this.locationHost + " PARTOUT_TOKEN=" + this.ahToken + " partout --mode=agent";
@@ -3215,6 +3234,14 @@
         if (!r || r === "success") return "—";
         return r + (u.last_exit_code ? " (" + u.last_exit_code + ")" : "");
       },
+      // Loopback hostnames (the local-dev posture): localhost + its subdomains
+      // (RFC 6761 reserves *.localhost), the loopback IPs, and an empty host
+      // (file:// or a bare host). Anything else on http: is a cleartext path.
+      isLoopbackHost(h) {
+        const s = String(h || "").toLowerCase();
+        if (s === "" || s === "localhost" || s === "127.0.0.1" || s === "::1" || s === "[::1]") return true;
+        return s.endsWith(".localhost");
+      },
       // config_error text when the validator failed ("" when valid/unknown).
       cfgErr(c) { const x = c.haproxy || c.nginx; return (x && !x.config_valid && x.config_error) ? x.config_error : ""; },
       // Config badge state. A root-only config (config_readable === false) is
@@ -3424,6 +3451,11 @@
     },
     mounted() {
       if (typeof window !== "undefined") window.__partout = this; // test hook: component instance
+      // Capture how this page was actually served: cleartextLogin warns on
+      // the login card when the operator is about to send a password over an
+      // unencrypted network path (same condition doctor warns on server-side).
+      this.locProtocol = (typeof location !== "undefined" && location.protocol) || "";
+      this.locHostname = (typeof location !== "undefined" && location.hostname) || "";
       this.loadNavCollapsed();
       window.addEventListener("keydown", this.onGlobalKey);
       if (this.token) {
