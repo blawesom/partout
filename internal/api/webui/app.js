@@ -1867,7 +1867,7 @@
         addHostOpen: false, addHostTab: "manual",
         ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
         provRuns: [],
-        provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], timer: null },
+        provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
@@ -2349,7 +2349,12 @@
           // Reconcile only on RE-connect: the first open follows the initial
           // page load (mounted/afterLogin already fetched); reloading here
           // would double every list request on every page load.
-          if (opened) this.loadPageData();
+          if (opened) {
+            this.loadPageData();
+            // Events fired while the stream was down are gone; if the wizard
+            // is watching a still-non-terminal run, catch it up once.
+            if (this.provWiz.open && this.provWiz.runId && this.provWiz.run && !this.provTerminal(this.provWiz.run.state)) this.provWizRefresh();
+          }
           opened = true;
         };
         es.onerror = () => { this.sseStatus = "reconnecting"; };
@@ -2358,6 +2363,10 @@
       },
       stopSSE() { if (this._es) { this._es.close(); this._es = null; } },
       onSSEEvent(kind, p) {
+        // The onboarding wizard is event-driven: any provision.* event for
+        // the run it is watching refetches it (the "no polling" invariant —
+        // ui-guidelines §10). The wizard was the one remaining poller.
+        if (kind && kind.indexOf("provision.") === 0 && this.provWiz.open && this.provWiz.runId && p && p.run_id === this.provWiz.runId) this.provWizRefresh();
         if (kind === "host.state") this.loadHosts();
         else if (kind === "execution.state") { if (this.page === "execute") this.loadExecutions(); if (this.page === "exec") this.loadExecDetail(); }
         else if (kind === "audit.event" && this.page === "audit") this.loadAudit();
@@ -2815,8 +2824,7 @@
       openProvWizard() {
         // Starting a fresh wizard detaches any previous watch; the earlier
         // run keeps going server-side and stays visible in the Runs table.
-        if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
-        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], timer: null, sshStatus: null, sshBusy: false, sshErr: "" };
+        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "" };
       },
       dismissGettingStarted() {
         this.gsDismissed = true;
@@ -2860,26 +2868,22 @@
       provWizClose() {
         const inFlight = !!(this.provWiz.runId && this.provWiz.run && !this.provTerminal(this.provWiz.run.state));
         if (!inFlight) {
-          if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
           this.provWiz.runId = ""; this.provWiz.run = null; this.provWiz.steps = [];
         }
-        // In-flight run: keep the poll timer alive in the background so the
-        // wizard state is fresh if re-opened (Watch button on the run row)
-        // and the terminal SSE toast still fires; the timer self-stops when
-        // the run reaches a terminal state (provWizRefresh).
+        // In-flight run: the wizard stays attached in the background — the
+        // provision.* SSE events keep refreshing it if re-opened (Watch
+        // button on the run row) and the terminal SSE toast still fires.
         const hadRun = !!this.provWiz.runId;
         this.provWiz.open = false;
         if (hadRun) this.loadProvRuns();
       },
       // Re-attach the wizard to an existing run from the Runs table.
       async provWizWatch(id) {
-        if (this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
         this.provWiz.open = true; this.provWiz.phase = "live"; this.provWiz.runId = id;
         this.provWiz.run = null; this.provWiz.steps = [];
+        // Event-driven live view: the initial fetch plus the provision.* SSE
+        // events for this run (onSSEEvent) — no polling interval.
         await this.provWizRefresh();
-        if (!this.provWiz.timer && this.provWiz.run && !this.provTerminal(this.provWiz.run.state)) {
-          this.provWiz.timer = setInterval(() => this.provWizRefresh(), 2500);
-        }
       },
       provWizNext() {
         if (this.provWiz.phase === "target" && this.provWiz.host.trim()) {
@@ -2904,8 +2908,11 @@
           const d = await this.api("/provision-runs", { method: "POST", body: { host: this.provWiz.host.trim(), mode: this.provWiz.mode } });
           this.provWiz.runId = d.id;
           this.provWiz.phase = "live";
+          // Event-driven from here: the provision.* SSE events for this run
+          // trigger provWizRefresh (onSSEEvent) — no polling interval. The
+          // initial refresh below paints the run as it was created; every
+          // subsequent step/key/terminal event refetches it.
           await this.provWizRefresh();
-          if (!this.provWiz.timer) this.provWiz.timer = setInterval(() => this.provWizRefresh(), 2500);
         } catch (e) { this.notify("err", "provision start failed: " + e.message); } finally { this.provWiz.busy = false; }
       },
       async provWizRefresh() {
@@ -2913,7 +2920,6 @@
         try {
           const d = await this.api("/provision-runs/" + encodeURIComponent(this.provWiz.runId), { toast: false });
           this.provWiz.run = d.run; this.provWiz.steps = d.steps || [];
-          if (d.run && this.provTerminal(d.run.state) && this.provWiz.timer) { clearInterval(this.provWiz.timer); this.provWiz.timer = null; }
         } catch (e) { /* keep last state on a transient error */ }
       },
       async provWizKey(action) {

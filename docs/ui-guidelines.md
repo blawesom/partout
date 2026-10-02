@@ -382,7 +382,8 @@ tell the operator whether anything executed at all.
 
 - **One SSE subscription**, `GET /api/v1/events`, established after login, authenticated
   with the session token as `?token=<jwt>` (EventSource cannot set headers). Pages filter
-  event kinds; they never open their own stream. No polling, ever.
+  event kinds; they never open their own stream. No polling, ever — including
+  the onboarding wizard's live phase (event-driven over `provision.*`, §21).
 - **Session expiry is explained, not silent.** Any API 401 goes through
   `sessionExpired()`: a warn toast ("Session expired — sign in to continue")
   explains the drop to the login page, and the interrupted route is captured
@@ -710,10 +711,14 @@ Phases (one modal, `provWiz` state): **1 · target** (host + mode, with live
 mode guidance — see below) →
 **2 · confirm** (the plan: **live SSH-key readiness**, host-key gate, the
 five steps `connect → preflight → transfer → install → wait-enroll`) →
-**3 · live** (polls the run every 2.5 s: state badge, current step, step
-list; a `key_confirm` run shows the fingerprint prominently with
-Confirm/Deny; a terminal run shows the result). On `connected`/`handoff` it
-offers a link straight to the enrolled host.
+**3 · live** (**event-driven over SSE**: every `provision.*` event for the
+watched run refetches it — state badge, current step, step list; the initial
+fetch happens on watch/start, a stream reconnect catches up a non-terminal
+run once, and a foreign run's events are ignored. There is no polling
+interval — the wizard was the last poller, so the §10 "no polling, ever"
+invariant now holds app-wide. A `key_confirm` run shows the fingerprint
+prominently with Confirm/Deny; a terminal run shows the result). On
+`connected`/`handoff` it offers a link straight to the enrolled host.
 
 **Mode guidance (target phase).** The fresh/join choice is the wizard's main
 trap — `fresh` is destructive. The selected mode shows a full one-line

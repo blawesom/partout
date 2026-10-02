@@ -701,6 +701,28 @@ async function main() {
     inst.provWizClose();
     await sleep(200);
     check("wizard: closed", !d.body.textContent.includes("Step 1 of 3"), "wizard did not close");
+    // Event-driven live view: the wizard refreshes on provision.* SSE
+    // events for its run (no polling). Point it at the REAL seeded run
+    // (fails fast at connect), fire the event, and assert the run renders.
+    try {
+      const runs = await inst.api("/provision-runs");
+      const list = (runs && (runs.runs || runs.items || runs)) || [];
+      const seeded = list.find((r) => r.host === "nobody@127.0.0.1");
+      if (!seeded) check("wizard: seeded run for SSE wiring", false, "no nobody@127.0.0.1 run");
+      else {
+        await inst.provWizWatch(seeded.id);
+        inst.provWiz.run = null; // force the refetch to be the ONLY source
+        inst.onSSEEvent("provision.step", { run_id: seeded.id });
+        await sleep(400);
+        check("wizard: SSE event refetches the watched run", inst.provWiz.run && inst.provWiz.run.id === seeded.id && inst.provWiz.run.host === "nobody@127.0.0.1", "run=" + JSON.stringify((inst.provWiz.run || {}).host));
+        // An event for a DIFFERENT run must not disturb the watched one.
+        const before = inst.provWiz.run && inst.provWiz.run.updated;
+        inst.onSSEEvent("provision.step", { run_id: "pr_other" });
+        await sleep(250);
+        check("wizard: other runs' events ignored", inst.provWiz.run && inst.provWiz.run.id === seeded.id, "watched run changed on foreign event");
+        inst.provWizClose(); await sleep(150);
+      }
+    } catch (e) { check("wizard: SSE wiring", false, String(e)); }
   }
 
   await visit("#/obs-services", 1600);
