@@ -579,6 +579,9 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |
+| `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`) |
+| `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
+| `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification |
 | `PARTOUT_REBOOT_FLUSH_S` | **5** | (M3) pre-reboot grace for a task `reboot` step (PRD §5.5): the agent waits this long after persisting the resume marker, so the `rebooting` report flushes up the stream before the host goes down |
 | `PARTOUT_RELEASE_KEY` | *(empty)* | (M8.1) Ed25519 **public** key (hex or path) the agent verifies fleet-update releases against; set → strict-signed (unsigned refused) |
 | `PARTOUT_RELEASE_VERIFY_KEY` | *(empty)* | server-side, optional: Ed25519 public key (base64) that every upload's signature must verify against before the release is stored (catches signing mistakes at registration) |
@@ -634,30 +637,24 @@ lives in memory only: if the server restarts while a run is paused, a later `con
 
 These are PRD/architecture targets. They are **not parsed** by the current binary; setting
 them has no effect. (The config package deliberately refuses to parse vars without an
-implementation.)
+implementation.) Everything else in the §4.1–4.3 tables **is** wired. (Session recording
+retention is wired too — daily sweeper, `PARTOUT_SESSION_RETENTION_DAYS`, default 30 — but the
+var is parsed in `main.go`, not the config package.)
 
 | Var | Planned default | Planned feature |
 |---|---|---|
-| `PARTOUT_ADDR` / `PARTOUT_GRPC_ADDR` | `:8443` / off | main listener naming / split gRPC listener (§1.2) |
+| `PARTOUT_GRPC_ADDR` | off | split gRPC listener (§1.2) |
 | `PARTOUT_H2C` | false | explicit cleartext-h2 acceptance flag |
 | `PARTOUT_DB` | `sqlite:$PARTOUT_DATA_DIR/db.partout` | Postgres backend (R9) |
-| `PARTOUT_RETENTION_*` (output/runs/facts days) | 30/90/90 | retention (PRD §9; session recordings are wired via `PARTOUT_SESSION_RETENTION_DAYS`) |
+| `PARTOUT_RETENTION_*` (output/runs/facts days) | 30/90/90 | retention (PRD §9) |
 | `PARTOUT_MAX_OUTPUT_MB` / `PARTOUT_MAX_TRANSFER_MB` | 16 / 256 | size limits |
 | `PARTOUT_MAX_CONCURRENT_RUNS_PER_HOST` | 4 | concurrency |
-| `PARTOUT_SPOOL_MEM_MB` / `PARTOUT_SPOOL_DISK_MB` / `PARTOUT_SPOOL_AGE_S` | 16 / 128 / 86400 | offline spool (PRD §9) |
+| `PARTOUT_SPOOL_MEM_MB` / `PARTOUT_SPOOL_DISK_MB` / `PARTOUT_SPOOL_AGE_S` | 16 / 128 / 86400 | offline spool tuning (PRD §9) |
 | `PARTOUT_DISPATCH_TTL_S` | 900 | offline queue expiry |
 | `PARTOUT_POLICY_STALE_S` | 172800 | agent job bundle staleness |
-| `PARTOUT_MCP_ENABLED` | true | MCP server |
+| `PARTOUT_MCP_ENABLED` | true | MCP server kill-switch |
 | `PARTOUT_LOG_LEVEL` | info | structured log level |
-| `PARTOUT_OBSERVE_FACTS_INTERVAL` | **300** | (M5) seconds between structured fact uploads (services/configs/certs); per-collector cadences in PRD arch §7.2
-| `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`)
-| `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
-| `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification
-| `PARTOUT_ELEVATE` | none | agent elevation `none\|sudoers\|sudo` (Decision 3; see §4.2) |
-| `PARTOUT_ELEVATION_POLICY` | *(empty)* | elevation policy file / `*.json` dir (Decision 3 full; `partout ctl elevation`) |
-| `PARTOUT_FILE_ROOT` | /home/partout | file surface root (wired; see §4.2) |
-| `--file-root=…` | — | agent file root (see §4.2) |
-| `--label=k=v`, `--version` | — | flags *proposed* in earlier drafts; not wired |
+| `--label=k=v` | — | enrollment label flag (proposed in earlier drafts) |
 
 ### 4.5 All flags (current)
 

@@ -186,7 +186,7 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
 - **Editing a rule** *(v0.2)*: create/delete a rule; the server pushes a fresh bundle to all
   connected agents immediately (no reconnect needed). Bundles are versioned + content-hashed,
   and the agent's cached bundle persists under `<data dir>/agent/`.
-- **Testing policy**: the UI dry-run is *(proposed — Web UI deferred)*; verify with
+- **Testing policy**: a policy dry-run in the UI is not implemented; verify with
   `partout ctl policy list` and a test dispatch (a denied run records `state=denied` with the
   matched rule id(s) and reason).
 
@@ -511,11 +511,11 @@ Partout observes **hosts**; you also need to observe the control plane:
 
 ```
 1. DELETE /api/v1/agents/{old_id} → cascade-purges rows.
-2. On the (same or new) host: remove the stale agent state, then re-provision:
-   ssh <host> 'sudo rm -f /var/lib/partout/agent/identity.json'
-   partout ctl provision new --host user@host        # fresh identity is generated
-   (the destructive `--mode fresh` wipe is not wired yet, so remove identity.json
-   explicitly — architecture §3.5). Or by hand: install the binary and run
+2. On the (same or new) host, re-provision:
+   partout ctl provision new --host user@host --mode fresh
+   `fresh` (default) is a destructive wipe — it stops + disables the existing agent unit
+   and removes its identity + env, then enrolls as a brand-new agent (architecture §3.5).
+   Or by hand: install the binary and run
    `partout --mode=agent --server=... --token=par_enr_new` (fresh token).
 3. Agent generates a new keypair; writes identity.json (0600); connects.
 4. Tag/role/group the host per your topology.
