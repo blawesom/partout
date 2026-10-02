@@ -112,8 +112,8 @@
         <button class="btn sm" @click="closeAddHost()" aria-label="close">✕</button>
       </div>
       <div class="tabs">
-        <div class="tab" :class="{active: addHostTab==='manual'}" @click="addHostTab='manual'">Run on the host</div>
-        <div class="tab" :class="{active: addHostTab==='ssh'}" @click="addHostTab='ssh'" :title="isAdmin ? '' : 'requires admin role'">Onboard over SSH</div>
+        <div class="tab" :class="{active: addHostTab==='manual'}" tabindex="0" role="tab" :aria-selected="addHostTab==='manual'" @click="addHostTab='manual'" @keydown.enter.prevent="addHostTab='manual'">Run on the host</div>
+        <div class="tab" :class="{active: addHostTab==='ssh'}" tabindex="0" role="tab" :aria-selected="addHostTab==='ssh'" @click="addHostTab='ssh'" @keydown.enter.prevent="addHostTab='ssh'" :title="isAdmin ? '' : 'requires admin role'">Onboard over SSH</div>
       </div>
 
       <!-- Option A: manual install with a one-time enrollment token -->
@@ -426,14 +426,15 @@
       </div>
       <nav class="nav">
         <template v-for="g in navGroups()" :key="g.key">
-          <div class="nav-section" @click="toggleNavGroup(g.key)" :title="isNavCollapsed(g.key) ? 'Expand' : 'Collapse'">
+          <div class="nav-section" tabindex="0" role="button" :aria-expanded="!isNavCollapsed(g.key)" @click="toggleNavGroup(g.key)" @keydown.enter.prevent="toggleNavGroup(g.key)" @keydown.space.prevent="toggleNavGroup(g.key)" :title="isNavCollapsed(g.key) ? 'Expand' : 'Collapse'">
             <span class="nav-caret">{{ isNavCollapsed(g.key) ? '▸' : '▾' }}</span>{{ g.label }}
             <span v-if="navGroupBadge(g) > 0" class="nav-badge">{{ navGroupBadge(g) }}</span>
           </div>
           <template v-if="!isNavCollapsed(g.key)">
             <div v-for="n in g.items" :key="n.key"
                  :class="['nav-item', {active: page===n.key, disabled: !navEnabled(n)}]"
-                 :title="navTitle(n)" @click="navClick(n)">
+                 tabindex="0" role="link" :aria-current="page===n.key ? 'page' : null"
+                 :title="navTitle(n)" @click="navClick(n)" @keydown.enter.prevent="navClick(n)">
               <span class="icon">{{ n.icon }}</span>{{ n.label }}
               <span v-if="n.badge && navBadge(n) > 0" class="nav-badge" :class="n.badge">{{ navBadge(n) }}</span>
               <span v-else-if="!navEnabled(n)" class="chip-ms">{{ navTag(n) }}</span>
@@ -443,11 +444,11 @@
 
         <template v-if="groups.length">
           <div class="nav-section nav-section-plain">Scope</div>
-          <div v-for="g in groups" :key="g.name" class="nav-scope" :class="{active: scope===g.name}"
+          <div v-for="g in groups" :key="g.name" class="nav-scope" tabindex="0" :class="{active: scope===g.name}"
                :title="'Filter the fleet to group #' + g.name + (scope === g.name ? ' (click to clear)' : '')"
-               @click="setScope(g.name)">
+               tabindex="0" role="button" @click="setScope(g.name)" @keydown.enter.prevent="setScope(g.name)">
             <span class="mono">#{{ g.name }}</span>
-            <span v-if="scope === g.name" class="nav-clear">×</span>
+            <span v-if="scope === g.name" class="nav-clear" aria-hidden="true">×</span>
           </div>
           <div v-if="scope" class="nav-scope-hint muted small" :class="{'scope-err': !!scopeErr}">
             {{ scopeErr ? scopeErr : (scopeHostIds ? scopeHostIds.length + ' host(s) in scope' : 'resolving…') }}
@@ -476,7 +477,7 @@
           <span class="kbd">⌘K</span> Jump to…
         </button>
         <button class="btn ghost theme-btn" :aria-label="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
-                :title="theme === 'dark' ? 'Light mode' : 'Dark mode'" @click="toggleTheme">
+                :title="theme === 'dark' ? 'Light mode' : 'Dark mode'" :aria-label="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'" @click="toggleTheme">
           <svg v-if="theme === 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
           <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </button>
@@ -533,7 +534,7 @@
             <table class="tbl">
               <thead><tr><th>Host</th><th>State</th><th>OS</th><th>Version</th><th>Last seen</th></tr></thead>
               <tbody>
-                <tr v-for="h in visibleHosts" :key="h.id" class="click" @click="go('host/'+h.id)">
+                <tr v-for="h in visibleHosts" :key="h.id" class="click" tabindex="0" @click="go('host/'+h.id)" @keydown.enter.prevent="go('host/'+h.id)">
                   <td>
                     <div class="host-name">{{ hostName(h) }}</div>
                     <div class="host-id mono muted" v-if="hostName(h) !== h.id">{{ h.id }}</div>
@@ -553,8 +554,8 @@
         <!-- ============ HOST DETAIL ============ -->
         <section v-else-if="page==='host'">
           <div class="tabs">
-            <div class="tab" :class="{active: p2==='overview' || !p2}" @click="go('host/'+p1)">Overview</div>
-            <div class="tab" :class="{active: p2==='facts'}" @click="go('host/'+p1+'/facts')">Facts</div>
+            <div class="tab" :class="{active: p2==='overview' || !p2}" tabindex="0" role="tab" :aria-selected="p2==='overview' || !p2" @click="go('host/'+p1)" @keydown.enter.prevent="go('host/'+p1)">Overview</div>
+            <div class="tab" :class="{active: p2==='facts'}" tabindex="0" role="tab" :aria-selected="p2==='facts'" @click="go('host/'+p1+'/facts')" @keydown.enter.prevent="go('host/'+p1+'/facts')">Facts</div>
           </div>
           <template v-if="p2!=='facts'">
             <div class="grid cols-2">
@@ -606,7 +607,7 @@
               <label class="fld"><span>Roles</span>
                 <div class="toolbar">
                   <span class="muted small" v-if="!(host && host.roles && host.roles.length)">none</span>
-                  <span class="chip" v-for="r in (host && host.roles) || []" :key="r">{{ r }}<a href="#" @click.prevent="removeRole(r)" title="remove role">×</a></span>
+                  <span class="chip" v-for="r in (host && host.roles) || []" :key="r">{{ r }}<a href="#" @click.prevent="removeRole(r)" title="remove role" :aria-label="'remove role ' + r">×</a></span>
                   <input v-model="roleDraft" class="mono" placeholder="add role…" style="max-width:150px" @keyup.enter="addRole()" />
                 </div>
               </label>
@@ -650,7 +651,7 @@
             <table class="tbl">
               <thead><tr><th>ID</th><th>Command</th><th>Selector</th><th>State</th><th>When</th></tr></thead>
               <tbody>
-                <tr v-for="e in executions" :key="e.id" class="click" @click="go('exec/'+e.id)">
+                <tr v-for="e in executions" :key="e.id" class="click" tabindex="0" @click="go('exec/'+e.id)" @keydown.enter.prevent="go('exec/'+e.id)">
                   <td class="mono">{{ e.id }}</td>
                   <td class="mono">{{ e.cmd }}<template v-if="e.args && e.args.length"> {{ e.args.join(' ') }}</template></td>
                   <td class="mono">{{ e.selector }}</td>
@@ -1003,7 +1004,7 @@
             <table class="tbl">
               <thead><tr><th>ID</th><th>Task</th><th>Host</th><th>State</th><th>Started</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="r in taskRuns" :key="r.id" class="click" @click="showTaskRun(r.id)">
+                <tr v-for="r in taskRuns" :key="r.id" class="click" tabindex="0" @click="showTaskRun(r.id)" @keydown.enter.prevent="showTaskRun(r.id)">
                   <td class="mono">{{ r.id }}</td>
                   <td class="mono">{{ r.task_id }}<template v-if="r.task_version">@{{ r.task_version }}</template></td>
                   <td class="mono">{{ hostNameById(r.agent_id) }}</td>
@@ -1089,7 +1090,7 @@
             <table class="tbl">
               <thead><tr><th>ID</th><th>Host</th><th>Kind</th><th>Status</th><th>Applied</th><th>When</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="a in pkgActions" :key="a.id" class="click" @click="showPkgAction(a.id)">
+                <tr v-for="a in pkgActions" :key="a.id" class="click" tabindex="0" @click="showPkgAction(a.id)" @keydown.enter.prevent="showPkgAction(a.id)">
                   <td class="mono">{{ a.id }}</td>
                   <td class="mono">{{ hostNameById(a.agent_id) }}</td>
                   <td class="mono">{{ a.kind }}</td>
@@ -1416,7 +1417,7 @@
               <thead><tr><th>ID</th><th>Host</th><th>Mode</th><th>State</th><th>Key fingerprint</th><th>Started</th><th></th></tr></thead>
               <tbody>
                 <template v-for="r in provRuns" :key="r.id">
-                <tr class="click" @click="showProvRun(r.id)">
+                <tr class="click" tabindex="0" @click="showProvRun(r.id)" @keydown.enter.prevent="showProvRun(r.id)">
                   <td class="mono">{{ r.id }}</td>
                   <td class="mono">{{ r.host }}</td>
                   <td class="mono">{{ r.mode }}</td>
@@ -1547,7 +1548,7 @@
               </tr></thead>
               <tbody>
                 <template v-for="(row,i) in svcRows" :key="svcKey(row)">
-                <tr @click="toggleSvcDetail(svcKey(row))" style="cursor:pointer" :title="'click for details'">
+                <tr class="click" tabindex="0" @click="toggleSvcDetail(svcKey(row))" @keydown.enter.prevent="toggleSvcDetail(svcKey(row))" :title="'click for details (or press Enter)'">
                   <td class="mono">{{ row.unit.name }}<div v-if="row.unit.description" class="muted small" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ row.unit.description }}</div></td>
                   <td class="mono">{{ hostNameById(row.host_id) }}</td>
                   <td><span class="badge" :class="svcBadge(row.unit).cls">{{ svcBadge(row.unit).label }}</span></td>

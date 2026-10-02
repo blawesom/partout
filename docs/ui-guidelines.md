@@ -601,7 +601,15 @@ Still deferred:
 14. **Fleet Health cards live on `/fleet`**, not on host pages; host pages get host-scoped cards.
 15. **Host tabs:** Overview · Facts · Terminal · Files · Updates · Audit.
 16. **Host-scoped audit** = client-side filter of `GET /audit` until B4.
-17. **Accessibility floor:** WCAG AA, full keyboard operation, `prefers-reduced-motion` honoured, no color-only state.
+17. **Accessibility floor** (current state, kept honest): keyboard operation of the
+    interactive non-control elements — clickable rows (fleet, executions, task/package/
+    provision/services), tabs, and nav items/sections/scopes are `tabindex`-focusable with a
+    visible `:focus-visible` ring and Enter activation (`Space` on nav sections); tooltips work
+    on keyboard focus (`data-tip` CSS, `data-jtip` floating); icon-only controls carry
+    `aria-label`s; `prefers-reduced-motion` is honoured; state is never color-only (icon +
+    text). **Still open** toward full WCAG AA: a complete audit pass (form labeling and error
+    association, focus order, landmark roles, a screen-reader walkthrough) — the decision-
+    level target stands, the audit is tracked follow-up work.
 18. **Buildless SPA (v0.5):** the UI is a single-file Vue 3 SPA in `internal/api/webui/` with the
     runtime vendored in `lib/` (offline-capable, no Node in `go build`). This supersedes decision 12's
     Vite→`web/dist` plan; the source is the artifact. Backend prerequisites B1 (`/capabilities`) and

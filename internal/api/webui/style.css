@@ -220,6 +220,17 @@ table.tbl tr:last-child td { border-bottom: none; }
 table.tbl tr.click { cursor: pointer; }
 table.tbl tr.click:hover td { background: var(--brand-subtle); }
 
+/* Keyboard focus ring for the interactive non-control elements (rows, tabs,
+   nav items, scopes): same affordance mouse hover gives, visible on Tab.
+   ui-guidelines §11 keyboard floor. */
+.click:focus-visible, .tab:focus-visible, .nav-item:focus-visible,
+.nav-section:focus-visible, .nav-scope:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
+table.tbl tr.click:focus-visible { outline-offset: -3px; display: table-row; }
+
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 20px;

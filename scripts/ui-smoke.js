@@ -101,6 +101,29 @@ async function main() {
 
   await visit("#/fleet");
   check("fleet: host row", rowsWithText(d, "ag_") > 0);
+  // Keyboard floor: rows/tabs are focusable and Enter activates them —
+  // clickable rows previously had no keyboard path at all (a11y pass).
+  {
+    const row = d.querySelector("tr.click[tabindex='0']");
+    check("a11y: host rows keyboard-focusable", !!row, "no tabindex on fleet rows");
+    if (row) {
+      row.focus();
+      row.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await sleep(300);
+      check("a11y: Enter on a host row opens the host", /^#\/host\/ag_/.test(w.location.hash), "hash=" + w.location.hash);
+      const tab = [...d.querySelectorAll(".tab[tabindex='0']")].find((t) => t.textContent.trim() === "Facts");
+      check("a11y: tabs keyboard-focusable", !!tab, "no tabindex on host tabs");
+      if (tab) {
+        tab.focus();
+        tab.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        await sleep(300);
+        check("a11y: Enter on the Facts tab switches tab", /\/facts$/.test(w.location.hash), "hash=" + w.location.hash);
+      }
+      w.location.hash = "#/fleet"; await sleep(300);
+    }
+    const themeBtn = d.querySelector("[aria-label^='Switch to']");
+    check("a11y: theme toggle has an aria-label", !!themeBtn, "theme button unlabeled");
+  }
   check("fleet: group scope rendered", !!d.querySelector(".nav-scope"));
 
   // Nav IA: grouped, collapsible sections ordered common → advanced.
