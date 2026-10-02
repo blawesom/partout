@@ -115,7 +115,7 @@ will jank (→ later item L5, and the modularization L7 that sits under it).
 
 | # | Win | Effort | Notes |
 |---|---|---|---|
-| Q1 | **Contrast fix**: bump `--text-faint` to a ≥4.5:1 value (e.g. `#64748b` ≈ 4.75:1); differentiate *faint* from *muted* by size/weight instead of contrast; sweep the dark-theme tokens in the same pass | hours | One token + a screenshot pass; fixes a real WCAG AA failure on meaningful text |
+| Q1 | ~~**Contrast fix**~~ ✅ **shipped**: light `--text-faint` `#94a3b8`→`#64748b` (≈4.75:1 on white), dark `#64748b`→`#94a3b8` (≈6.6:1 on slate-900) — both themes now pass AA for the meaningful text faint carries; pinned by `TestUIShape_ContrastTokens` | hours | One token pair + a shape test; fixed a real WCAG AA failure |
 | Q2 | **Modal focus basics**: focus the first control on open (confirm/input/add-host/wizard), Esc closes every dialog, focus returns to the opener; a full Tab-trap is ~20 more lines — do both | ~½ day | Largest a11y gain per line; `askConfirm`/`askInput` already centralize the plumbing |
 | Q3 | **Selector autocomplete + cheat-sheet**: a `<datalist>` with `all`, `group:<known>`, `role:<known>`, `host:<known>` beside every selector input (data already client-side) + a small `?` popover documenting the grammar | ~½ day | Attacks the biggest recall burden; the preview button already makes exploration safe |
 | Q4 | **Re-run from Recent executions**: a ↻ button on execution rows prefills the Execute form — the first-command-nudge pattern (prefill, never auto-run) | hours | High-frequency operator action currently done by retyping |

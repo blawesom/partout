@@ -9,7 +9,10 @@
   --border: #e2e8f0;
   --text: #0f172a;
   --text-muted: #475569;
-  --text-faint: #94a3b8;
+  /* WCAG AA: ≥4.5:1 on the light surfaces — #94a3b8 was ~2.6:1 and carried
+     MEANINGFUL text (captions, ids, metadata), not decoration. Faint is now
+     differentiated from muted by size/weight, not by failing contrast. */
+  --text-faint: #64748b;
   --healthy: #059669;
   --healthy-subtle: #d1fae5;
   --warning: #d97706;
@@ -537,7 +540,9 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
   --border: #334155;
   --text: #e2e8f0;
   --text-muted: #94a3b8;
-  --text-faint: #64748b;
+  /* WCAG AA on dark surfaces (#0f172a ≈ 0.011 luminance): #64748b was
+     ~3.6:1; #94a3b8 is ~6.6:1. */
+  --text-faint: #94a3b8;
   --healthy: #34d399;
   --healthy-subtle: rgba(16, 185, 129, 0.14);
   --warning: #fbbf24;

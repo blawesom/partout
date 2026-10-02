@@ -557,6 +557,37 @@ func TestUIShape_CleartextLoginBanner(t *testing.T) {
 	}
 }
 
+// TestUIShape_ContrastTokens pins the WCAG AA contrast floor for the
+// de-emphasis text tokens (ux-improvements Q1): --text-faint carries
+// MEANINGFUL text (captions, ids, metadata), so it must stay ≥4.5:1 on its
+// surfaces in both themes. The pre-fix values failed badly (light #94a3b8
+// ≈ 2.6:1, dark #64748b ≈ 3.6:1); a token "tweak" must not silently
+// reintroduce them.
+func TestUIShape_ContrastTokens(t *testing.T) {
+	root := repoRoot(t)
+	b, err := os.ReadFile(filepath.Join(root, "internal", "api", "webui", "style.css"))
+	if err != nil {
+		t.Fatalf("read style.css: %v", err)
+	}
+	s := string(b)
+	// Light theme (root block): faint must be the AA-passing value.
+	if !strings.Contains(s, "--text-faint: #64748b;") {
+		t.Error("style.css: light --text-faint is not the AA-passing #64748b (was #94a3b8 ≈ 2.6:1)")
+	}
+	// Dark theme block: faint must be the AA-passing value there too.
+	dark := s[strings.Index(s, `:root[data-theme="dark"]`):]
+	if dark == "" {
+		t.Fatal("style.css: dark theme block not found")
+	}
+	if !strings.Contains(dark, "--text-faint: #94a3b8;") {
+		t.Error("style.css: dark --text-faint is not the AA-passing #94a3b8 (was #64748b ≈ 3.6:1)")
+	}
+	// The two themes must not share one faint value (they are tuned per surface).
+	if strings.Count(s, "--text-faint: #64748b;") != 1 || strings.Count(s, "--text-faint: #94a3b8;") != 1 {
+		t.Error("style.css: expected exactly one faint token per theme")
+	}
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
