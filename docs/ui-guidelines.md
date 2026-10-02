@@ -757,7 +757,7 @@ asserts the `ssh-status` endpoint shape.
 
 ## 22. First-run UI affordances
 
-Three small surfaces make a brand-new server self-explanatory:
+Four small surfaces make a brand-new server self-explanatory:
 
 - **Login page — cleartext warning.** When the page itself was served over
   plain `http:` from a non-loopback host, an amber warn-box sits above the
@@ -775,6 +775,14 @@ Three small surfaces make a brand-new server self-explanatory:
   generated password was written to `admin_password.txt` next to the database
   — log in, change it, then delete the file.” Shown only on the logged-out
   view (always, since a first-run operator has no other reference).
+- **Fleet page — "Secure this server" card** (cleartext origins only). Shown while
+  the page itself was served over plain `http:` from a non-loopback host (`cleartextLogin`,
+  the same condition as the login banner — the operator is now signed in and can act):
+  three steps — turn on TLS (`PARTOUT_TLS=on`, local-CA bootstrap, reload over https — or
+  `PARTOUT_ADDR=127.0.0.1` behind a TLS proxy), rotate the admin password (Account link,
+  especially if it was generated into `admin_password.txt`), review the preset guardrails
+  (Policies/Alerts links). Dismissible, persisted per-browser
+  (`partout.secure.dismissed`); never renders on `https:` or loopback origins.
 - **Fleet page — getting-started checklist.** A dismissible card shown only
   while the fleet is empty (`!hosts.length`, not just filtered/scoped) and not
   yet dismissed. Three numbered steps with clear hierarchy: **1 · onboard the

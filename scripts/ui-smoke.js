@@ -887,6 +887,31 @@ async function main() {
     await sleep(150);
     check("loading: empty state shown after load", d.body.textContent.includes("No jobs."), "empty state not shown after load");
     check("empty: jobs has actionable CTA", [...d.querySelectorAll(".empty button")].some((b) => b.textContent.includes("New job")), "no 'New job' CTA in empty state");
+
+  // --- First-run "Secure this server" card (cleartext origin only) ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const savedSecure = inst.secureDismissed, savedProto = inst.locProtocol, savedHost = inst.locHostname;
+    await visit("#/fleet", 500);
+    // Default smoke origin is loopback http: no card.
+    check("secure card: hidden on loopback http", !d.body.textContent.includes("Secure this server"), "card rendered on loopback");
+    // Fake the exposed-http origin: the card must appear with its remedies.
+    inst.locHostname = "203.0.113.9"; await sleep(200);
+    const card = [...d.querySelectorAll(".card")].find((c) => c.textContent.includes("Secure this server"));
+    check("secure card: shown on non-loopback http", !!card, "no secure card on exposed http");
+    check("secure card: names PARTOUT_TLS and PARTOUT_ADDR", !!card && card.textContent.includes("PARTOUT_TLS=on") && card.textContent.includes("PARTOUT_ADDR=127.0.0.1"), "remedies missing");
+    const dx = card && [...card.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "dismiss");
+    if (dx) dx.click();
+    await sleep(200);
+    check("secure card: dismiss persists", !d.body.textContent.includes("Secure this server"), "card not dismissed");
+    check("secure card: dismissal persisted to localStorage", w.localStorage.getItem("partout.secure.dismissed") === "1", "localStorage not set");
+    // https never shows it; restore.
+    inst.secureDismissed = false; inst.locProtocol = "https:"; inst.locHostname = "203.0.113.9"; await sleep(200);
+    check("secure card: hidden on https", !d.body.textContent.includes("Secure this server"), "card rendered on https");
+    inst.locProtocol = savedProto; inst.locHostname = savedHost; inst.secureDismissed = savedSecure;
+    try { w.localStorage.removeItem("partout.secure.dismissed"); } catch (e) {}
+    await sleep(150);
+  }
     inst.jobs = savedJobs;
   }
 

@@ -509,6 +509,22 @@
             <div class="stat bad"><div class="lbl">✕ Disconnected</div><div class="num">{{ health.disconnected }}</div></div>
             <div class="stat info"><div class="lbl">◷ Pending</div><div class="num">{{ health.pending }}</div></div>
           </div>
+          <div v-if="cleartextLogin && !secureDismissed" class="card warn-box" style="margin-bottom:16px;display:block">
+            <div class="head">
+              <h2>⚠ Secure this server</h2>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="dismissSecureCard()" aria-label="dismiss">✕</button>
+            </div>
+            <ol class="gs-steps">
+              <li class="gs-primary"><b>1 · Turn on TLS</b> — this page was loaded over an unencrypted connection: passwords and session tokens cross the network in cleartext.
+                Set <span class="mono">PARTOUT_TLS=on</span> on the server (a local root CA is bootstrapped on first run), restart it, then reload over <span class="mono">https</span>.
+                Alternatively bind loopback (<span class="mono">PARTOUT_ADDR=127.0.0.1</span>) behind your own TLS proxy.</li>
+              <li><b>2 · Rotate the admin password</b> — especially if it was generated into <span class="mono">admin_password.txt</span> on first run.
+                <a @click.prevent="go('account')" class="gs-link">Account</a></li>
+              <li><b>3 · Review the preset guardrails</b> — the seeded safety-net policies and alert rules.
+                <a @click.prevent="go('policies')" class="gs-link">Policies</a><span class="muted"> · </span><a @click.prevent="go('obs-alerts')" class="gs-link">Alerts</a></li>
+            </ol>
+          </div>
           <div v-if="!hostsLoading && !hosts.length && !gsDismissed" class="card gs-card" style="margin-bottom:16px">
             <div class="head">
               <h2>Get started</h2>
@@ -1843,6 +1859,7 @@
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
+        secureDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.secure.dismissed") === "1"),
         _returnRoute: "", // route to return to after session-expiry re-login
         confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", _resolve: null, _isInput: false },
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
@@ -2830,6 +2847,10 @@
       dismissGettingStarted() {
         this.gsDismissed = true;
         try { localStorage.setItem("partout.gs.dismissed", "1"); } catch (e) { /* private mode: fine */ }
+      },
+      dismissSecureCard() {
+        this.secureDismissed = true;
+        try { localStorage.setItem("partout.secure.dismissed", "1"); } catch (e) { /* private mode: fine */ }
       },
       // --- Confirmation dialog (replaces native confirm()) ---
       // askConfirm shows the dialog and resolves true/false. opts: { title,
