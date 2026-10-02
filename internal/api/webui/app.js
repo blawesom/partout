@@ -1646,8 +1646,10 @@
                   </td>
                 </tr>
                 </template>
-                <tr v-if="!svcRows.length && !pageLoading"><td colspan="11"><div class="empty">{{ services.length ? 'No units match the current filters.' : 'No service facts (agents must be connected &amp; systemd present).' }}</div></td></tr>
-                <tr v-if="!services.length && !pageLoading"><td colspan="10"><div class="empty">No service facts (agents must be connected &amp; systemd present).</div></td></tr>
+                <tr v-if="!svcRows.length && !pageLoading"><td colspan="11"><div class="empty">{{ services.length ? 'No units match the current filters.' : 'No service facts yet.' }}<template v-if="!services.length"><div class="small muted" style="margin-top:8px;line-height:1.6;max-width:560px;margin-left:auto;margin-right:auto">
+                  Agents report <b>custom</b> units: operator-labelled (enrollment <span class="mono">--label</span>, or the agent's <span class="mono">PARTOUT_SERVICE_LABELS=unit1,unit2</span> env) or with a unit file under <span class="mono">/etc/systemd/system</span>. OS-managed units stay out of fleet health by design (see the docs) but appear in a unit's dependency context.
+                </div></template></div></td></tr>
+                <tr v-if="!services.length && !pageLoading"><td colspan="10"><div class="empty">No service facts yet.<div class="small muted" style="margin-top:8px;line-height:1.6;max-width:560px;margin-left:auto;margin-right:auto">Agents must be connected with systemd present, and report <b>custom</b> units: operator-labelled (enrollment <span class="mono">--label</span>, or the agent's <span class="mono">PARTOUT_SERVICE_LABELS=unit1,unit2</span> env) or with a unit file under <span class="mono">/etc/systemd/system</span>.</div></div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1688,7 +1690,7 @@
                     <span v-if="!certUsedBy(row).length" class="muted">—</span>
                   </td>
                 </tr>
-                <tr v-if="!certs.length && !pageLoading"><td colspan="7"><div class="empty">No certificate facts.</div></td></tr>
+                <tr v-if="!certs.length && !pageLoading"><td colspan="7"><div class="empty">No certificate facts yet.<div class="small muted" style="margin-top:8px;line-height:1.6;max-width:560px;margin-left:auto;margin-right:auto">Certificates are discovered from webservice configs (nginx / haproxy / caddy TLS paths) and the default walks of <span class="mono">/etc/ssl</span> and <span class="mono">/etc/pki/tls</span>; point the agent at custom paths with <span class="mono">PARTOUT_CERT_PATHS</span>.</div></div></td></tr>
               </tbody>
             </table>
           </div>
@@ -1750,7 +1752,7 @@
               </table>
             </template>
           </div>
-          <div class="card" v-if="!configs.length && !pageLoading"><div class="empty">No config facts (haproxy/nginx must be installed).</div></div>
+          <div class="card" v-if="!configs.length && !pageLoading"><div class="empty">No config facts yet.<div class="small muted" style="margin-top:8px;line-height:1.6;max-width:560px;margin-left:auto;margin-right:auto">Config facts cover <b>haproxy</b> and <b>nginx</b> (must be installed on the host): the agent runs the native validators (<span class="mono">haproxy -c</span>, <span class="mono">nginx -t</span>) and parses topology from the config files. A root-only config is reported <i>not readable</i>, never <i>invalid</i>.</div></div></div>
         </section>
 
         <!-- ============ OBSERVE · ALERTS (M6 engine; rule-management UI M7) ============ -->

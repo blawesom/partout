@@ -874,6 +874,14 @@ async function main() {
   if (w.__partout.me && adminRole) w.__partout.me.role = adminRole;
   w.__partout.svcClearF();
   await sleep(200);
+  // Teaching empty state (services): no facts at all -> the empty state
+  // explains custom-unit discovery, not just "nothing here".
+  {
+    const savedSvc = w.__partout.services;
+    w.__partout.services = []; await sleep(200);
+    check("empty states: services teaches custom units", d.body.textContent.includes("PARTOUT_SERVICE_LABELS") && d.body.textContent.includes("/etc/systemd/system"), "services empty state does not teach");
+    w.__partout.services = savedSvc; await sleep(150);
+  }
   // Row click expands the detail row (description/pid/fragment/last-start).
   const svcRowEl = d.querySelector("table.tbl tbody tr");
   if (svcRowEl) svcRowEl.click();
@@ -884,6 +892,12 @@ async function main() {
   await visit("#/obs-certs", 1600);
   check("observe certs: real cert",
     [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("CN =")), "no cert rows");
+  {
+    const savedCerts = w.__partout.certs;
+    w.__partout.certs = []; await sleep(200);
+    check("empty states: certs teaches discovery paths", d.body.textContent.includes("/etc/ssl") && d.body.textContent.includes("PARTOUT_CERT_PATHS"), "certs empty state does not teach");
+    w.__partout.certs = savedCerts; await sleep(150);
+  }
   check("observe certs: used-by column", d.body.textContent.includes("Used by"), "no Used by column");
   // Service-config discovery: the fixture cert (CN=svc-smoke, living outside
   // /etc/ssl) must be found via the fake nginx/caddy configs and carry both
@@ -898,6 +912,15 @@ async function main() {
   // AND the validator's own explanation, not a bare red badge.
   check("observe configs: invalid haproxy flagged", [...d.querySelectorAll(".badge")].some((b) => b.textContent.trim() === "invalid"), "no invalid badge");
   check("observe configs: validator error shown", d.body.textContent.includes("cannot open certificate file"), "config_error not surfaced");
+  // Teaching empty states: clear the loaded data and assert each observe
+  // page's empty state explains HOW facts arrive (not just "nothing here").
+  {
+    const savedCfg = w.__partout.configs;
+    w.__partout.configs = []; await sleep(200);
+    check("empty states: configs teaches validators", d.body.textContent.includes("native validators") && d.body.textContent.includes("not readable"), "configs empty state does not teach");
+    w.__partout.configs = savedCfg; await sleep(150);
+  }
+  // (certs + services empty-state teaching is checked on their own pages)
   await visit("#/obs-alerts");
   check("observe alerts: live card (engine wired)", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Alerts") && d.body.textContent.includes("Firing now:"), "alerts card missing");
   // Honest state: the empty-state text is shown iff there are no alerts. The
