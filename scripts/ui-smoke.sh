@@ -158,6 +158,13 @@ seed POST /policies '{"name":"needs-approval","effect":"require_approval","prior
 # Park a command on an approval request so the Approvals page has a live row.
 seed POST /executions '{"selector":"all","cmd":"echo","args":["needsapproval"],"timeout_s":10}' >/dev/null
 seed POST /users   '{"username":"alice","password":"alicepass123","role":"operator"}' >/dev/null
+# Enough audit rows to force a second page (list default limit 100): cheap
+# policy create+delete pairs — two audit rows per pair, no agent dispatch.
+for i in $(seq 1 60); do
+  seed POST /policies '{"name":"page-'"$i"'","effect":"deny","priority":1,"match":{"command_regex":"^never-page-'"$i"'$"}}' >/dev/null
+  PID=$(curl -s "$B/policies" -H "$H" | python3 -c 'import sys,json;print(next((p["id"] for p in json.load(sys.stdin)["items"] if p["name"]=="page-'"$i"'"), ""))')
+  [ -n "$PID" ] && seed DELETE "/policies/$PID" >/dev/null
+done
 seed POST /users   '{"username":"vera","password":"verapass123","role":"viewer"}' >/dev/null
 seed POST /secrets '{"name":"dbpass","value":"s3cr3t","selector":"all"}' >/dev/null
 TID=$(seed POST /tasks '{"name":"check disk","description":"df -h","steps":[{"cmd":"df"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')

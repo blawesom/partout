@@ -82,9 +82,8 @@ at the time of writing (they drift; the mechanism descriptions are the durable p
 
 - Command palette is good; shortcuts have no discoverability affordance (no `?` help).
 - No bulk actions except the Updates checkbox selection; no saved views / filter presets.
-- **The Audit page has no pagination and only a kind filter** — `loadAudit()` fetches one
-  page with `?kind=` only, while the API already supports `actor`, `since`, and cursor
-  paging. On a real fleet the audit view **silently truncates** (→ quick win Q5).
+- ~~**The Audit page has no pagination and only a kind filter**~~ ✅ fixed (Q5):
+  actor + time-range filters and "Load more" cursor paging; the silent truncation is gone.
 
 ### H8 · Accessibility beyond the keyboard floor — medium
 
@@ -118,7 +117,7 @@ will jank (→ later item L5, and the modularization L7 that sits under it).
 | Q2 | **Modal focus basics**: focus the first control on open (confirm/input/add-host/wizard), Esc closes every dialog, focus returns to the opener; a full Tab-trap is ~20 more lines — do both | ~½ day | Largest a11y gain per line; `askConfirm`/`askInput` already centralize the plumbing |
 | Q3 | ~~**Selector autocomplete + cheat-sheet**~~ ✅ **shipped**: a `<datalist id="selector-suggestions">` fed from live fleet data (all, group:, role:, tag:, host:) attached to every selector input (Execute, job form, rollout form, secrets), plus a self-contained `?` grammar help dialog (selector + cron kinds — offline-capable, no CDN) | ~½ day | Verified by the smoke harness (datalist options from live data, help opens/closes with grammar content) |
 | Q4 | ~~**Re-run from Recent executions**~~ ✅ **shipped**: a ↻ Re-run button on execution rows prefills the Execute form (cmd/args/selector/timeout) — the first-command-nudge pattern (prefill, never auto-run) | hours | Smoke-verified against the seeded execution: prefilled values + "nothing auto-executed" |
-| Q5 | **Audit pagination + actor/time filters**: send `actor`/`since`, add "Load more" via `next_cursor` — the API already supports all of it | ~½ day | The UI silently truncates today |
+| Q5 | ~~**Audit pagination + actor/time filters**~~ ✅ **shipped**: actor + time-range (1h/24h/7d/30d) filters, a "shown N" count, and "Load more" cursor paging (`next_cursor`); the empty state says "for these filters" when filtered. The API always supported all of it — the UI silently truncated at page one before | ~½ day | Smoke-verified against 140+ real audit rows: second page present, Load-more appends, actor filter empties honestly for a non-actor |
 | Q6 | ~~**Docs links in-app**~~ ✅ **shipped**: "Docs ↗" in the user menu (repo docs, new tab); the grammar help dialog (Q3) covers the cron/selector field hints self-contained and offline. The `when` help lands with a when-field in the task form (none exists yet) | hours | The walkthrough exists; now the product points at it |
 | Q7 | ~~**Replace the remaining `prompt()`s**~~ ✅ **shipped**: `askSelect()` extends the shared dialog with a dropdown; the job/task host pickers use it (`pickHost`, single-host fleets skip the dialog), and group-create is a proper dialog form (name + selector with autocomplete, disabled-until-filled). No native `prompt()` remains in the SPA | ~½ day | Smoke-verified: dropdown renders/chooses/cancels; the group form creates a real group |
 

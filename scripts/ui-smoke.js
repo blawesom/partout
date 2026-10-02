@@ -389,6 +389,31 @@ async function main() {
 
   await visit("#/audit");
   check("audit renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Audit"));
+  // Filters + cursor paging (ux Q5): the API always supported actor/since/
+  // next_cursor; the UI silently truncated at page one before.
+  {
+    check("audit: actor + range filters render",
+      !!d.querySelector("input[placeholder^='actor']") && [...d.querySelectorAll("select")].some((x) => [...x.options].some((o) => o.value === "24h")),
+      "filter controls missing");
+    const rowsBefore = w.__partout.audit.length;
+    check("audit: more than one page available", !!w.__partout.auditMore && rowsBefore >= 100,
+      "auditMore=" + w.__partout.auditMore + " rows=" + rowsBefore);
+    const lmb = [...d.querySelectorAll("button")].find((b) => b.textContent.trim() === "Load more");
+    check("audit: Load more button", !!lmb, "no Load more");
+    if (lmb) { lmb.click(); await sleep(700); }
+    check("audit: Load more appends rows", w.__partout.audit.length > rowsBefore, "rows " + rowsBefore + " -> " + w.__partout.audit.length);
+    // Actor filter: an actor that never acted -> honest empty state.
+    w.__partout.auditActor = "ghost-user"; // nobody by that name (vera has an auth.login row)
+    await w.__partout.loadAudit(); await sleep(400);
+    check("audit: actor filter narrows (empty for a read-only actor)",
+      w.__partout.audit.length === 0 && /for these filters/.test(d.body.textContent),
+      "rows=" + w.__partout.audit.length);
+    w.__partout.auditActor = ""; w.__partout.auditRange = "24h";
+    await w.__partout.loadAudit(); await sleep(400);
+    check("audit: time-range filter loads (recent rows)", w.__partout.audit.length > 0, "24h range returned nothing");
+    w.__partout.auditRange = "";
+    await w.__partout.loadAudit(); await sleep(300);
+  }
 
   await visit("#/sessions");
   check("sessions renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Sessions"));

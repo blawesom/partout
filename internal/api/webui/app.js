@@ -838,10 +838,19 @@
           <h1 class="page">Audit Log</h1>
           <p class="page-sub">Read-only event history (PRD R9).</p>
           <div class="toolbar">
-            <select v-model="auditKind" style="max-width:220px" @change="loadAudit">
+            <select v-model="auditKind" style="max-width:220px" @change="loadAudit()">
               <option value="">All kinds</option>
               <option v-for="k in auditKinds" :key="k" :value="k">{{ k }}</option>
             </select>
+            <input v-model="auditActor" class="mono" placeholder="actor (e.g. admin)" style="max-width:200px" @keyup.enter="loadAudit()" />
+            <select v-model="auditRange" style="max-width:150px" @change="loadAudit()">
+              <option value="">all time</option>
+              <option value="1h">last hour</option>
+              <option value="24h">last 24 h</option>
+              <option value="7d">last 7 days</option>
+              <option value="30d">last 30 days</option>
+            </select>
+            <button class="btn sm" @click="loadAudit()">Apply</button>
           </div>
           <div class="card">
             <table class="tbl">
@@ -854,9 +863,14 @@
                   <td class="mono">{{ a.agent_id ? (hostNameById(a.agent_id) || a.agent_id) : 'server' }}</td>
                   <td class="mono small" style="max-width:420px;overflow:hidden;text-overflow:ellipsis">{{ typeof a.payload==='string'? a.payload : (a.payload && a.payload.message) || JSON.stringify(a.payload||{}) }}</td>
                 </tr>
-                <tr v-if="!audit.length && !pageLoading"><td colspan="5"><div class="empty">No audit events.</div></td></tr>
+                <tr v-if="!audit.length && !pageLoading"><td colspan="5"><div class="empty">No audit events{{ (auditKind || auditActor.trim() || auditRange) ? " for these filters." : "." }}</div></td></tr>
               </tbody>
             </table>
+            <div v-if="auditMore" class="toolbar" style="margin-top:8px">
+              <span class="muted small">{{ audit.length }} shown</span>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="loadAudit(true)">Load more</button>
+            </div>
           </div>
         </section>
 
@@ -2006,7 +2020,7 @@
         exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
-        audit: [], auditKind: "",
+        audit: [], auditKind: "", auditActor: "", auditRange: "", auditMore: "",
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null, fileRoot: "",
@@ -2733,7 +2747,27 @@
           this.notify("ok", `role "${role}" removed`);
         } catch (e) { /* toast shown by api() */ }
       },
-      async loadAudit() { const q = this.auditKind ? "?kind=" + encodeURIComponent(this.auditKind) : ""; try { const d = await this.api("/audit" + q); this.audit = d.items || []; } catch (e) { this.audit = []; } },
+      // Audit list (ux Q5): kind + actor + time-range filters and cursor
+      // paging ("Load more") — the API has always supported all of it; the UI
+      // silently truncated at the first page before.
+      auditSinceEpoch() {
+        const secs = { "1h": 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400 }[this.auditRange];
+        return secs ? Math.floor(Date.now() / 1000) - secs : 0;
+      },
+      async loadAudit(append) {
+        const q = [];
+        if (this.auditKind) q.push("kind=" + encodeURIComponent(this.auditKind));
+        if (this.auditActor.trim()) q.push("actor=" + encodeURIComponent(this.auditActor.trim()));
+        const since = this.auditSinceEpoch();
+        if (since) q.push("since=" + since);
+        if (append && this.auditMore) q.push("cursor=" + encodeURIComponent(this.auditMore));
+        try {
+          const d = await this.api("/audit" + (q.length ? "?" + q.join("&") : ""));
+          const items = d.items || [];
+          this.audit = append ? this.audit.concat(items) : items;
+          this.auditMore = d.next_cursor || "";
+        } catch (e) { if (!append) this.audit = []; }
+      },
       async loadSessions() { try { const d = await this.api("/sessions"); this.sessions = d.sessions || d.items || []; } catch (e) { this.sessions = []; } },
       async loadSessionReplay() {
         this.sessionReplay = null;
