@@ -243,6 +243,33 @@ async function main() {
     await sleep(250);
   }
 
+  // --- First-command nudge: fleet 0 -> 1 teaches the core loop ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const savedGs = inst.gsDismissed, savedNudge = inst.firstCmdDismissed;
+    inst.gsDismissed = false; inst.firstCmdDismissed = false; // force-show for the check
+    await sleep(250);
+    const card = [...d.querySelectorAll(".card")].find((c) => c.textContent.includes("Your first host is connected"));
+    check("nudge: shown with a connected host", !!card && card.textContent.includes("uptime"), "no first-command card");
+    const runBtn = card && [...card.querySelectorAll("button")].find((b) => b.textContent.includes("Run your first command"));
+    if (!runBtn) { check("nudge: run CTA", false, "no run CTA"); }
+    else {
+      runBtn.click();
+      await sleep(300);
+      check("nudge: run CTA prefills Execute", w.location.hash.includes("#/execute") && inst.exCmd === "uptime" && /^host:ag_/.test(inst.exSel), "hash=" + w.location.hash + " sel=" + inst.exSel + " cmd=" + inst.exCmd);
+      check("nudge: nothing auto-executed", !inst.execDetail, "a command ran without the operator pressing Run");
+      w.location.hash = "#/fleet"; await sleep(300);
+      const x = [...d.querySelectorAll(".card button")].find((b) => b.getAttribute("aria-label") === "dismiss" && b.closest(".card").textContent.includes("Your first host is connected"));
+      if (x) x.click();
+      await sleep(200);
+      check("nudge: dismissible", !d.body.textContent.includes("Your first host is connected"), "card not dismissed");
+      check("nudge: dismissal persisted", w.localStorage.getItem("partout.nudge.firstcmd") === "1", "localStorage not set");
+    }
+    inst.gsDismissed = savedGs; inst.firstCmdDismissed = savedNudge;
+    try { w.localStorage.removeItem("partout.nudge.firstcmd"); } catch (e) {}
+    await sleep(150);
+  }
+
   const hostId = (w.__partout && w.__partout.hosts && w.__partout.hosts[0] && w.__partout.hosts[0].id) ||
     [...d.querySelectorAll("table.tbl tr td .host-id")].map((t) => t.textContent.trim()).find((s) => s.startsWith("ag_"));
   check("fleet: host id resolvable", !!hostId, "no host id on the fleet page");

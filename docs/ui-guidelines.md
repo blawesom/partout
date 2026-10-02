@@ -770,7 +770,7 @@ asserts the `ssh-status` endpoint shape.
 
 ## 22. First-run UI affordances
 
-Four small surfaces make a brand-new server self-explanatory:
+Five small surfaces make a brand-new server self-explanatory:
 
 - **Login page — cleartext warning.** When the page itself was served over
   plain `http:` from a non-loopback host, an amber warn-box sits above the
@@ -796,6 +796,13 @@ Four small surfaces make a brand-new server self-explanatory:
   especially if it was generated into `admin_password.txt`), review the preset guardrails
   (Policies/Alerts links). Dismissible, persisted per-browser
   (`partout.secure.dismissed`); never renders on `https:` or loopback origins.
+- **Fleet page — first-command nudge** (fleet 0 → 1). Once a host is connected
+  (and the getting-started checklist is not dismissed — the operator has not
+  asked to stop being guided), a dismissable card walks the core loop the UI
+  exists for: **Run your first command** prefills Execute with a harmless
+  `uptime` scoped to the new host (the operator presses Run — nothing
+  auto-executes), and **Confirm it in the audit log** links to Audit.
+  Dismissal persists per-browser (`partout.nudge.firstcmd`).
 - **Fleet page — getting-started checklist.** A dismissible card shown only
   while the fleet is empty (`!hosts.length`, not just filtered/scoped) and not
   yet dismissed. Three numbered steps with clear hierarchy: **1 · onboard the

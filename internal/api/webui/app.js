@@ -563,6 +563,20 @@
                 <a @click.prevent="go('policies')" class="gs-link">Policies</a><span class="muted"> · </span><a @click.prevent="go('obs-alerts')" class="gs-link">Alerts</a></li>
             </ol>
           </div>
+          <div v-if="hosts.length && !firstCmdDismissed && !gsDismissed" class="card gs-card" style="margin-bottom:16px">
+            <div class="head">
+              <h2>Your first host is connected</h2>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="dismissFirstCmd()" aria-label="dismiss">✕</button>
+            </div>
+            <p class="muted small" style="margin:0">Walk the core loop: run a command across the fleet, watch the output live, then confirm it in the audit log.</p>
+            <ol class="gs-steps">
+              <li class="gs-primary"><b>Run your first command</b> — a harmless <span class="mono">uptime</span>, prefilled on the new host (you press Run; nothing auto-executes).
+                <button class="btn primary sm" style="margin-left:8px" :disabled="!hosts.length" @click="runFirstCommand(hosts[0].id)">Run your first command →</button></li>
+              <li><b>Confirm it in the audit log</b> — every action is recorded with actor, host, output, and timing.
+                <a @click.prevent="go('audit')" class="gs-link">Audit</a></li>
+            </ol>
+          </div>
           <div v-if="!hostsLoading && !hosts.length && !gsDismissed" class="card gs-card" style="margin-bottom:16px">
             <div class="head">
               <h2>Get started</h2>
@@ -1898,6 +1912,7 @@
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
         secureDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.secure.dismissed") === "1"),
+        firstCmdDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.nudge.firstcmd") === "1"),
         _returnRoute: "", // route to return to after session-expiry re-login
         confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", _resolve: null, _isInput: false },
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
@@ -2906,6 +2921,19 @@
       dismissSecureCard() {
         this.secureDismissed = true;
         try { localStorage.setItem("partout.secure.dismissed", "1"); } catch (e) { /* private mode: fine */ }
+      },
+      // First-command nudge (fleet 0 → 1): the UI's stated purpose is walking
+      // the core loop — run a command, watch output live, confirm in the
+      // audit log — and nothing taught steps 3–5. Prefills Execute with a
+      // harmless read-only command on the new host; the operator still
+      // presses Run (nothing auto-executes).
+      dismissFirstCmd() {
+        this.firstCmdDismissed = true;
+        try { localStorage.setItem("partout.nudge.firstcmd", "1"); } catch (e) { /* private mode: fine */ }
+      },
+      runFirstCommand(hostId) {
+        this.exSel = "host:" + hostId; this.exCmd = "uptime"; this.exArgs = "";
+        this.go("execute");
       },
       // --- Confirmation dialog (replaces native confirm()) ---
       // askConfirm shows the dialog and resolves true/false. opts: { title,
