@@ -75,12 +75,15 @@ A buildless Vue 3 SPA, served same-origin (no CDN, no build step). Fleet + healt
 command execution, an xterm.js terminal, files browser (jailed to the host's file root,
 default `/home/partout`), jobs/tasks/updates, secrets, policies,
 approvals, provisioning, users, and the Observe pages (Services, Certificates, Configs, Alerts).
+Light + dark themes — the topbar toggle persists per-browser and defaults to the OS
+`prefers-color-scheme`.
 
 | | |
 |---|---|
 | ![Fleet](docs/screenshots/fleet.png) | ![Execute](docs/screenshots/execute.png) |
 | ![Services](docs/screenshots/services.png) | ![Alerts](docs/screenshots/alerts.png) |
 | ![Configs](docs/screenshots/configs.png) | ![Updates](docs/screenshots/updates-runs.png) |
+| ![Fleet — dark mode](docs/screenshots/fleet-dark.png) | ![Execute — dark mode](docs/screenshots/execute-dark.png) |
 
 ## Quick start
 

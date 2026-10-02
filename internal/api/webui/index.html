@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Partout Fleet Management</title>
+  <!-- Apply the persisted theme before first paint (no flash). -->
+  <script>document.documentElement.dataset.theme = localStorage.getItem("partout_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");</script>
   <link rel="stylesheet" href="/style.css" />
   <!-- Vendored runtime: the deployed binary works fully offline (no CDN). -->
   <link rel="stylesheet" href="/lib/xterm.css" />

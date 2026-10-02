@@ -94,6 +94,27 @@ try:
             page.screenshot(path=out, full_page=False)
             print(f"  saved {out}")
 
+        # Dark mode: flip the real topbar toggle (persists for the rest of
+        # the page's life), capture two pages, flip back for later shots.
+        page.goto(f"http://127.0.0.1:{PORT}/#/fleet")
+        page.wait_for_timeout(1200)
+        page.click(".theme-btn")
+        page.wait_for_timeout(500)
+        out = os.path.join(OUT, "fleet-dark.png")
+        page.screenshot(path=out, full_page=False)
+        print(f"  saved {out}")
+        page.goto(f"http://127.0.0.1:{PORT}/#/execute")
+        page.wait_for_timeout(1600)
+        try:
+            page.wait_for_load_state("networkidle", timeout=3000)
+        except Exception:
+            pass
+        out = os.path.join(OUT, "execute-dark.png")
+        page.screenshot(path=out, full_page=False)
+        print(f"  saved {out}")
+        page.click(".theme-btn")
+        page.wait_for_timeout(300)
+
         # M8.1: seed a release in the store, then show the Releases tab.
         # (The server does not validate signature content on upload — a dummy
         # 64-byte signature is enough for the screenshot.)

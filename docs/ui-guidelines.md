@@ -270,8 +270,12 @@ only: connection state, last seen, distro/version, updates available.
 
 ## 7. Design tokens
 
-Adopt Tailwind defaults with semantic aliases. Light is the default theme; dark is a planned
-toggle (tokens defined, not built).
+Adopt Tailwind defaults with semantic aliases. Light is the default theme; **dark is built**
+(topbar toggle, `localStorage("partout_theme")`, defaults to `prefers-color-scheme`). The
+dark values re-derive the same semantic tokens (slate-900 app / slate-800 surfaces, state
+colors one step brighter for dark-bg contrast, `*-subtle` tints at ~14% alpha); a few
+surface-specific colors (box text, scrims, shadows, brand hover) are separate tokens with
+light+dark values. Terminals (`.console`, xterm) stay dark in both themes.
 
 | Semantic | Value | Use |
 |---|---|---|

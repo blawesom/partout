@@ -10,6 +10,7 @@
   const { createApp } = Vue;
   const LS_TOKEN = "partout_token";
   const LS_NAV_COLLAPSED = "partout_nav_collapsed";
+  const LS_THEME = "partout_theme";
 
   // ---------------- formatting + state vocab (exposed to template) --------
   function fmtAgo(ts) {
@@ -464,6 +465,11 @@
         <button class="btn sm ghost palette-btn" @click="openPalette" title="Jump to a page or host (⌘K / Ctrl-K)">
           <span class="kbd">⌘K</span> Jump to…
         </button>
+        <button class="btn ghost theme-btn" :aria-label="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+                :title="theme === 'dark' ? 'Light mode' : 'Dark mode'" @click="toggleTheme">
+          <svg v-if="theme === 'dark'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
         <div class="sse-dot" data-tip-pos="below" :data-tip="'stream: /api/v1/events — ' + sseStatus">
           <span class="dot" :class="sseDot"></span>{{ sseStatus }}
         </div>
@@ -477,7 +483,7 @@
         </div>
         <div v-if="pageLoading && pagePrimaryEmpty" class="loading-banner"><span class="spin"></span> Loading…</div>
         <div v-if="userMenu" @click="userMenu=false" style="position:fixed;inset:0;z-index:40;background:rgba(15,23,42,.25)">
-          <div style="position:absolute;bottom:70px;left:12px;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px;min-width:180px">
+          <div style="position:absolute;bottom:70px;left:12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:6px;min-width:180px">
             <div class="nav-item" @click.stop="userMenu=false; go('account')">Account</div>
             <div class="nav-item" @click.stop="signOut">Sign out</div>
           </div>
@@ -1788,6 +1794,7 @@
     data() {
       return {
         token: localStorage.getItem(LS_TOKEN) || "",
+        theme: document.documentElement.dataset.theme || "light",
         me: null, caps: {}, loginForm: { username: "", password: "" },
         loginErr: "", loginBusy: false, userMenu: false,
         route: (location.hash || "#/fleet").replace(/^#\/?/, ""),
@@ -2196,6 +2203,14 @@
           this.scopeHostIds = (d.items || []).map(i => i.id);
           this.scopeErr = "";
         } catch (e) { this.scopeHostIds = []; this.scopeErr = e.message || "unresolved selector"; }
+      },
+      // Theme toggle (topbar): light/dark, persisted to localStorage.
+      // The <html data-theme> attribute is set pre-paint by index.html so
+      // the first render never flashes the wrong theme.
+      toggleTheme() {
+        this.theme = this.theme === "dark" ? "light" : "dark";
+        document.documentElement.dataset.theme = this.theme;
+        try { localStorage.setItem(LS_THEME, this.theme); } catch (e) {}
       },
       // Command palette (⌘K / Ctrl-K): jump to any enabled page or host.
       openPalette() {
