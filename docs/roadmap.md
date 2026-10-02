@@ -236,9 +236,13 @@ jobs Run now, tasks Run…, playbooks Run render an inline note row under the
 affected row (dispatching… → started/parked-on-approval/failed, dismissable)
 plus a spinner on the row-action button while busy (alert-rule toggles too);
 other write rows (policies/users/secrets deletes) still use the global toast —
-add the note row there if operators ask. (b) a **body-ported JS tooltip** for
-the `overflow:hidden` truncated cells (sha256, errors, step output) that a CSS
-`::after` tooltip can't reach, plus the remaining `title=` sites. See
+add the note row there if operators ask. (b) ~~a **body-ported JS tooltip**
+for the `overflow:hidden` truncated cells (sha256, errors, step output) that a
+CSS `::after` tooltip can't reach, plus the remaining `title=` sites~~ ✅
+**shipped** (`data-jtip` floating tooltip for the four clipped-cell sites —
+sessions excerpt, release sha256, update-run host error, provision error —
+hover + keyboard focus; and the deny-reason / secret-rotate `prompt()`s
+replaced by the shared dialog, the secret value now password-masked). See
 `docs/ui-guidelines.md` §23–24.
 
 ### Host removal: revocation loop + pinned cleanup contract

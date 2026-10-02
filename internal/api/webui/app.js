@@ -260,7 +260,7 @@
             <tr v-for="s in provWiz.steps" :key="s.seq">
               <td class="mono">{{ s.seq }}</td><td class="mono">{{ s.name }}</td>
               <td><span class="badge" :class="provStepBadge(s.state)">{{ s.state }}</span></td>
-              <td class="mono small" style="max-width:300px;overflow:hidden;text-overflow:ellipsis" :title="s.stderr_excerpt || s.stdout_excerpt">{{ s.stderr_excerpt || s.stdout_excerpt || '—' }}</td>
+              <td class="mono small" style="max-width:300px;overflow:hidden;text-overflow:ellipsis" tabindex="0" :data-jtip="s.stderr_excerpt || s.stdout_excerpt || ''">{{ s.stderr_excerpt || s.stdout_excerpt || '—' }}</td>
             </tr>
             <tr v-if="!(provWiz.steps||[]).length"><td colspan="4" class="muted">Connecting…</td></tr>
           </tbody>
@@ -358,6 +358,10 @@
       <div v-if="confirmBox.requireText" class="fld" style="margin-top:10px">
         <span>Type <span class="mono">{{ confirmBox.requireText }}</span> to confirm</span>
         <input v-model="confirmBox.value" class="mono" :placeholder="confirmBox.requireText" @keyup.enter="confirmBoxAllowed() && confirmBoxYes()" />
+      </div>
+      <div v-if="confirmBox.inputLabel" class="fld" style="margin-top:10px">
+        <span>{{ confirmBox.inputLabel }}</span>
+        <input v-model="confirmBox.input" :type="confirmBox.inputType" :placeholder="confirmBox.inputPlaceholder" @keyup.enter="confirmBoxYes()" />
       </div>
       <div class="toolbar" style="margin-top:16px">
         <div class="spacer"></div>
@@ -1143,7 +1147,7 @@
                     <td class="mono">{{ r.version }}</td>
                     <td class="mono">{{ r.arch }}</td>
                     <td>{{ r.kind }}</td>
-                    <td class="mono" :title="r.sha256">{{ (r.sha256 || '').slice(0, 12) }}…</td>
+                    <td class="mono" tabindex="0" :data-jtip="r.sha256 || ''">{{ (r.sha256 || '').slice(0, 12) }}…</td>
                     <td><span v-if="r.signature" class="badge ok">signed</span><span v-else class="badge warn" data-tip="no signature — only keyless agents apply it, and only while the server allows unsigned releases (PARTOUT_ALLOW_UNSIGNED_RELEASES=true)">unsigned</span></td>
                     <td class="muted">{{ fmtBytes(r.size) }}</td>
                     <td class="muted">{{ fmtAgo(r.created) }}</td>
@@ -1215,7 +1219,7 @@
                     <td><div class="hostcell"><span>{{ hostNameById(h.host_id) }}</span><span class="hostid mono">{{ h.host_id }}</span></div></td>
                     <td><span class="badge" :class="runStatusKind(h.status)">{{ h.status }}</span></td>
                     <td class="mono muted">{{ h.version || '—' }}</td>
-                    <td class="muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="h.error">{{ h.error || '' }}</td>
+                    <td class="muted" style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" tabindex="0" :data-jtip="h.error || ''">{{ h.error || '' }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -1416,7 +1420,7 @@
                   <td class="mono">{{ r.id }}</td>
                   <td class="mono">{{ r.host }}</td>
                   <td class="mono">{{ r.mode }}</td>
-                  <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span><span v-if="r.error" class="mono small" style="color:var(--critical,#dc2626);display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom" :title="r.error"> · {{ r.error }}</span></td>
+                  <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span><span v-if="r.error" class="mono small" style="color:var(--critical,#dc2626);display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom" tabindex="0" :data-jtip="r.error"> · {{ r.error }}</span></td>
                   <td class="mono small">{{ r.fingerprint || '—' }}</td>
                   <td class="muted" :title="new Date(r.created * 1000).toLocaleString()">{{ fmtAgo(r.created) }}</td>
                   <td style="white-space:nowrap">
@@ -1839,7 +1843,7 @@
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
         _returnRoute: "", // route to return to after session-expiry re-login
-        confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", _resolve: null },
+        confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", _resolve: null, _isInput: false },
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
         hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, serverVersion: "",
@@ -2825,18 +2829,29 @@
       askConfirm(opts) {
         const o = Object.assign({ title: "Are you sure?", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "" }, opts || {});
         return new Promise((resolve) => {
-          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: o.requireText, value: "", _resolve: resolve };
+          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: o.requireText, value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", _resolve: resolve, _isInput: false };
+        });
+      },
+      // askInput: the same shared dialog, but with a free-text (optionally
+      // password-typed) input instead of a boolean. Resolves the trimmed
+      // input on confirm, null on cancel/Esc — the typed replacement for the
+      // remaining native prompt() sites (deny reason, secret rotate value).
+      askInput(opts) {
+        const o = Object.assign({ title: "Input", body: "", mono: "", confirmLabel: "OK", variant: "primary", inputLabel: "Value", inputPlaceholder: "", inputType: "text", initial: "" }, opts || {});
+        return new Promise((resolve) => {
+          this.confirmBox = { open: true, title: o.title, body: o.body, mono: o.mono, confirmLabel: o.confirmLabel, variant: o.variant, requireText: "", value: "", inputLabel: o.inputLabel, inputPlaceholder: o.inputPlaceholder, inputType: o.inputType, input: o.initial, _resolve: resolve, _isInput: true };
         });
       },
       confirmBoxYes() {
-        const r = this.confirmBox._resolve;
+        const r = this.confirmBox._resolve, isInput = this.confirmBox._isInput;
+        const val = (this.confirmBox.input || "").trim();
         this.confirmBox.open = false;
-        if (r) r(true);
+        if (r) r(isInput ? val : true);
       },
       confirmBoxNo() {
-        const r = this.confirmBox._resolve;
+        const r = this.confirmBox._resolve, isInput = this.confirmBox._isInput;
         this.confirmBox.open = false;
-        if (r) r(false);
+        if (r) r(isInput ? null : false);
       },
       confirmBoxAllowed() {
         if (!this.confirmBox.requireText) return true;
@@ -3189,9 +3204,11 @@
         if (verb === "approve") {
           if (!await this.askConfirm({ title: "Approve " + id, body: "The exact stored payload will be dispatched to the agent.", confirmLabel: "Approve", variant: "ok" })) return;
         } else {
-          const r = prompt("Deny reason for " + id + " (optional):", "");
+          // Typed in the shared dialog, not a native prompt(): the reason is
+          // recorded on the audit trail and shown to the requester.
+          const r = await this.askInput({ title: "Deny " + id, body: "The parked action is denied and finalized; the reason is recorded on the audit trail.", confirmLabel: "Deny", variant: "danger", inputLabel: "Reason (optional)", inputPlaceholder: "why this action was refused" });
           if (r === null) return;
-          this._denyReason = r.trim();
+          this._denyReason = r;
         }
         this.apprBusy = id; this.apprMsg = "";
         try {
@@ -3356,6 +3373,48 @@
         } catch (e) { this.jobNote[job.id] = { kind: "err", text: e.message }; } finally { this.jobRunBusy = ""; }
       },
       dismissNote(map, id) { delete map[id]; },
+      // Body-ported tooltip for overflow-hidden truncated cells (ui-guidelines
+      // §23): the CSS ::after tooltip is clipped by the very cell it decorates,
+      // so those sites carry data-jtip and this single floating element shows
+      // the full text on hover AND keyboard focus. Delegated listeners, one
+      // element, no per-cell wiring.
+      initJTip() {
+        if (this._jtipEl || typeof document === "undefined") return;
+        const el = document.createElement("div");
+        el.className = "jtip"; el.setAttribute("role", "tooltip");
+        document.body.appendChild(el);
+        this._jtipEl = el;
+        const show = (target) => {
+          const txt = target.getAttribute("data-jtip");
+          if (!txt) { el.classList.remove("show"); return; }
+          el.textContent = txt;
+          el.classList.add("show");
+          el.style.left = "0px"; el.style.top = "0px"; // reset before measuring
+          const r = target.getBoundingClientRect();
+          const w = el.offsetWidth, h = el.offsetHeight;
+          // Below the cell, clamped into the viewport; above it when no room.
+          let left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+          let top = r.bottom + 7;
+          if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 7);
+          el.style.left = left + "px"; el.style.top = top + "px";
+        };
+        const hide = () => el.classList.remove("show");
+        this._jtipHide = hide;
+        document.addEventListener("mouseover", (e) => {
+          const t = e.target && e.target.closest ? e.target.closest("[data-jtip]") : null;
+          if (t) show(t); else if (!(e.target && e.target.closest && e.target.closest(".jtip"))) hide();
+        });
+        document.addEventListener("mouseout", (e) => {
+          const t = e.target && e.target.closest ? e.target.closest("[data-jtip]") : null;
+          if (t) hide();
+        });
+        document.addEventListener("focusin", (e) => {
+          const t = e.target && e.target.closest ? e.target.closest("[data-jtip]") : null;
+          if (t) show(t); else hide();
+        });
+        document.addEventListener("focusout", hide);
+        document.addEventListener("scroll", hide, true);
+      },
       openFile(f) { if (f.is_dir) { this.fileDir = joinPath(this.fileDir, f.name); this.listFiles(); } },
       async downloadFile(f) {
         const path = joinPath(this.fileDir, f.name);
@@ -3496,7 +3555,9 @@
         catch (e) { /* toast shown by api() */ } finally { this.secretBusy = false; }
       },
       async rotateSecret(name) {
-        const v = prompt("New value for secret '" + name + "':");
+        // The new value is typed into the shared dialog with password
+        // masking — a native prompt() echoed the secret in cleartext.
+        const v = await this.askInput({ title: "Rotate secret " + name, body: "A new version is created; all prior versions are revoked. The value is never displayed again.", confirmLabel: "Rotate", variant: "primary", inputLabel: "New value", inputType: "password", inputPlaceholder: "the new secret value" });
         if (v === null || v === "") return;
         try { const d = await this.api("/secrets/" + encodeURIComponent(name) + "/rotate", { method: "POST", body: { value: v } }); this.notify("ok", "secret \"" + name + "\" rotated (v" + (d.version != null ? d.version : "") + ")"); this.loadSecrets(); }
         catch (e) { /* toast shown by api() */ }
@@ -3514,6 +3575,7 @@
       // unencrypted network path (same condition doctor warns on server-side).
       this.locProtocol = (typeof location !== "undefined" && location.protocol) || "";
       this.locHostname = (typeof location !== "undefined" && location.hostname) || "";
+      this.initJTip();
       this.loadNavCollapsed();
       window.addEventListener("keydown", this.onGlobalKey);
       if (this.token) {

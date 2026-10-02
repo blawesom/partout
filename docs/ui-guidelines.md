@@ -792,14 +792,20 @@ Migrated: sidebar server version, the SSE status dot, the EOL/external-data
 status chip, and the “unsigned (beta)” release badge. A `tabindex` is added
 where the element wasn’t otherwise focusable so keyboard users can reach it.
 
-**Deliberate ceiling.** The highest-value cases — truncated table cells
-(`sha256`, errors, step output) — use `overflow:hidden`, which **clips** a CSS
-`::after` tooltip, so they keep native `title=` (works on hover). `<option>`
-mode hints also stay native (CSS can’t reach select options); their guidance
-is already inline text. A body-ported JS tooltip that escapes clipping for
-those cells + the remaining `title=` sites is a **follow-up**, not part of
-this release. The mechanism + these four clean wins ship now; the rest is
-explicitly deferred.
+**Deliberate ceiling — now lifted for the highest-value cases.** A **body-ported
+JS tooltip** (`data-jtip`) ships for the `overflow:hidden` truncated cells the
+CSS `::after` tooltip cannot reach: a single floating element
+(`initJTip()`, delegated `mouseover`/`mouseout`/`focusin`/`focusout` listeners
+— no per-cell wiring) shows the full text on hover **and** keyboard focus
+(cells carry `tabindex="0"`), positioned below the cell and clamped to the
+viewport (above when there is no room), hidden on leave/blur/scroll. Same
+visual language as `[data-tip]`; `word-break` + `pre-wrap` suit long sha256
+and error text. Migrated sites: the sessions output excerpt, the release
+sha256, the update-run host error, and the provision-run error cells.
+`<option>` mode hints still use native `title=` (CSS and the floating tip
+cannot reach select options); their guidance is already inline text. Remaining
+`title=` sites (buttons, non-clipped cells) are fine as-is — native hover
+tooltips on unclipped elements behave identically.
 
 ## 24. Confirmation dialog (no native `confirm()`)
 
@@ -814,7 +820,14 @@ target (host id, fingerprint, release) so the operator sees what's affected.
 - an optional `requireText` **type-to-confirm guard**: for the highest-stakes
   actions (Remove host, Delete release, Delete secret/user) the operator must
   type the exact id/version/name before the confirm button enables.
-- `Esc` or Cancel resolves `false`.
+- `askInput(opts)` — the same dialog with a **free-text input** (optionally
+  `inputType: "password"`) instead of a boolean: resolves the trimmed input on
+  confirm, `null` on cancel/Esc. The typed replacement for the remaining
+  native `prompt()` sites: the approval **deny reason** (recorded on the audit
+  trail) and the **secret rotate value** (password-masked — a native prompt
+  echoed the secret in cleartext). The job/task host picker and group-create
+  prompts remain native `prompt()` for now (multi-field forms, add-on-request).
+- `Esc` or Cancel resolves `false` for `askConfirm`, `null` for `askInput`.
 
 The host-key **confirm** in the provision flow now renders the fingerprint in
 the `mono` block (previously it was `\n`-separated text in a native

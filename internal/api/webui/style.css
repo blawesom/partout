@@ -284,6 +284,24 @@ label.fld input, label.fld select, label.fld textarea { width: 100%; }
 .prov-inline .toolbar { margin-bottom: 0; }
 .prov-inline .tbl { margin-top: 8px; }
 
+/* Body-ported JS tooltip (ui-guidelines §23): for overflow:hidden truncated
+   cells the CSS ::after tooltip is clipped by the very cell it decorates, so
+   those sites use data-jtip + this single floating element instead. Same
+   visual language as [data-tip]; position:fixed keeps it aligned with the
+   cell under any scroll container. */
+.jtip {
+  position: fixed; z-index: 400;
+  background: var(--text); color: var(--tip-fg);
+  padding: 5px 9px; border-radius: 7px;
+  font-size: 12px; line-height: 1.4;
+  max-width: 380px; white-space: pre-wrap; word-break: break-word;
+  pointer-events: none; opacity: 0;
+  transition: opacity .12s ease;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .2);
+}
+.jtip.show { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .jtip { transition: none; } }
+
 .empty {
   text-align: center; padding: 40px 20px; color: var(--text-faint);
 }

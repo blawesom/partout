@@ -862,6 +862,55 @@ async function main() {
     check("confirm: right text enables", !cbtn.disabled, "confirm still disabled with right text");
     inst.confirmBoxNo(); await sleep(100); // cancel — never confirm (would delete a real host)
     check("confirm: cancel closes", !inst.confirmBox.open, "dialog not closed on cancel");
+    // askInput: the typed replacement for the remaining native prompt()
+    // sites (deny reason, secret rotate). Confirm resolves the trimmed input,
+    // cancel resolves null.
+    const ip = inst.askInput({ title: "Deny appr_x", confirmLabel: "Deny", variant: "danger", inputLabel: "Reason (optional)", inputType: "text" });
+    await sleep(150);
+    const iinp = d.querySelector(".overlay .fld input:not([placeholder='ag_x'])");
+    check("input dialog: free-text field renders", !!iinp, "no input field");
+    if (iinp) { iinp.value = "not on a Friday"; iinp.dispatchEvent(new w.Event("input", { bubbles: true })); }
+    await sleep(80);
+    const ibtn = [...d.querySelectorAll(".overlay button")].find((b) => b.textContent.trim() === "Deny");
+    if (ibtn) ibtn.click();
+    const got = await ip; await sleep(100);
+    check("input dialog: confirm resolves the typed value", got === "not on a Friday", "resolved " + JSON.stringify(got));
+    const ip2 = inst.askInput({ title: "Deny appr_x", confirmLabel: "Deny", variant: "danger", inputLabel: "Reason" });
+    await sleep(120);
+    inst.confirmBoxNo();
+    const got2 = await ip2; await sleep(80);
+    check("input dialog: cancel resolves null", got2 === null, "resolved " + JSON.stringify(got2));
+    // Password masking for secret values: the rotate dialog must not echo.
+    const ip3 = inst.askInput({ title: "Rotate secret s", inputLabel: "New value", inputType: "password" });
+    await sleep(120);
+    const pinp = [...d.querySelectorAll(".overlay .fld input")].find((x) => x.type === "password");
+    check("input dialog: password-typed secret input", !!pinp, "rotate input not password-typed");
+    inst.confirmBoxNo(); await ip3; await sleep(80);
+  }
+
+  // --- Body-ported JS tooltip (data-jtip) on truncated cells ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    // The releases table has a truncated sha256 cell (data-jtip). Hover it and
+    // assert the floating tooltip shows the full text, then keyboard-focus it.
+    await visit("#/updates", 1500);
+    if (inst.updTab !== "releases") { inst.updTab = "releases"; await sleep(600); }
+    const cell = d.querySelector("[data-jtip]");
+    if (!cell) { check("jtip: clipped cell present", false, "no data-jtip cell on the releases tab"); }
+    else {
+      const full = cell.getAttribute("data-jtip");
+      cell.dispatchEvent(new w.MouseEvent("mouseover", { bubbles: true }));
+      await sleep(150);
+      const tip = d.querySelector(".jtip");
+      check("jtip: shows full text on hover", !!tip && tip.classList.contains("show") && tip.textContent === full, "tip=" + (tip ? tip.textContent.slice(0, 40) : "none"));
+      cell.dispatchEvent(new w.MouseEvent("mouseout", { bubbles: true }));
+      await sleep(100);
+      check("jtip: hides on leave", !d.querySelector(".jtip.show"), "tooltip did not hide");
+      cell.focus(); await sleep(150);
+      check("jtip: shows on keyboard focus", !!d.querySelector(".jtip.show"), "no tooltip on focus");
+      cell.blur(); await sleep(100);
+      check("jtip: hides on blur", !d.querySelector(".jtip.show"), "tooltip did not hide on blur");
+    }
   }
 
   // --- Session expiry: toast + route preservation + return on re-login ---
