@@ -225,3 +225,4 @@ help` prints the full reference.
 | [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, runbooks, troubleshooting, compliance |
 | [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: IA, tokens, components, slice plan |
+| [docs/ux-improvements.md](docs/ux-improvements.md) | **UX evaluation & improvement plan** (research; quick wins + later areas) |

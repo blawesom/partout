@@ -7,7 +7,9 @@ Provision, Users, MCP). This document is the definition; `internal/api/webui/` i
 the build. (The slice table below is the original plan; ✅ marks what has since shipped.)
 **Companion docs:** `docs/ui-design.png` (north-star mockup), `PRD.md` (§3 principles, §11 Frontend,
 §15.1 decisions), `docs/architecture.md` (§10.1 API, §10.2 SSE, §11 Frontend),
-`docs/deployment.md` (§4 config)
+`docs/deployment.md` (§4 config), `docs/ux-improvements.md` (heuristic evaluation of the
+shipped UI — gap analysis and priorities; this document stays the definition, that one the
+backlog)
 **Stack (implemented):** Vue 3 (single-file SPA, no build step) with the runtime vendored in
 `internal/api/webui/lib/` so a deployed binary works fully offline. No router/pinia/tailwind
 packages — state and nav are in one component; styles are hand-written CSS using the §7 tokens.
