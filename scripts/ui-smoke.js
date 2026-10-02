@@ -368,6 +368,25 @@ async function main() {
     await sleep(100);
   }
 
+  // --- Re-run from Recent executions (ux Q4): prefill, never auto-run ---
+  await visit("#/execute", 600);
+  {
+    const row = [...d.querySelectorAll("table.tbl tr")].find((tr) => tr.textContent.includes("needsapproval"));
+    const btn = row && [...row.querySelectorAll("button")].find((b) => b.textContent.includes("Re-run"));
+    check("rerun: button on execution rows", !!btn, "no Re-run button");
+    if (btn) {
+      const before = w.__partout.executions.length;
+      w.__partout.exCmd = ""; w.__partout.exArgs = ""; // clear the form first
+      btn.click();
+      await sleep(300);
+      check("rerun: prefills the form (cmd/args/selector)",
+        w.__partout.exCmd === "echo" && w.__partout.exArgs === "needsapproval" && w.__partout.exSel === "all",
+        "cmd=" + w.__partout.exCmd + " args=" + w.__partout.exArgs + " sel=" + w.__partout.exSel);
+      check("rerun: nothing auto-executed", w.__partout.executions.length === before && !w.__partout.execDetail,
+        "executions grew or a dispatch happened");
+    }
+  }
+
   await visit("#/audit");
   check("audit renders", !!d.querySelector("h1") && d.querySelector("h1").textContent.includes("Audit"));
 

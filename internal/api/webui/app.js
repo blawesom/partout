@@ -761,7 +761,7 @@
           <div class="card">
             <div class="head"><h2>Recent executions</h2></div>
             <table class="tbl">
-              <thead><tr><th>ID</th><th>Command</th><th>Selector</th><th>State</th><th>When</th></tr></thead>
+              <thead><tr><th>ID</th><th>Command</th><th>Selector</th><th>State</th><th>When</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="e in executions" :key="e.id" class="click" tabindex="0" @click="go('exec/'+e.id)" @keydown.enter.prevent="go('exec/'+e.id)">
                   <td class="mono">{{ e.id }}</td>
@@ -769,6 +769,7 @@
                   <td class="mono">{{ e.selector }}</td>
                   <td><span class="badge" :class="execBadge(e.state)">{{ e.state }}</span></td>
                   <td class="muted">{{ fmtAgo(e.created) }}</td>
+                  <td class="row-actions"><button class="btn sm" :disabled="!isOperator" @click.stop="rerunExecution(e)" title="Prefill the form with this command (nothing auto-runs)">↻ Re-run</button></td>
                 </tr>
                 <tr v-if="!executions.length"><td colspan="5"><div class="empty">No executions yet.</div></td></tr>
               </tbody>
@@ -3588,6 +3589,16 @@
       // Grammar help dialog (ux Q3/Q6): selector / cron syntax, self-contained
       // so it works offline (the webui is deliberately CDN-free).
       openHelp(kind) { this.helpBox = kind; },
+      // Re-run from Recent executions (ux Q4): prefill the form with a past
+      // command — the first-command-nudge pattern: nothing auto-executes,
+      // the operator presses Run.
+      rerunExecution(e) {
+        this.exSel = e.selector || "all";
+        this.exCmd = e.cmd || "";
+        this.exArgs = (e.args || []).join(" ");
+        if (e.timeout_s) this.exTimeout = e.timeout_s;
+        this.go("execute");
+      },
       // Body-ported tooltip for overflow-hidden truncated cells (ui-guidelines
       // §23): the CSS ::after tooltip is clipped by the very cell it decorates,
       // so those sites carry data-jtip and this single floating element shows
