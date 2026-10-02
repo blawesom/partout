@@ -89,6 +89,20 @@ backend be
     server s1 127.0.0.1:8080 check
 EOF
 
+echo "==> seeding jailed file root (PARTOUT_FILE_ROOT)"
+# The file surface is confined to the file root (docs/spec-file-root.md;
+# default /home/partout). The Files-page checks browse /etc and /tmp
+# *relative to that root*, so seed a small tree inside a workdir root and
+# point the embedded agent at it. Without this the surface is disabled
+# (503 file root unavailable) wherever /home/partout cannot be created —
+# the harness must be hermetic.
+mkdir -p "$WORK/fileroot/etc" "$WORK/fileroot/tmp" "$WORK/fileroot/var/lib"
+printf 'ui-smoke-host\n' > "$WORK/fileroot/etc/hostname"
+printf '127.0.0.1 localhost\n::1 localhost\n' > "$WORK/fileroot/etc/hosts"
+printf 'nameserver 127.0.0.53\n' > "$WORK/fileroot/etc/resolv.conf"
+printf 'seeded by scripts/ui-smoke.sh\n' > "$WORK/fileroot/README.txt"
+printf 'v0\n' > "$WORK/fileroot/var/lib/seed.state"
+
 echo "==> starting embedded server on :$PORT"
 mkdir -p "$WORK/run"
 (
@@ -100,6 +114,7 @@ mkdir -p "$WORK/run"
     PARTOUT_DB_PATH="$WORK/run/p.db" \
     PARTOUT_DATA_DIR="$WORK/run/agent" \
     PARTOUT_MODE=embedded \
+    PARTOUT_FILE_ROOT="$WORK/fileroot" \
     PARTOUT_OBSERVE_FACTS_INTERVAL=2 \
     PARTOUT_NGINX_CONF="$WORK/svc/nginx.conf" \
     PARTOUT_HAPROXY_CONF="$WORK/svc/haproxy.cfg" \
