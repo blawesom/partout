@@ -119,19 +119,57 @@
       <!-- Option A: manual install with a one-time enrollment token -->
       <div v-if="addHostTab==='manual'">
         <p class="cap">For hosts you can shell into that the server should not SSH into. Mint a
-          one-time token, run the command on the host — it appears in the fleet the moment it connects.</p>
+          one-time token, follow the recipe on the host — it appears in the fleet the moment it connects.</p>
         <div v-if="!ahToken">
           <button class="btn primary sm" :disabled="!isOperator || ahTokenBusy" @click="mintAddHostToken()">Mint one-time token (15 min)</button>
           <span v-if="!isOperator" class="muted small" style="margin-left:8px">requires operator role</span>
         </div>
         <div v-else>
+          <p class="cap"><b>1 · Get the binary onto the host</b></p>
+          <div v-if="ahDownloadCmd" class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahDownloadCmd }}</div>
+          <p v-else class="muted small">Download the static linux build from the
+            <a :href="'https://github.com/blawesom/partout/releases'" target="_blank" rel="noopener">releases page</a>
+            (amd64 / arm64) and copy it to the host.</p>
+
+          <template v-if="locProtocol==='https:'">
+            <p class="cap" style="margin-top:10px"><b>2 · Trust the server CA</b> <span class="muted small">— the agent verifies the server before enrolling</span></p>
+            <div v-if="ahCaBusy" class="muted small">fetching the server root CA…</div>
+            <div v-else-if="ahCa" class="toolbar">
+              <button class="btn sm" @click="downloadAhCa">Download ca.crt</button>
+              <span class="muted small">place it next to the command (as <span class="mono">ca.crt</span>)</span>
+            </div>
+            <p v-else-if="ahCaErr" class="muted small">CA not fetched: {{ ahCaErr }} — ship it to the host as <span class="mono">ca.crt</span> next to the command.</p>
+          </template>
+
+          <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '3' : '2' }} · Run the agent</b> <span class="muted small">— one-time, expires in {{ ahTtlLeft }} s</span></p>
           <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahCmd }}</div>
           <div class="toolbar" style="margin-top:8px">
             <button class="btn sm" @click="copyAhCmd">Copy command</button>
-            <span class="muted small">shown once — expires in {{ ahTtlLeft }} s</span>
+            <span class="muted small">shown once</span>
           </div>
-          <p class="muted small" style="margin-top:8px">The <span class="mono">partout</span> binary ships as a static
-            linux build in each release. If this UI is behind a proxy, replace
+
+          <!-- Connection watch: the dialog that handed the recipe reports the
+               outcome, so the operator is never left staring at an empty fleet. -->
+          <div v-if="ahConnect==='waiting'" class="toolbar" style="margin-top:12px">
+            <span v-if="!ahStuck" class="spin"></span>
+            <span class="muted small">Waiting for the host to connect…</span>
+          </div>
+          <div v-if="ahConnect==='ok'" class="toolbar" style="margin-top:12px">
+            <span class="badge ok">✓ Connected</span>
+            <span class="muted small">the host joined the fleet</span>
+            <button class="btn sm" @click="go('host/'+ahHostId); closeAddHost()">View host →</button>
+          </div>
+          <div v-if="ahStuck" class="warn-box" style="margin-top:12px">
+            <b>No host connected yet.</b> Check, on the host:
+            <ul style="margin:6px 0 0 16px">
+              <li>token still valid? (expires in {{ ahTtlLeft }} s — mint a new one if not)</li>
+              <li>can the host reach <span class="mono">{{ locationHost }}</span>? (test: <span class="mono">curl -v http{{ locProtocol==='https:' ? 's' : '' }}://{{ locationHost }}/healthz</span>)</li>
+              <li v-if="locProtocol==='https:'">is <span class="mono">ca.crt</span> next to the command?</li>
+              <li>agent logs: <span class="mono">journalctl -u partout-agent</span></li>
+            </ul>
+          </div>
+
+          <p class="muted small" style="margin-top:8px">If this UI is behind a proxy, replace
             <span class="mono">{{ locationHost }}</span> with an address the host can actually reach.</p>
         </div>
       </div>
@@ -1884,6 +1922,8 @@
         provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false,
         addHostOpen: false, addHostTab: "manual",
         ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
+        ahCa: "", ahCaErr: "", ahCaBusy: false, // server root CA for TLS-mode recipes
+        ahKnownIds: null, ahWatchStarted: 0, ahConnect: "idle", ahHostId: "", // connection watch
         provRuns: [],
         provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
@@ -2001,8 +2041,23 @@
       },
       ahCmd() {
         if (!this.ahToken) return "";
-        return "PARTOUT_SERVER=" + this.locationHost + " PARTOUT_TOKEN=" + this.ahToken + " partout --mode=agent";
+        // TLS-mode servers require the CA before the agent can verify the
+        // enroll connection; the recipe ships it as ca.crt next to the command.
+        const ca = this.locProtocol === "https:" ? " PARTOUT_TLS_CA=ca.crt" : "";
+        return "PARTOUT_SERVER=" + this.locationHost + ca + " PARTOUT_TOKEN=" + this.ahToken + " partout --mode=agent";
       },
+      // A release build knows its exact assets (partout_<ver>_linux_<arch>.tar.gz);
+      // a dev build ("dev" or unstamped) falls back to the releases-page link.
+      ahIsRelease() { return /^v\d+\.\d+/.test(this.serverVersion || ""); },
+      ahDownloadCmd() {
+        if (!this.ahIsRelease) return "";
+        const v = this.serverVersion;
+        return "curl -LO https://github.com/blawesom/partout/releases/download/" + v + "/partout_" + v + "_linux_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz\ntar xzf partout_" + v + "_linux_*.tar.gz";
+      },
+      // Waiting >90s with no new host: flip to troubleshooting hints. (The
+      // token has a 15-min TTL; 90s is enough for a reachable host + operator
+      // paste, and short enough that the operator is not left staring.)
+      ahStuck() { return this.ahConnect === "waiting" && Date.now() - this.ahWatchStarted > 90000; },
       ahTtlLeft() {
         if (!this.ahTokenExpiry) return "—";
         return Math.max(0, this.ahTokenExpiry - Math.floor(this.ahNow / 1000));
@@ -2486,7 +2541,7 @@
           case "obs-configs": this.syncObserveQuery(); await this.loadConfigs(); break;
         }
       },
-      async loadHosts() { this.hostsLoading = true; try { const d = await this.api("/hosts"); this.hosts = d.items || []; } catch (e) { this.hosts = []; } finally { this.hostsLoading = false; } if (this.scope) this.resolveScope(); },
+      async loadHosts() { this.hostsLoading = true; try { const d = await this.api("/hosts"); this.hosts = d.items || []; } catch (e) { this.hosts = []; } finally { this.hostsLoading = false; } if (this.scope) this.resolveScope(); this.checkAhConnect(); },
       async loadHostDetail() {
         // Overview comes from GET /hosts/{id} (state/uuid/version/timestamps);
         // GET /hosts/{id}/facts only returns {host_id, ts, facts}.
@@ -3562,8 +3617,48 @@
         try {
           const d = await this.api("/agents/enrollment-tokens", { body: { ttl_s: 900 } });
           this.ahToken = d.token; this.ahTokenExpiry = d.expires;
+          // Connection watch: snapshot the fleet so the first NEW host flips
+          // the dialog to Connected instead of leaving the operator staring
+          // at an empty fleet (checked from loadHosts / host.state events).
+          this.ahKnownIds = new Set((this.hosts || []).map((h) => h.id));
+          this.ahConnect = "waiting"; this.ahWatchStarted = Date.now(); this.ahHostId = "";
           this.notify("ok", "enrollment token created — shown once, 15 min TTL");
+          if (this.locProtocol === "https:") this.loadAhCa(); // TLS recipe needs the CA
         } catch (e) { /* toast shown by api() */ } finally { this.ahTokenBusy = false; }
+      },
+      // Fetch the server root CA so a TLS-mode recipe is complete in-browser.
+      // Admin-gated endpoint: an operator gets the fallback instruction
+      // instead (the CA is public material — an admin can hand it over).
+      async loadAhCa() {
+        this.ahCaBusy = true; this.ahCaErr = "";
+        try {
+          const d = await this.api("/tls/ca", { toast: false });
+          this.ahCa = (d && d.cert) || "";
+          if (!this.ahCa) this.ahCaErr = "server returned no CA";
+        } catch (e) {
+          this.ahCa = "";
+          this.ahCaErr = e.status === 403 ? "an admin can fetch it: partout ctl ca" : e.message;
+        } finally { this.ahCaBusy = false; }
+      },
+      downloadAhCa() {
+        try {
+          const blob = new Blob([this.ahCa], { type: "application/x-pem-file" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = "ca.crt"; a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 4000);
+        } catch (e) { this.notify("err", "download failed: " + e.message); }
+      },
+      // Diff the fleet against the mint-time snapshot: the first host that
+      // was not there before is (almost certainly) the one this token
+      // enrolled. Called from loadHosts (which host.state SSE triggers).
+      checkAhConnect() {
+        if (this.ahConnect !== "waiting" || !this.ahKnownIds) return;
+        const fresh = (this.hosts || []).find((h) => !this.ahKnownIds.has(h.id));
+        if (fresh) {
+          this.ahConnect = "ok"; this.ahHostId = fresh.id;
+          this.notify("ok", "host connected — " + (this.hostName(fresh) || fresh.id) + " joined the fleet");
+        }
       },
       async copyAhCmd() {
         try { await navigator.clipboard.writeText(this.ahCmd); this.notify("ok", "copied to clipboard"); }

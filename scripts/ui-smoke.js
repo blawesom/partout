@@ -190,6 +190,32 @@ async function main() {
     const cmd = (d.querySelector(".overlay .console") || {}).textContent || "";
     check("add-host: command embeds one-time token", cmd.includes("PARTOUT_TOKEN=par_enr_") && cmd.includes("--mode=agent"), "cmd=" + cmd.slice(0, 120));
     check("add-host: ttl countdown rendered", /expires in \d+ s/.test((d.querySelector(".overlay") || {}).textContent || ""));
+    // The recipe is complete: step numbering, binary acquisition, and (on
+    // https servers) the CA step + PARTOUT_TLS_CA in the command. The smoke
+    // server is plain http on loopback, so drive the https branch by faking
+    // the captured protocol (the same mechanism as the login-banner checks).
+    check("add-host: binary step rendered", /1 · Get the binary onto the host/.test(d.body.textContent) && (w.__partout.ahDownloadCmd || d.body.textContent.includes("releases page")), "binary step missing");
+    check("add-host: run-agent step rendered", /\d · Run the agent/.test(d.body.textContent), "run step missing");
+    check("add-host: no CA step on http", !d.body.textContent.includes("Trust the server CA"), "CA step rendered on plain http");
+    const savedProto = w.__partout.locProtocol;
+    w.__partout.locProtocol = "https:"; await sleep(250);
+    check("add-host: CA step on https", d.body.textContent.includes("Trust the server CA"), "CA step missing on https");
+    const httpsCmd = (d.querySelector(".overlay .console:last-of-type") || {}).textContent || d.body.textContent;
+    check("add-host: command carries PARTOUT_TLS_CA on https", (w.__partout.ahCmd || "").includes("PARTOUT_TLS_CA=ca.crt"), "cmd=" + (w.__partout.ahCmd || ""));
+    check("add-host: step numbering shifts on https", /3 · Run the agent/.test(d.body.textContent), "numbering did not shift");
+    w.__partout.locProtocol = savedProto; await sleep(200);
+    // Connection watch: the dialog must report when a NEW host joins. The
+    // smoke has one host (the embedded agent); empty the mint-time snapshot
+    // and reload the REAL host list — the diff must flip the watch to ok.
+    check("add-host: watch waiting after mint", w.__partout.ahConnect === "waiting" && d.body.textContent.includes("Waiting for the host to connect"), "ahConnect=" + w.__partout.ahConnect);
+    w.__partout.ahKnownIds = new Set();
+    await w.__partout.loadHosts();
+    await sleep(250);
+    check("add-host: watch flips to Connected on a new host", w.__partout.ahConnect === "ok" && !!w.__partout.ahHostId && d.body.textContent.includes("Connected"), "ahConnect=" + w.__partout.ahConnect);
+    // Stuck path: fake the 90s elapsed window -> troubleshooting hints.
+    w.__partout.ahConnect = "waiting"; w.__partout.ahWatchStarted = Date.now() - 95000; await sleep(250);
+    check("add-host: troubleshooting hints after 90s", d.body.textContent.includes("No host connected yet") && d.body.textContent.includes("healthz"), "no troubleshooting block");
+    w.__partout.ahConnect = "ok"; // restore
     // fresh/join tooltips live in the SSH tab's select: switch tabs first.
     w.__partout.addHostTab = "ssh";
     await sleep(250);

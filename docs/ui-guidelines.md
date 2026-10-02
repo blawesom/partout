@@ -665,13 +665,24 @@ with two explicitly framed options, because a new user with an *existing* deploy
 has two valid paths and the old UI only exposed one (SSH provision, admin-only):
 
 - **Run on the host** (primary; operator+): mint a one-time enrollment token
-  (`POST /agents/enrollment-tokens`, 15-min TTL) and render one copy-pasteable
-  command block — `PARTOUT_SERVER=<host:port> PARTOUT_TOKEN=par_enr_… partout
-  --mode=agent` — with a Copy button and a live TTL countdown. The token is shown
+  (`POST /agents/enrollment-tokens`, 15-min TTL) and render a **complete recipe**:
+  **1 · Get the binary onto the host** — on a stamped release build, a copy-pasteable
+  `curl`+`tar` for the exact `partout_<ver>_linux_<arch>.tar.gz` asset (arch mapped from
+  `uname -m`); on a dev build, the releases-page link. **2 · Trust the server CA**
+  (https servers only) — the dialog fetches the root CA via the admin session
+  (`GET /tls/ca`; an operator gets the `partout ctl ca` fallback instruction) and offers
+  a **Download ca.crt** button. **3 · Run the agent** — `PARTOUT_SERVER=<host:port>
+  PARTOUT_TLS_CA=ca.crt PARTOUT_TOKEN=par_enr_… partout --mode=agent` (the CA variable
+  only on https) — with a Copy button and a live TTL countdown. The token is shown
   **once** (server-side one-time + hashed; the UI must not re-fetch or persist it).
   A note covers the proxy case (replace the browser-visible host with an address
-  the host can reach). The host row appears on connect — the existing
-  `host.state` SSE already reloads the fleet table; no extra wiring.
+  the host can reach). **Connection watch:** after minting, the dialog snapshots the
+  fleet and reports the outcome itself — a spinner ("Waiting for the host to
+  connect…") flips to **✓ Connected** (with a View host link) when a new host
+  appears (diffed on every `loadHosts`, which `host.state` SSE triggers), and after
+  90 s without a connect it swaps to targeted troubleshooting (token still valid?
+  host→server reachability with a `curl /healthz` test line, CA present?, agent
+  logs) — the operator is never left staring at an empty fleet.
 - **Onboard over SSH** (admin+): the existing provision flow (`user@host` +
   fresh/join), with the **precondition stated up front** ("the server's own
   `~/.ssh` must reach `user@host`") — it used to surface only as a mid-run
@@ -685,8 +696,10 @@ has two valid paths and the old UI only exposed one (SSH provision, admin-only):
   (identity preserved). For upgrades.
 
 Guards: `TestUIShape_AddHostSurface` (entry points, both tabs, token call, tooltips)
-+ `scripts/ui-smoke.js` (open dialog → mint token → command block embeds
-`par_enr_` → tooltips → close).
++ `scripts/ui-smoke.js` (open dialog → mint token → recipe renders with the binary
+step and the token command → CA step + `PARTOUT_TLS_CA=ca.crt` + shifted numbering
+on https (faked protocol) → connection watch waiting → Connected on a new host
+(real fleet diff) → troubleshooting hints after the 90 s window → tooltips → close).
 
 ## 20. Provision runs link to live host state
 
