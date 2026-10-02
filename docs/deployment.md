@@ -301,6 +301,24 @@ until they explicitly re-apply that one.
 
 ### 3.1 Bare binary + systemd — **server** *(implemented — `deploy/systemd/`)*
 
+**One-command install (recommended):** `scripts/install-server.sh` automates this
+entire section idempotently — binary, `partout` system user, dirs (`/var/lib/partout`,
+file root `/home/partout`), `server.env` (created only when missing — operator secrets
+are never clobbered), units + the daily backup timer, a real `partout doctor`
+pre-flight against the effective config, `enable --now`, and a `/healthz` verify that
+ends in a summary block (URL, password source, generated CLI token, TLS posture).
+A different binary version under a *running* service is refused with a pointer at
+`update-server.sh` (the supervised swap is the update path). Verified by
+`scripts/install-server-test.sh` (28 checks: layout, idempotency, env preservation,
+refusal, rewrites, and a real server started from the installed artifacts).
+
+```bash
+sudo bash scripts/install-server.sh --binary /path/to/partout            # defaults
+sudo bash scripts/install-server.sh --binary ./partout --tls on --port 8443
+```
+
+Manual steps (equivalent, for reference / non-systemd derivations):
+
 ```
 /usr/local/bin/partout
 /etc/partout/server.env        # EnvironmentFile (see server.env.example), mode 0640
@@ -702,7 +720,10 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
    (warn only), the provisioning SSH key, and the fleet-update release key —
    and exits non-zero on a hard failure. Run it before first start and after a
    config change: `partout doctor && ./partout`.
-1. Install server (§3.1) → `systemctl status partout-server` green;
+1. Install server — **one command** (`scripts/install-server.sh`, §3.1) runs
+   this checklist's steps 1–2 automatically (user, dirs, env with generated
+   tokens, units + backup timer, doctor, start, healthz, summary) and is
+   idempotent; or manually per §3.1 → `systemctl status partout-server` green;
    `GET /healthz` 200, `GET /readyz` 200.
 2. Set up auth: pre-seed the first-run admin user with `PARTOUT_ADMIN_PASSWORD` (or
    read the generated password from `<db dir>/admin_password.txt`), and/or set the RBAC

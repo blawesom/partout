@@ -108,7 +108,9 @@ tools for AI assistants — same policy gates, same audit trail.
 ## 5. From demo to production
 
 The embedded demo is a self-contained process with its own database — starting a real
-server is a fresh start, not a migration. Take the same binary, run it as
-`--mode=server` with TLS on (see [deployment.md](deployment.md) §3 for systemd,
-backup timer, and the bring-up checklist), and onboard hosts as above. Back up the
-SQLite file (`partout ctl db-backup`) — it is the control plane's state.
+server is a fresh start, not a migration. Take the same binary and run it as
+`--mode=server` with TLS on: on a systemd Linux box, **`sudo bash
+scripts/install-server.sh --binary ./partout --tls on`** is the one-command day-1
+install (user, env with generated tokens, units, daily backup timer, doctor,
+healthz — see [deployment.md](deployment.md) §3.1); back up the SQLite file
+(`partout ctl db-backup`) — it is the control plane's state.

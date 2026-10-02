@@ -564,14 +564,28 @@ signed-repo one-command triggered by CI the operator owns.
 
 #### M8.2 — Distribution artifacts
 
-Carried from the original M8 scope: Docker image + compose (server; the per-host
-agent stays a bare binary on systemd — containerizing it is a non-goal),
-cloud-init user-data for new VMs, Helm chart (server), status page (per-component
-readiness beyond `/healthz`/`/readyz`). Also deferred from the v0.7.3 feedback
-triage (DEPLOYMENT_FEEDBACK.md C9): `scripts/install-server.sh` — idempotent
-day-1 bootstrap (user, data dir, env, units, backup timer, healthz verify);
-pairs with the shipped `partout-backup.timer` and the §6 bring-up checklist.
-All remain *proposed* in `docs/deployment.md` until shipped.
+**Shipped:** `scripts/install-server.sh` — idempotent day-1 bootstrap for the
+server (the DEPLOYMENT_FEEDBACK.md C9 ask): binary, `partout` system user,
+dirs, `server.env` (created only when missing — operator secrets are never
+clobbered; generates the admin CLI token when not given), units + the daily
+backup timer, a real `partout doctor` pre-flight against the effective
+config, `enable --now`, `/healthz` verify, and a summary block (URL, password
+source, token, TLS posture). A different binary version under a running
+service is refused with a pointer at `update-server.sh` (updates are the
+supervised swap's job, not the installer's). Verified by
+`scripts/install-server-test.sh` (28 checks — layout, idempotent re-run, env
+preservation, version refusal, port/db rewrites, dry-run, and a REAL server
+started from the installed unit via a mock systemctl that parses the
+installed ExecStart/EnvironmentFile). Deployment §3.1/§6 lead with it.
+
+Carried (still proposed): Docker image + compose (server; the per-host agent
+stays a bare binary on systemd — containerizing it is a non-goal), cloud-init
+user-data for new VMs, Helm chart (server), status page (per-component
+readiness beyond `/healthz`/`/readyz`). Scoping decision (v0.9.6): Docker +
+compose + cloud-init + a readiness JSON are the M8.2 remainder for 1.0; Helm
+and the containerized agent stay documented non-goals unless operators ask
+(the agent-in-container sketch depends on the unimplemented `--root=/host`
+flag, and elevation inside containers is its own problem).
 
 
 ## Next steps
