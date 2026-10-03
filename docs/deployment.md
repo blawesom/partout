@@ -10,7 +10,8 @@ rollout orchestration, supervised server update via `partout selftest` +
 `scripts/update-server.sh`, the one-command `partout update`, **v0.9.x**: one-command
 uninstall, host-level elevation + the full Decision 3 elevation policy, and the
 jailed file surface; v0.9.7: **`scripts/install-server.sh`** — idempotent day-1 bootstrap, §3.1). Sections marked *proposed* describe planned work that is not
-yet wired into the binary.
+yet wired into the binary; sections marked *maybe future* are off the
+roadmap entirely — operator-demand sketches with no commitment.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/operations.md`
 **PRD anchor:** R16 (install paths), R15 (env config), R9 (storage engines).
 
@@ -403,7 +404,7 @@ the leaf SANs (`PARTOUT_TLS_SERVER_NAMES`) — `doctor` warns when it is not.
 > operations.md §3.6). Docker-host, air-gapped and non-systemd manual paths
 > follow the same env + flags (§4).
 
-### 3.3 Docker — server *(proposed — no artifacts in repo)*
+### 3.3 Docker — server *(maybe future — no artifacts in repo, not on the roadmap)*
 
 ```
 docker run -d --name partout-server \
@@ -417,7 +418,7 @@ docker run -d --name partout-server \
 `partout-data` holds the DB and `tls/` CA material — this volume **is** the server's
 state (back it up; ops doc §4.1).
 
-### 3.4 Docker — agent *(proposed — no artifacts in repo)*
+### 3.4 Docker — agent *(maybe future — no artifacts in repo, not on the roadmap)*
 
 ```
 docker run -d --name partout-agent \
@@ -428,11 +429,11 @@ docker run -d --name partout-agent \
   <image> --mode=agent --root=/host
 ```
 
-> `--root=/host` and `PARTOUT_ROOT` are *proposed* (not parsed); the containerized
+> `--root=/host` and `PARTOUT_ROOT` are *maybe future* (not parsed); the containerized
 > agent is for environments where a container is already the standard host-management
 > vehicle. For hosts that will need elevation, prefer the bare-binary agent (§3.2).
 
-### 3.5 Compose *(proposed — no artifacts in repo)*
+### 3.5 Compose *(maybe future — no artifacts in repo, not on the roadmap)*
 
 `deploy/compose/local.yaml` would hold server + same-host agent (the "one box" lab).
 nginx single-port routing (if not using Caddy):
@@ -450,7 +451,7 @@ server {
 }
 ```
 
-### 3.6 cloud-init *(proposed — no artifacts in repo)*
+### 3.6 cloud-init *(maybe future — no artifacts in repo, not on the roadmap)*
 
 `deploy/cloud-init/agent.yaml` user-data for new VMs (Debian/Ubuntu):
 
@@ -470,7 +471,7 @@ runcmd:
 Better practice: mint a **short-TTL token per VM** and inject it via the cloud API's
 user-data at create time (token shown once; the server logs the enrolling host's facts).
 
-### 3.7 Helm *(proposed — no artifacts in repo)*
+### 3.7 Helm *(maybe future — no artifacts in repo, not on the roadmap)*
 
 1. **Server**: single-replica `Deployment` (no HPA/leader election — PRD §13), `PVC` for
    `/var/lib/partout`, `Service` (+ optional Ingress TLS).
@@ -715,7 +716,7 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 
 - Server on a beefier box. *Proposed:* `PARTOUT_DB=postgres://` once hosts > ~10k or
   audit volume is high (R9); the current build is SQLite-only.
-- *Proposed:* image the agent (cloud-init §3.6), per-VM short-TTL tokens, concurrency /
+- *Maybe-future:* image the agent (cloud-init §3.6), per-VM short-TTL tokens, concurrency /
   spool tuning.
 
 ### 5.3 Air-gapped

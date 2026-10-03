@@ -163,7 +163,7 @@ CVE data — see the fleet Security card on the Updates page.
 New here? **[docs/getting-started.md](docs/getting-started.md)** is the guided
 5-minute walkthrough (first host, first command, the audit check).
 
-For systemd units, Docker/compose, cloud-init, and Helm, see [docs/deployment.md](docs/deployment.md).
+For systemd units (and maybe-future Docker/compose, cloud-init, Helm sketches), see [docs/deployment.md](docs/deployment.md).
 
 ### Deployment notes
 
@@ -222,7 +222,7 @@ help` prints the full reference.
 | [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions |
 | [docs/roadmap.md](docs/roadmap.md) | **Milestone plan & status** (M0–M8.1 done; 1.0 in preparation) + shipped feature deep-dives |
 | [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, storage, security, testing |
-| [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd/Docker/compose/cloud-init/Helm), config reference |
+| [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd; Docker/compose/cloud-init/Helm sketches), config reference |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, runbooks, troubleshooting, compliance |
 | [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: IA, tokens, components, slice plan |
 | [docs/ux-improvements.md](docs/ux-improvements.md) | **UX evaluation & improvement plan** (research; quick wins + later areas) |

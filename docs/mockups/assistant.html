@@ -1,0 +1,343 @@
+<!doctype html>
+<!--
+  Partout — Assistant (LLM) page, STATIC DESIGN MOCK.
+
+  Design mock for the proposed LLM assistant feature (docs/assistant.md).
+  Not the application: no build step, no framework, no network fetches.
+  Renders the v0.9.7 tokens (docs/ui-guidelines.md §7).
+
+  Depicts:
+   - chat column with tool chips (name + one-line result + audit link)
+   - an approval-parked card (write tool → require_approval)
+   - session header: profile selector (role-capped), endpoint + model, egress badge
+   - Settings > Assistant card (admin): endpoint, model, caps, key status, probe
+  Data is hard-coded sample data (the "cert expiring on role:web" scenario).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Partout — Assistant (design mock)</title>
+<style>
+  /* ---- tokens (ui-guidelines §7) ------------------------------------- */
+  :root {
+    --brand: #2563eb; --brand-subtle: #eff6ff;
+    --surface: #ffffff; --surface-app: #f8fafc; --surface-sunken: #f1f5f9;
+    --border: #e2e8f0; --border-strong: #cbd5e1;
+    --text: #0f172a; --text-muted: #475569; --text-faint: #94a3b8;
+    --healthy: #059669; --warning: #d97706; --critical: #dc2626;
+    --info: var(--brand); --neutral: #64748b;
+    --critical-subtle: #fef2f2; --critical-border: #fecaca;
+    --warning-subtle: #fffbeb; --warning-border: #fde68a;
+    --healthy-subtle: #ecfdf5; --healthy-border: #a7f3d0;
+    --r-card: 12px; --r-ctl: 8px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--surface-app); color: var(--text);
+         font: 14px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
+  .mono { font-family: var(--mono); }
+  .small { font-size: 12px; } .muted { color: var(--text-muted); }
+  .ic { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none;
+        stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---- shell ---------------------------------------------------------- */
+  .shell { display: grid; grid-template-columns: 270px 1fr; height: 100%; }
+  .side { background: var(--surface); border-right: 1px solid var(--border);
+          display: flex; flex-direction: column; padding: 14px 12px; gap: 4px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700;
+           letter-spacing: -.01em; padding: 4px 8px 14px; }
+  .brand .dot { width: 22px; height: 22px; border-radius: 6px; background: var(--brand);
+                color: #fff; display: grid; place-items: center; font-size: 12px; }
+  .brand .sub { font-weight: 500; color: var(--text-faint); font-size: 12px; margin-left: auto; }
+  .nav-section { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+                 color: var(--text-faint); padding: 12px 8px 4px; }
+  .nav-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+              border-radius: var(--r-ctl); color: var(--text-muted);
+              text-decoration: none; font-weight: 500; }
+  .nav-item + .nav-item { margin-top: 1px; }
+  .nav-item:hover { background: var(--surface-sunken); color: var(--text); }
+  .nav-item.is-active { background: var(--brand-subtle); color: var(--brand); font-weight: 600; }
+  .nav-item.is-new::after { content: "new"; font-size: 10px; font-weight: 700;
+        background: var(--warning-subtle); color: var(--warning);
+        border: 1px solid var(--warning-border); border-radius: 99px;
+        padding: 0 6px; margin-left: auto; }
+  .usercard { margin-top: auto; display: flex; align-items: center; gap: 8px;
+              padding: 8px; border-top: 1px solid var(--border); }
+  .avatar { width: 28px; height: 28px; border-radius: 99px; background: var(--brand-subtle);
+            color: var(--brand); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+  .role-chip { font-size: 11px; color: var(--text-muted); border: 1px solid var(--border);
+               border-radius: 99px; padding: 1px 8px; margin-left: auto; }
+
+  .main { overflow: auto; }
+  .page { max-width: 960px; margin: 0 auto; padding: 22px 28px 60px; }
+  .page-head { display: flex; align-items: baseline; gap: 12px; }
+  .page-head h1 { font-size: 20px; margin: 0; letter-spacing: -.02em; }
+  .page-sub { color: var(--text-muted); margin: 4px 0 18px; }
+
+  /* ---- chips / badges -------------------------------------------------- */
+  .chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+          font-weight: 600; border-radius: 99px; padding: 1px 8px;
+          border: 1px solid var(--border); color: var(--text-muted); background: var(--surface); }
+  .chip-write { color: var(--warning); border-color: var(--warning-border); background: var(--warning-subtle); }
+  .chip-ok { color: var(--healthy); border-color: var(--healthy-border); background: var(--healthy-subtle); }
+  .chip-egress { color: var(--brand); border-color: #bfdbfe; background: var(--brand-subtle); }
+
+  /* ---- session header --------------------------------------------------- */
+  .session-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                 background: var(--surface); border: 1px solid var(--border);
+                 border-radius: var(--r-card); padding: 10px 14px; margin-bottom: 14px; }
+  .session-bar .lbl { font-size: 12px; color: var(--text-faint); }
+  select.ctl { font: inherit; font-size: 13px; color: var(--text);
+               border: 1px solid var(--border-strong); border-radius: var(--r-ctl);
+               background: var(--surface); padding: 4px 8px; }
+  .session-bar .grow { flex: 1; }
+  .role-cap-hint { font-size: 11px; color: var(--text-faint); }
+
+  /* ---- chat -------------------------------------------------------------- */
+  .chat { background: var(--surface); border: 1px solid var(--border);
+          border-radius: var(--r-card); padding: 18px 20px; display: flex;
+          flex-direction: column; gap: 16px; min-height: 380px; }
+  .msg { display: flex; gap: 10px; }
+  .msg .bubble { background: var(--surface-sunken); border: 1px solid var(--border);
+                 border-radius: 10px; padding: 9px 12px; max-width: 78%; }
+  .msg.assistant .bubble { background: var(--surface); border-color: var(--border); }
+  .who { font-size: 11px; font-weight: 700; color: var(--text-faint);
+         text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+
+  .toolchip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+              border: 1px dashed var(--border-strong); border-radius: var(--r-ctl);
+              background: var(--surface); padding: 6px 10px; margin-top: 6px; }
+  .toolchip .tname { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+  .toolchip .targ { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
+  .toolchip .taudit { margin-left: auto; font-size: 11px; color: var(--brand);
+                      text-decoration: none; }
+  .toolchip .taudit:hover { text-decoration: underline; }
+
+  .approval { border: 1px solid var(--warning-border); background: var(--warning-subtle);
+              border-radius: var(--r-ctl); padding: 10px 12px; margin-top: 8px; }
+  .approval h4 { margin: 0 0 4px; font-size: 13px; color: var(--warning); }
+  .approval .payload { font-family: var(--mono); font-size: 12px; background: var(--surface);
+                       border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+                       margin: 6px 0; white-space: pre-wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 13px;
+         font-weight: 600; border-radius: var(--r-ctl); padding: 5px 12px; cursor: pointer;
+         border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
+  .btn:hover { background: var(--surface-sunken); }
+  .btn-brand { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .btn-brand:hover { background: #1d4ed8; }
+  .btn-danger { color: var(--critical); }
+
+  .composer { display: flex; gap: 10px; align-items: flex-end; margin-top: 4px;
+              border-top: 1px solid var(--border); padding-top: 14px; }
+  textarea.ctl { flex: 1; font: inherit; font-size: 13px; resize: none;
+                 border: 1px solid var(--border-strong); border-radius: var(--r-ctl);
+                 padding: 9px 12px; min-height: 42px; background: var(--surface); color: var(--text); }
+  textarea.ctl:focus { outline: 2px solid #bfdbfe; border-color: var(--brand); }
+
+  .egress-note { display: flex; align-items: center; gap: 8px; font-size: 12px;
+                 color: var(--text-muted); background: var(--brand-subtle);
+                 border: 1px solid #bfdbfe; border-radius: var(--r-ctl); padding: 7px 10px; }
+
+  /* ---- settings section --------------------------------------------------- */
+  .section { margin-top: 28px; }
+  .section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .section-head h2 { font-size: 15px; margin: 0; letter-spacing: -.01em; }
+  .section-head .cap { margin-left: auto; font-size: 12px; color: var(--text-faint); }
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: var(--r-card); padding: 16px 18px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 22px; }
+  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
+  input.ctl { font: inherit; font-size: 13px; width: 100%;
+              border: 1px solid var(--border-strong); border-radius: var(--r-ctl);
+              padding: 6px 10px; background: var(--surface); color: var(--text); }
+  input.ctl.mono { font-family: var(--mono); font-size: 12px; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0;
+        border-bottom: 1px solid var(--border); font-size: 13px; }
+  .kv:last-child { border-bottom: none; }
+  .kv b { font-weight: 600; }
+  .probe { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+  .probe .ok { color: var(--healthy); font-weight: 600; }
+  .mocktag { position: fixed; bottom: 10px; right: 14px; font-size: 11px; color: var(--text-faint);
+             background: var(--surface); border: 1px solid var(--border); border-radius: 99px;
+             padding: 3px 10px; }
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 5-3.5 8-7 10-3.5-2-7-5-7-10V6z"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M4 6l6 6-6 6M12 18h8"/></symbol>
+  <symbol id="i-scroll" viewBox="0 0 24 24"><path d="M7 4h11v14H8a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9 9h6M9 13h6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3zM12 11v4M12 18v.5"/></symbol>
+  <symbol id="i-mcp" viewBox="0 0 24 24"><rect x="4" y="9" width="16" height="10" rx="2"/><path d="M9 9V6a3 3 0 0 1 6 0v3M12 13v2"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2M6.3 6.3l1.4 1.4M16.3 16.3l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 16.3l-1.4 1.4"/></symbol>
+  <symbol id="i-egress" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M9 5H5v14h14v-4"/></symbol>
+</svg>
+
+<div class="shell">
+  <aside class="side">
+    <div class="brand"><span class="dot">P</span> Partout <span class="sub">v0.9.7</span></div>
+    <div class="nav-section">Fleet</div>
+    <a class="nav-item" href="#"><svg class="ic"><use href="#i-shield"/></svg>Fleet Management</a>
+    <a class="nav-item" href="#"><svg class="ic"><use href="#i-terminal"/></svg>Execute</a>
+    <a class="nav-item" href="#"><svg class="ic"><use href="#i-scroll"/></svg>Audit Log</a>
+    <div class="nav-section">Observe</div>
+    <a class="nav-item" href="#"><svg class="ic"><use href="#i-alert"/></svg>Alerts <span class="chip" style="margin-left:auto">2</span></a>
+    <div class="nav-section">Automation</div>
+    <a class="nav-item" href="#"><svg class="ic"><use href="#i-mcp"/></svg>MCP</a>
+    <a class="nav-item is-active is-new" href="#"><svg class="ic"><use href="#i-spark"/></svg>Assistant</a>
+    <div class="nav-section">Admin</div>
+    <a class="nav-item" href="#"><svg class="ic"><use href="#i-gear"/></svg>Settings</a>
+    <div class="usercard">
+      <span class="avatar">AL</span>
+      <span class="small"><b>ale</b><br><span class="muted">admin</span></span>
+      <span class="role-chip">admin</span>
+    </div>
+  </aside>
+
+  <main class="main"><div class="page">
+    <div class="page-head">
+      <h1>Assistant</h1>
+      <span class="chip chip-egress"><svg class="ic" style="width:12px;height:12px"><use href="#i-egress"/></svg>external endpoint</span>
+    </div>
+    <p class="page-sub">Chat with a model over the <b>same governed tool surface</b> as the MCP server —
+      every action still passes RBAC, policy, approvals and audit (docs: <span class="mono">docs/assistant.md</span>).
+      Fleet data leaves to the configured endpoint; prompts are not logged by default.</p>
+
+    <!-- session header -->
+    <div class="session-bar">
+      <span class="lbl">Profile</span>
+      <select class="ctl" title="Capped by your role">
+        <option>readonly</option>
+        <option selected>operator</option>
+        <option>full</option>
+      </select>
+      <span class="role-cap-hint">full requires admin · decide_approval never offered</span>
+      <span class="grow"></span>
+      <span class="chip">ollama.local:11434</span>
+      <span class="chip mono">qwen3-32b</span>
+      <span class="chip">session as4_f91c2 · turn 2/5</span>
+    </div>
+
+    <!-- chat -->
+    <div class="chat">
+      <div class="msg user">
+        <div class="bubble"><div class="who">You</div>Any certs expiring soon on role:web?</div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="avatar" style="margin-top:2px">✦</div>
+        <div class="bubble" style="max-width:88%">
+          <div class="who">Assistant</div>
+          One cert is expiring within 7 days.
+          <div class="toolchip">
+            <span class="tname">list_hosts</span><span class="targ">role:web → 4 hosts</span>
+            <a class="taudit" href="#">audit →</a>
+          </div>
+          <div class="toolchip">
+            <span class="tname">list_certificates</span><span class="targ">days&lt;=7 → 1 found</span>
+            <a class="taudit" href="#">audit →</a>
+          </div>
+          <div class="toolchip">
+            <span class="tname">get_host_facts</span><span class="targ">ag_4d21 (api-2) · letsencrypt</span>
+            <a class="taudit" href="#">audit →</a>
+          </div>
+          <b>api-2</b> (<span class="mono">ag_4d21</span>): <span class="mono">api.example.com</span>
+          expires <b style="color:var(--warning)">Apr 18 (6 days)</b>. Renewal job
+          <span class="mono">cert-renew</span> last ran OK on Apr 2.
+        </div>
+      </div>
+
+      <div class="msg user">
+        <div class="bubble"><div class="who">You</div>Run the renewal playbook on api-2.</div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="avatar" style="margin-top:2px">✦</div>
+        <div class="bubble" style="max-width:88%">
+          <div class="who">Assistant</div>
+          I can dispatch it, but it needs an approval first.
+          <div class="toolchip">
+            <span class="tname">run_playbook</span><span class="targ">cert-renew on ag_4d21</span>
+            <span class="chip chip-write">write</span>
+            <a class="taudit" href="#">audit →</a>
+          </div>
+          <div class="approval">
+            <h4>Parked for approval #42 — admin decision required</h4>
+            <div class="payload">playbook: cert-renew · host: ag_4d21 (api-2)
+steps: [renew-letsencrypt, reload-nginx] · scope: 1 host</div>
+            <span class="muted small">Policy <span class="mono">default-require-approval-writes</span> matched
+            <span class="mono">run_playbook</span>. The assistant cannot self-approve.</span><br>
+            <a class="btn btn-brand" href="#">Open approval #42</a>
+            <a class="btn btn-danger" href="#">Cancel run</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <textarea class="ctl" placeholder="Ask about the fleet, or request a governed action…"></textarea>
+        <button class="btn">Cancel</button>
+        <button class="btn btn-brand">Send</button>
+      </div>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="egress-note">
+        <svg class="ic"><use href="#i-egress"/></svg>
+        <span><b>Egress:</b> prompts + tool results are sent to <span class="mono">ollama.local:11434</span>
+        (local). ~4.1 KB this turn · logged to audit (prompts not logged — admin opt-in).</span>
+        <span class="chip chip-egress" style="margin-left:auto">local endpoint · zero external egress</span>
+      </div>
+    </div>
+
+    <!-- settings -->
+    <div class="section">
+      <div class="section-head"><h2>Settings — Assistant endpoint</h2>
+        <span class="cap">admin only · key stored in secrets vault, write-only</span></div>
+      <div class="card">
+        <div class="grid2">
+          <div class="field">
+            <label for="f-url">Endpoint (OpenAI-compatible base URL)</label>
+            <input id="f-url" class="ctl mono" value="http://ollama.local:11434/v1">
+          </div>
+          <div class="field">
+            <label for="f-model">Model</label>
+            <input id="f-model" class="ctl mono" value="qwen3-32b">
+          </div>
+          <div class="field">
+            <label for="f-key">API key</label>
+            <input id="f-key" class="ctl mono" value="•••••••••••• (set, masked)" readonly style="background:var(--surface-sunken)">
+          </div>
+          <div class="field">
+            <label for="f-prof">Default profile</label>
+            <select id="f-prof" class="ctl" style="width:100%;font:inherit;padding:6px 10px"><option>readonly</option><option selected>operator</option><option>full</option></select>
+          </div>
+          <div class="field">
+            <label for="f-turns">Max tool calls / turn</label>
+            <input id="f-turns" class="ctl" value="15" inputmode="numeric">
+          </div>
+          <div class="field">
+            <label for="f-clock">Max loop wall clock (s)</label>
+            <input id="f-clock" class="ctl" value="120" inputmode="numeric">
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:16px">
+          <button class="btn btn-brand">Save</button>
+          <button class="btn">Reset key</button>
+          <span class="grow" style="flex:1"></span>
+          <span class="probe">
+            <span class="ok">✓ probe OK</span>
+            tools: supported · model: qwen3-32b · 320 ms
+          </span>
+        </div>
+      </div>
+    </div>
+  </div></main>
+</div>
+<span class="mocktag">static design mock — sample data, not the application</span>
+</body>
+</html>

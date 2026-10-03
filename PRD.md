@@ -122,7 +122,7 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R13 | **Host OS identification** (`/etc/os-release`, `osImage`, support table) | Feeds package/patch logic and the external data refresh (§6.3). |
 | R14 | **Editions/licensing** | No editions or license keys; every capability is free and self-hosted. |
 | R15 | **Config via env vars; label-driven discovery** | Configuration via env vars; label-driven discovery. |
-| R16 | **Install paths** (bare binary + systemd, `docker run`, compose, cloud-init, Helm) | Bare binary + systemd, `docker run`, compose, cloud-init, Helm. |
+| R16 | **Install paths** (bare binary + systemd) | Bare binary + systemd is the v1 path (shipped installer + `partout uninstall`). Docker/compose, cloud-init, Helm, readiness JSON/status page are **maybe-future** — operator-demand driven, not committed (sketches: deployment.md §3.3–3.7). |
 | R17 | **Host provisioning** (server installs the agent over the operator's existing fleet SSH) | Preflight → scp binary + unit → start agent → standard enrollment. Credentials used in-memory only; never persisted; Docker-host installs are manual handoff. |
 | R18 | **Service fact collection** (systemd units with full state, deps, health) | Unit name, state (active/inactive/failed/activating/deactivating), sub-state, enablement, dependencies (required-by, wanted-by, after), restart policy, resource usage, custom operator labels |
 | R19 | **Config fact collection** (haproxy, nginx, validation, topology) | Config presence, version, validity (`-c` / `-t`), backends/servers, frontends/vhosts, TLS binding |
@@ -132,6 +132,7 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R23 | **Alert rules over service/config/cert domains** | Thresholds: service failed > N min, restarting in loop, cert expiring in N days, chain broken, OCSP revoked, config invalid, drift detected |
 | R24 | **UI pages: Services, Certificates, Configs** (fleet view, health, custom filter) | Sidebar nav section "Observe" with sub-pages |
 | R25 | **Alert engine** (threshold rules, alert store, SSE fan-out) | M6; the vehicle that makes observe data actionable |
+| R26 | **LLM assistant** (operator-configured endpoint, governed tool reuse) | Any OpenAI-compatible endpoint (incl. local); the assistant reuses the R11 tool surface through the same control plane — RBAC, policy, approvals, audit. Profiles cap the tool set; `decide_approval` is never assistant-reachable. Design: `docs/assistant.md`. |
 | C1 | **Remote command execution** (ad-hoc, sessions, scripts) | The core control primitive. |
 | C2 | **File management** (upload/download/edit/perm/checksum) | |
 | C3 | **Targeting model** (groups, tags, roles, selectors) | Groups, tags, roles, selectors. |
@@ -649,6 +650,11 @@ provision run steps (R17), audit events, and alert events (alert engine).
   the same decision-table pattern — a structured refusal that names the offending rule and what
   would satisfy it — is used for `policy_denied` / `approval_required` (the control-plane
   gate).
+- **Assistant reuse (R26):** the in-UI LLM assistant calls this same tool registry in-process
+  with the authenticated user's token — one tool surface, two front doors (external MCP
+  clients + the built-in assistant). Assistant profiles (readonly / operator / full) are
+  allow-lists over this catalog; the model can *request* a governed action but can never
+  *approve* one. Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
 
 ---
 
@@ -683,6 +689,10 @@ Stack per R12. New pages:
   hash, validity status, version, backends/servers count with active counts, frontends, TLS
   bindings. Config drift view: same config across hosts compared by hash, flagged when
   divergent. Task actions: `assert config_valid` as part of playbooks.
+- **Assistant** — LLM chat over the governed tool surface (R26): session header with profile
+  selector + egress badge, tool-call chips with audit links, approval-parked cards, cancel;
+  admin endpoint settings (URL, model, caps, vault key, capabilities probe). Gated off when
+  no endpoint is configured. Mockup: `docs/mockups/assistant.html`.
 - **Overview** — "fleet control" summary (hosts connected, pending approvals, recent failures)
   alongside monitoring widgets.
   Fleet Health cards now include an Observe widget showing active alert counts by severity
@@ -723,6 +733,9 @@ feature paywall (R14). Consequences that follow from "everything free":
 - **Not** container-*orchestration* (Swarm/K8s control); containers are observed, not scheduled.
 - **Not** a replacement for secret managers at enterprise scale (no HSM/KMS integration in v1;
   a pluggable KMS hook is a later concern).
+- **Not** a hosted or bundled LLM: the assistant's endpoint is always operator-configured
+  (any OpenAI-compatible server, including fully local ones — Ollama, vLLM, LM Studio);
+  Partout never ships a model and never sends telemetry to a vendor.
 
 ---
 
@@ -798,9 +811,18 @@ feature paywall (R14). Consequences that follow from "everything free":
   drift comparison, and the Active Alerts section on `/fleet` — is still open; the Alerts page
   is live since v0.6.5 (firing/recently-resolved list; rule management stays M7).*
 
-- **M8 — Distribution & polish:** installers (systemd unit, `docker run`, compose),
-  cloud-init, Helm chart, status page integration. Independent of the observe layer;
-  can be interleaved with M5–M7.
+- **M8 — Distribution & polish:** systemd installer (`scripts/install-server.sh`) +
+  `partout uninstall` — shipped. Docker/compose, cloud-init, Helm chart, status page:
+  reclassified **maybe-future** (operator-demand driven, not committed; sketches in
+  deployment.md §3.3–3.7). Independent of the observe layer.
+- **M9 — LLM assistant (`R26`, in 1.0):** the operator configures an external,
+  OpenAI-compatible LLM endpoint; a built-in assistant chats over the fleet through the R11
+  tool registry in-process (same RBAC / policy / approvals / audit chain; profiles
+  `readonly|operator|full` cap the tool set; `decide_approval` is never assistant-reachable).
+  Audit rows carry the assistant session + model + prompt hash (Decision 18); data egress
+  is explicit (blocking consent modal at first enablement, per-turn egress audit, prompts
+  not logged by default). Design + mockup (PRD Decisions 17–19): `docs/assistant.md`,
+  `docs/mockups/assistant.html`.
 
 ---
 
@@ -889,9 +911,34 @@ feature paywall (R14). Consequences that follow from "everything free":
     emits alert events. This keeps the agent minimal and avoids distributing rule definitions
     to agents (no policy-bundle-like mechanism needed). Alert rules are CRUD-managed on the
     server with the same audit trail as other server-side state.
+17. **LLM assistant — governed tool reuse, not a new write path (R26).** The
+    assistant is a *reflection of the control plane*, the same doctrine as the UI: it reuses
+    the R11 MCP tool registry through the in-process REST router with the authenticated
+    user's token, so RBAC, the policy gate, approvals, and audit apply unchanged — the model
+    can *request* a governed action, never *approve* one. The endpoint is operator-configured
+    (OpenAI-compatible; a local endpoint is the zero-egress option), tool profiles
+    (readonly/operator/full) are allow-lists over the MCP catalog, and data egress is
+    explicit: blocking consent modal at first enablement, per-turn egress audit, prompts
+    not logged by default. See `docs/assistant.md`.
+18. **LLM assistant transcripts — persist, split-store (R26).** Sessions and messages are
+    stored (`assistant_sessions` + `assistant_messages`), retention-configurable with a
+    30-day default (the sessions-recording precedent, §9). The transcript is the
+    accountability record: full prompts + replies, user-owned, admin-readable (the
+    approvals visibility split). The audit log carries the action half only —
+    `source=assistant`, session id, model, tool calls, plus a sha256 of the prompt
+    (correlation without content); "prompts not logged" refers to the audit log, behind
+    the opt-in admin flag.
+19. **LLM assistant endpoint — one server-wide, admin-set (R26).** A single
+    admin-configured endpoint is the only egress destination: one consent surface, one
+    audit destination, no personal API keys. Per-user endpoints, if ever requested, ship
+    as an admin-granted capability (admin registers the endpoint, then assigns it to a
+    user) — never user-self-serve URL+key entry. The first-class deployment is a local
+    endpoint (Ollama/vLLM on the server host, zero external egress), documented in
+    getting-started.
 
 ### 15.2 Open questions
 
-**None — all decisions recorded.**
+**None — all decisions recorded.** The R26 assistant questions (transcript persistence,
+endpoint scope) are recorded as Decisions 18–19 above.
 
 

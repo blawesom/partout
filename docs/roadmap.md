@@ -22,7 +22,8 @@
 | **M5 — Observe: fact collectors** | ✅ Complete + M5.1 | R18–R20: agent collectors for service/config/cert facts; server merge-on-write into `host_facts` JSON; read-only API (`GET /services`, `/certificates`, `/configs`). Web UI pages render real data. MCP read tools ship with the R11 server (REST endpoints are their backing surface). **M5.1: periodic CVE security scan** (agent update list + OSV correlation → `security_findings`), `security_updates` alert kind + preset rule, fleet Security card + Scan now. |
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
-| **M8 — Distribution & self-update** | 🚧 M8.1 + M8.1.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.1.1 update drift & auto-draft rollouts**: uploading an agent release pre-arms a parked draft rollout (operator starts it; policy re-checked at start) + `update_drift` server-level alert (preset `default-update-drift` — agents behind the store's latest). **M8.2 distribution artifacts**: Docker/compose, cloud-init, Helm, status page. |
+| **M8 — Distribution & self-update** | 🚧 M8.1 + M8.1.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.1.1 update drift & auto-draft rollouts**: uploading an agent release pre-arms a parked draft rollout (operator starts it; policy re-checked at start) + `update_drift` server-level alert (preset `default-update-drift` — agents behind the store's latest). **M8.2 install/uninstall**: `install-server.sh` + `partout uninstall` shipped; Docker/compose, cloud-init, Helm, readiness JSON/status page are **maybe-future** (off the 1.0 path) |
+| **M9 — LLM assistant** | 📋 design agreed — **in 1.0**, not started | R26: operator-configured OpenAI-compatible endpoint; in-UI assistant reusing the R11 MCP tool registry in-process (RBAC/policy/approvals/audit unchanged; profiles cap tools; `decide_approval` never assistant-reachable). Design: `docs/assistant.md` · mockup: `docs/mockups/assistant.html` · PRD Decisions 17–19 |
 
 ### M0 — Spine (complete)
 
@@ -581,15 +582,48 @@ installed ExecStart/EnvironmentFile). Deployment §3.1/§6 lead with it.
 `/usr/local/sbin/partout-backup.sh` (the backup timer's ExecStart script —
 previously orphaned by uninstall).
 
-Carried (still proposed): Docker image + compose (server; the per-host agent
+Maybe-future — removed from the roadmap (no commitment, operator-demand driven,
+nothing here gates 1.0): Docker image + compose (server; the per-host agent
 stays a bare binary on systemd — containerizing it is a non-goal), cloud-init
-user-data for new VMs, Helm chart (server), status page (per-component
-readiness beyond `/healthz`/`/readyz`). Scoping decision (v0.9.6): Docker +
-compose + cloud-init + a readiness JSON are the M8.2 remainder for 1.0; Helm
-and the containerized agent stay documented non-goals unless operators ask
-(the agent-in-container sketch depends on the unimplemented `--root=/host`
-flag, and elevation inside containers is its own problem).
+user-data for new VMs, Helm chart (server), and a per-component readiness
+JSON / status page beyond `/healthz`/`/readyz`. Sketches live in
+deployment.md §3.3–3.7 (the agent-in-container sketch depends on the
+unimplemented `--root=/host` flag, and elevation inside containers is its
+own problem). They ship only if operators ask.
 
+
+### M9 — LLM assistant (design agreed — in 1.0)
+
+**Status: design agreed — not started; in 1.0 scope, built after the item-20 gate.**
+R26 (PRD §4, Decisions 17–19): the operator
+configures an external, OpenAI-compatible LLM endpoint (any vendor, or a local
+Ollama/vLLM for zero egress); a built-in assistant chats over the fleet **reusing the
+R11 MCP tool registry in-process** — one tool surface, two front doors.
+
+Non-negotiables (the reason it reuses the MCP surface rather than adding a new path):
+
+- The assistant acts as the authenticated user (RBAC ∩ profile); every tool call goes
+  through the normal REST chain — policy deny, approval parking, audit.
+- The model can *request* a governed action, never *approve* one — `decide_approval`
+  is not assistant-reachable.
+- Tool profiles (`readonly` default / `operator` / `full`) are allow-lists over the
+  MCP catalog's read/write split; per-run caps (tool calls, wall clock, result bytes).
+- Egress is explicit: blocking consent modal at first enablement + session egress badge,
+  per-turn egress audit row, prompts not logged by default.
+- Transcripts persist — split-store (Decision 18): full prompts + replies in
+  `assistant_messages` (30-day retention, user-owned/admin-readable); audit rows carry
+  session id, model, tool calls and a prompt sha256 only.
+- One server-wide, admin-set endpoint (Decision 19) — the single egress destination;
+  per-user endpoints only ever as an admin-granted capability.
+
+Scope (1.0 slice): `internal/server/assistant` (LLM client, agent loop, profiles, endpoint +
+transcript store — reusing `mcp.Tool`/`localAPI` unchanged), REST + SSE chat surface,
+Web UI Assistant panel + Settings card, audit `source=assistant` tagging (prompt
+sha256, no content). Follow-ups: Explain buttons (alert/execution detail),
+alert-triage remediation drafts (parked as approvals), scheduled NL checks,
+fleet-drift reports.
+
+Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
 
 ## Next steps
 
@@ -616,7 +650,7 @@ flag, and elevation inside containers is its own problem).
 17a. ~~**M6 — Alert engine**~~ ✅ Done (v0.6.5) — see the M6 section above (rules, evaluation, dedup, SSE, API/CLI/MCP, live Alerts page).
 17b. ~~**M6.1 — `service_restarting` rule kind**~~ ✅ Done (v0.7) — agent collects systemd `NRestarts`; engine computes restarts/hour per unit over the real interval between counter movements (not the 30 s alert tick, which inflated the rate ~10×), holds the rate while a loop continues (no firing/resolved flapping between facts uploads), folds counter resets, and ignores units whose collector failed; fires ≥ `service_restart_rate_per_hour` (default 10), resolves after 10 min quiet.
 17c. ~~**M7 remainders**~~ ✅ Done (v0.7) — alert rule-management UI, cert→config→service cross-links, config drift (R22, `config_drift` rule), task actions, live PTY (xterm.js), and write actions (jobs CRUD, package apply/dry-run, provision start/key-confirm/cancel). See the M7 section above.
-18. **Postgres backend — decision (v0.9.6): post-v1.** SQLite is the 1.0 storage engine (WAL, single writer — fine to ~10k hosts per the capacity targets); the Postgres dialect ships after 1.0, at which point the migration-parity CI matrix from arch §14 starts. The original sequencing then (M8.1 signed fleet updates: release store + signatures, agent self-swap with rollback, rollout orchestration, auto job-decision re-issue; M8.2 Docker/compose, cloud-init, Helm, status page). See the M8 section.
+18. **Postgres backend — decision (v0.9.6): post-v1.** SQLite is the 1.0 storage engine (WAL, single writer — fine to ~10k hosts per the capacity targets); the Postgres dialect ships after 1.0, at which point the migration-parity CI matrix from arch §14 starts. The original sequencing then (M8.1 signed fleet updates: release store + signatures, agent self-swap with rollback, rollout orchestration, auto job-decision re-issue; M8.2 the shipped installer/uninstall — Docker/compose, cloud-init, Helm and the status page are maybe-future, off the 1.0 path). See the M8 section.
 19. **~~Elevation — full Decision 3 (per-command profiles) + finer-grained env control.~~** ✅ **Policy engine shipped (next release, post-v0.9.5):** the **elevation policy** (`PARTOUT_ELEVATION_POLICY`: one .json or a *.json drop-in dir) is now the single source of truth for what the agent runs elevated — pattern-scoped rules (exact args, verb×unit `systemctl` grants, file-glob reads, per-rule env) — and `partout ctl elevation <show|check|install-sudoers>` renders the sudoers drop-in **from the same policy** (visudo-checked before install; `check` detects drift via a `policy-sha256` header). With a policy loaded + `PARTOUT_ELEVATE=sudo`, a matching command elevates and a non-matching one runs unprivileged (logged); no policy = legacy drop-in decides. Policy-generated drop-ins keep `env_reset` ON (per-rule env renders as `SETENV:`, retiring the legacy blanket `!env_reset` for generated files). The observe layer now reports a root-only config as **not readable** (never mislabeled *invalid*) and validates elevated when the policy authorizes the validator. Example: `deploy/elevation/elevation-web.json.example`. **Remaining** (take up when operators ask): `PARTOUT_ROOT` (elevated target home); elevation visibility on the exec/audit UI surface (a per-run "elevated/not in scope" badge); per-command profiles declared in the server-side command spec (PRD Decision 3 + arch §6.6); and optionally even finer env management (scoped `env_keep` allowlists beyond per-rule `SETENV`). See operations.md §3.6.
 
 
@@ -640,6 +674,9 @@ flag, and elevation inside containers is its own problem).
     the server keeps serving, but this host will NOT appear in it`) and a
     **server-half** death after readiness logs and unwinds the whole process
     (nothing serves anymore) instead of hanging until shutdown.
+22. **M9 — LLM assistant (R26)**: design agreed — `docs/assistant.md` + PRD Decisions
+    17–19 (governed tool reuse; split-store transcripts; one admin-set endpoint).
+    **In 1.0**: build the 1.0 slice (design doc §9) after the item-20 gate; ships with 1.0.
 ### Polish items (closed this cycle)
 
 - **v0.9.7 — onboarding & trust pass, UX quick wins, and the first M8.2
