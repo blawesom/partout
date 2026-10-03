@@ -22,6 +22,7 @@ package sshutil
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -222,5 +223,160 @@ func TestLiveSSHDirIsolation(t *testing.T) {
 	kh := filepath.Join(sshDir, "known_hosts")
 	if _, err := os.Stat(kh); err != nil {
 		t.Fatalf("isolated known_hosts missing: %v", err)
+	}
+}
+
+// TestLiveAliasStrict proves ssh-config aliases work end-to-end against a
+// real sshd: the run captures the key via the alias (resolved through
+// ssh -G to the HostName), stores it under the resolved name, and a strict
+// ssh connect via the alias succeeds — the exact provision key-confirm flow
+// an operator with "Host ai / HostName <ip>" in their config relies on.
+func TestLiveAliasStrict(t *testing.T) {
+	host := liveHost(t)
+	sshDir := liveSSHDir(t)
+	cfg := liveConfig(sshDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The operator-style alias: Host <alias> / HostName <real host>.
+	alias := "partout-live-alias"
+	cfgPath := filepath.Join(sshDir, "config")
+	if err := os.WriteFile(cfgPath, []byte(
+		fmt.Sprintf("Host %s\n    HostName %s\n    User %s\n", alias, host, currentUser())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolution: alias -> real host, via the same config ssh will use.
+	res, err := cfg.ResolveHost(ctx, alias)
+	if err != nil {
+		t.Fatalf("ResolveHost: %v", err)
+	}
+	if res.Host != host {
+		t.Fatalf("resolved host = %q, want %q", res.Host, host)
+	}
+
+	// Not yet trusted under the alias.
+	trusted, err := cfg.HasHost(ctx, alias)
+	if err != nil {
+		t.Fatalf("HasHost: %v", err)
+	}
+	if trusted {
+		t.Fatalf("alias %s unexpectedly already trusted", alias)
+	}
+
+	// Capture + confirm via the alias; the key line must be keyed under
+	// the resolved host.
+	_, _, line, err := cfg.HostKey(ctx, alias)
+	if err != nil {
+		t.Fatalf("HostKey via alias: %v", err)
+	}
+	if !strings.HasPrefix(line, host+" ") {
+		t.Fatalf("key line %q not keyed under resolved host %q", line, host)
+	}
+	if err := cfg.AddKey(ctx, line); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	// The alias must now be trusted.
+	trusted, err = cfg.HasHost(ctx, alias)
+	if err != nil {
+		t.Fatalf("HasHost after AddKey: %v", err)
+	}
+	if !trusted {
+		t.Fatal("HasHost(alias) false after AddKey(resolved)")
+	}
+
+	// A strict ssh run via the alias must succeed end-to-end.
+	out, stderr, exit, err := cfg.Run(ctx, alias, "echo PARTOUT_LIVE_ALIAS_OK")
+	if err != nil {
+		t.Fatalf("Run via alias: %v", err)
+	}
+	if exit != 0 {
+		t.Fatalf("strict Run via alias exit %d: %s", exit, strings.TrimSpace(stderr))
+	}
+	if !strings.Contains(out, "PARTOUT_LIVE_ALIAS_OK") {
+		t.Fatalf("unexpected Run output: %q (stderr %q)", out, stderr)
+	}
+}
+
+// currentUser returns the invoking user's name (sshd needs it in the alias
+// config; $USER suffices for the live-test environment).
+func currentUser() string {
+	u := os.Getenv("USER")
+	if u == "" {
+		u = "root"
+	}
+	return u
+}
+
+// TestLiveProxyCaptureStrict proves the ProxyJump/ProxyCommand capture path
+// end-to-end against a real sshd: the target is only reachable through a
+// ProxyCommand (raw-TCP keyscan cannot traverse it), so the key must be
+// captured by ssh itself into a throwaway known_hosts — then gated through
+// key_confirm (AddKey) and used for a strict connect. The throwaway
+// accept-new never touches the operator's known_hosts.
+func TestLiveProxyCaptureStrict(t *testing.T) {
+	host := liveHost(t)
+	sshDir := liveSSHDir(t)
+	cfg := liveConfig(sshDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, err := exec.LookPath("nc"); err != nil {
+		t.Skip("no nc for the ProxyCommand test")
+	}
+
+	// Structurally a proxied target: the connection to <host> goes through
+	// a ProxyCommand, which forces the ssh-capture path (keyscan would do
+	// raw TCP to the hostname and read no config).
+	alias := "partout-live-proxy"
+	cfgPath := filepath.Join(sshDir, "config")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf(
+		"Host %s\n    HostName %s\n    User %s\n    ProxyCommand nc %%h %%p\n",
+		alias, host, currentUser())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := cfg.ResolveHost(ctx, alias)
+	if err != nil {
+		t.Fatalf("ResolveHost: %v", err)
+	}
+	if !res.ViaProxy {
+		t.Fatalf("resolved = %+v, want ViaProxy=true (ProxyCommand present)", res)
+	}
+
+	// The operator's known_hosts must stay untouched by the capture.
+	kh := filepath.Join(sshDir, "known_hosts")
+	before, _ := os.ReadFile(kh)
+
+	_, _, line, err := cfg.HostKey(ctx, alias)
+	if err != nil {
+		t.Fatalf("HostKey via proxy: %v", err)
+	}
+	if !strings.HasPrefix(line, host+" ") {
+		t.Fatalf("captured line %q not keyed under %q", line, host)
+	}
+	after, _ := os.ReadFile(kh)
+	if string(before) != string(after) {
+		t.Fatalf("capture wrote to the operator's known_hosts:\n%s", after)
+	}
+
+	// Gate + trust + strict connect via the proxy alias.
+	if err := cfg.AddKey(ctx, line); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	trusted, err := cfg.HasHost(ctx, alias)
+	if err != nil || !trusted {
+		t.Fatalf("HasHost(alias) = %v, %v", trusted, err)
+	}
+	out, stderr, exit, err := cfg.Run(ctx, alias, "echo PARTOUT_LIVE_PROXY_OK")
+	if err != nil {
+		t.Fatalf("Run via proxy: %v", err)
+	}
+	if exit != 0 {
+		t.Fatalf("strict Run via proxy exit %d: %s", exit, strings.TrimSpace(stderr))
+	}
+	if !strings.Contains(out, "PARTOUT_LIVE_PROXY_OK") {
+		t.Fatalf("unexpected output: %q", out)
 	}
 }

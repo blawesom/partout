@@ -169,6 +169,7 @@ func (s *Store) applySchema() error {
 	if err := ensureColumns(tx, []columnSpec{
 		{table: "agents", column: "tls_pub", def: "TEXT NOT NULL DEFAULT ''"},
 		{table: "agents", column: "tls_not_after", def: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "provision_runs", column: "resolved_host", def: "TEXT"},
 	}); err != nil {
 		return fmt.Errorf("store: ensure columns: %w", err)
 	}

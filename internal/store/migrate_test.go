@@ -111,3 +111,59 @@ func TestMigration_UpgradeV13AddsTLSColumns(t *testing.T) {
 		t.Errorf("upgraded row defaults = (%q,%d), want ('',0)", pub, na)
 	}
 }
+
+// TestMigration_UpgradeAddsResolvedHost simulates a pre-alias-support
+// database (provision_runs without resolved_host) and verifies that opening
+// it with New() adds the column and that the run — including its resolved
+// target once set — remains readable.
+func TestMigration_UpgradeAddsResolvedHost(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/old.db"
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v0.9.7-era provision_runs (no resolved_host).
+	stmts := []string{
+		`CREATE TABLE schema_version (version INTEGER NOT NULL)`,
+		`INSERT INTO schema_version(version) VALUES (13)`,
+		`CREATE TABLE provision_runs (
+			id TEXT PRIMARY KEY, host TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'fresh',
+			state TEXT NOT NULL DEFAULT 'queued', key_type TEXT, fingerprint TEXT, key_line TEXT,
+			token_hash TEXT, agent_id TEXT, step TEXT, error TEXT,
+			created INTEGER NOT NULL, updated INTEGER NOT NULL)`,
+		`INSERT INTO provision_runs(id, host, mode, state, created, updated)
+		 VALUES ('prv_old', 'ai', 'fresh', 'connected', 1, 2)`,
+	}
+	for _, s := range stmts {
+		if _, err := raw.Exec(s); err != nil {
+			raw.Close()
+			t.Fatalf("seed old db: %v", err)
+		}
+	}
+	raw.Close()
+
+	st, err := New("sqlite:" + path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	defer st.Close()
+
+	if !hasColumn(t, st.db, "provision_runs", "resolved_host") {
+		t.Fatal("provision_runs.resolved_host missing after migration")
+	}
+	runs, err := st.ProvisionRuns(10)
+	if err != nil {
+		t.Fatalf("ProvisionRuns after migration: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != "prv_old" || runs[0].ResolvedHost != "" {
+		t.Fatalf("unexpected runs: %+v", runs)
+	}
+	if err := st.SetProvisionRunResolved("prv_old", "172.16.100.95"); err != nil {
+		t.Fatalf("SetProvisionRunResolved: %v", err)
+	}
+	r, err := st.ProvisionRun("prv_old")
+	if err != nil || r.ResolvedHost != "172.16.100.95" {
+		t.Fatalf("resolved host not persisted: %+v err=%v", r, err)
+	}
+}

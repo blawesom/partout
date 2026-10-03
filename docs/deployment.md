@@ -33,7 +33,16 @@ wait-enroll). The server spawns the system `ssh`/`scp`/`ssh-keyscan`/`ssh-keygen
 passed to the binaries **explicitly** (`-F`, `UserKnownHostsFile`, `IdentityFile`); a
 non-default dir replaces the per-user `ssh_config`. `PARTOUT_SERVER_HOST` sets the address
 written into the new agent's `agent.env`. Preflight also probes host→server reachability
-(`/healthz`) so a firewall fails fast.
+(`/healthz`) so a firewall fails fast. Provision hosts may be **ssh-config aliases**:
+the run resolves them with `ssh -G` (same config file) before keyscan, so `Host ai` /
+`HostName 172.16.100.95` blocks work — the captured key is stored under the resolved
+name, and the key-confirm screen shows `ai → 172.16.100.95`. Hosts behind a
+**ProxyJump/ProxyCommand** (and `HostKeyAlias` configs) are supported too: the key is
+captured through ssh itself into a throwaway known_hosts (the operator gate still
+applies — it is a capture transport, not silent TOFU). A **reinstalled host** (key
+changed) fails with a re-confirm hint; the run's detail view offers **Re-confirm key**,
+which drops the stale entry, re-captures, and re-gates at `key_confirm`. One active
+run per host: a second concurrent run for the same host is rejected (409).
 New env vars: `PARTOUT_SSH_DIR`, `PARTOUT_SERVER_HOST`.
 **What v0.3 also ships (M2–M3, M4 in progress):** offline spool (R5), files &
 sessions (M2), secrets (C7), external data refresh (§6.3), package management (C6),
@@ -382,6 +391,12 @@ systemctl enable --now partout-agent
 TLS variant: add `--ca-file /etc/partout/ca.crt` (or `PARTOUT_TLS_CA` in the env file);
 the agent then enrolls over HTTPS and stores its CA-signed leaf + key under
 `<data dir>/tls/` (key 0600), and reconnects over mTLS on later starts.
+Via fleet provisioning this is automatic: when the server runs with
+`PARTOUT_TLS=on`, the provisioner ships the root CA to `/etc/partout/ca.crt`
+and writes `PARTOUT_TLS_CA` into `agent.env` (verified against its sha256),
+so provisioned agents enroll over HTTPS and stream over mTLS with no manual
+CA step. Make sure the host agents dial (`PARTOUT_SERVER_HOST`) is covered by
+the leaf SANs (`PARTOUT_TLS_SERVER_NAMES`) — `doctor` warns when it is not.
 
 > *Elevation (PRD Decision 3):* wired — `PARTOUT_ELEVATE=sudo` + the
 > elevation policy (`PARTOUT_ELEVATION_POLICY`, `partout ctl elevation`;
@@ -566,7 +581,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | Var / Flag | Default | Notes |
 |---|---|---|
 | `PARTOUT_PORT` / `--port` | **8443** | single listener (REST + SSE + gRPC) |
-| `PARTOUT_ADDR` / `--addr` | *(empty = all interfaces)* | bind address for the single listener; set `127.0.0.1` when the server sits behind a reverse proxy on the same host — keeps a plaintext (or TLS) control plane off the public interface |
+| `PARTOUT_ADDR` / `--addr` | *(empty = all interfaces)* | bind address for the single listener; set `127.0.0.1` when the server sits behind a reverse proxy on the same host — keeps a plaintext (or TLS) control plane off the public interface. **Incompatible with provisioning remote hosts**: a loopback bind is unreachable from any other machine, so fleet-provisioned agents can never connect (the server warns at boot, `doctor` flags it, and preflight fails with a specific bind error — not a firewall hint) |
 | `PARTOUT_DB_PATH` / `--db` | **./partout.db** | SQLite path; `tls/` CA material is created in `<db dir>/tls/` |
 | `PARTOUT_TLS` / `--tls` | **off** | `on` → local root-CA bootstrap + mTLS on the gRPC stream; REST/SSE stay bearer-auth |
 | `PARTOUT_TLS_SERVER_NAMES` / `--tls-names` | **localhost,127.0.0.1,\<hostname\>** | comma-separated SANs for the server leaf |
@@ -582,8 +597,8 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_AUTO_DRAFT_ROLLOUTS` | **true** | (M8.1.1) when a new **agent** release is uploaded, pre-arm a **paused** fleet rollout (draft, canary 1, wave 25). Safe to leave on — a draft is inert until an operator Starts it; set `false` to disable |
 | `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` | **false** | air-gap switch: disables all external data fetching, EOL + CVE (PRD §6.3) |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for future output blobs — external data cache is in-DB (`eol_cache`/`vuln_cache`) |
-| `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules |
-| `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning (the listen address `:8443` is not usable by remote agents) |
+| `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules. **ssh-config aliases work as provision hosts**: the run resolves them via `ssh -G` against that same config before keyscan, and the key-confirm screen shows the resolved target. The wizard's *SSH access* line and `partout doctor` report host-specific `IdentityFile` entries too (keys a conventional-name scan misses) |
+| `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning (the listen address `:8443` is not usable by remote agents). The hostname default only works when every target can resolve it — on routed LANs without DNS, or when `/etc/hosts` maps the hostname to `127.0.1.1`, set an explicit IP/FQDN (the server warns at boot and `doctor` checks it) |
 | `PARTOUT_REQUIRE_FILE_ROOT` | **false** | (file root, docs/spec-file-root.md) when true, file ops are refused to agents that report no `partout.file_root` fact (legacy/pre file-root agents). For mixed-fleet cutovers: flip on once every agent is upgraded; default off during beta |
 
 RBAC: when no token is set the server runs in **single-user local mode** (no auth);
@@ -739,10 +754,14 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
    /api/v1/hosts` shows it `connected` with facts within ~10 s.
 5. Bind + expose: if the server sits behind a reverse proxy on the same host,
    set `PARTOUT_ADDR=127.0.0.1` so the control plane is not reachable from the
-   network at all (the edge is the only path in). If exposing beyond localhost
+   network at all (the edge is the only path in). Note: a loopback bind is
+   incompatible with provisioning **remote** hosts — fleet-provisioned agents
+   connect back to `PARTOUT_SERVER_HOST` directly, so keep loopback for
+   same-host agents only, or use a routable bind. If exposing beyond localhost
    directly: `PARTOUT_TLS=on`, fetch the CA
    (`partout ctl ca --server https://… --ca-file <fetched-ca>`), put `ca.crt` on agents
-   (`PARTOUT_TLS_CA`), restart both sides → agents reconnect over mTLS.
+   (`PARTOUT_TLS_CA`), restart both sides → agents reconnect over mTLS
+   (provisioned agents get the CA shipped automatically).
 6. Run a command: `partout ctl run --selector all -- whoami` → verify output + an
    `exec.dispatch` audit row.
 7. Back up the DB file **and** `<db dir>/tls/` (CA + keys) **before** onboarding more

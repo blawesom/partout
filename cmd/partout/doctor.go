@@ -118,6 +118,7 @@ func runDoctor() error {
 	checkOutboundEOL(cfg, r)
 	checkSSHKey(cfg, r)
 	checkReleaseKey(cfg, r)
+	checkProvisioning(cfg, r)
 
 	fmt.Println()
 	if r.fails > 0 {
@@ -240,7 +241,8 @@ func checkOutboundEOL(cfg *config.Config, r *doctorResult) {
 }
 
 // checkSSHKey reports which identity key the server's host-provisioning path
-// would use (conventional names in the SSH dir, in OpenSSH's order), or notes
+// would use (conventional names in the SSH dir, in OpenSSH's order), plus
+// any IdentityFile the ssh config declares that exists on disk, or notes
 // the absence so the operator knows provisioning needs a key first.
 func checkSSHKey(cfg *config.Config, r *doctorResult) {
 	sshDir := os.Getenv("PARTOUT_SSH_DIR")
@@ -253,16 +255,20 @@ func checkSSHKey(cfg *config.Config, r *doctorResult) {
 		r.add(dwarn, "ssh key", "cannot determine SSH dir (HOME unset?)")
 		return
 	}
-	// Same source of truth the provisioner uses (sshutil.IdentityStatus), so
-	// doctor reports exactly what a run would offer.
-	st := sshutil.Default(sshDir).IdentityStatus()
+	// Same source of truth the provisioner uses (sshutil.IdentityStatusFor),
+	// so doctor reports exactly what a run would offer. The probe is
+	// host-agnostic: defaults + "Host *" config sections (the wizard passes
+	// the real target host for host-specific IdentityFile blocks).
+	st := sshutil.Default(sshDir).IdentityStatusFor(context.Background(), "")
 	switch {
 	case len(st.FileKeys) > 0:
 		r.add(dok, "ssh key", filepath.Join(sshDir, st.FileKeys[0])+" (host provisioning)")
+	case len(st.ConfigKeys) > 0:
+		r.add(dok, "ssh key", st.ConfigKeys[0]+" (from ssh config, host provisioning)")
 	case st.Agent:
 		r.add(dok, "ssh key", "ssh-agent holds a key (no conventional file in "+sshDir+")")
 	default:
-		r.add(dwarn, "ssh key", "no identity key found for host provisioning (looked for id_ed25519/ecdsa/rsa in "+sshDir+" or the ssh-agent)")
+		r.add(dwarn, "ssh key", "no identity key found for host provisioning (looked for id_ed25519/ecdsa/rsa in "+sshDir+", the ssh config's IdentityFile entries, or the ssh-agent)")
 	}
 }
 
@@ -272,6 +278,87 @@ func checkReleaseKey(cfg *config.Config, r *doctorResult) {
 		return
 	}
 	r.add(dinfo, "release key", "unset — fleet updates run unsigned-beta (set PARTOUT_RELEASE_KEY to require signatures)")
+}
+
+// checkProvisioning reports whether host provisioning from this server can
+// work: the listener bind must be reachable from remote hosts (a loopback
+// bind never is), the server host written into agents' PARTOUT_SERVER must
+// resolve to something other targets can use (not just loopback), and with
+// TLS on, that host must be covered by the leaf's SANs or provisioned agents
+// fail certificate verification.
+func checkProvisioning(cfg *config.Config, r *doctorResult) {
+	if config.LoopbackBind(cfg.Addr) {
+		r.add(dwarn, "provision bind", "PARTOUT_ADDR="+cfg.Addr+" is loopback-only — hosts provisioned from this server can never reach it; use a routable bind (or same-host agents only)")
+	}
+
+	sh := cfg.ServerHost
+	if sh == "" {
+		sh = config.DefaultServerHost()
+	}
+	if cfg.ServerHost == "" {
+		if ips, err := net.LookupHost(sh); err == nil && allLoopbackIPs(ips) {
+			r.add(dwarn, "provision server host", "PARTOUT_SERVER_HOST unset and the local hostname resolves only to loopback ("+strings.Join(ips, ",")+") — remote targets cannot reach it; set PARTOUT_SERVER_HOST to a routable IP/FQDN")
+		} else {
+			r.add(dinfo, "provision server host", sh+" (PARTOUT_SERVER_HOST unset — hostname fallback; it must resolve on every target)")
+		}
+	} else {
+		if ips, err := net.LookupHost(hostOnly(sh)); err != nil {
+			r.add(dwarn, "provision server host", sh+" does not resolve — provisioned agents cannot find the server")
+		} else if allLoopbackIPs(ips) {
+			r.add(dwarn, "provision server host", sh+" resolves only to loopback — remote targets cannot reach it")
+		} else {
+			r.add(dok, "provision server host", sh)
+		}
+	}
+
+	// TLS + provisioning: the leaf must cover the host agents dial, and the
+	// CA gets distributed by the installer automatically.
+	if cfg.TLS {
+		names := serverCertNames(cfg.TLSNames)
+		if !nameCovered(names, hostOnly(sh)) {
+			r.add(dwarn, "provision tls", "server host "+hostOnly(sh)+" is not in the leaf SANs "+strings.Join(names, ",")+" — provisioned agents will fail cert verification (add it to PARTOUT_TLS_SERVER_NAMES or point PARTOUT_SERVER_HOST at a covered name)")
+		}
+	}
+}
+
+// hostOnly strips a :port suffix (best-effort; IPv6 literals keep their
+// brackets so net.ParseIP still works on the result).
+func hostOnly(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return hostport
+}
+
+// allLoopbackIPs reports whether a resolved address list is non-empty and
+// loopback-only (e.g. the typical /etc/hosts 127.0.1.1 hostname entry).
+func allLoopbackIPs(ips []string) bool {
+	if len(ips) == 0 {
+		return false
+	}
+	for _, s := range ips {
+		ip := net.ParseIP(s)
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
+
+// serverCertNames (shared with the server bootstrap) lives in main.go; it
+// resolves the configured list or the documented default
+// (localhost,127.0.0.1,hostname).
+
+// nameCovered reports whether the SAN list covers host (exact, case-
+// insensitive — the same check Go's x509 verifier effectively applies).
+func nameCovered(names []string, host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	for _, n := range names {
+		if strings.ToLower(strings.TrimSpace(n)) == host {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -302,22 +389,10 @@ func orAll(s string) string {
 	return s
 }
 
-// loopbackOnly reports whether the bind address confines the listener to the
-// local host. An empty addr (the default) binds all interfaces and is NOT
-// loopback; "localhost" is special-cased as loopback (RFC 6761 reserves it);
-// any other hostname is conservatively treated as reachable (doctor reports,
-// it does not resolve).
-func loopbackOnly(addr string) bool {
-	a := strings.TrimSpace(strings.ToLower(addr))
-	if a == "" {
-		return false
-	}
-	if a == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(a)
-	return ip != nil && ip.IsLoopback()
-}
+// loopbackOnly is a thin alias over the shared config helper (canonical
+// implementation + tests live in internal/config, so the provisioner and
+// doctor agree on what counts as loopback).
+func loopbackOnly(addr string) bool { return config.LoopbackBind(addr) }
 
 func formatPort(p int) string { return fmt.Sprintf("%d", p) }
 

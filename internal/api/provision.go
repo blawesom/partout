@@ -3,8 +3,10 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/blawesom/partout/internal/server/provision"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -15,6 +17,7 @@ func (h *Handler) RegisterProvision(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/provision-runs", h.requireRole(roleViewer)(http.HandlerFunc(h.handleListRuns)))
 	mux.Handle("GET /api/v1/provision-runs/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetRun)))
 	mux.Handle("POST /api/v1/provision-runs/{id}/key", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleConfirmKey)))
+	mux.Handle("POST /api/v1/provision-runs/{id}/rekey", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleReconfirmKey)))
 	mux.Handle("POST /api/v1/provision-runs/{id}/cancel", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleCancelRun)))
 	mux.Handle("GET /api/v1/provision/ssh-status", h.requireRole(roleViewer)(http.HandlerFunc(h.handleSSHStatus)))
 }
@@ -51,6 +54,12 @@ func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := h.prov.Start(req.Host, req.Mode)
 	if err != nil {
+		// A concurrent run for the same host is a conflict, not a server
+		// error — the operator should see which run holds the host.
+		if errors.Is(err, provision.ErrHostBusy) {
+			writeError(w, http.StatusConflict, "host_busy", err.Error(), nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error",
 			"failed to start provisioning: "+err.Error(), nil)
 		return
@@ -149,6 +158,30 @@ func (h *Handler) handleConfirmKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ---- admin: re-confirm a rotated host key -----------------------------------
+
+// handleReconfirmKey restarts the fingerprint gate for a failed run whose
+// host key no longer matches the trusted entry (host reinstalled): the
+// stale entry is removed, the current key re-captured, and the run paused
+// at key_confirm again.
+func (h *Handler) handleReconfirmKey(w http.ResponseWriter, r *http.Request) {
+	if !h.provIsReady() {
+		writeError(w, http.StatusServiceUnavailable, "provisioner_unavailable",
+			"provisioner not yet configured", nil)
+		return
+	}
+	runID := r.PathValue("id")
+	if _, err := h.st.ProvisionRun(runID); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "provision run not found", nil)
+		return
+	}
+	if err := h.prov.ReconfirmKey(runID); err != nil {
+		writeError(w, http.StatusConflict, "rekey_failed", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"action": "reconfirming"})
+}
+
 // ---- admin: cancel provisioning run -----------------------------------------
 
 func (h *Handler) handleCancelRun(w http.ResponseWriter, r *http.Request) {
@@ -180,15 +213,17 @@ func (h *Handler) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 
 // handleSSHStatus reports the identity keys the provisioner would offer, so
 // the wizard can show the operator what will be used (or that none was
-// found) before starting a run. Read-only; exposes file basenames + a
-// boolean only, never key material.
+// found) before starting a run. Read-only; exposes file paths + a boolean
+// only, never key material. An optional ?host= parameter resolves the ssh
+// config for that specific target (alias + host-specific IdentityFile
+// blocks) — without it the probe is host-agnostic (defaults + "Host *").
 func (h *Handler) handleSSHStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.provIsReady() {
 		writeError(w, http.StatusServiceUnavailable, "provisioner_unavailable",
 			"provisioner not yet configured", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, h.prov.SSHStatus())
+	writeJSON(w, http.StatusOK, h.prov.SSHStatusFor(r.URL.Query().Get("host")))
 }
 
 // ---- helpers ---------------------------------------------------------------

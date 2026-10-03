@@ -140,19 +140,20 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 CREATE TABLE IF NOT EXISTS provision_runs (
-  id           TEXT PRIMARY KEY,
-  host         TEXT NOT NULL,
-  mode         TEXT NOT NULL DEFAULT 'fresh',
-  state        TEXT NOT NULL DEFAULT 'queued',
-  key_type     TEXT,
-  fingerprint  TEXT,
-  key_line     TEXT,
-  token_hash   TEXT,
-  agent_id     TEXT REFERENCES agents(id) ON DELETE SET NULL,
-  step         TEXT,
-  error        TEXT,
-  created      INTEGER NOT NULL,
-  updated      INTEGER NOT NULL
+  id            TEXT PRIMARY KEY,
+  host          TEXT NOT NULL,
+  mode          TEXT NOT NULL DEFAULT 'fresh',
+  state         TEXT NOT NULL DEFAULT 'queued',
+  key_type      TEXT,
+  fingerprint   TEXT,
+  key_line      TEXT,
+  resolved_host TEXT,
+  token_hash    TEXT,
+  agent_id      TEXT REFERENCES agents(id) ON DELETE SET NULL,
+  step          TEXT,
+  error         TEXT,
+  created       INTEGER NOT NULL,
+  updated       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_provision_state ON provision_runs(state);
 

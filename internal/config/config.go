@@ -15,6 +15,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -41,6 +42,11 @@ type Config struct {
 	// DataDir: agent — identity, TLS material, policy dir (used).
 	// server — reserved (output blobs, extern cache; M1+).
 	DataDir string
+	// ServerHost: the address written into provisioned agents'
+	// PARTOUT_SERVER (PARTOUT_SERVER_HOST). Empty = the local hostname
+	// (see DefaultServerHost) — a bare hostname only works when every target
+	// can resolve it; set an IP/FQDN on routed LANs without DNS.
+	ServerHost string
 	// TLS enables server-native TLS with local root-CA bootstrap
 	// (PARTOUT_TLS=on / --tls=on).
 	TLS bool
@@ -167,6 +173,7 @@ func Load() (*Config, error) {
 		Addr:                  os.Getenv("PARTOUT_ADDR"),
 		DBPath:                envStr("PARTOUT_DB_PATH", "./partout.db"),
 		DataDir:               os.Getenv("PARTOUT_DATA_DIR"),
+		ServerHost:            os.Getenv("PARTOUT_SERVER_HOST"),
 		TLS:                   envBool("PARTOUT_TLS"),
 		TLSNames:              os.Getenv("PARTOUT_TLS_SERVER_NAMES"),
 		AdminToken:            os.Getenv("PARTOUT_TOKEN_ADMIN"),
@@ -230,6 +237,47 @@ func envStr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// DefaultServerHost returns the address provisioned agents are told to
+// connect back on: PARTOUT_SERVER_HOST when set, else the local hostname.
+// A bare hostname must resolve on every target host — on a routed LAN
+// without DNS, set PARTOUT_SERVER_HOST to an IP or FQDN. A ":port" suffix
+// is stripped (the server always appends its own listener port — an
+// explicit port here used to produce "host:8443:8443" addresses that no
+// agent could dial).
+func DefaultServerHost() string {
+	if v := strings.TrimSpace(os.Getenv("PARTOUT_SERVER_HOST")); v != "" {
+		// Strip an explicit :port (net.SplitHostPort only succeeds when one
+		// is present; bare IPv6 literals without brackets do not split).
+		if h, _, err := net.SplitHostPort(v); err == nil && h != "" {
+			v = h
+		}
+		return v
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "localhost"
+}
+
+// LoopbackBind reports whether a bind address confines the listener to the
+// local host: 127.x, ::1, or "localhost" (RFC 6761 reserves it). An empty
+// address (the default) binds all interfaces and is NOT loopback; unknown
+// hostnames are conservatively reported as reachable — callers use this to
+// pick better diagnostics, never to enforce security.
+func LoopbackBind(addr string) bool {
+	a := strings.TrimSpace(strings.ToLower(addr))
+	if a == "" {
+		return false
+	}
+	if a == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(a); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func envInt(key string, def int) int {

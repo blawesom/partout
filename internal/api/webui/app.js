@@ -245,6 +245,10 @@
                 <span class="mono">{{ provWiz.sshStatus.ssh_dir }}/{{ provWiz.sshStatus.file_keys[0] }}</span>
                 <span class="muted small"> — conventional key found</span>
               </template>
+              <template v-else-if="provWiz.sshStatus && (provWiz.sshStatus.config_keys||[]).length">
+                <span class="mono">{{ provWiz.sshStatus.config_keys[0] }}</span>
+                <span class="muted small"> — from ssh config for this host</span>
+              </template>
               <template v-else-if="provWiz.sshStatus && provWiz.sshStatus.agent">
                 <b>ssh-agent</b> <span class="muted small">holds a key (no conventional file in <span class="mono">{{ provWiz.sshStatus.ssh_dir }}</span>)</span>
               </template>
@@ -280,6 +284,7 @@
         <div v-if="provWiz.run.state==='key_confirm'" class="info-box" style="margin-top:12px;border-left:3px solid var(--warn,#d97706)">
           <div style="font-weight:600">New host key — confirm to continue</div>
           <div class="mono" style="margin:8px 0;word-break:break-all">{{ provWiz.run.key_type || '' }} {{ provWiz.run.fingerprint }}</div>
+          <p v-if="provWiz.run.resolved_host" class="muted small" style="margin:0 0 4px">Host <span class="mono">{{ provWiz.run.host }}</span> resolves to <span class="mono">{{ provWiz.run.resolved_host }}</span> (ssh config).</p>
           <p class="muted small" style="margin:0 0 10px">Verify this fingerprint out-of-band before confirming.</p>
           <button class="btn ok sm" @click="provWizKey('confirm')">Confirm key</button>
           <button class="btn danger sm" @click="provWizKey('deny')">Deny</button>
@@ -1581,7 +1586,7 @@
                 <template v-for="r in provRuns" :key="r.id">
                 <tr class="click" tabindex="0" @click="showProvRun(r.id)" @keydown.enter.prevent="showProvRun(r.id)">
                   <td class="mono">{{ r.id }}</td>
-                  <td class="mono">{{ r.host }}</td>
+                  <td class="mono">{{ r.host }}<span v-if="r.resolved_host" class="muted small"> → {{ r.resolved_host }}</span></td>
                   <td class="mono">{{ r.mode }}</td>
                   <td><span class="badge" :class="provBadge(r.state).cls">{{ provBadge(r.state).label }}</span><span v-if="r.step && !provTerminal(r.state)" class="muted small"> · {{ r.step }}</span><span v-if="r.error" class="mono small" style="color:var(--critical,#dc2626);display:inline-block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom" tabindex="0" :data-jtip="r.error"> · {{ r.error }}</span></td>
                   <td class="mono small">{{ r.fingerprint || '—' }}</td>
@@ -1604,6 +1609,7 @@
                     <div class="toolbar">
                       <span class="muted mono small">run {{ provDetail.run.id }} · {{ provDetail.run.host }} · {{ provDetail.run.state }}</span>
                       <span class="err-box" style="margin:0" v-if="provDetail.run.error">{{ provDetail.run.error }}</span>
+                      <button v-if="provDetail.run.state==='failed' && /host key|HOST IDENTIFICATION/i.test(provDetail.run.error||'')" class="btn warn sm" :disabled="provRekeyBusy" @click="provRekey(provDetail.run.id)">Re-confirm key</button>
                       <template v-if="provDetail.run.agent_id">
                         <span class="badge" :class="agentBadge((hostMap[provDetail.run.agent_id]||{}).state).cls">{{ agentBadge((hostMap[provDetail.run.agent_id]||{}).state).label }}</span>
                         <span class="muted mono small">{{ hostMap[provDetail.run.agent_id] ? hostName(hostMap[provDetail.run.agent_id]) : provDetail.run.agent_id }}</span>
@@ -2032,7 +2038,7 @@
         secrets: [], policies: [], users: [], presetStatus: null,
         secretForm: { name: "", value: "", selector: "all" }, secretBusy: false,
         userForm: { username: "", password: "", role: "operator" }, userBusy: false,
-        provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false,
+        provHost: "", provMode: "fresh", provMsg: "", provDetail: null, provBusy: false, provRekeyBusy: false,
         addHostOpen: false, addHostTab: "manual",
         ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
         ahCa: "", ahCaErr: "", ahCaBusy: false, // server root CA for TLS-mode recipes
@@ -3078,6 +3084,17 @@
         try { this.provDetail = await this.api("/provision-runs/" + encodeURIComponent(id)); }
         catch (e) { this.provDetail = null; }
       },
+      // Re-confirm a rotated host key: the run failed because the host's key
+      // no longer matches the trusted entry (reinstall); the server removes
+      // the stale entry, re-captures, and re-gates through key_confirm.
+      async provRekey(id) {
+        this.provRekeyBusy = true;
+        try {
+          await this.api("/provision-runs/" + encodeURIComponent(id) + "/rekey", { method: "POST" });
+          await this.loadProvDetail(id);
+        } catch (e) { this.toast(e.message, "error"); }
+        finally { this.provRekeyBusy = false; }
+      },
       async createProvRun() {
         this.provMsg = ""; this.provBusy = true;
         try {
@@ -3210,7 +3227,10 @@
       async provWizLoadSSH() {
         this.provWiz.sshBusy = true; this.provWiz.sshErr = "";
         try {
-          this.provWiz.sshStatus = await this.api("/provision/ssh-status", { toast: false });
+          // Pass the typed target so host-specific ssh-config blocks
+          // (IdentityFile under "Host <name>") are resolved for it.
+          const q = this.provWiz.host.trim() ? "?host=" + encodeURIComponent(this.provWiz.host.trim()) : "";
+          this.provWiz.sshStatus = await this.api("/provision/ssh-status" + q, { toast: false });
         } catch (e) {
           this.provWiz.sshStatus = null; this.provWiz.sshErr = e.message;
         } finally { this.provWiz.sshBusy = false; }

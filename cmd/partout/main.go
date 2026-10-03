@@ -541,16 +541,48 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 			sshDir = filepath.Join(home, ".ssh")
 		}
 	}
-	serverHost := os.Getenv("PARTOUT_SERVER_HOST")
-	if serverHost == "" {
-		if host, err := os.Hostname(); err == nil && host != "" {
-			serverHost = host
-		} else {
-			serverHost = "localhost"
-		}
-	}
+	serverHost := config.DefaultServerHost()
 	binPath, _ := os.Executable()
-	prov := provision.New(st, sshutil.Default(sshDir), serverHost+":"+fmt.Sprint(cfg.Port), binPath, sseB, lg)
+	// With TLS on, the provisioner ships the server's root CA to every
+	// target (see serveTLS below: the CA is bootstrapped in <dbdir>/tls at
+	// startup, before any run can start). With TLS off there is no CA to
+	// distribute and the agent stream stays plaintext h2c.
+	var provCAPath string
+	if cfg.TLS {
+		provCAPath = filepath.Join(filepath.Dir(cfg.DBPath), "tls", "ca.crt")
+	}
+	// Provisioning self-checks (fail loud at boot, not mid-run): the two
+	// most common field failures are a loopback-only bind no remote host
+	// can ever reach, and a bare hostname the target cannot resolve.
+	if config.LoopbackBind(cfg.Addr) {
+		lg.Printf("WARNING: provisioning: PARTOUT_ADDR=%s binds loopback-only — hosts provisioned from this server will fail preflight (unreachable); set PARTOUT_ADDR to a routable address, or keep loopback for same-host/reverse-proxy deployments only", cfg.Addr)
+	}
+	if os.Getenv("PARTOUT_SERVER_HOST") == "" {
+		// The hostname fallback only works when targets can resolve it —
+		// typically it maps to 127.0.1.1 in /etc/hosts, which no remote host
+		// can use. Warn (not fatal): single-host/embedded setups are legitimate.
+		if ips, err := net.LookupHost(serverHost); err != nil {
+			lg.Printf("WARNING: provisioning: PARTOUT_SERVER_HOST unset and the local hostname %q does not resolve here — provisioned agents may not find the server; set PARTOUT_SERVER_HOST to an IP or a name every target can resolve", serverHost)
+		} else if allLoopbackIPs(ips) {
+			lg.Printf("WARNING: provisioning: PARTOUT_SERVER_HOST unset and the local hostname %q resolves only to loopback (%s) — remote hosts cannot reach it; set PARTOUT_SERVER_HOST to a routable address", serverHost, strings.Join(ips, ", "))
+		}
+	} else if ips, err := net.LookupHost(hostOnly(serverHost)); err != nil {
+		// Explicitly set but unresolvable here: preflight would fail the run
+		// with reach=dns; say it now so the operator can fix it before starting.
+		lg.Printf("WARNING: provisioning: PARTOUT_SERVER_HOST %q does not resolve here — provisioned agents cannot find the server", serverHost)
+	} else if allLoopbackIPs(ips) {
+		lg.Printf("WARNING: provisioning: PARTOUT_SERVER_HOST %q resolves only to loopback (%s) — remote hosts cannot reach it", serverHost, strings.Join(ips, ", "))
+	}
+	prov := provision.New(provision.Options{
+		Store:      st,
+		SSH:        sshutil.Default(sshDir),
+		ServerHost: serverHost + ":" + fmt.Sprint(cfg.Port),
+		BindAddr:   cfg.Addr,
+		CAPath:     provCAPath,
+		BinaryPath: binPath,
+		Emitter:    sseB,
+		Logger:     lg,
+	})
 	// Fail runs stranded by a previous process (the state machine is
 	// in-memory, so a mid-run restart leaves them stuck forever).
 	prov.ReapStale()

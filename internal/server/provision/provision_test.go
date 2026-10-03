@@ -2,6 +2,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -93,7 +94,13 @@ func newTestProvisioner(t *testing.T) (*Provisioner, *store.Store) {
 		Keygen:         filepath.Join(bin, "ssh-keygen"),
 		ConnectTimeout: 5,
 	}
-	prov := New(st, ssh, "127.0.0.1:8443", binPath, nil, log.New(os.Stderr, "", 0))
+	prov := New(Options{
+		Store:      st,
+		SSH:        ssh,
+		ServerHost: "127.0.0.1:8443",
+		BinaryPath: binPath,
+		Logger:     log.New(os.Stderr, "", 0),
+	})
 	return prov, st
 }
 
@@ -539,7 +546,10 @@ exit 0
 // does not, and that the env-file values are NOT shell-quoted (they sit in a
 // quoted <<'EOF' heredoc).
 func TestInstallScriptFreshWipe(t *testing.T) {
-	fresh := buildInstallScript("abc123def456", "fullsha", wipeScript("fresh"), "127.0.0.1:8443", "ptok_0123456789abcdef")
+	fresh := buildInstallScript(installSpec{
+		binSHA12: "abc123def456", binSHA: "fullsha", wipe: wipeScript("fresh"),
+		serverHost: "127.0.0.1:8443", token: "ptok_0123456789abcdef",
+	})
 	// The install script must create the file root (spec-file-root):
 	// the file surface is confined to /home/partout on every host.
 	if !strings.Contains(fresh, "mkdir -p /home/partout") || !strings.Contains(fresh, "chown partout:partout /home/partout") {
@@ -555,7 +565,10 @@ func TestInstallScriptFreshWipe(t *testing.T) {
 		t.Fatalf("fresh script missing unit disable:\n%s", fresh)
 	}
 
-	join := buildInstallScript("abc123def456", "fullsha", wipeScript("join"), "127.0.0.1:8443", "ptok_0123456789abcdef")
+	join := buildInstallScript(installSpec{
+		binSHA12: "abc123def456", binSHA: "fullsha", wipe: wipeScript("join"),
+		serverHost: "127.0.0.1:8443", token: "ptok_0123456789abcdef",
+	})
 	if strings.Contains(join, "rm -rf /var/lib/partout/agent") {
 		t.Fatalf("join script must NOT wipe the data dir:\n%s", join)
 	}
@@ -592,4 +605,472 @@ func TestVersionNote(t *testing.T) {
 			t.Errorf("versionNote(%q,%q) = %q, want %q", c.remote, c.local, got, c.want)
 		}
 	}
+}
+
+// TestPreflightLoopbackBindMessage verifies the loopback-bind diagnostic:
+// when the server itself binds loopback-only, the preflight failure must
+// blame the bind (actionable: change PARTOUT_ADDR) instead of sending the
+// operator to debug firewalls — the first-user report's exact failure mode.
+func TestPreflightLoopbackBindMessage(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+	prov.bindAddr = "127.0.0.1"
+
+	bin := writeFakeFleetNoReach(t)
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	os.MkdirAll(sshDir, 0o700)
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+	if err := prov.ssh.AddKey(context.Background(), "web-lb ssh-ed25519 AAAApretrusted"); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	run, err := prov.Start("web-lb", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "failed")
+	for _, want := range []string{"loopback", "PARTOUT_ADDR"} {
+		if !strings.Contains(run.Error, want) {
+			t.Errorf("loopback-bind failure should mention %q, got %q", want, run.Error)
+		}
+	}
+	if strings.Contains(run.Error, "firewall") {
+		t.Errorf("loopback-bind failure must not blame the firewall, got %q", run.Error)
+	}
+}
+
+// TestPreflightDNSFailureMessage verifies the DNS-distinct diagnostic: when
+// the target cannot resolve the server address (typically the hostname
+// fallback for PARTOUT_SERVER_HOST), the failure must say so — no firewall
+// change can fix a name that does not resolve.
+func TestPreflightDNSFailureMessage(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+
+	bin := t.TempDir()
+	ssh := `#!/bin/sh
+case "$*" in
+  *"base64 -d"*) echo "INSTALL_OK"; exit 0 ;;
+  *)
+    echo "os=Ubuntu 24.04"
+    echo "arch=x86_64"
+    echo "init=systemd"
+    echo "user=root"
+    echo "sudo=yes"
+    echo "disk=100000000"
+    echo "reach=dns"
+    exit 0
+    ;;
+esac
+`
+	scp := "#!/bin/sh\nexit 0\n"
+	keyscan := `#!/bin/sh
+echo "$3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyDNS"
+exit 0
+`
+	keygen := `#!/bin/sh
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
+case "$1" in
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -H) exit 0 ;;
+  -l) cat >/dev/null; echo "256 SHA256:FakeDNSFingerprint comment (ED25519)"; exit 0 ;;
+esac
+exit 0
+`
+	for name, body := range map[string]string{
+		"ssh": ssh, "scp": scp, "ssh-keyscan": keyscan, "ssh-keygen": keygen,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	os.MkdirAll(sshDir, 0o700)
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+	if err := prov.ssh.AddKey(context.Background(), "web-dns ssh-ed25519 AAAApretrusted"); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	run, err := prov.Start("web-dns", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "failed")
+	for _, want := range []string{"resolve", "PARTOUT_SERVER_HOST"} {
+		if !strings.Contains(run.Error, want) {
+			t.Errorf("dns failure should mention %q, got %q", want, run.Error)
+		}
+	}
+}
+
+// TestInstallScriptCADistribution verifies the TLS install path: with a CA
+// fingerprint the script must verify + install the CA and wire
+// PARTOUT_TLS_CA into the agent env; without one (TLS off) neither may
+// appear — the script stays byte-compatible with the pre-TLS installer.
+func TestInstallScriptCADistribution(t *testing.T) {
+	base := installSpec{
+		binSHA12: "abc123def456", binSHA: "fullsha",
+		wipe:       wipeScript("join"),
+		serverHost: "10.0.0.5:8443", token: "ptok_0123456789abcdef",
+	}
+	withCA := base
+	withCA.caSHA12, withCA.caSHA = "cafebabecafe", "cafefullsha"
+	s := buildInstallScript(withCA)
+	if !strings.Contains(s, "CA=/tmp/partout-ca-cafebabecafe") {
+		t.Errorf("install script missing CA transfer path:\n%s", s)
+	}
+	if !strings.Contains(s, `"$CAACT" != 'cafefullsha'`) {
+		t.Errorf("install script missing CA sha verification:\n%s", s)
+	}
+	if !strings.Contains(s, `install -m 0644 "$CA" /etc/partout/ca.crt`) {
+		t.Errorf("install script missing CA install:\n%s", s)
+	}
+	if !strings.Contains(s, "PARTOUT_TLS_CA=/etc/partout/ca.crt\n") {
+		t.Errorf("agent env missing PARTOUT_TLS_CA:\n%s", s)
+	}
+
+	without := buildInstallScript(base)
+	if strings.Contains(without, "PARTOUT_TLS_CA") || strings.Contains(without, "partout-ca") {
+		t.Errorf("TLS-off install script must not reference a CA:\n%s", without)
+	}
+}
+
+// TestTransferShipsCA verifies the transfer step copies the CA alongside the
+// binary when one is configured (the fake scp records its arguments).
+func TestTransferShipsCA(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+
+	caPath := filepath.Join(t.TempDir(), "ca.crt")
+	os.WriteFile(caPath, []byte("fake-ca-pem"), 0o644)
+	prov.caPath = caPath
+
+	// scp logs every invocation's args so the test can assert both copies.
+	logFile := filepath.Join(t.TempDir(), "scp.log")
+	bin := t.TempDir()
+	scp := "#!/bin/sh\necho \"$@\" >> " + logFile + "\nexit 0\n"
+	ssh := `#!/bin/sh
+case "$*" in
+  *"base64 -d"*) echo "INSTALL_OK"; exit 0 ;;
+  *) echo "os=Ubuntu 24.04"; echo "init=systemd"; echo "sudo=yes"; echo "reach=yes-plain"; exit 0 ;;
+esac
+`
+	keyscan := `#!/bin/sh
+echo "$3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyCA"
+exit 0
+`
+	keygen := `#!/bin/sh
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
+case "$1" in
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -H) exit 0 ;;
+  -l) cat >/dev/null; echo "256 SHA256:FakeCAFingerprint comment (ED25519)"; exit 0 ;;
+esac
+exit 0
+`
+	for name, body := range map[string]string{
+		"ssh": ssh, "scp": scp, "ssh-keyscan": keyscan, "ssh-keygen": keygen,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	os.MkdirAll(sshDir, 0o700)
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+	if err := prov.ssh.AddKey(context.Background(), "web-ca ssh-ed25519 AAAApretrusted"); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	run, err := prov.Start("web-ca", "join")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The run flows through transfer; wait for install to have happened
+	// (enrolling needs an agent we do not simulate — enrolling is enough).
+	waitForState(t, st, run.ID, "enrolling")
+
+	scpLog, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read scp log: %v", err)
+	}
+	log := string(scpLog)
+	if !strings.Contains(log, "/tmp/partout-") {
+		t.Errorf("scp log missing binary copy:\n%s", log)
+	}
+	if !strings.Contains(log, "/tmp/partout-ca-") {
+		t.Errorf("scp log missing CA copy:\n%s", log)
+	}
+}
+
+// TestProvisionAliasResolvesSSHConfig verifies ssh-config aliases work as
+// provision hosts: keyscan/keygen read no ssh config, so the run must
+// resolve the alias (ssh -G), capture the key under the resolved name, and
+// surface the resolution on the run for the key-confirm screen.
+func TestProvisionAliasResolvesSSHConfig(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+
+	bin := t.TempDir()
+	// ssh: -G resolves "ai" to 172.16.100.95 (port 22); other calls behave
+	// like the standard fake fleet.
+	ssh := `#!/bin/sh
+GH=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-G" ]; then GH="$a"; fi
+  prev="$a"
+done
+if [ -n "$GH" ]; then
+  echo "hostname 172.16.100.95"
+  echo "port 22"
+  exit 0
+fi
+case "$*" in
+  *"base64 -d"*) echo "INSTALL_OK"; exit 0 ;;
+  *) echo "os=Ubuntu 24.04"; echo "init=systemd"; echo "sudo=yes"; echo "reach=yes-plain"; exit 0 ;;
+esac
+`
+	// keyscan echoes the last non-flag arg as the host (the resolved host we
+	// pass it).
+	keyscan := `#!/bin/sh
+HOST=""
+for a in "$@"; do case "$a" in -*) ;; *) HOST="$a" ;; esac; done
+echo "$HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyAliasRes"
+exit 0
+`
+	keygen := `#!/bin/sh
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
+case "$1" in
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -H) exit 0 ;;
+  -l) cat >/dev/null; echo "256 SHA256:FakeAliasFingerprint comment (ED25519)"; exit 0 ;;
+esac
+exit 0
+`
+	for name, body := range map[string]string{
+		"ssh": ssh, "scp": "#!/bin/sh\nexit 0\n", "ssh-keyscan": keyscan, "ssh-keygen": keygen,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	os.MkdirAll(sshDir, 0o700)
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+
+	run, err := prov.Start("ai", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "key_confirm")
+	if run.ResolvedHost != "172.16.100.95" {
+		t.Errorf("run.ResolvedHost = %q, want 172.16.100.95", run.ResolvedHost)
+	}
+	if !strings.HasPrefix(run.KeyLine, "172.16.100.95 ") {
+		t.Errorf("key line not keyed under resolved host: %q", run.KeyLine)
+	}
+
+	// Confirm must succeed (known_hosts keyed under the resolved name —
+	// exactly what ssh verifies when connecting via the alias).
+	if err := prov.ConfirmKey(run.ID); err != nil {
+		t.Fatalf("ConfirmKey via alias: %v", err)
+	}
+	waitForState(t, st, run.ID, "enrolling")
+}
+
+// TestProvisionKeyRotationReconfirm exercises the host-reinstall path: a
+// trusted host presents a new key, the run fails with the re-confirm hint,
+// ReconfirmKey removes the stale entry + re-captures + re-gates at
+// key_confirm, and ConfirmKey resumes the machine (fresh token) through to
+// enrolling.
+func TestProvisionKeyRotationReconfirm(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+	ctx := context.Background()
+
+	// Fake fleet whose ssh fails with the rotation banner while
+	// PROV_ROTATED=1, and behaves normally once the test clears it.
+	bin := t.TempDir()
+	ssh := `#!/bin/sh
+GH=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-G" ]; then GH="$a"; fi
+  prev="$a"
+done
+if [ -n "$GH" ]; then echo "hostname $GH"; echo "port 22"; exit 0; fi
+if [ "$PROV_ROTATED" = "1" ]; then
+  echo "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@" >&2
+  echo "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" >&2
+  echo "Host key verification failed." >&2
+  exit 255
+fi
+case "$*" in
+  *"base64 -d"*) echo "INSTALL_OK"; exit 0 ;;
+  *) echo "os=Ubuntu 24.04"; echo "init=systemd"; echo "sudo=yes"; echo "reach=yes-plain"; exit 0 ;;
+esac
+`
+	scp := "#!/bin/sh\nexit 0\n"
+	keyscan := `#!/bin/sh
+HOST=""
+for a in "$@"; do case "$a" in -*) ;; *) HOST="$a" ;; esac; done
+echo "$HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeRotatedNewKey0123456789"
+exit 0
+`
+	keygen := `#!/bin/sh
+KHFILE=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then KHFILE="$a"; fi
+  prev="$a"
+done
+[ -z "$KHFILE" ] && KHFILE="$HOME/.ssh/known_hosts"
+case "$1" in
+  -F) if grep -qF "$2" "$KHFILE" 2>/dev/null; then exit 0; else exit 1; fi ;;
+  -H) exit 0 ;;
+  -R) [ -f "$KHFILE" ] && grep -v "^$2 " "$KHFILE" > "$KHFILE.tmp" 2>/dev/null && mv "$KHFILE.tmp" "$KHFILE"; exit 0 ;;
+  -l) cat >/dev/null; echo "256 SHA256:FakeRotatedFingerprint comment (ED25519)"; exit 0 ;;
+esac
+exit 0
+`
+	for name, body := range map[string]string{
+		"ssh": ssh, "scp": scp, "ssh-keyscan": keyscan, "ssh-keygen": keygen,
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+	sshDir := filepath.Join(t.TempDir(), ".ssh")
+	os.MkdirAll(sshDir, 0o700)
+	prov.ssh = sshutil.Config{
+		SSHDir:         sshDir,
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+
+	// Pre-trust the host with the OLD key (the pre-rotation state).
+	if err := prov.ssh.AddKey(ctx, "web-rot ssh-ed25519 AAAAFakeOldKeyThatNoLongerMatches"); err != nil {
+		t.Fatalf("AddKey old: %v", err)
+	}
+
+	// Phase 1: the host was reinstalled; its key changed.
+	t.Setenv("PROV_ROTATED", "1")
+	run, err := prov.Start("web-rot", "fresh")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "failed")
+	for _, want := range []string{"REMOTE HOST IDENTIFICATION HAS CHANGED", "Re-confirm key"} {
+		if !strings.Contains(run.Error, want) {
+			t.Errorf("rotation failure should mention %q, got %q", want, run.Error)
+		}
+	}
+	oldFP := run.Fingerprint
+
+	// Phase 2: re-confirm — stale entry dropped, new key captured, run
+	// re-gated at key_confirm.
+	t.Setenv("PROV_ROTATED", "0")
+	if err := prov.ReconfirmKey(run.ID); err != nil {
+		t.Fatalf("ReconfirmKey: %v", err)
+	}
+	run = waitForState(t, st, run.ID, "key_confirm")
+	if run.Fingerprint == "" || run.Fingerprint == oldFP {
+		t.Errorf("fingerprint after re-confirm = %q (old %q), want a new one", run.Fingerprint, oldFP)
+	}
+	if !strings.Contains(run.KeyLine, "FakeRotatedNewKey") {
+		t.Errorf("key line after re-confirm = %q, want the new key", run.KeyLine)
+	}
+
+	// Confirm resumes the machine through to enrolling.
+	if err := prov.ConfirmKey(run.ID); err != nil {
+		t.Fatalf("ConfirmKey after re-confirm: %v", err)
+	}
+	waitForState(t, st, run.ID, "enrolling")
+
+	// A second reconfirm while the machine is live must be refused.
+	if err := prov.ReconfirmKey(run.ID); err == nil {
+		t.Error("ReconfirmKey on a live run should fail")
+	}
+}
+
+// TestStartRejectsConcurrentRunForHost: a second run for a host with a
+// non-terminal run in flight must be rejected (concurrent runs race on
+// known_hosts, the install script, and the target's units); a different
+// host is fine.
+func TestStartRejectsConcurrentRunForHost(t *testing.T) {
+	prov, st := newTestProvisioner(t)
+
+	a, err := prov.Start("web-dup", "fresh")
+	if err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	waitForState(t, st, a.ID, "key_confirm") // non-terminal
+
+	if _, err := prov.Start("web-dup", "fresh"); !errors.Is(err, ErrHostBusy) {
+		t.Fatalf("second Start for same host: err = %v, want ErrHostBusy", err)
+	}
+	if _, err := prov.Start("web-other", "fresh"); err != nil {
+		t.Fatalf("Start for a different host: %v", err)
+	}
+
+	// After the first run reaches a terminal state, the host is free again.
+	if err := st.SetProvisionRunState(a.ID, "cancelled", "connect", "test"); err != nil {
+		t.Fatalf("cancel first: %v", err)
+	}
+	third, err := prov.Start("web-dup", "fresh")
+	if err != nil {
+		t.Fatalf("Start after terminal: %v", err)
+	}
+	// Park the relaunched machine before the test's temp dirs are cleaned.
+	waitForState(t, st, third.ID, "key_confirm")
+	if err := prov.Cancel(third.ID); err != nil {
+		t.Fatalf("cancel third: %v", err)
+	}
+	waitForState(t, st, third.ID, "cancelled")
 }

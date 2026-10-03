@@ -319,3 +319,24 @@ func TestAutoDraftRolloutsBetaDefault(t *testing.T) {
 		t.Error("explicit false: want false")
 	}
 }
+
+// TestDefaultServerHostStripsPort: the provisioner appends its own listener
+// port to PARTOUT_SERVER_HOST, so an explicit ":port" in the value used to
+// yield "host:8443:8443" agent addresses. The helper must strip it (and
+// leave bare IPv6 literals alone).
+func TestDefaultServerHostStripsPort(t *testing.T) {
+	cases := map[string]string{
+		"myhost:8443":      "myhost",
+		"[::1]:8443":       "::1",
+		"203.0.113.7:9443": "203.0.113.7",
+		"myhost":           "myhost",
+		"203.0.113.7":      "203.0.113.7",
+		"2001:db8::1":      "2001:db8::1", // no brackets: does not split
+	}
+	for in, want := range cases {
+		t.Setenv("PARTOUT_SERVER_HOST", in)
+		if got := DefaultServerHost(); got != want {
+			t.Errorf("DefaultServerHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

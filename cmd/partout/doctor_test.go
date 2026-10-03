@@ -210,3 +210,104 @@ func TestDoctorResultCounting(t *testing.T) {
 		t.Fatalf("counts = fail %d warn %d, want 1/1", r.fails, r.warns)
 	}
 }
+
+// TestCheckProvisioningBind covers the loopback-bind diagnostic: a
+// loopback-only bind can never be reached by a provisioned remote host, so
+// doctor must warn (a routable or default bind must not).
+func TestCheckProvisioningBind(t *testing.T) {
+	cfg := newTestConfig() // Addr 127.0.0.1 from the helper
+	cfg.ServerHost = "192.0.2.10"
+	r := &doctorResult{}
+	checkProvisioning(cfg, r)
+	if r.warns == 0 {
+		t.Fatalf("loopback bind should warn, got %+v", r.checks)
+	}
+	found := false
+	for _, c := range r.checks {
+		if c.name == "provision bind" && c.level == dwarn && strings.Contains(c.detail, "loopback") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a provision bind warning, got %+v", r.checks)
+	}
+
+	// A routable bind must not produce the provision-bind warning.
+	cfg.Addr = "192.0.2.10"
+	r2 := &doctorResult{}
+	checkProvisioning(cfg, r2)
+	for _, c := range r2.checks {
+		if c.name == "provision bind" {
+			t.Errorf("routable bind must not warn, got %+v", r2.checks)
+		}
+	}
+}
+
+// TestCheckProvisioningServerHost covers the resolution diagnostics for the
+// address written into provisioned agents' PARTOUT_SERVER: it must resolve
+// to something other targets can actually use.
+func TestCheckProvisioningServerHost(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Addr = "192.0.2.10"
+
+	// An explicitly-set IP needs no DNS and is OK.
+	cfg.ServerHost = "192.0.2.10"
+	r := &doctorResult{}
+	checkProvisioning(cfg, r)
+	ok := false
+	for _, c := range r.checks {
+		if c.name == "provision server host" && c.level == dok {
+			ok = true
+		}
+	}
+	if !ok {
+		t.Errorf("explicit IP server host should be ok, got %+v", r.checks)
+	}
+
+	// A set-but-unresolvable host must warn.
+	cfg.ServerHost = "no-such-host.invalid"
+	r2 := &doctorResult{}
+	checkProvisioning(cfg, r2)
+	found := false
+	for _, c := range r2.checks {
+		if c.name == "provision server host" && c.level == dwarn && strings.Contains(c.detail, "resolve") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("unresolvable server host should warn, got %+v", r2.checks)
+	}
+}
+
+// TestCheckProvisioningTLSSAN covers the TLS x provisioning interaction:
+// with TLS on, the host agents dial must be covered by the leaf SANs or
+// provisioned agents fail certificate verification.
+func TestCheckProvisioningTLSSAN(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Addr = "192.0.2.10"
+	cfg.TLS = true
+	cfg.ServerHost = "192.0.2.10"
+	cfg.TLSNames = "partout.example.com"
+
+	r := &doctorResult{}
+	checkProvisioning(cfg, r)
+	found := false
+	for _, c := range r.checks {
+		if c.name == "provision tls" && c.level == dwarn && strings.Contains(c.detail, "SAN") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("uncovered server host should warn about SANs, got %+v", r.checks)
+	}
+
+	// Covered by an explicit SAN: no warning.
+	cfg.ServerHost = "partout.example.com"
+	r2 := &doctorResult{}
+	checkProvisioning(cfg, r2)
+	for _, c := range r2.checks {
+		if c.name == "provision tls" {
+			t.Errorf("covered server host must not warn, got %+v", r2.checks)
+		}
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	agentfacts "github.com/blawesom/partout/internal/agent/facts"
+	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
@@ -61,6 +63,8 @@ type Provisioner struct {
 	emitter      Emitter
 	log          *log.Logger
 	serverHost   string // address the new agent connects to (PARTOUT_SERVER)
+	bindAddr     string // server listener bind ("" = all interfaces); diagnostics only
+	caPath       string // server root CA to distribute ("" = TLS off, plaintext h2c)
 	binaryPath   string // path to the partout binary on the server
 	localVersion string // the server's own version (for the version-diff check)
 	tokenTTL     int    // enrollment token TTL seconds (short, arch §3.5)
@@ -69,21 +73,42 @@ type Provisioner struct {
 	runs map[string]*activeRun
 }
 
-// New builds a Provisioner. ssh controls the ssh child processes (use
+// Options builds a Provisioner. SSH controls the ssh child processes (use
 // sshutil.Default(sshDir) for the operator's ~/.ssh; inject a custom Config
-// in tests). serverHost is the address written into the agent's
-// PARTOUT_SERVER. binaryPath is the server's own binary that gets transferred.
-func New(st *store.Store, ssh sshutil.Config, serverHost, binaryPath string, em Emitter, lg *log.Logger) *Provisioner {
+// in tests). ServerHost is the address written into the agent's
+// PARTOUT_SERVER. BindAddr is the server's own listener bind ("" = all
+// interfaces), used only for diagnostics: a loopback-only bind can never be
+// reached from a remote host, so the preflight failure can say that instead
+// of blaming the network. BinaryPath is the server's own binary that gets
+// transferred. CAPath is the server root CA (PEM) distributed to
+// /etc/partout/ca.crt on targets so a provisioned agent trusts the server
+// from its first connection; "" (TLS off) keeps the agent stream plaintext h2c.
+type Options struct {
+	Store      *store.Store
+	SSH        sshutil.Config
+	ServerHost string
+	BindAddr   string
+	CAPath     string
+	BinaryPath string
+	Emitter    Emitter
+	Logger     *log.Logger
+}
+
+// New builds a Provisioner from opts.
+func New(opts Options) *Provisioner {
+	lg := opts.Logger
 	if lg == nil {
 		lg = log.Default()
 	}
 	return &Provisioner{
-		store:        st,
-		ssh:          ssh,
-		emitter:      em,
+		store:        opts.Store,
+		ssh:          opts.SSH,
+		emitter:      opts.Emitter,
 		log:          lg,
-		serverHost:   serverHost,
-		binaryPath:   binaryPath,
+		serverHost:   opts.ServerHost,
+		bindAddr:     opts.BindAddr,
+		caPath:       opts.CAPath,
+		binaryPath:   opts.BinaryPath,
 		localVersion: agentfacts.Version,
 		tokenTTL:     300, // 5 min — short TTL for the one-time token
 		runs:         make(map[string]*activeRun),
@@ -99,12 +124,36 @@ func (p *Provisioner) SSHStatus() sshutil.IdentityStatus {
 	return p.ssh.IdentityStatus()
 }
 
+// SSHStatusFor is the host-aware variant of SSHStatus: it also resolves the
+// ssh config for that specific host (aliases, host-specific IdentityFile
+// blocks) via ssh -G, so a config like "Host ai / IdentityFile marvin_ops"
+// is reported as an offered key instead of silently missing from the
+// conventional-name scan.
+func (p *Provisioner) SSHStatusFor(host string) sshutil.IdentityStatus {
+	return p.ssh.IdentityStatusFor(context.Background(), host)
+}
+
 // stepNames are the five provisioning steps in order.
 var stepNames = []string{"connect", "preflight", "transfer", "install", "wait-enroll"}
+
+// ErrHostBusy reports a rejected start: another non-terminal run for the
+// same host is already in flight (concurrent runs race on known_hosts
+// entries, the install script, and the target's systemd units).
+var ErrHostBusy = errors.New("provision: an active run for this host already exists")
 
 // Start creates a provisioning run in queued state, generates a one-time
 // enrollment token, and kicks off the async state machine.
 func (p *Provisioner) Start(host, mode string) (*store.ProvisionRun, error) {
+	// One active run per host: a second run would race the first on
+	// known_hosts, the install script, and the target's units.
+	if runs, err := p.store.ProvisionRuns(500); err == nil {
+		for _, r := range runs {
+			if !isTerminal(r.State) && r.Host == host {
+				return nil, fmt.Errorf("%w: run %s (state %s); cancel it or wait for it to finish", ErrHostBusy, r.ID, r.State)
+			}
+		}
+	}
+
 	runID := id.New("prv")
 	run := &store.ProvisionRun{
 		ID:      runID,
@@ -342,6 +391,20 @@ func (p *Provisioner) stepConnect(ctx context.Context, run *store.ProvisionRun) 
 	if err := p.store.SetProvisionRunKey(run.ID, ft, fp, line); err != nil {
 		p.log.Printf("provision: %s store key: %v", run.ID, err)
 	}
+	// The keyscan line is keyed under the ssh-config-resolved target
+	// ("[host]:port" for non-default ports) — surface it on the run so the
+	// operator sees what an ssh-config alias actually points at before
+	// confirming the fingerprint.
+	resolved := ""
+	if f := strings.Fields(line); len(f) > 0 {
+		resolved = f[0]
+	}
+	if resolved != "" && resolved != run.Host {
+		if err := p.store.SetProvisionRunResolved(run.ID, resolved); err != nil {
+			p.log.Printf("provision: %s store resolved: %v", run.ID, err)
+		}
+		run.ResolvedHost = resolved
+	}
 	p.setState(run, "key_confirm", "connect", "")
 	if err := p.store.FinishProvisionStep(run.ID, 1, "key_confirm", "", ""); err != nil {
 		p.log.Printf("provision: %s finish step 1: %v", run.ID, err)
@@ -349,7 +412,7 @@ func (p *Provisioner) stepConnect(ctx context.Context, run *store.ProvisionRun) 
 	p.log.Printf("provision: %s key_confirm: %s %s %s", run.ID, run.Host, ft, fp)
 	if p.emitter != nil {
 		p.emitter.Emit("provision.key_confirm", map[string]string{
-			"run_id": run.ID, "host": run.Host, "key_type": ft, "fingerprint": fp,
+			"run_id": run.ID, "host": run.Host, "key_type": ft, "fingerprint": fp, "resolved": resolved,
 		})
 	}
 	return false
@@ -374,14 +437,21 @@ if sudo -n true 2>/dev/null; then echo "sudo=yes"; else echo "sudo=no"; fi
 # Currently-installed partout version (version-diff check). none = not present.
 if [ -x /usr/local/bin/partout ]; then echo "remote_version=$(/usr/local/bin/partout --version 2>/dev/null | awk '{print $2}')"; else echo "remote_version=none"; fi
 echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
-# Host -> server reachability on the control-plane port.
+# Host -> server reachability on the control-plane port. The https attempt
+# is deliberately unverified (curl -k): preflight only proves the network
+# path exists — trust is established later, when the install step places the
+# server's CA at /etc/partout/ca.crt. A DNS failure is reported separately
+# from a refused/filtered port: curl exit 6 means the address itself is bad
+# (typically PARTOUT_SERVER_HOST defaulting to a bare hostname the target
+# cannot resolve), which no firewall change can fix.
 SRV=%s
 if command -v curl >/dev/null 2>&1; then
-  if curl -fsS --max-time 5 "https://$SRV/healthz" >/dev/null 2>&1; then echo "reach=yes-tls"
+  if curl -kfsS --max-time 5 "https://$SRV/healthz" >/dev/null 2>&1; then echo "reach=yes-tls"
   elif curl -fsS --max-time 5 "http://$SRV/healthz" >/dev/null 2>&1; then echo "reach=yes-plain"
+  elif [ "$?" = "6" ]; then echo "reach=dns"
   else echo "reach=no"; fi
 elif command -v wget >/dev/null 2>&1; then
-  if wget -q -T 5 -O /dev/null "https://$SRV/healthz" 2>/dev/null; then echo "reach=yes-tls"
+  if wget -q -T 5 --no-check-certificate -O /dev/null "https://$SRV/healthz" 2>/dev/null; then echo "reach=yes-tls"
   elif wget -q -T 5 -O /dev/null "http://$SRV/healthz" 2>/dev/null; then echo "reach=yes-plain"
   else echo "reach=no"; fi
 else
@@ -394,7 +464,7 @@ fi
 		return p.failStep(run, 2, fmt.Sprintf("ssh failed: %v", err))
 	}
 	if exit != 0 {
-		return p.failStep(run, 2, p.authHint(fmt.Sprintf("preflight exit %d: %s", exit, strings.TrimSpace(stderr))))
+		return p.failStep(run, 2, p.keyHint(p.authHint(fmt.Sprintf("preflight exit %d: %s", exit, strings.TrimSpace(stderr)))))
 	}
 
 	facts := parseKeyValues(out)
@@ -417,7 +487,20 @@ fi
 	}
 	// reach=unknown means neither curl nor wget is present: warn but continue,
 	// since the agent itself (Go) does not need them.
+	if facts["reach"] == "dns" {
+		return p.failStep(run, 2, fmt.Sprintf(
+			"host cannot resolve the server address %s — set PARTOUT_SERVER_HOST to an IP or a name every target host can resolve",
+			p.serverHost))
+	}
 	if facts["reach"] == "no" {
+		// A loopback-only server bind can never be reached from a remote host —
+		// no firewall change fixes that, so say so instead of sending the
+		// operator to debug their network.
+		if config.LoopbackBind(p.bindAddr) {
+			return p.failStep(run, 2, fmt.Sprintf(
+				"host cannot reach the server at %s: the server binds %s (loopback-only), which no remote host can ever reach — set PARTOUT_ADDR to a routable address (e.g. the LAN IP) and restart the server, or provision same-host agents only",
+				p.serverHost, p.bindAddr))
+		}
 		return p.failStep(run, 2, fmt.Sprintf(
 			"host cannot reach the server at %s on the control-plane port; open the firewall/NAT path before provisioning",
 			p.serverHost))
@@ -433,7 +516,8 @@ fi
 	return true
 }
 
-// stepTransfer scp's the server binary to the host. Returns true to continue.
+// stepTransfer scp's the server binary (and, when TLS is on, the root CA)
+// to the host. Returns true to continue.
 func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun) bool {
 	p.setState(run, "transferring", "transfer", "")
 	p.beginStep(run, 3)
@@ -444,7 +528,21 @@ func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun)
 	}
 	remote := "/tmp/partout-" + hex.EncodeToString(sha[:])[:12]
 	if _, err := p.ssh.Copy(ctx, p.binaryPath, run.Host, remote); err != nil {
-		return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp failed: %v", err)))
+		return p.failStep(run, 3, p.keyHint(p.authHint(fmt.Sprintf("scp failed: %v", err))))
+	}
+	// The server's root CA rides along when TLS is on, so the provisioned
+	// agent trusts the server from its very first connection (HTTPS
+	// enrollment + mTLS stream). Without it the agent could not verify the
+	// locally-bootstrapped CA at all.
+	if p.caPath != "" {
+		caSHA, err := sha256Of(p.caPath)
+		if err != nil {
+			return p.failStep(run, 3, fmt.Sprintf("read CA %s: %v", p.caPath, err))
+		}
+		remoteCA := "/tmp/partout-ca-" + hex.EncodeToString(caSHA[:])[:12]
+		if _, err := p.ssh.Copy(ctx, p.caPath, run.Host, remoteCA); err != nil {
+			return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp CA failed: %v", err)))
+		}
 	}
 	p.finishStep(run, 3)
 	return true
@@ -463,7 +561,25 @@ func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, 
 	sha12 := hex.EncodeToString(sha[:])[:12]
 	fullSHA := hex.EncodeToString(sha[:])
 
-	script := buildInstallScript(sha12, fullSHA, wipeScript(run.Mode), p.serverHost, token)
+	spec := installSpec{
+		binSHA12:   sha12,
+		binSHA:     fullSHA,
+		wipe:       wipeScript(run.Mode),
+		serverHost: p.serverHost,
+		token:      token,
+	}
+	// The CA fingerprint is part of the install contract when TLS is on:
+	// the script verifies it before trusting /etc/partout/ca.crt.
+	if p.caPath != "" {
+		caSHA, err := sha256Of(p.caPath)
+		if err != nil {
+			return p.failStep(run, 4, fmt.Sprintf("read CA %s: %v", p.caPath, err))
+		}
+		spec.caSHA12 = hex.EncodeToString(caSHA[:])[:12]
+		spec.caSHA = hex.EncodeToString(caSHA[:])
+	}
+
+	script := buildInstallScript(spec)
 
 	// Pipe the script as base64 through sudo bash -s (avoids stdin plumbing
 	// and shell-quoting issues). The token is one-time + short-TTL and is
@@ -475,7 +591,7 @@ func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, 
 		return p.failStep(run, 4, fmt.Sprintf("ssh failed: %v", err))
 	}
 	if exit != 0 || !strings.Contains(out, "INSTALL_OK") {
-		return p.failStep(run, 4, p.authHint(fmt.Sprintf("install exit %d: %s", exit, strings.TrimSpace(stderr))))
+		return p.failStep(run, 4, p.keyHint(p.authHint(fmt.Sprintf("install exit %d: %s", exit, strings.TrimSpace(stderr)))))
 	}
 	p.finishStep(run, 4)
 	return true
@@ -511,12 +627,35 @@ func versionNote(remoteVer, localVer string) string {
 	}
 }
 
-// buildInstallScript renders the one-shot root install script. wipe is the
-// mode-specific prelude (empty for join). serverHost and token are inserted
-// raw into the quoted (<<'EOF') heredoc — they must NOT be shell-quoted there
-// or the env file would contain literal quotes (token is prefix+hex and
-// serverHost is host:port, both quote-safe).
-func buildInstallScript(sha12, fullSHA, wipe, serverHost, token string) string {
+// installSpec renders the one-shot root install script. The ca fields are
+// empty when the server runs without TLS — the script then carries no CA
+// block and no PARTOUT_TLS_CA line (byte-compatible with the pre-TLS
+// installer). serverHost and token are inserted raw into the quoted
+// (<<'EOF') heredoc — they must NOT be shell-quoted there or the env file
+// would contain literal quotes (token is prefix+hex and serverHost is
+// host:port, both quote-safe).
+type installSpec struct {
+	binSHA12, binSHA  string // agent binary fingerprint (transfer verification)
+	caSHA12, caSHA    string // root-CA fingerprint; both empty = TLS off
+	wipe              string // mode-specific prelude ("" for join)
+	serverHost, token string
+}
+
+func buildInstallScript(s installSpec) string {
+	// CA install + env line only when TLS is on: verify the transferred CA
+	// against its expected sha256, then place it where the agent expects it
+	// (PARTOUT_TLS_CA). The CA is public material (0644); the private key
+	// never leaves the server.
+	caBlock, envCA := "", ""
+	if s.caSHA != "" {
+		caBlock = fmt.Sprintf(`CA=/tmp/partout-ca-%s
+CAACT=$(sha256sum "$CA" | cut -d' ' -f1)
+if [ "$CAACT" != %s ]; then echo "ca sha256 mismatch: $CAACT" >&2; exit 1; fi
+install -m 0644 "$CA" /etc/partout/ca.crt
+rm -f "$CA"
+`, s.caSHA12, shellQuote(s.caSHA))
+		envCA = "PARTOUT_TLS_CA=/etc/partout/ca.crt\n"
+	}
 	return fmt.Sprintf(`set -eu
 BIN=/tmp/partout-%s
 EXPECT=%s
@@ -534,12 +673,13 @@ chown partout:partout /home/partout
 chmod 0750 /home/partout
 mkdir -p /etc/partout
 umask 077
+%s# agent identity material lives under DATA_DIR (0700); the CA is a public cert
 cat > /etc/partout/agent.env <<'EOF'
 PARTOUT_MODE=agent
 PARTOUT_SERVER=%s
 PARTOUT_TOKEN=%s
 PARTOUT_DATA_DIR=/var/lib/partout/agent
-EOF
+%sEOF
 chmod 0640 /etc/partout/agent.env
 cat > /etc/systemd/system/partout-agent.service <<'EOF'
 [Unit]
@@ -563,7 +703,7 @@ systemctl enable partout-agent
 systemctl restart partout-agent
 rm -f "$BIN"
 echo INSTALL_OK
-`, sha12, fullSHA, wipe, serverHost, token)
+`, s.binSHA12, s.binSHA, s.wipe, caBlock, s.serverHost, s.token, envCA)
 }
 
 // stepWaitEnroll polls until the agent from this run has connected. Terminal:
@@ -645,6 +785,126 @@ func (p *Provisioner) authHint(msg string) string {
 	return msg + " — no usable SSH client key: " + dir + " offers no key this host accepts; " +
 		"create one there as the server user (ssh-keygen -t ed25519) and add its public key " +
 		"to the target's authorized_keys, then re-run"
+}
+
+// keyHint augments ssh errors that stem from a host-key mismatch (a
+// reinstalled host presents a new key): instead of dead-ending at OpenSSH's
+// raw banner, point at the re-confirm flow, which re-gates the new key
+// through key_confirm.
+func (p *Provisioner) keyHint(msg string) string {
+	if !strings.Contains(msg, "REMOTE HOST IDENTIFICATION HAS CHANGED") &&
+		!strings.Contains(msg, "Host key verification failed") {
+		return msg
+	}
+	return msg + " — the host's key no longer matches the trusted entry (host reinstalled?); use Re-confirm key on the run to review and accept the new key"
+}
+
+// ReconfirmKey restarts the fingerprint gate for a failed run whose host
+// key no longer matches the trusted entry (host reinstalled, key rotated):
+// it removes the stale entry, re-captures the current key, and pauses the
+// run at key_confirm again — rotation goes through the same deliberate
+// operator gate as first contact instead of dead-ending at ssh's raw
+// banner. The state machine is relaunched with a fresh one-time enrollment
+// token (the original may have expired while the run sat failed).
+func (p *Provisioner) ReconfirmKey(runID string) error {
+	p.mu.Lock()
+	if _, active := p.runs[runID]; active {
+		p.mu.Unlock()
+		return fmt.Errorf("provision: run %s already has a live state machine", runID)
+	}
+	p.mu.Unlock()
+
+	run, err := p.store.ProvisionRun(runID)
+	if err != nil {
+		return fmt.Errorf("provision: reconfirm key: %w", err)
+	}
+	if run.State != "failed" {
+		return fmt.Errorf("provision: run %s is not failed (state=%s); only a failed run can re-confirm its key", runID, run.State)
+	}
+
+	// Drop the stale entry (plain + hashed) under the resolved name.
+	ctx := context.Background()
+	res, err := p.ssh.ResolveHost(ctx, run.Host)
+	if err != nil {
+		return fmt.Errorf("provision: resolve %s: %w", run.Host, err)
+	}
+	if err := p.ssh.RemoveHost(ctx, res.Name()); err != nil {
+		return fmt.Errorf("provision: remove stale key: %w", err)
+	}
+
+	// Re-capture the current key and pause at the gate again.
+	ft, fp, line, err := p.ssh.HostKey(ctx, run.Host)
+	if err != nil {
+		return fmt.Errorf("provision: recapture key: %w", err)
+	}
+	if err := p.store.SetProvisionRunKey(runID, ft, fp, line); err != nil {
+		return fmt.Errorf("provision: store key: %w", err)
+	}
+	resolved := ""
+	if f := strings.Fields(line); len(f) > 0 {
+		resolved = f[0]
+	}
+	if resolved != "" && resolved != run.Host {
+		_ = p.store.SetProvisionRunResolved(runID, resolved)
+	}
+
+	// Fresh one-time token: the original likely expired while failed.
+	token, err := p.store.NewEnrollmentToken(p.tokenTTL)
+	if err != nil {
+		return fmt.Errorf("provision: create token: %w", err)
+	}
+	if err := p.store.SetProvisionRunToken(runID, sha256Hex(token)); err != nil {
+		return fmt.Errorf("provision: link token: %w", err)
+	}
+
+	if err := p.store.SetProvisionRunState(runID, "key_confirm", "connect", ""); err != nil {
+		return fmt.Errorf("provision: pause at key_confirm: %w", err)
+	}
+	p.audit("provision.key.reconfirm", fmt.Sprintf(`{"run_id":%q,"fingerprint":%q}`, runID, fp))
+	p.log.Printf("provision: %s re-confirm: stale key removed, new %s %s", runID, ft, fp)
+	if p.emitter != nil {
+		p.emitter.Emit("provision.key_confirm", map[string]string{
+			"run_id": runID, "host": run.Host, "key_type": ft, "fingerprint": fp, "resolved": resolved,
+		})
+	}
+
+	// Relaunch the state machine paused at the gate: on ConfirmKey the new
+	// key enters known_hosts and p.run's stepConnect fast-paths (host now
+	// trusted), continuing from preflight with the fresh token.
+	cctx, cancel := context.WithCancel(context.Background())
+	ar := &activeRun{id: runID, confirm: make(chan struct{}), cancel: cancel}
+	p.mu.Lock()
+	p.runs[runID] = ar
+	p.mu.Unlock()
+	go p.reconfirmWait(cctx, ar, runID, token)
+	return nil
+}
+
+// reconfirmWait blocks at the re-opened key_confirm gate, then resumes the
+// standard state machine on confirm (or terminates on cancel/deny).
+func (p *Provisioner) reconfirmWait(ctx context.Context, ar *activeRun, runID, token string) {
+	defer func() {
+		p.mu.Lock()
+		delete(p.runs, runID)
+		p.mu.Unlock()
+		if r := recover(); r != nil {
+			p.log.Printf("provision: %s PANIC: %v", runID, r)
+			_ = p.store.SetProvisionRunState(runID, "failed", "", fmt.Sprint(r))
+		}
+	}()
+	select {
+	case <-ar.confirm:
+		run, err := p.store.ProvisionRun(runID)
+		if err != nil || run == nil {
+			p.log.Printf("provision: %s resume after re-confirm: %v", runID, err)
+			return
+		}
+		p.run(ctx, ar, run, token)
+	case <-ctx.Done():
+		if r, err := p.store.ProvisionRun(runID); err == nil && r.State == "key_confirm" {
+			p.setTerminal(r, "cancelled", "key confirmation cancelled")
+		}
+	}
 }
 
 func (p *Provisioner) failStep(run *store.ProvisionRun, seq int, errMsg string) bool {

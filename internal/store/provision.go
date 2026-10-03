@@ -10,19 +10,20 @@ import (
 
 // ProvisionRun is one host-provisioning attempt (architecture §3.5).
 type ProvisionRun struct {
-	ID          string `json:"id"`
-	Host        string `json:"host"`
-	Mode        string `json:"mode"` // fresh | update
-	State       string `json:"state"`
-	KeyType     string `json:"key_type,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	KeyLine     string `json:"-"` // host key material — never serialized
-	TokenHash   string `json:"-"` // enrollment token hash — never serialized
-	AgentID     string `json:"agent_id,omitempty"`
-	Step        string `json:"step,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Created     int64  `json:"created"`
-	Updated     int64  `json:"updated"`
+	ID           string `json:"id"`
+	Host         string `json:"host"`
+	Mode         string `json:"mode"` // fresh | update
+	State        string `json:"state"`
+	KeyType      string `json:"key_type,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
+	KeyLine      string `json:"-"`                       // host key material — never serialized
+	ResolvedHost string `json:"resolved_host,omitempty"` // ssh-config-resolved target (alias → host[:port])
+	TokenHash    string `json:"-"`                       // enrollment token hash — never serialized
+	AgentID      string `json:"agent_id,omitempty"`
+	Step         string `json:"step,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Created      int64  `json:"created"`
+	Updated      int64  `json:"updated"`
 }
 
 // ProvisionStep is one step within a run.
@@ -84,6 +85,17 @@ func (s *Store) SetProvisionRunKey(id, keyType, fingerprint, keyLine string) err
 	return err
 }
 
+// SetProvisionRunResolved records the ssh-config-resolved target
+// (alias → host[:port]) so the operator can see what a run's host really
+// connects to on the key-confirm screen.
+func (s *Store) SetProvisionRunResolved(id, resolved string) error {
+	_, err := s.db.Exec(
+		`UPDATE provision_runs SET resolved_host=?, updated=? WHERE id=?`,
+		resolved, now(), id,
+	)
+	return err
+}
+
 // SetProvisionRunToken links a one-time enrollment token to a run.
 func (s *Store) SetProvisionRunToken(runID, tokenHash string) error {
 	_, err := s.db.Exec(`UPDATE provision_runs SET token_hash=?, updated=? WHERE id=?`, tokenHash, now(), runID)
@@ -113,7 +125,7 @@ func (s *Store) ProvisionRunForToken(tokenHash string) (string, error) {
 // ProvisionRun returns one run by id.
 func (s *Store) ProvisionRun(id string) (*ProvisionRun, error) {
 	return scanProvisionRun(s.db.QueryRow(
-		`SELECT id, host, mode, state, key_type, fingerprint, key_line, token_hash, agent_id, step, error, created, updated
+		`SELECT id, host, mode, state, key_type, fingerprint, key_line, resolved_host, token_hash, agent_id, step, error, created, updated
 		 FROM provision_runs WHERE id=?`, id))
 }
 
@@ -123,7 +135,7 @@ func (s *Store) ProvisionRuns(limit int) ([]*ProvisionRun, error) {
 		limit = 50
 	}
 	rows, err := s.db.Query(
-		`SELECT id, host, mode, state, key_type, fingerprint, key_line, token_hash, agent_id, step, error, created, updated
+		`SELECT id, host, mode, state, key_type, fingerprint, key_line, resolved_host, token_hash, agent_id, step, error, created, updated
 		 FROM provision_runs ORDER BY created DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -200,13 +212,14 @@ type rowScanner interface {
 
 func scanProvisionRun(r rowScanner) (*ProvisionRun, error) {
 	pr := &ProvisionRun{}
-	var keyType, fingerprint, keyLine, tokenHash, agentID, step, errText sql.NullString
-	if err := r.Scan(&pr.ID, &pr.Host, &pr.Mode, &pr.State, &keyType, &fingerprint, &keyLine, &tokenHash, &agentID, &step, &errText, &pr.Created, &pr.Updated); err != nil {
+	var keyType, fingerprint, keyLine, resolvedHost, tokenHash, agentID, step, errText sql.NullString
+	if err := r.Scan(&pr.ID, &pr.Host, &pr.Mode, &pr.State, &keyType, &fingerprint, &keyLine, &resolvedHost, &tokenHash, &agentID, &step, &errText, &pr.Created, &pr.Updated); err != nil {
 		return nil, err
 	}
 	pr.KeyType = keyType.String
 	pr.Fingerprint = fingerprint.String
 	pr.KeyLine = keyLine.String
+	pr.ResolvedHost = resolvedHost.String
 	pr.TokenHash = tokenHash.String
 	pr.AgentID = agentID.String
 	pr.Step = step.String

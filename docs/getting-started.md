@@ -23,7 +23,8 @@ go build -o partout ./cmd/partout
 
 **Pre-flight first** — it reports exactly what would stop a start (port in use,
 unwritable DB, TLS posture, outbound CVE/EOL reachability, the SSH key provisioning
-would use):
+would use, and whether fleet provisioning can work at all: a loopback-only bind or
+an unresolvable `PARTOUT_SERVER_HOST` would doom every run):
 
 ```bash
 ./partout doctor
