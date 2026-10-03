@@ -109,6 +109,13 @@ type Config struct {
 	// explicitly start. The draft is inert — nothing dispatches without a
 	// human; the flag only controls whether the reminder is created.
 	AutoDraftRollouts bool
+	// InterruptedTTL (PARTOUT_INTERRUPTED_TTL_S, default 86400 = 24 h): how
+	// long a disconnect-interrupted run may stay "interrupted" before the
+	// server resolves it to not_delivered. The default matches the agent-side
+	// spool window (R5) — after 24 h a replayed result can no longer arrive,
+	// so the run is stranded and resolves to a terminal state (1.0 gate,
+	// roadmap item 20). 0 disables the resolution sweep.
+	InterruptedTTL int
 	// SecurityScanS (M5.1, PARTOUT_SECURITY_SCAN_S, default 21600 = 6 h):
 	// cadence of the periodic security scan — per-host update list + OSV CVE
 	// correlation, persisted for the security_updates alert kind. 0 disables
@@ -196,6 +203,7 @@ func Load() (*Config, error) {
 		ReleaseVerifyKey:      os.Getenv("PARTOUT_RELEASE_VERIFY_KEY"),
 		AutoDraftRollouts:     envBoolDefaultTrue("PARTOUT_AUTO_DRAFT_ROLLOUTS"),
 		SecurityScanS:         envInt("PARTOUT_SECURITY_SCAN_S", 21600),
+		InterruptedTTL:        envInt("PARTOUT_INTERRUPTED_TTL_S", 86400),
 		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 		CleanupOnRevoke:       envBool("PARTOUT_AGENT_CLEANUP_ON_REVOKE"),

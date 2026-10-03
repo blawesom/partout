@@ -466,13 +466,16 @@ func TestDisconnectInterruptsRuns(t *testing.T) {
 		t.Fatalf("run_x state = %q, want interrupted", runs[0].State)
 	}
 
-	// Verify the execution was finalized (interrupted counts as failure).
+	// Verify the execution was finalized to its own "interrupted" state
+	// (1.0 gate, roadmap item 20: a disconnect is transient — the spooled
+	// replay re-finalizes — so the aggregate must NOT read "failed", or a
+	// failure policy watching it would wrongly fire/retry).
 	exec, err := st.GetExecution("exec_x")
 	if err != nil {
 		t.Fatalf("GetExecution: %v", err)
 	}
-	if exec.State != "failed" {
-		t.Fatalf("execution state = %q, want failed", exec.State)
+	if exec.State != "interrupted" {
+		t.Fatalf("execution state = %q, want interrupted (not failed — the disconnect is transient)", exec.State)
 	}
 }
 

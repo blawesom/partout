@@ -502,6 +502,18 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		lg.Printf("server: secrets feature disabled (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY to enable)")
 	}
 
+	// Interrupted-run sweeper (1.0 gate, roadmap item 20): a disconnect marks
+	// in-flight runs "interrupted" — the execution aggregate reads
+	// "interrupted" (never "failed") until the agent replays its spooled
+	// result. Once a run outlives the spool window (default 24 h, R5) a
+	// replay can no longer arrive, so the sweeper resolves it to
+	// not_delivered and the aggregate converges.
+	if cfg.InterruptedTTL > 0 {
+		go apiH.Control().RunInterruptSweeper(ctx, time.Duration(cfg.InterruptedTTL)*time.Second)
+	} else {
+		lg.Printf("server: interrupted-run resolution disabled (PARTOUT_INTERRUPTED_TTL_S=0)")
+	}
+
 	// Retention sweeper (PRD §9: 30-day session-recording retention). Purges
 	// old recordings once at startup, then daily. The window is
 	// PARTOUT_SESSION_RETENTION_DAYS (default 30).
@@ -515,6 +527,34 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		sweep := func() {
 			if n, err := sm.Retention(retentionDays); err == nil && n > 0 {
 				lg.Printf("retention: purged %d session-record chunk(s) older than %dd", n, retentionDays)
+			}
+		}
+		sweep()
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				sweep()
+			}
+		}
+	}()
+
+	// Assistant transcript retention (R26, PRD Decision 18): transcripts are
+	// the accountability record but not forever — same 30-day default as
+	// session recordings, PARTOUT_ASSISTANT_RETENTION_DAYS to tune.
+	assistantRetentionDays := int64(30)
+	if v := os.Getenv("PARTOUT_ASSISTANT_RETENTION_DAYS"); v != "" {
+		if d, err := strconv.ParseInt(v, 10, 64); err == nil && d > 0 {
+			assistantRetentionDays = d
+		}
+	}
+	go func() {
+		sweep := func() {
+			if n, err := st.AssistantRetention(assistantRetentionDays); err == nil && n > 0 {
+				lg.Printf("assistant: purged %d transcript session(s) older than %dd", n, assistantRetentionDays)
 			}
 		}
 		sweep()

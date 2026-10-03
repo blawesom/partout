@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ---- Executions -----------------------------------------------------------
@@ -208,6 +209,54 @@ func (s *Store) InterruptAgentRuns(agentID string) ([]string, error) {
 		UPDATE execution_runs SET state='interrupted', updated=?
 		WHERE agent_id=? AND state IN ('delivered','running')
 	`, now(), agentID); err != nil {
+		return nil, err
+	}
+	return execs, nil
+}
+
+// StrandedInterruptedRuns resolves interrupted runs whose last update is
+// older than ttl to not_delivered (terminal), returning the distinct
+// execution ids of affected runs, for aggregate recomputation.
+//
+// A run marked interrupted by a disconnect can only be re-finalized by the
+// agent replaying its spooled result; the agent-side spool itself drops
+// entries after 24h (R5), so a run interrupted longer than that can never
+// resolve — it is stranded. The default ttl matches that window.
+func (s *Store) StrandedInterruptedRuns(ttl time.Duration) ([]string, error) {
+	cutoff := now() - int64(ttl/time.Second)
+	if ttl <= 0 {
+		// Resolve-all-now (tests, operational drain): nothing can be "older
+		// than now" at second granularity, so push the cutoff past it.
+		cutoff = now() + 1
+	}
+	rows, err := s.db.Query(`
+		SELECT DISTINCT execution_id FROM execution_runs
+		WHERE state='interrupted' AND updated < ?
+	`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	var execs []string
+	for rows.Next() {
+		var execID string
+		if err := rows.Scan(&execID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		execs = append(execs, execID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(execs) == 0 {
+		return nil, nil
+	}
+	if _, err := s.db.Exec(`
+		UPDATE execution_runs SET state='not_delivered', updated=?
+		WHERE state='interrupted' AND updated < ?
+	`, now(), cutoff); err != nil {
 		return nil, err
 	}
 	return execs, nil

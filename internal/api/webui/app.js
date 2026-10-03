@@ -30,7 +30,7 @@
     return n.toFixed(n >= 10 || i === 0 ? 0 : 1) + " " + u[i];
   }
   function agentBadge(s) { return ({ connected: { cls: "ok", label: "connected" }, disconnected: { cls: "bad", label: "disconnected" }, pending: { cls: "info", label: "pending" } })[s] || { cls: "neutral", label: s || "unknown" }; }
-  function execBadge(s) { return ({ pending: "neutral", running: "info", succeeded: "ok", failed: "bad", partial: "warn", cancelled: "neutral" })[s] || "neutral"; }
+  function execBadge(s) { return ({ pending: "neutral", running: "info", succeeded: "ok", failed: "bad", partial: "warn", cancelled: "neutral", interrupted: "neutral" })[s] || "neutral"; }
   function runBadge(s) { return ({ queued: "neutral", delivered: "neutral", running: "info", succeeded: "ok", failed: "bad", timed_out: "warn", cancelled: "neutral", interrupted: "neutral", not_delivered: "outline-warn", denied: "outline-bad" })[s] || "neutral"; }
   function taskRunBadge(s) { return ({ ok: "ok", changed: "ok", running: "info", rebooting: "info", failed: "bad", skipped: "neutral", denied: "outline-bad", awaiting_approval: "warn" })[s] || "neutral"; }
   function stepBadge(s) { return ({ ok: "ok", changed: "ok", failed: "bad", skipped: "neutral", rebooting: "info" })[s] || "neutral"; }
@@ -813,8 +813,9 @@
               <span class="muted mono">{{ execDetail.cmd }}<template v-if="execDetail.args"> {{ execDetail.args.join(' ') }}</template></span>
               <span class="muted small">selector: {{ execDetail.selector }}</span>
               <div class="spacer"></div>
-              <button v-if="['running','pending'].includes(execDetail.state) && isOperator" class="btn danger sm" @click="cancelExec(execDetail.id)">Cancel</button>
+              <button v-if="['running','pending','interrupted'].includes(execDetail.state) && isOperator" class="btn danger sm" @click="cancelExec(execDetail.id)">Cancel</button>
             </div>
+            <p v-if="execDetail.state==='interrupted'" class="muted small" style="margin:4px 0 10px">A host stream dropped mid-run — the outcome is not yet known. The agent replays its spooled result on reconnect and the execution re-finalizes; runs interrupted longer than the spool window resolve as <span class="mono">not_delivered</span>.</p>
             <table class="tbl">
               <thead><tr><th>Host</th><th>State</th><th>Exit</th><th>Duration</th><th>Output</th></tr></thead>
               <tbody>
@@ -3530,6 +3531,7 @@
       },
       async loadApprovals() { this.apprMsg = ""; const q = this.apprState ? "?state=" + encodeURIComponent(this.apprState) : ""; try { const d = await this.api("/approvals" + q); this.approvals = d.approvals || []; } catch (e) { this.approvals = []; } },
       async loadMcp() { try { this.mcpInfo = await this.api("/mcp/info"); } catch (e) { this.mcpInfo = null; } },
+
       protocolHost() { return location.protocol + '//' + location.host; },
       mcpSnippet() {
         if (!this.mcpInfo) return '';

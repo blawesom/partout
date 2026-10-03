@@ -447,12 +447,22 @@ func (c *Control) FinalizeExecution(execID string) error {
 		}
 	}
 
-	var succeeded, failed, other int
+	var succeeded, failed, interrupted, other int
 	for _, r := range runs {
 		switch r.State {
 		case "succeeded":
 			succeeded++
-		case "failed", "timed_out", "interrupted", "not_delivered", "cancelled", "denied", "expired":
+		case "interrupted":
+			// Transient (1.0 gate, roadmap item 20): a disconnect marked the
+			// run; the agent's spooled replay will re-finalize it. It must
+			// NOT count as failed — a failure policy watching the execution
+			// would fire on the transient state and wrongly retry. The
+			// aggregate gets its own "interrupted" state (ui-guidelines §9
+			// distinguishes it from cancelled) and converges to the true
+			// outcome when the last interrupted run resolves (replay, or the
+			// stranded-run sweeper).
+			interrupted++
+		case "failed", "timed_out", "not_delivered", "cancelled", "denied", "expired":
 			failed++
 		default:
 			other++
@@ -461,6 +471,8 @@ func (c *Control) FinalizeExecution(execID string) error {
 	state := "running" // still in-flight
 	if other == 0 {
 		switch {
+		case interrupted > 0:
+			state = "interrupted"
 		case failed == 0:
 			state = "succeeded"
 		case succeeded == 0:
@@ -469,7 +481,7 @@ func (c *Control) FinalizeExecution(execID string) error {
 			state = "partial"
 		}
 	}
-	c.log.Printf("control: execution %s finalize: %s (succeeded=%d failed=%d other=%d)", execID, state, succeeded, failed, other)
+	c.log.Printf("control: execution %s finalize: %s (succeeded=%d failed=%d interrupted=%d other=%d)", execID, state, succeeded, failed, interrupted, other)
 	if err := c.st.UpdateExecutionState(execID, state); err != nil {
 		return err
 	}
@@ -477,6 +489,55 @@ func (c *Control) FinalizeExecution(execID string) error {
 		c.sse.Emit("execution.state", map[string]string{"execution_id": execID, "state": state})
 	}
 	return nil
+}
+
+// SweepInterrupted resolves stranded interrupted runs (older than ttl) to
+// not_delivered and re-finalizes their executions. It is the bound half of
+// the item-20 fix: while a run is interrupted the aggregate reads
+// "interrupted" (never "failed"), and once the agent-side spool window has
+// passed (R5: 24h) a replay can no longer arrive, so the run resolves to a
+// terminal not_delivered and the aggregate converges.
+func (c *Control) SweepInterrupted(ttl time.Duration) error {
+	execs, err := c.st.StrandedInterruptedRuns(ttl)
+	if err != nil {
+		return err
+	}
+	for _, execID := range execs {
+		c.audit("exec.stranded", "system", map[string]string{
+			"execution_id": execID,
+			"reason":       "interrupted run outlived the spool window; resolved to not_delivered",
+		})
+		if err := c.FinalizeExecution(execID); err != nil {
+			c.log.Printf("control: finalize stranded %s: %v", execID, err)
+		}
+	}
+	return nil
+}
+
+// RunInterruptSweeper runs SweepInterrupted on a ticker until ctx is done
+// (intended for its own goroutine in the server assembly). The interval is
+// one minute — the query is a single indexed scan of non-terminal runs — and
+// adapts down for small TTLs so tests can sweep promptly.
+func (c *Control) RunInterruptSweeper(ctx context.Context, ttl time.Duration) {
+	interval := time.Minute
+	if ttl > 0 && ttl < 4*interval {
+		interval = ttl / 4
+	}
+	if err := c.SweepInterrupted(ttl); err != nil {
+		c.log.Printf("control: interrupted sweep: %v", err)
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := c.SweepInterrupted(ttl); err != nil {
+				c.log.Printf("control: interrupted sweep: %v", err)
+			}
+		}
+	}
 }
 
 // onRunFinished is the stream handler result hook: called from the gRPC stream
