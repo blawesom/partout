@@ -619,6 +619,11 @@ GET    /api/v1/hosts/{id}/updates      POST /api/v1/hosts/updates/apply
 CRUD   /api/v1/secrets       (values write-only)
 CRUD   /api/v1/policies      CRUD /api/v1/approvals
 GET    /api/v1/audit
+# LLM assistant (R26, M9)
+GET/PUT /api/v1/assistant/config        (admin write; key write-only, sealed)
+GET    /api/v1/assistant/capabilities   (probe: tool calling required)
+POST/GET /api/v1/assistant/sessions     (profiles capped by role)
+POST   /api/v1/assistant/sessions/{id}/chat   (SSE events)
 # Monitoring endpoints, alerts, channels, status page
 ```
 
@@ -820,9 +825,12 @@ feature paywall (R14). Consequences that follow from "everything free":
   tool registry in-process (same RBAC / policy / approvals / audit chain; profiles
   `readonly|operator|full` cap the tool set; `decide_approval` is never assistant-reachable).
   Audit rows carry the assistant session + model + prompt hash (Decision 18); data egress
-  is explicit (blocking consent modal at first enablement, per-turn egress audit, prompts
-  not logged by default). Design + mockup (PRD Decisions 17–19): `docs/assistant.md`,
-  `docs/mockups/assistant.html`.
+  is explicit (per-turn egress audit, prompts not logged by default). Design + mockup
+  (PRD Decisions 17–19): `docs/assistant.md`, `docs/mockups/assistant.html`.
+  *v0.9.9: shipped — `internal/server/assistant` (LLM client, agent loop, profiles,
+  sealed endpoint key, transcript store with 30 d retention), REST + SSE chat, Web UI
+  Assistant panel + admin settings card, `assistant.*` audit rows; enablement is
+  probe-gated (tool calling required, no emulation fallback).*
 
 ---
 

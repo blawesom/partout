@@ -1,6 +1,6 @@
 # Partout — LLM Assistant (design)
 
-**Status:** design agreed, not started (in 1.0 scope) · **PRD:** R26 (§4), Decisions 17–19 (§15.1), Milestone M9 (§14) · **Mockup:** [`mockups/assistant.html`](mockups/assistant.html)
+**Status:** ✅ implemented — 1.0 slice shipped in v0.9.9 (the 1.0-scoped beta) · **PRD:** R26 (§4), Decisions 17–19 (§15.1), Milestone M9 (§14) · **Mockup:** [`mockups/assistant.html`](mockups/assistant.html)
 **Companions:** `PRD.md` (R11 MCP, §10.3), `docs/architecture.md` (§10 API, §11 Frontend),
 `docs/ui-guidelines.md` (tokens, state vocabulary, capability gating), `internal/server/mcp/`
 (tool registry, `API` interface).

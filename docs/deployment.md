@@ -1,6 +1,6 @@
 # Partout — Deployment
 
-**Status:** v0.9.8 — reflects the current implementation
+**Status:** v0.9.9 — reflects the current implementation
 (M0–M8.1 complete: Web UI, M4 approvals + MCP + OAuth2, M6.1 alert rule kinds,
 v0.7.x in-stream mTLS rotation / offline down-queue dispatch / provisioning
 fresh+join modes / `partout --version`, **M8.1 fleet updates**: release store +
@@ -592,6 +592,8 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_ADMIN_PASSWORD` / `--admin-password` | *(empty)* | first-run admin-user bootstrap password (M4); otherwise a random password is generated into `<db dir>/admin_password.txt` (0600). Prefer the env var — a flag value is visible in `ps` |
 | `PARTOUT_SECRET_KEY_FILE` / `PARTOUT_SECRET_KEY` | *(empty)* | secrets master key (PRD §5.7): key file (mode `0600`) or env var; per-secret keys derived via HKDF. No key → the secrets feature is disabled at startup |
 | `PARTOUT_SESSION_RETENTION_DAYS` | **30** | retention sweeper window for session recordings (PRD §9) |
+| `PARTOUT_INTERRUPTED_TTL_S` | **86400** | (1.0 gate, item 20) how long a disconnect-`interrupted` run may stay interrupted before the sweeper resolves it to `not_delivered` (the agent-side spool window — after 24 h a replayed result can no longer arrive). `0` disables the sweep (runs stay interrupted) |
+| `PARTOUT_ASSISTANT_RETENTION_DAYS` | **30** | (R26) assistant transcript retention — same window as session recordings; sessions and messages purge together |
 | `PARTOUT_APPROVAL_TTL_S` | **3600** | (M4) approval-request TTL in seconds (PRD §5.8): a `require_approval`-parked action expires and is finalized `failed` if un-acted within this window; expired requests can never be retroactively honored |
 | `PARTOUT_ALERT_TICK_S` | **30** | (M6) alert-engine evaluation cadence in seconds (PRD R25); one pass over all enabled rules × all host facts per tick |
 | `PARTOUT_SECURITY_SCAN_S` | **21600** | (M5.1) periodic CVE security-scan cadence in seconds (6 h); `0` disables the scan loop. The scan correlates installed packages against the OSV cache and persists findings; the `security_updates` alert kind reads them |

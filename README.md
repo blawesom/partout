@@ -1,13 +1,15 @@
 # Partout
 
-> **Status: beta (v0.9.8; v1.0 in preparation)** — the full feature set (observe,
-> execute, patch, update rollouts, MCP) is available and self-hosted; expect the
+> **Status: beta (v0.9.9 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
+> before the 1.0 GA flip)** — the full feature set (observe,
+> execute, patch, update rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your
 > `partout.db` regularly.
 
 **Partout** is a remote host-management control plane: one Go binary to discover, observe,
 execute against, configure, patch, and orchestrate work across Linux hosts — safely,
-auditably, and verifiably — with a web UI and an MCP server for AI assistants.
+auditably, and verifiably — with a web UI, an MCP server for AI assistants, and a built-in
+LLM assistant (bring any OpenAI-compatible endpoint — a local Ollama keeps all data on-host).
 
 It ships as a single self-hosted binary (no editions, everything free) with an embedded
 observe layer, a full write/control path, and an append-only audit log (a cryptographic

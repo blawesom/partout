@@ -1,6 +1,6 @@
 # Partout — Web UI Definition & Guidelines
 
-**Status:** v0.9.8 — UI implemented (S0 shell + data pages for M1–M8.1: Fleet, Execute,
+**Status:** v0.9.9 — UI implemented (S0 shell + data pages for M1–M8.1: Fleet, Execute,
 Observe (Services/Certificates/Configs/Alerts), Updates (releases + rollout runs),
 Files (view/edit/upload/perm), Sessions, Jobs, Tasks, Secrets, Policies, Approvals,
 Provision, Users, MCP). This document is the definition; `internal/api/webui/` is
@@ -223,6 +223,7 @@ UI labels are presentation names; the PRD/API nouns stay authoritative.
 | Observe · Services | Observe → Services | `/services`, `/services?agent_id=&name=` |
 | Observe · Certificates | Observe → Certificates | `/certificates`, `/certificates?days_remaining_lt=` |
 | Observe · Configs | Observe → Configs | `/configs`, `/configs?kind=&agent_id=` |
+| Assistant | Assistant (R26) | `/assistant/config`, `/assistant/sessions`, `/assistant/sessions/{id}/chat` (SSE) |
 
 ### Routes
 
@@ -355,7 +356,7 @@ Build these once in S0/S1 and reuse at S3–S5; do not re-invent per page.
 `revoked` is unreachable today (no revoke endpoint — see §14) and is excluded from the cards; if
 it becomes reachable it gets its own row, not a card.
 
-**Execution aggregate:** `pending · running · succeeded · failed · partial · cancelled`
+**Execution aggregate:** `pending · running · interrupted · succeeded · failed · partial · cancelled`
 
 **Per-run:** `queued · delivered · running · succeeded · failed · timed_out · cancelled ·
 interrupted · not_delivered · denied`

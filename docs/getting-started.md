@@ -105,6 +105,13 @@ tools for AI assistants — same policy gates, same audit trail.
   `/etc/systemd/system`.
 - **Updates** — CVE-ranked package updates per host, and fleet release rollouts
   (upload an agent release; a draft rollout is pre-armed for you to start).
+- **Assistant** — chat with your fleet in natural language over the same governed
+  tool surface: ask "any certs expiring soon on role:web?", request a playbook run
+  (it parks on approvals like any write). Configure it in **Settings → Assistant**
+  (admin): any OpenAI-compatible endpoint works — for a fully local setup,
+  `ollama serve` + `ollama pull qwen3:32b`, then base URL
+  `http://127.0.0.1:11434/v1` (keyless, zero egress). Profiles cap what the
+  model may call; `decide_approval` is never assistant-reachable.
 
 ## 5. From demo to production
 

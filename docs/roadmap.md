@@ -23,7 +23,7 @@
 | **M6 — Observe: alert engine** | ✅ **Done** | **Alert engine ✅** (R23/R25): threshold rules over service/cert/config facts — `service_failed`, **`service_restarting` (M6.1)**, `cert_expiring`, `config_invalid`, **`config_drift` (R22)**; `alerts` + `alert_rules` store; dedup per (rule, host, subject); firing/resolved transitions; SSE `alert.firing`/`alert.resolved`; `GET /alerts` + rules CRUD; `partout ctl alerts`; MCP `list_alerts`; live Alerts page. |
 | **M7 — Observe: Web UI pages** | ✅ **Done** | S0 shell + data pages for M1–M6 (Fleet, Execute, Audit, Sessions, Files, Jobs, Tasks, Updates, Secrets, Policies, **Approvals (M4)**, **Alerts (M6 live list)**, Provision, Users, Services, Certificates, Configs). Now complete: **alert rule-management UI**, **cert→config→service cross-links**, **config drift (R22)**, **task actions** (run task/playbook + run inspection), **live PTY terminal (xterm.js)**, and **write actions** (jobs CRUD + run history, package apply/dry-run + history, provision start/key-confirm/cancel + live steps). |
 | **M8 — Distribution & self-update** | 🚧 M8.1 + M8.1.1 shipped | **M8.1 signed fleet updates**: one-command `partout update` (fetch signed release from repo → supervised server update → fleet rollout to the same version → one status line); release store + Ed25519 signatures, agent self-swap with auto-rollback, canary/wave rollout orchestration (`update.apply` governed action), automatic re-issue of signed job decisions on version change; server update via supervised script (new-binary selftest → verified backup → swap → post-checks + auto-rollback). **M8.1.1 update drift & auto-draft rollouts**: uploading an agent release pre-arms a parked draft rollout (operator starts it; policy re-checked at start) + `update_drift` server-level alert (preset `default-update-drift` — agents behind the store's latest). **M8.2 install/uninstall**: `install-server.sh` + `partout uninstall` shipped; Docker/compose, cloud-init, Helm, readiness JSON/status page are **maybe-future** (off the 1.0 path) |
-| **M9 — LLM assistant** | 📋 design agreed — **in 1.0**, not started | R26: operator-configured OpenAI-compatible endpoint; in-UI assistant reusing the R11 MCP tool registry in-process (RBAC/policy/approvals/audit unchanged; profiles cap tools; `decide_approval` never assistant-reachable). Design: `docs/assistant.md` · mockup: `docs/mockups/assistant.html` · PRD Decisions 17–19 |
+| **M9 — LLM assistant** | ✅ **Implemented** (ships in v0.9.9, the 1.0-scoped beta) | R26: operator-configured OpenAI-compatible endpoint; in-UI assistant reusing the R11 MCP tool registry in-process (RBAC/policy/approvals/audit unchanged; profiles cap tools; `decide_approval` never assistant-reachable). `internal/server/assistant` (LLM client, agent loop, profiles, sealed endpoint key, transcript store) + REST/SSE + Web UI Assistant panel + Settings card + audit `assistant.*` rows. Design: `docs/assistant.md` · mockup: `docs/mockups/assistant.html` · PRD Decisions 17–19 |
 
 ### M0 — Spine (complete)
 
@@ -592,10 +592,9 @@ unimplemented `--root=/host` flag, and elevation inside containers is its
 own problem). They ship only if operators ask.
 
 
-### M9 — LLM assistant (design agreed — in 1.0)
+### M9 — LLM assistant (implemented — ships in v0.9.9)
 
-**Status: design agreed — not started; in 1.0 scope, built after the item-20 gate.**
-R26 (PRD §4, Decisions 17–19): the operator
+**Status: implemented (1.0 slice).** R26 (PRD §4, Decisions 17–19): the operator
 configures an external, OpenAI-compatible LLM endpoint (any vendor, or a local
 Ollama/vLLM for zero egress); a built-in assistant chats over the fleet **reusing the
 R11 MCP tool registry in-process** — one tool surface, two front doors.
@@ -616,12 +615,15 @@ Non-negotiables (the reason it reuses the MCP surface rather than adding a new p
 - One server-wide, admin-set endpoint (Decision 19) — the single egress destination;
   per-user endpoints only ever as an admin-granted capability.
 
-Scope (1.0 slice): `internal/server/assistant` (LLM client, agent loop, profiles, endpoint +
+Scope (1.0 slice — shipped): `internal/server/assistant` (LLM client, agent loop, profiles, endpoint +
 transcript store — reusing `mcp.Tool`/`localAPI` unchanged), REST + SSE chat surface,
-Web UI Assistant panel + Settings card, audit `source=assistant` tagging (prompt
-sha256, no content). Follow-ups: Explain buttons (alert/execution detail),
-alert-triage remediation drafts (parked as approvals), scheduled NL checks,
-fleet-drift reports.
+Web UI Assistant panel + Settings card, audit `assistant.*` tagging (prompt
+sha256, no content). The endpoint API key is sealed at rest under the secrets
+master key (keyless local endpoints need none); enabling requires the
+capabilities probe (tool calling) to pass; transcripts retain 30 d by default
+(`PARTOUT_ASSISTANT_RETENTION_DAYS`). Follow-ups (1.0.x): Explain buttons
+(alert/execution detail), alert-triage remediation drafts (parked as approvals),
+scheduled NL checks, fleet-drift reports.
 
 Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
 
@@ -654,13 +656,17 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
 19. **~~Elevation — full Decision 3 (per-command profiles) + finer-grained env control.~~** ✅ **Policy engine shipped (next release, post-v0.9.5):** the **elevation policy** (`PARTOUT_ELEVATION_POLICY`: one .json or a *.json drop-in dir) is now the single source of truth for what the agent runs elevated — pattern-scoped rules (exact args, verb×unit `systemctl` grants, file-glob reads, per-rule env) — and `partout ctl elevation <show|check|install-sudoers>` renders the sudoers drop-in **from the same policy** (visudo-checked before install; `check` detects drift via a `policy-sha256` header). With a policy loaded + `PARTOUT_ELEVATE=sudo`, a matching command elevates and a non-matching one runs unprivileged (logged); no policy = legacy drop-in decides. Policy-generated drop-ins keep `env_reset` ON (per-rule env renders as `SETENV:`, retiring the legacy blanket `!env_reset` for generated files). The observe layer now reports a root-only config as **not readable** (never mislabeled *invalid*) and validates elevated when the policy authorizes the validator. Example: `deploy/elevation/elevation-web.json.example`. **Remaining** (take up when operators ask): `PARTOUT_ROOT` (elevated target home); elevation visibility on the exec/audit UI surface (a per-run "elevated/not in scope" badge); per-command profiles declared in the server-side command spec (PRD Decision 3 + arch §6.6); and optionally even finer env management (scoped `env_keep` allowlists beyond per-rule `SETENV`). See operations.md §3.6.
 
 
-20. **1.0 gate — `interrupted` must not read as `failed` in the execution aggregate**
-    (arch §3.4 known limitation, shipped through v0.9.x): a disconnect momentarily
-    finalizes the execution `failed`/`partial` before the spooled replay re-finalizes
-    it, and a job/task failure policy watching the transient state would wrongly retry.
-    Fix: keep the execution `running` while any run is `interrupted`, with a bound to
-    resolve stranded runs (or model `interrupted` as its own aggregate state — the
-    ui-guidelines §9 visual vocabulary already distinguishes them).
+20. ~~**1.0 gate — `interrupted` must not read as `failed` in the execution aggregate**~~
+    ✅ **shipped (v0.9.9)**: `FinalizeExecution` buckets `interrupted` separately — the aggregate
+    reads **`interrupted`** (its own state, ui-guidelines §9 vocabulary) while any run is
+    interrupted, never `failed`/`partial`, so a job/task failure policy watching the transient
+    state no longer fires. Convergence: the spooled replay re-finalizes via the result hook;
+    the bound is the new stranded-run sweeper (`PARTOUT_INTERRUPTED_TTL_S`, default 24 h =
+    the agent-side spool window, R5) resolving stranded runs to `not_delivered` + an
+    `exec.stranded` audit row, and the execution converges to its true terminal state. The
+    exec detail page explains the state; the UI badge treats it like `cancelled` (slate).
+    Covered by `TestFinalizeExecutionInterruptedAggregate`/`TestSweepInterruptedResolvesStranded`
+    (control) and `TestDisconnectInterruptsRuns` (stream, updated to the new contract).
 
 21. ~~**Onboarding polish — first-run output + embedded-mode error surfacing**~~
     ✅ **shipped**: (a) the server startup log ends with a **first-run next-steps
@@ -674,11 +680,31 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     the server keeps serving, but this host will NOT appear in it`) and a
     **server-half** death after readiness logs and unwinds the whole process
     (nothing serves anymore) instead of hanging until shutdown.
-22. **M9 — LLM assistant (R26)**: design agreed — `docs/assistant.md` + PRD Decisions
-    17–19 (governed tool reuse; split-store transcripts; one admin-set endpoint).
-    **In 1.0**: build the 1.0 slice (design doc §9) after the item-20 gate; ships with 1.0.
+22. ~~**M9 — LLM assistant (R26)**~~ ✅ **shipped (v0.9.9, 1.0-scoped beta)** — see the M9
+    section above: `internal/server/assistant` + REST/SSE + Web UI panel + audit rows,
+    per PRD Decisions 17–19 (governed tool reuse; split-store transcripts; one admin-set
+    endpoint). The next release after v0.9.8 is the **1.0 beta**: all 1.0 features in,
+    beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.9 — the 1.0-scoped beta: item 20 + the LLM assistant.** Everything
+  since the v0.9.8 tag:
+
+  - **`interrupted` no longer reads as `failed`** (the last 1.0 correctness
+    gate, item 20): the execution aggregate gets its own `interrupted`
+    state on disconnect — transient, converging via the spooled replay —
+    with a stranded-run sweeper (24 h default) as the bound. Failure
+    policies watching executions no longer fire on the disconnect blip.
+  - **The LLM assistant (R26, M9) ships** — operator-configured
+    OpenAI-compatible endpoint (local Ollama/vLLM = zero egress),
+    in-UI chat over the same governed tool surface the MCP server
+    exposes, tool profiles (readonly/operator/full) capped by role,
+    `decide_approval` never assistant-reachable, split-store transcripts
+    (30 d retention), sealed endpoint key, probe-gated enablement, and
+    `assistant.*` audit rows carrying prompt hashes — never content.
+  - This is the **1.0 feature set in beta form**: feedback from here
+    shapes the 1.0.0 GA flip (the `PARTOUT_ALLOW_UNSIGNED_RELEASES`
+    default change stays gated on GA).
 - **v0.9.8 — provisioning reachability, and the 1.0 scope set.** Everything
   since the v0.9.7 tag:
 
