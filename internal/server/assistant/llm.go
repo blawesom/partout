@@ -39,7 +39,7 @@ type ChatMessage struct {
 	Content    string        `json:"content"`
 	ToolCalls  []ToolCallOut `json:"tool_calls,omitempty"`
 	ToolCallID string        `json:"tool_call_id,omitempty"` // role=tool: which call this answers
-	Name       string        `json:"name,omitempty"`        // role=tool: tool name
+	Name       string        `json:"name,omitempty"`         // role=tool: tool name
 }
 
 // ToolCallOut is an assistant-requested tool call (what the model returns).
@@ -54,8 +54,8 @@ type ToolCallOut struct {
 
 // chatRequest is the request body for /chat/completions.
 type chatRequest struct {
-	Model    string         `json:"model"`
-	Messages []ChatMessage  `json:"messages"`
+	Model    string           `json:"model"`
+	Messages []ChatMessage    `json:"messages"`
 	Tools    []map[string]any `json:"tools,omitempty"`
 }
 

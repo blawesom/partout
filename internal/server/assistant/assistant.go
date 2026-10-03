@@ -194,8 +194,8 @@ func (s *Service) Probe(ctx context.Context) (map[string]any, error) {
 // CreateSession starts a chat session; the profile is capped by the role.
 func (s *Service) CreateSession(userID, role, profile string) (*store.AssistantSession, error) {
 	ss := &store.AssistantSession{
-		ID:     id.New("as"),
-		UserID: userID,
+		ID:      id.New("as"),
+		UserID:  userID,
 		Profile: ProfileFor(profile, role),
 	}
 	if err := s.st.CreateAssistantSession(ss); err != nil {
