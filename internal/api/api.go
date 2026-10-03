@@ -18,6 +18,7 @@ import (
 	"github.com/blawesom/partout/internal/release"
 	serverapprovals "github.com/blawesom/partout/internal/server/approvals"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
+	"github.com/blawesom/partout/internal/server/assistant"
 	"github.com/blawesom/partout/internal/server/externaldata"
 	"github.com/blawesom/partout/internal/server/files"
 	"github.com/blawesom/partout/internal/server/jobs"
@@ -61,6 +62,7 @@ type Handler struct {
 	allowUnsigned     bool                   // GA: unsigned releases accepted only when PARTOUT_ALLOW_UNSIGNED_RELEASES=true (default false = signed-only)
 	releaseVerifyKey  ed25519.PublicKey      // optional: verify upload signatures at registration (PARTOUT_RELEASE_VERIFY_KEY); nil = store-and-forward
 	autoDraftRollouts bool                   // M8.1.1: auto-draft a parked rollout on agent release upload
+	assistant         *assistant.Service     // R26 LLM assistant; nil until SetAssistant (routes 503)
 }
 
 // New builds the REST handler and its router.
@@ -229,6 +231,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)
+
+	// R26: LLM assistant (M9). Routes 503 until SetAssistant installs the
+	// service (endpoint config + sessions + SSE chat).
+	handler.RegisterAssistant(mux)
 
 	// M3: external data status/refresh (PRD §6.3).
 	handler.RegisterExternalData(mux)

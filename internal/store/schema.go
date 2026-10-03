@@ -560,10 +560,47 @@ CREATE TABLE IF NOT EXISTS security_scan_meta (
   updates_total    INTEGER NOT NULL DEFAULT 0,
   security_updates INTEGER NOT NULL DEFAULT 0
 );
+
+-- v19: LLM assistant (R26, M9). assistant_config is a single row (id=1):
+-- the operator-configured OpenAI-compatible endpoint. The API key is stored
+-- SEALED (AES-GCM under a key derived from the secrets master key) and never
+-- returned by read APIs. Sessions + messages are the split-store transcript
+-- (PRD Decision 18): prompts + replies live here (user-owned, admin-readable);
+-- the audit log records only the action half (session, model, tool calls,
+-- prompt hash).
+CREATE TABLE IF NOT EXISTS assistant_config (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  base_url        TEXT NOT NULL DEFAULT '',
+  model           TEXT NOT NULL DEFAULT '',
+  api_key_sealed  BLOB,
+  max_tool_calls  INTEGER NOT NULL DEFAULT 15,
+  timeout_s       INTEGER NOT NULL DEFAULT 120,
+  default_profile TEXT NOT NULL DEFAULT 'readonly',
+  enabled         INTEGER NOT NULL DEFAULT 0,
+  updated         INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS assistant_sessions (
+  id      TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  created INTEGER NOT NULL DEFAULT 0,
+  updated INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_sessions_user ON assistant_sessions(user_id);
+CREATE TABLE IF NOT EXISTS assistant_messages (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  role       TEXT NOT NULL,              -- user|assistant|tool
+  content    TEXT NOT NULL,
+  tool_name  TEXT NOT NULL DEFAULT '',
+  tool_args  TEXT NOT NULL DEFAULT '',   -- JSON, tool rows only
+  created    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_messages_session ON assistant_messages(session_id);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 18
+const currentSchemaVersion = 19
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

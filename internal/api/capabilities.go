@@ -60,6 +60,8 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// available (read-only catalog) but the live surface is only usable
 		// when wired.
 		"mcp": h.mcpWired,
+		// R26 assistant: configured AND enabled (the nav entry hides when off).
+		"assistant": h.assistant != nil && h.assistantEnabled(),
 	}
 	writeJSON(w, http.StatusOK, caps)
 }

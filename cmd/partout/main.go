@@ -43,6 +43,7 @@ import (
 	"github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/preset"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/assistant"
 	"github.com/blawesom/partout/internal/server/approvals"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
 	"github.com/blawesom/partout/internal/server/externaldata"
@@ -375,6 +376,18 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// RBAC + policy gating + audit are the same control plane the UI/CLI
 	// use (no duplicated write path). stdio mode: `partout mcp`.
 	apiH.HandleMCP(mcp.HTTPHandler(mcp.New(mcp.NewLocalAPI(apiH), lg)))
+
+	// R26/M9: LLM assistant — reuses the same in-process tool surface (one
+	// tool surface, two front doors, PRD Decision 17). The endpoint API key
+	// is sealed at rest under the secrets master key when one is configured;
+	// keyless local endpoints (Ollama/vLLM) work without it.
+	var assistantMaster []byte
+	if master, err := serversecrets.LoadMasterKey(); err == nil {
+		assistantMaster = master
+	} else if !errors.Is(err, serversecrets.ErrDisabled) {
+		lg.Printf("server: assistant key storage disabled (%v)", err)
+	}
+	apiH.SetAssistant(assistant.New(st, mcp.NewLocalAPI(apiH), assistantMaster, lg))
 
 	// M2: files + sessions (PRD §5.3, §5.2.2). Both sign Decisions with the
 	// same server identity (agent-side guardrail re-check).

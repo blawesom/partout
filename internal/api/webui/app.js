@@ -1540,6 +1540,94 @@
           </template>
         </section>
 
+        <!-- ============ ASSISTANT (R26) ============ -->
+        <section v-else-if="page==='assistant'">
+          <h1 class="page">Assistant</h1>
+          <p class="page-sub">LLM assistant over the governed tool surface (R26): every action still passes RBAC, policy, approvals and audit — the model can request an action, never approve one. Fleet data leaves to the configured endpoint; prompts live in your session transcript, not the audit log.</p>
+
+          <div v-if="!assistantCfg || !assistantCfg.enabled" class="card">
+            <div class="empty">
+              <template v-if="isAdmin">The assistant is not configured — set an OpenAI-compatible endpoint below (a local Ollama/vLLM keeps all data on-host).</template>
+              <template v-else>The assistant is not configured — ask an admin to set the endpoint.</template>
+            </div>
+          </div>
+
+          <template v-else>
+            <div class="card" style="margin-bottom:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+              <span class="muted small">Session</span>
+              <span class="mono small">{{ assistantSession ? assistantSession.id : "—" }}</span>
+              <span v-if="assistantSession" class="badge info small">{{ assistantSession.profile }}</span>
+              <select v-if="isAdmin || isOperator" class="fld" style="width:auto;padding:4px 8px" v-model="assistantProfile" title="Capped by your role; decide_approval is never offered">
+                <option>readonly</option>
+                <option v-if="isOperator">operator</option>
+                <option v-if="isAdmin">full</option>
+              </select>
+              <button class="btn sm" @click="assistantNewSession()">New session</button>
+              <div class="spacer"></div>
+              <span class="badge neutral small mono">{{ assistantCfg.base_url }}</span>
+              <span class="mono small">{{ assistantCfg.model }}</span>
+            </div>
+
+            <div class="card">
+              <div v-if="!assistantMsgs.length" class="empty">No messages yet — ask about the fleet, or request a governed action.</div>
+              <div v-for="m in assistantMsgs" :key="m.id" style="margin-bottom:10px">
+                <div v-if="m.role==='user'" style="text-align:right">
+                  <div style="display:inline-block;max-width:80%;text-align:left;background:var(--sunken);border:1px solid var(--border);border-radius:10px;padding:8px 12px;white-space:pre-wrap"><span class="muted small" style="display:block">You</span>{{ m.content }}</div>
+                </div>
+                <div v-else-if="m.role==='assistant' && m.tool_name!=='tool_calls'" style="max-width:90%;white-space:pre-wrap"><span class="badge info small" style="display:block;width:fit-content;margin-bottom:2px">Assistant</span>{{ m.content }}</div>
+                <div v-else-if="m.role==='tool'" style="border:1px dashed var(--border);border-radius:8px;padding:6px 10px">
+                  <span class="mono small"><b>{{ m.tool_name }}</b></span>
+                  <span v-if="isApprovalResult(m.content)" class="badge warn small">approval required</span>
+                  <details style="margin-top:4px"><summary class="muted small">result</summary><pre class="console" style="max-height:220px;overflow:auto;white-space:pre-wrap">{{ m.content }}</pre></details>
+                </div>
+              </div>
+              <div v-if="assistantBusy" class="muted small" style="margin:6px 0">working… (tool calls + answer stream below)</div>
+              <div style="display:flex;gap:8px;margin-top:12px;align-items:flex-start">
+                <input class="fld" v-model="assistantInput" @keydown.enter.prevent="assistantSend()" :disabled="assistantBusy || !assistantSession" placeholder="Ask about the fleet, or request a governed action…" style="flex:1">
+                <button v-if="assistantBusy" class="btn sm warn" @click="assistantCancel()">Cancel</button>
+                <button v-else class="btn sm primary" @click="assistantSend()" :disabled="!assistantInput.trim() || !assistantSession">Send</button>
+              </div>
+            </div>
+            <p class="cap">Egress: prompts and tool results are sent to <span class="mono">{{ assistantCfg.base_url }}</span> · {{ assistantCfg.max_tool_calls }} tool calls / turn · profile <span class="mono">{{ assistantSession ? assistantSession.profile : assistantCfg.default_profile }}</span>. Writes still park on approvals — a human always decides.</p>
+          </template>
+
+          <div class="card" v-if="isAdmin" style="margin-top:14px">
+            <h2>Endpoint (admin)</h2>
+            <p class="cap">Any OpenAI-compatible chat-completions endpoint (base URL ends with /v1). A local Ollama/vLLM keeps all data on-host. The API key is stored sealed and never shown again. Enabling requires the capabilities probe (tool calling) to pass — no emulation fallback.</p>
+            <div class="form-row">
+              <label class="lbl">Base URL
+                <input class="fld mono" v-model="assistantForm.base_url" placeholder="http://ollama.local:11434/v1">
+              </label>
+              <label class="lbl">Model
+                <input class="fld mono" v-model="assistantForm.model" placeholder="qwen3:32b">
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="lbl">API key <span class="muted">(write-only; empty keeps the stored key)</span>
+                <input class="fld mono" type="password" v-model="assistantForm.api_key" placeholder="— keyless for local endpoints —">
+              </label>
+              <label class="lbl">Default profile
+                <select class="fld" v-model="assistantForm.default_profile"><option>readonly</option><option>operator</option><option>full</option></select>
+              </label>
+            </div>
+            <div class="form-row">
+              <label class="lbl">Max tool calls / turn
+                <input class="fld" v-model.number="assistantForm.max_tool_calls" type="number" min="1" max="50">
+              </label>
+              <label class="lbl">Turn timeout (s)
+                <input class="fld" v-model.number="assistantForm.timeout_s" type="number" min="10" max="600">
+              </label>
+              <label class="lbl" style="display:flex;align-items:center;gap:6px;margin-top:22px"><input type="checkbox" v-model="assistantForm.enabled"> enabled</label>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+              <button class="btn sm primary" @click="assistantSave()">Save</button>
+              <button class="btn sm" @click="assistantResetKey()">Reset key</button>
+              <span v-if="assistantProbe" class="muted small">probe: {{ assistantProbe.tools }} · {{ assistantProbe.model }} · {{ assistantProbe.latency_ms }} ms</span>
+              <span v-if="assistantForm.key_set && !assistantForm.api_key" class="muted small">key: set</span>
+            </div>
+          </div>
+        </section>
+
         <!-- ============ PROVISION ============ -->
         <section v-else-if="page==='provision'">
           <h1 class="page">Provision</h1>
@@ -2027,6 +2115,8 @@
         exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
+        assistantCfg: null, assistantForm: { base_url: "", model: "", api_key: "", max_tool_calls: 15, timeout_s: 120, default_profile: "readonly", enabled: false, key_set: false },
+        assistantProbe: null, assistantSession: null, assistantMsgs: [], assistantInput: "", assistantProfile: "readonly", assistantBusy: false, assistantAbort: null,
         audit: [], auditKind: "", auditActor: "", auditRange: "", auditMore: "",
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
@@ -2248,6 +2338,7 @@
           case "tasks": return !this.tasks.length;
           case "updates": return !this.releases.length && !this.runs.length && !this.security.length;
           case "secrets": return !this.secrets.length;
+          case "assistant": return !this.assistantMsgs.length;
           case "policies": return !this.policies.length;
           case "approvals": return !this.approvals.length;
           case "obs-alerts": return !this.alerts.length && !this.rules.length;
@@ -2381,6 +2472,7 @@
           { key: "automation", label: "Automation", items: [
             { key: "jobs", label: "Jobs", icon: "◷", cap: "jobs" },
             { key: "tasks", label: "Tasks & Playbooks", icon: "⚙", cap: "tasks" },
+            { key: "assistant", label: "Assistant", icon: "✦", cap: "assistant" },
           ] },
           { key: "observe", label: "Observe", items: [
             { key: "obs-alerts", label: "Alerts", icon: "⚠", cap: "alerts", badge: "alerts" },
@@ -2716,6 +2808,7 @@
             }
             break;
           case "mcp": await this.loadMcp(); this.loadMcpClients(); break;
+          case "assistant": await this.loadAssistant(); break;
           case "provision": await this.loadProvRuns(); break;
           case "users": await this.loadUsers(); break;
           case "obs-services": this.syncObserveQuery(); await this.loadServices(); break;
@@ -3532,6 +3625,102 @@
       async loadApprovals() { this.apprMsg = ""; const q = this.apprState ? "?state=" + encodeURIComponent(this.apprState) : ""; try { const d = await this.api("/approvals" + q); this.approvals = d.approvals || []; } catch (e) { this.approvals = []; } },
       async loadMcp() { try { this.mcpInfo = await this.api("/mcp/info"); } catch (e) { this.mcpInfo = null; } },
 
+      // ---- Assistant (R26) --------------------------------------------------
+      async loadAssistant() {
+        try { this.assistantCfg = await this.api("/assistant/config"); } catch (e) { this.assistantCfg = null; }
+        if (this.assistantCfg) this.assistantForm = { ...this.assistantCfg, api_key: "" };
+        this.assistantSession = null; this.assistantMsgs = [];
+        try {
+          const d = await this.api("/assistant/sessions");
+          if (d.items && d.items.length) {
+            this.assistantSession = d.items[0];
+            this.assistantProfile = d.items[0].profile;
+            await this.loadAssistantSession();
+          }
+        } catch (e) { /* 503/403 when unconfigured */ }
+      },
+      async loadAssistantSession() {
+        if (!this.assistantSession) return;
+        try {
+          const d = await this.api("/assistant/sessions/" + encodeURIComponent(this.assistantSession.id));
+          this.assistantMsgs = d.messages || [];
+        } catch (e) { this.assistantMsgs = []; }
+      },
+      async assistantNewSession() {
+        try {
+          const ss = await this.api("/assistant/sessions", { body: { profile: this.assistantProfile } });
+          this.assistantSession = ss; this.assistantMsgs = [];
+        } catch (e) { this.notify("bad", "Session failed: " + e.message); }
+      },
+      async assistantSend() {
+        const text = this.assistantInput.trim();
+        if (!text || !this.assistantSession || this.assistantBusy) return;
+        this.assistantInput = ""; this.assistantBusy = true;
+        this.assistantMsgs.push({ id: "u" + Date.now(), role: "user", content: text });
+        const ctl = new AbortController(); this.assistantAbort = ctl;
+        try {
+          const res = await fetch("/api/v1/assistant/sessions/" + encodeURIComponent(this.assistantSession.id) + "/chat", {
+            method: "POST",
+            headers: { "Authorization": "Bearer " + this.token, "Content-Type": "application/json" },
+            body: JSON.stringify({ text }), signal: ctl.signal,
+          });
+          if (!res.ok || !res.body) {
+            let msg = "HTTP " + res.status;
+            try { const j = await res.json(); if (j.message) msg = j.message; } catch (e) {}
+            this.assistantMsgs.push({ id: "e" + Date.now(), role: "assistant", content: "⚠ " + msg });
+          } else {
+            const reader = res.body.getReader(), dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += dec.decode(value, { stream: true });
+              let i;
+              while ((i = buf.indexOf("\n\n")) >= 0) {
+                this.assistantFrame(buf.slice(0, i));
+                buf = buf.slice(i + 2);
+              }
+            }
+          }
+        } catch (e) {
+          if (e.name !== "AbortError") this.assistantMsgs.push({ id: "e" + Date.now(), role: "assistant", content: "⚠ " + e.message });
+        }
+        this.assistantBusy = false; this.assistantAbort = null;
+        await this.loadAssistantSession(); // authoritative transcript
+      },
+      assistantFrame(frame) {
+        let evName = "", data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event: ")) evName = line.slice(7).trim();
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (!data) return;
+        let ev; try { ev = JSON.parse(data); } catch (e) { return; }
+        if (ev.type === "assistant_delta") this.assistantMsgs.push({ id: "a" + Date.now(), role: "assistant", content: ev.content });
+        else if (ev.type === "tool_call") this.assistantMsgs.push({ id: "t" + Date.now() + Math.random(), role: "tool", tool_name: ev.tool, content: "…" });
+        else if (ev.type === "tool_result" || ev.type === "approval_required") {
+          for (let i = this.assistantMsgs.length - 1; i >= 0; i--) {
+            const m = this.assistantMsgs[i];
+            if (m.role === "tool" && m.tool_name === ev.tool && m.content === "…") { m.content = ev.content; break; }
+          }
+        } else if (ev.type === "error") this.assistantMsgs.push({ id: "e" + Date.now(), role: "assistant", content: "⚠ " + ev.content });
+      },
+      async assistantCancel() {
+        if (this.assistantAbort) this.assistantAbort.abort();
+        if (this.assistantSession) { try { await this.api("/assistant/sessions/" + encodeURIComponent(this.assistantSession.id) + "/cancel", { body: {} }); } catch (e) {} }
+      },
+      async assistantSave() {
+        try {
+          this.assistantCfg = await this.api("/assistant/config", { method: "PUT", body: { ...this.assistantForm } });
+          this.assistantForm = { ...this.assistantCfg, api_key: "" };
+          this.notify("ok", "Assistant endpoint saved");
+        } catch (e) { this.notify("bad", "Save failed: " + e.message, 8000); }
+      },
+      async assistantResetKey() {
+        try { await this.api("/assistant/config/reset-key", { body: {} }); this.assistantForm.key_set = false; this.notify("ok", "Endpoint key cleared"); }
+        catch (e) { this.notify("bad", "Reset failed: " + e.message); }
+      },
+      isApprovalResult(text) { return /approval/i.test(text || ""); },
       protocolHost() { return location.protocol + '//' + location.host; },
       mcpSnippet() {
         if (!this.mcpInfo) return '';
