@@ -842,7 +842,7 @@
         <!-- ============ AUDIT ============ -->
         <section v-else-if="page==='audit'">
           <h1 class="page">Audit Log</h1>
-          <p class="page-sub">Read-only event history (PRD R9).</p>
+          <p class="page-sub">Read-only event history.</p>
           <div class="toolbar">
             <select v-model="auditKind" style="max-width:220px" @change="loadAudit()">
               <option value="">All kinds</option>
@@ -883,7 +883,7 @@
         <!-- ============ SESSIONS ============ -->
         <section v-else-if="page==='sessions'">
           <h1 class="page">Sessions</h1>
-          <p class="page-sub">PTY terminal sessions and recordings (M2).</p>
+          <p class="page-sub">PTY terminal sessions and recordings.</p>
           <div class="card" style="margin-bottom:12px">
             <div class="head"><h2>Open terminal</h2><p class="cap">Live PTY (xterm.js): input via REST, output via SSE.</p></div>
             <div class="toolbar">
@@ -940,7 +940,7 @@
         <!-- ============ FILES ============ -->
         <section v-else-if="page==='files'">
           <h1 class="page">Files</h1>
-          <p class="page-sub">Host file browser (M2). Reads are open to viewers; upload / edit / perm are policy-gated (<span class="mono">file.write</span> / <span class="mono">file.perm</span>) and audited. Edits are compare-and-swap — a save aborts if the file changed since you opened it.</p>
+          <p class="page-sub">Host file browser. Reads are open to viewers; upload / edit / perm are policy-gated (<span class="mono">file.write</span> / <span class="mono">file.perm</span>) and audited. Edits are compare-and-swap — a save aborts if the file changed since you opened it.</p>
           <div v-if="fileHost && fileRoot" class="info-box"><b>File root:</b> <span class="mono">{{ fileRoot }}</span> — every path below is relative to this directory. The no-escape invariant: no role or parameter can reach outside the root through the file surface.</div>
           <div v-else-if="fileHost" class="warn-box"><b>Legacy agent:</b> no file root reported — the file surface on this host is not confined to a root (pre file-root agent). Upgrade the agent; with <span class="mono">PARTOUT_REQUIRE_FILE_ROOT</span> set, file ops to this host are refused.</div>
           <div class="toolbar">
@@ -972,7 +972,7 @@
         <!-- ============ JOBS ============ -->
         <section v-else-if="page==='jobs'">
           <h1 class="page">Jobs</h1>
-          <p class="page-sub">Scheduled jobs (M3). Create/update are policy-gated: the task's steps are evaluated under <span class="mono">task.run</span> per host before saving (a deny → 403, nothing written).</p>
+          <p class="page-sub">Scheduled jobs. Create/update are policy-gated: the task's steps are evaluated under <span class="mono">task.run</span> per host before saving (a deny → 403, nothing written).</p>
           <div class="card">
             <div class="head">
               <h2>Jobs</h2>
@@ -1060,7 +1060,7 @@
         <!-- ============ TASKS ============ -->
         <section v-else-if="page==='tasks'">
           <h1 class="page">Tasks &amp; Playbooks</h1>
-          <p class="page-sub">Multi-step automation (M3). Runs are policy-gated (task.run) and can park on approvals.</p>
+          <p class="page-sub">Multi-step automation. Runs are policy-gated (task.run) and can park on approvals.</p>
           <div v-if="taskMsg" class="info-box" style="margin-bottom:12px">{{ taskMsg }}</div>
           <div class="card" style="margin-bottom:12px">
             <div class="head">
@@ -1201,7 +1201,7 @@
             <div class="tab" :class="{active: updTab==='runs'}" @click="updTab='runs'; loadRuns()">Runs</div>
           </div>
           <template v-if="updTab==='packages'">
-          <p class="page-sub">Package updates for the selected host (M3). Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
+          <p class="page-sub">Package updates for the selected host. Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
           <div class="toolbar">
             <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
@@ -1261,7 +1261,7 @@
           </div>
           <div class="card" style="margin-top:12px">
             <div class="head"><h2>Security — unpatched CVEs (fleet)</h2><div class="spacer"></div>
-              <span class="muted small">server-side scan: per-host update list + OSV correlation (M5.1)</span>
+              <span class="muted small">server-side scan: per-host update list + OSV correlation</span>
               <button v-if="isAdmin" class="btn sm" :disabled="!!secBusy" @click="scanSecurity"><span v-if="secBusy" class="spin"></span> Scan now</button>
               <button v-if="isOperator" class="btn primary sm" :disabled="!!secPatchBusy || !secPatchTargets().length" :data-tip="'Patch the CVE-affected packages on every host with findings (dry-run first, policy-gated)'" @click="patchAllSecurity"><span v-if="secPatchBusy" class="spin"></span> Patch all security</button>
             </div>
@@ -1293,7 +1293,7 @@
           </div>
           </template>
           <template v-else-if="updTab==='releases'">
-            <p class="page-sub">Partout release artifacts (M8.1). The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. <b>Beta:</b> releases without a signature are accepted while unsigned updates are enabled (<span class="mono">PARTOUT_ALLOW_UNSIGNED_RELEASES</span>, default on) — keyless agents apply them on the sha256 integrity check alone; a provisioned release key stays strict-signed. Upload requires admin; downloading the artifact requires operator.</p>
+            <p class="page-sub">Partout release artifacts. The server stores and serves them; each agent verifies the Ed25519 signature against its own release public key before executing anything. <b>Beta:</b> releases without a signature are accepted while unsigned updates are enabled (<span class="mono">PARTOUT_ALLOW_UNSIGNED_RELEASES</span>, default on) — keyless agents apply them on the sha256 integrity check alone; a provisioned release key stays strict-signed. Upload requires admin; downloading the artifact requires operator.</p>
             <div class="card">
               <div class="head"><h2>Releases</h2><div class="spacer"></div><button class="btn sm" @click="loadReleases">Refresh</button></div>
               <table class="tbl">
@@ -1328,7 +1328,7 @@
             </div>
           </template>
           <template v-else-if="updTab==='runs'">
-            <p class="page-sub">Fleet rollouts (M8.1): canary, then waves of the resolved selector. The server dispatches signed directives; each agent verifies the release signature before swapping its binary, and rolls back to N-1 automatically on failure. <span class="mono">partout ctl update run …</span> does the same.</p>
+            <p class="page-sub">Fleet rollouts: canary, then waves of the resolved selector. The server dispatches signed directives; each agent verifies the release signature before swapping its binary, and rolls back to N-1 automatically on failure. <span class="mono">partout ctl update run …</span> does the same.</p>
             <div class="card">
               <div class="head"><h2>New rollout</h2><div class="spacer"></div><button class="btn sm" @click="loadRuns">Refresh runs</button></div>
               <div class="form-row" style="align-items:flex-end">
@@ -1386,7 +1386,7 @@
         <!-- ============ SECRETS ============ -->
         <section v-else-if="page==='secrets'">
           <h1 class="page">Secrets</h1>
-          <p class="page-sub">Encrypted at rest; values are write-only and never displayed (ui-guidelines §12.6).</p>
+          <p class="page-sub">Encrypted at rest; values are write-only and never displayed.</p>
           <div class="card" style="margin-bottom:12px">
             <div class="form-row" style="align-items:flex-end">
               <label class="fld"><span>Name</span><input v-model="secretForm.name" class="mono" placeholder="db-password" /></label>
@@ -1417,7 +1417,7 @@
         <!-- ============ POLICIES ============ -->
         <section v-else-if="page==='policies'">
           <h1 class="page">Policies</h1>
-          <p class="page-sub">Command policy rules (PRD R7).</p>
+          <p class="page-sub">Command policy rules.</p>
           <div class="card" v-if="presetStatus" style="margin-bottom:12px">
             <div class="toolbar">
               <div><strong>Fleet defaults (preset)</strong>
@@ -1447,7 +1447,7 @@
         <!-- ============ APPROVALS ============ -->
         <section v-else-if="page==='approvals'">
           <h1 class="page">Approvals</h1>
-          <p class="page-sub">Actions parked by <span class="mono">require_approval</span> policy rules — scoped to the exact payload (M4, PRD §5.8). Deciding requires the admin role.</p>
+          <p class="page-sub">Actions parked by <span class="mono">require_approval</span> policy rules — scoped to the exact payload. Deciding requires the admin role.</p>
           <div class="card">
             <div class="toolbar" style="margin-bottom:8px">
               <label class="lbl">State</label>
@@ -1488,7 +1488,7 @@
         <!-- ============ MCP ============ -->
         <section v-else-if="page==='mcp'">
           <h1 class="page">MCP</h1>
-          <p class="page-sub">MCP server for AI assistants (R11, PRD §10.3): JSON-RPC 2.0 over stdio + Streamable HTTP. Read tools are read-only; write tools are RBAC- and policy-gated by the same control plane the UI uses.</p>
+          <p class="page-sub">MCP server for AI assistants: JSON-RPC 2.0 over stdio + Streamable HTTP. Read tools are read-only; write tools are RBAC- and policy-gated by the same control plane the UI uses.</p>
           <div v-if="!mcpInfo">
             <div class="card"><div class="empty">MCP surface not available in this build.</div></div>
           </div>
@@ -1543,7 +1543,7 @@
         <!-- ============ ASSISTANT (R26) ============ -->
         <section v-else-if="page==='assistant'">
           <h1 class="page">Assistant</h1>
-          <p class="page-sub">LLM assistant over the governed tool surface (R26): every action still passes RBAC, policy, approvals and audit — the model can request an action, never approve one. Fleet data leaves to the configured endpoint; prompts live in your session transcript, not the audit log.</p>
+          <p class="page-sub">LLM assistant over the governed tool surface: every action still passes RBAC, policy, approvals and audit — the model can request an action, never approve one. Fleet data leaves to the configured endpoint; prompts live in your session transcript, not the audit log.</p>
 
           <div v-if="!assistantCfg || !assistantCfg.enabled" class="card">
             <div class="empty">
@@ -1631,7 +1631,7 @@
         <!-- ============ PROVISION ============ -->
         <section v-else-if="page==='provision'">
           <h1 class="page">Provision</h1>
-          <p class="page-sub">Server-initiated host onboarding over the operator's fleet SSH (R17, admin). A new host key pauses the run at <span class="mono">key_confirm</span> until an admin confirms the fingerprint (no silent TOFU).</p>
+          <p class="page-sub">Server-initiated host onboarding over the operator's fleet SSH (admin). A new host key pauses the run at <span class="mono">key_confirm</span> until an admin confirms the fingerprint (no silent TOFU).</p>
           <div class="card" style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
             <div style="flex:1">
               <b>Onboard a host (guided)</b>
@@ -1767,7 +1767,7 @@
         <!-- ============ OBSERVE · SERVICES ============ -->
         <section v-else-if="page==='obs-services'">
           <h1 class="page">Services</h1>
-          <p class="page-sub">Fleet service health from agent-collected facts (M5, R18).</p>
+          <p class="page-sub">Fleet service health from agent-collected facts.</p>
           <div class="toolbar">
             <span class="muted small">{{ svcRows.length }} of {{ services.length }} units</span>
             <button v-if="svcFAny" class="btn sm" @click="svcClearF()">Clear filters</button>
@@ -1847,7 +1847,7 @@
         <!-- ============ OBSERVE · CERTIFICATES ============ -->
         <section v-else-if="page==='obs-certs'">
           <h1 class="page">Certificates</h1>
-          <p class="page-sub">TLS certificate inventory (M5, R20).</p>
+          <p class="page-sub">TLS certificate inventory.</p>
           <div class="toolbar">
             <select :value="certHost" @change="certHost=$event.target.value; loadCerts()" style="max-width:180px">
               <option value="">all hosts</option>
@@ -1888,7 +1888,7 @@
         <!-- ============ OBSERVE · CONFIGS ============ -->
         <section v-else-if="page==='obs-configs'">
           <h1 class="page">Configs</h1>
-          <p class="page-sub">HAProxy / Nginx validity &amp; topology (M5, R19).</p>
+          <p class="page-sub">HAProxy / Nginx validity &amp; topology.</p>
           <div class="toolbar">
             <select :value="cfgHost" @change="cfgHost=$event.target.value; loadConfigs()" style="max-width:180px">
               <option value="">all hosts</option>
@@ -1947,7 +1947,7 @@
         <!-- ============ OBSERVE · ALERTS (M6 engine; rule-management UI M7) ============ -->
         <section v-else-if="page==='obs-alerts'">
           <h1 class="page">Alerts</h1>
-          <p class="page-sub">Threshold rules, firing/resolved state, SSE fan-out (R23, R25).</p>
+          <p class="page-sub">Threshold rules, firing/resolved state, SSE fan-out.</p>
           <div v-if="caps.alerts">
             <div class="card">
               <div class="row" style="margin-bottom:8px">
@@ -2005,13 +2005,13 @@
                   <label class="fld"><span>Kind</span>
                     <select v-model="ruleForm.kind">
                       <option value="service_failed">service_failed — unit stuck in failed state</option>
-                      <option value="service_restarting">service_restarting — restart rate over NRestarts (M6.1)</option>
+                      <option value="service_restarting">service_restarting — restart rate over NRestarts</option>
                       <option value="cert_expiring">cert_expiring — certificate expiry window</option>
                       <option value="config_invalid">config_invalid — haproxy/nginx native validation</option>
-                      <option value="config_drift">config_drift — cross-host config hash divergence (R22)</option>
-                      <option value="update_run">update_run — rollout stuck: paused/failed (M8.1, server-level)</option>
-                      <option value="update_drift">update_drift — agents behind the store's latest release (M8.1.1, server-level)</option>
-                      <option value="security_updates">security_updates — unpatched CVEs on a host (M5.1, security scan)</option>
+                      <option value="config_drift">config_drift — cross-host config hash divergence</option>
+                      <option value="update_run">update_run — rollout stuck: paused/failed (server-level)</option>
+                      <option value="update_drift">update_drift — agents behind the store's latest release (server-level)</option>
+                      <option value="security_updates">security_updates — unpatched CVEs on a host (security scan)</option>
                     </select>
                   </label>
                   <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
@@ -2057,7 +2057,7 @@
           <div v-else class="notavail">
             <span class="tag">M6 · not yet available</span>
             <h3>Alert engine not wired on this server</h3>
-            <p>Rebuild/upgrade the server to get the M6 alert engine.</p>
+            <p>Rebuild/upgrade the server to get the alert engine.</p>
           </div>
         </section>
 
