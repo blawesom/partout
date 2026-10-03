@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.9.5 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine + M7 write actions + M8.1 fleet updates + Decision 3 elevation policy (implementation-level design; §6.1 elevation/fs/config and §12.2 reflect the shipped implementation)
+**Status:** Draft v0.9.7 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine + M7 write actions + M8.1 fleet updates + Decision 3 elevation policy (implementation-level design; §6.1 elevation/fs/config and §12.2 reflect the shipped implementation)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and

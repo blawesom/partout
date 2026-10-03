@@ -642,6 +642,46 @@ flag, and elevation inside containers is its own problem).
     (nothing serves anymore) instead of hanging until shutdown.
 ### Polish items (closed this cycle)
 
+- **v0.9.7 — onboarding & trust pass, UX quick wins, and the first M8.2
+  artifact.** Everything since the v0.9.6 tag:
+
+  - **The plaintext default became impossible to miss** — doctor warns on a
+    non-loopback plain-HTTP bind, the login page and a first-run "Secure this
+    server" card warn in-browser, the README quick start leads with the caveat
+    and starts TLS-first, and the server's startup log ends with a first-run
+    next-steps block including the TLS posture; embedded mode surfaces
+    half-failures when they happen (an agent-half failure no longer waits for
+    Ctrl-C; a server-half death unwinds instead of hanging).
+  - **The add-host token recipe became complete** — binary download step, CA
+    step + `PARTOUT_TLS_CA` for TLS servers (the old command failed on the
+    recommended setup), and a connection watch (✓ Connected on the fleet diff,
+    90 s troubleshooting otherwise). Batch onboarding takes hosts 2..N.
+  - **Session + interaction trust** — session expiry is explained with a
+    return route to the interrupted page; row-level dispatch feedback on
+    jobs/tasks/playbooks; body-ported tooltips for clipped cells; the deny
+    reason and secret rotate (now password-masked) left `prompt()`; the
+    provision wizard moved to SSE (the "no polling" invariant holds app-wide).
+  - **Teaching surfaces** — the first-command nudge (fleet 0→1) walks the core
+    loop; observe empty states explain how facts arrive;
+    `docs/getting-started.md` is the guided 5-minute walkthrough.
+  - **UX quick wins** (`docs/ux-improvements.md`, heuristic evaluation): WCAG
+    AA contrast for the de-emphasis token in both themes; selector
+    autocomplete from live fleet data + an offline grammar help dialog;
+    re-run from recent executions; audit actor/time filters + Load-more
+    paging (the silent truncation is gone); keyboard operation for
+    rows/tabs/nav (a11y floor); full modal focus management (focus-in, Esc
+    everywhere, Tab trap, focus restore); docs links in-app.
+  - **`scripts/install-server.sh`** (M8.2 start, DEPLOYMENT_FEEDBACK C9) —
+    idempotent day-1 server bootstrap (binary, user, dirs,
+    env-never-clobbered with a generated admin token, units + the daily
+    backup timer, real `partout doctor` pre-flight, start, healthz, summary
+    block; a different version under a running service is refused with a
+    pointer at `update-server.sh`), verified by a 28-check harness that
+    starts the REAL server from the installed unit. `partout uninstall` now
+    removes the backup timer's script (previously orphaned).
+  - **Scope decisions recorded** — unsigned releases stay default through
+    beta (the flip is part of v1.0.0); **Postgres is post-v1** (SQLite is the
+    1.0 engine).
 - **v0.7.3 — deployment-feedback fixes** (from `DEPLOYMENT_FEEDBACK.md`, ccc.laplane.net
   field deploy): `PARTOUT_ADDR`/`--addr` bind knob (loopback-only behind a reverse
   proxy); `partout ctl db-backup` (atomic VACUUM INTO snapshot, no sqlite3 CLI) +

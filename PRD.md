@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.9.5 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE, 26 tools) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation (host-level slice + policy engine) shipped
+**Status:** Draft v0.9.7 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation policy shipped; v0.9.6–v0.9.7: onboarding/trust pass (plaintext-default warnings at every layer, complete first-host recipe, first-run guidance), `install-server.sh`, UX quick wins
 **Date:** 2025-09-25
 
 ---
