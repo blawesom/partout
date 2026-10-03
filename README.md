@@ -1,6 +1,6 @@
 # Partout
 
-> **Status: beta (v0.9.7; v1.0 in preparation)** — the full feature set (observe,
+> **Status: beta (v0.9.8; v1.0 in preparation)** — the full feature set (observe,
 > execute, patch, update rollouts, MCP) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your
 > `partout.db` regularly.

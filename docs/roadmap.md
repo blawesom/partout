@@ -679,6 +679,26 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     **In 1.0**: build the 1.0 slice (design doc §9) after the item-20 gate; ships with 1.0.
 ### Polish items (closed this cycle)
 
+- **v0.9.8 — provisioning reachability, and the 1.0 scope set.** Everything
+  since the v0.9.7 tag:
+
+  - **Fleet-SSH provisioning works where it previously couldn't** — ssh-config
+    aliases resolve via `ssh -G` (alias → target shown on the key-confirm
+    screen and in the runs table), ProxyJump/ProxyCommand/HostKeyAlias hosts
+    are supported (the key is captured through ssh itself; the fingerprint
+    gate still applies), and a reinstalled host whose key rotated gets
+    `POST .../rekey` instead of a bricked run.
+  - **Identity + reachability surfaced up front** — `partout doctor` and the
+    wizard report what a run would actually offer (conventional keys,
+    config-declared `IdentityFile` entries, ssh-agent keys), warn on a
+    loopback bind (incompatible with provisioning remote hosts) and on an
+    unresolvable `PARTOUT_SERVER_HOST`; concurrent same-host runs now
+    conflict (409) instead of racing.
+  - **The 1.0 scope was set on paper** — the LLM assistant (R26) is designed
+    and agreed for 1.0 (Decisions 17–19, `docs/assistant.md` + mockup);
+    distribution artifacts (Docker/compose, cloud-init, readiness JSON, Helm,
+    status page) moved off the roadmap to maybe-future, leaving item 20
+    (interrupted ≠ failed) + M9 + the release flip as the 1.0 gates.
 - **v0.9.7 — onboarding & trust pass, UX quick wins, and the first M8.2
   artifact.** Everything since the v0.9.6 tag:
 

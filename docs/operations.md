@@ -1,6 +1,6 @@
 # Partout — Operations
 
-**Status:** v0.9.7 — day-2 runbook for the control plane. Reflects the current
+**Status:** v0.9.8 — day-2 runbook for the control plane. Reflects the current
 implementation (M0–M8.1 complete, Web UI shipped) where stated; steps for features
 that ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`

@@ -1,6 +1,6 @@
 # Partout — Web UI Definition & Guidelines
 
-**Status:** v0.9.7 — UI implemented (S0 shell + data pages for M1–M8.1: Fleet, Execute,
+**Status:** v0.9.8 — UI implemented (S0 shell + data pages for M1–M8.1: Fleet, Execute,
 Observe (Services/Certificates/Configs/Alerts), Updates (releases + rollout runs),
 Files (view/edit/upload/perm), Sessions, Jobs, Tasks, Secrets, Policies, Approvals,
 Provision, Users, MCP). This document is the definition; `internal/api/webui/` is
@@ -501,7 +501,7 @@ Slices follow **implementation progress**, not the mockup's ambition. Fleet-scal
 **tens of hosts** (≤ ~200). Client-side roll-up and client-side filtering are accepted at this
 scale; revisit if fleet size grows.
 
-**Implementation status (v0.9.7):** S0 (shell, login, capabilities, SSE) is built. Data pages
+**Implementation status (v0.9.8):** S0 (shell, login, capabilities, SSE) is built. Data pages
 are
 live for the M1–M8.1 backend: Fleet (with pending host-key confirmations as toast + nav
 badge), Execute (with B2 selector preview + live per-host output),

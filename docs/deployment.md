@@ -1,6 +1,6 @@
 # Partout — Deployment
 
-**Status:** v0.9.7 — reflects the current implementation
+**Status:** v0.9.8 — reflects the current implementation
 (M0–M8.1 complete: Web UI, M4 approvals + MCP + OAuth2, M6.1 alert rule kinds,
 v0.7.x in-stream mTLS rotation / offline down-queue dispatch / provisioning
 fresh+join modes / `partout --version`, **M8.1 fleet updates**: release store +
