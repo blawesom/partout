@@ -78,7 +78,7 @@ and any build without the approvals engine wired still fails closed as deny.
 New env var: `PARTOUT_APPROVAL_TTL_S`.
 **What v0.6 also adds (M4: MCP server + OAuth2, R11/A20):** a JSON-RPC 2.0
 tool surface over stdio (`partout --mode=mcp`, §3.9) and Streamable HTTP
-(`POST /mcp`) — 31 read/write tools that forward the caller's credential to
+(`POST /mcp`) — 38 read/write tools that forward the caller's credential to
 the same REST router the UI/CLI use, so RBAC/policy/audit are the control
 plane's (no duplicated write path). **OAuth2 (PKCE)** for the HTTP transport:
 admin-registered MCP clients (`POST /api/v1/mcp/clients`),
@@ -512,7 +512,7 @@ self-managed machine, dev environment, CI e2e rig. Data under `PARTOUT_DB_PATH`
 `partout --mode=mcp --server host:port --token T [--ca-file ca.crt]` — runs the
 **MCP server over stdio** against a remote server, for MCP clients (Claude Code /
 Cursor / CI) that launch the process. It is a JSON-RPC 2.0 (2025-06-18) tool
-surface (31 tools: fleet/observe reads + governed writes); the `--token` is the
+surface (38 tools: fleet/observe/elevation reads + governed writes); the `--token` is the
 **caller's** credential — a static RBAC token, a local-user session token from
 `partout ctl auth login`, or an OAuth2 (PKCE) access token (§3.10) — and is
 forwarded with every tool call, so RBAC, policy

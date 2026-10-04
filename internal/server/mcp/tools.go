@@ -157,19 +157,22 @@ type ToolInfo struct {
 
 // writeTools are the mutating tools; every other catalog entry is read-only.
 var writeTools = map[string]bool{
-	"run_command":      true,
-	"cancel_execution": true,
-	"run_job":          true,
-	"run_playbook":     true,
-	"apply_updates":    true,
-	"upload_file":      true,
-	"create_secret":    true,
-	"decide_approval":  true,
-	"set_host_tag":     true,
-	"delete_host_tag":  true,
-	"add_host_role":    true,
-	"remove_host_role": true,
-	"delete_host":      true,
+	"run_command":             true,
+	"cancel_execution":        true,
+	"run_job":                 true,
+	"run_playbook":            true,
+	"apply_updates":           true,
+	"upload_file":             true,
+	"create_secret":           true,
+	"decide_approval":         true,
+	"set_host_tag":            true,
+	"delete_host_tag":         true,
+	"add_host_role":           true,
+	"remove_host_role":        true,
+	"delete_host":             true,
+	"create_elevation_policy": true,
+	"update_elevation_policy": true,
+	"delete_elevation_policy": true,
 }
 
 // ToolCatalog returns the tool set with its read/write classification
@@ -281,6 +284,30 @@ func DefaultTools() []*Tool {
 			InputSchema: objSchema(nil),
 			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
 				return doCall(ctx, api, token, "GET", "/api/v1/policies", nil)
+			},
+		},
+		{
+			Name:        "list_elevation_policies",
+			Description: "List the server-side elevation policy documents (the privilege profiles provisioning ships to hosts): name, rule count, canonical sha256, description.",
+			InputSchema: objSchema(nil),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/elevation/policies", nil)
+			},
+		},
+		{
+			Name:        "get_elevation_policy",
+			Description: "Get one elevation policy document: the full rules (allow/args/verbs/units/files grants).",
+			InputSchema: objSchema(map[string]any{"name": strProp("policy name or id (e.g. default-baseline)")}, "name"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/elevation/policies/"+url.PathEscape(argStr(args, "name")), nil)
+			},
+		},
+		{
+			Name:        "get_host_elevation",
+			Description: "Get one host's effective elevation posture: mode, rule count, the canonical policy hash (matchable against the stored policies — a mismatch means drift or a custom scope).",
+			InputSchema: objSchema(map[string]any{"agent_id": strProp("host id (ag_…)")}, "agent_id"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/hosts/"+url.PathEscape(argStr(args, "agent_id"))+"/elevation", nil)
 			},
 		},
 		{
@@ -564,6 +591,50 @@ func DefaultTools() []*Tool {
 				}
 				return prettyJSON([]byte(fmt.Sprintf(`{"path":%q,"size":%d,"content_b64":"%s"}`,
 					argStr(args, "path"), len(b), base64.StdEncoding.EncodeToString(b)))), nil
+			},
+		},
+		{
+			Name: "create_elevation_policy",
+			Description: "Create an elevation policy document (admin+) — the privilege profile provisioning " +
+				"can ship to hosts. Rules are elevate grants: {allow: binary, args: [glob…]} (full argv), " +
+				"{allow, verbs, units} (systemctl verb x unit glob), {allow, files} (single path glob), or " +
+				"bare {allow} (zero-args only, e.g. reboot). The sudoers wall itself is host-owned: updating " +
+				"a policy does not change already-provisioned hosts.",
+			InputSchema: objSchema(map[string]any{
+				"name":        strProp("policy name (unique; e.g. web-baseline)"),
+				"rules":       arrProp("object", "elevation rules (JSON array, see the description)"),
+				"description": strProp("what this grants, for humans (optional)"),
+			}, "name", "rules"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				body := map[string]any{"name": argStr(args, "name"), "rules": args["rules"]}
+				if d := argStr(args, "description"); d != "" {
+					body["description"] = d
+				}
+				return doCall(ctx, api, token, "POST", "/api/v1/elevation/policies", body)
+			},
+		},
+		{
+			Name:        "update_elevation_policy",
+			Description: "Replace an elevation policy's rules/description (admin+). Existing hosts keep their installed copy — re-provision (join) or use config management; get_host_elevation shows drift.",
+			InputSchema: objSchema(map[string]any{
+				"name":        strProp("policy name or id"),
+				"rules":       arrProp("object", "the new elevation rules (JSON array)"),
+				"description": strProp("new description (optional)"),
+			}, "name", "rules"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				body := map[string]any{"rules": args["rules"]}
+				if d := argStr(args, "description"); d != "" {
+					body["description"] = d
+				}
+				return doCall(ctx, api, token, "PUT", "/api/v1/elevation/policies/"+url.PathEscape(argStr(args, "name")), body)
+			},
+		},
+		{
+			Name:        "delete_elevation_policy",
+			Description: "Delete an elevation policy document (admin+). Hosts already provisioned with it keep running their installed copy (the wall is host-owned).",
+			InputSchema: objSchema(map[string]any{"name": strProp("policy name or id")}, "name"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "DELETE", "/api/v1/elevation/policies/"+url.PathEscape(argStr(args, "name")), nil)
 			},
 		},
 		{
