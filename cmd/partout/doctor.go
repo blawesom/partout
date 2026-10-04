@@ -352,7 +352,18 @@ func checkSSHKey(cfg *config.Config, r *doctorResult) {
 	case st.Agent:
 		r.add(dok, "ssh key", "ssh-agent holds a key (no conventional file in "+sshDir+")")
 	default:
-		r.add(dwarn, "ssh key", "no identity key found for host provisioning (looked for id_ed25519/ecdsa/rsa in "+sshDir+", the ssh config's IdentityFile entries, or the ssh-agent)")
+		// The provisioning key lives with the SERVICE user (partout,
+		// home /var/lib/partout) — running doctor as root looks in /root/.ssh
+		// and used to false-warn (field feedback). Probe the service user's
+		// dir too before warning.
+		const svcDir = "/var/lib/partout/.ssh"
+		if sshDir != svcDir {
+			if sst := sshutil.Default(svcDir).IdentityStatusFor(context.Background(), ""); len(sst.FileKeys) > 0 {
+				r.add(dok, "ssh key", filepath.Join(svcDir, sst.FileKeys[0])+" (service user's provisioning key)")
+				return
+			}
+		}
+		r.add(dwarn, "ssh key", "no identity key found for host provisioning (looked for id_ed25519/ecdsa/rsa in "+sshDir+", the ssh config's IdentityFile entries, the ssh-agent, and the partout service user's /var/lib/partout/.ssh)")
 	}
 }
 
