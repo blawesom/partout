@@ -968,11 +968,17 @@ async function main() {
     // Elevation bootstrap section (D1): checkbox, policy select, extras.
     check("wizard: elevation section (off)", d.body.textContent.includes("Enable elevation"), "no elevation section");
     inst.provWiz.elevate = true;
-    inst.provWiz.elevationPolicies = [{ id: "epl_1", name: "default-baseline", rules: [{}, {}, {}] }];
+    inst.provWiz.elevationPolicies = [{ id: "epl_1", name: "default-baseline", rules: [
+      { allow: "dnf", args: ["-y", "upgrade"] },
+      { allow: "systemctl", verbs: ["restart"], units: ["fail2ban*"] },
+      { allow: "reboot" }
+    ] }];
     inst.provWiz.elevationPolicy = "default-baseline";
     inst.provWiz.serviceLabels = "fail2ban,sshd";
     await sleep(150);
     check("wizard: elevation policy select", d.body.textContent.includes("default-baseline (3 rules)"), "policy option not shown");
+    check("wizard: grant preview renders", d.body.textContent.includes("This grants:"), "grant preview missing");
+    check("wizard: grant preview lines", d.body.textContent.includes("dnf -y upgrade"), "grant line not rendered");
     check("wizard: service labels input", !!d.querySelector("input[placeholder=\"fail2ban,sshd\"]"), "labels input missing");
     // advance to confirm
     inst.openProvWizard(); inst.provWiz.host = "smoke@127.0.0.1"; inst.provWizNext();

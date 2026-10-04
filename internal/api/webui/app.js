@@ -230,6 +230,13 @@
                 <option v-for="p in provWiz.elevationPolicies" :key="p.id" :value="p.name">{{ p.name }} ({{ (p.rules||[]).length }} rules)</option>
               </select>
             </label>
+            <div v-if="elevSelPolicy()" class="card" style="margin-top:8px;padding:8px 10px;background:var(--bg2,rgba(127,127,127,.06))">
+              <b class="small">This grants:</b>
+              <ul class="small mono" style="margin:4px 0 0 16px;padding:0">
+                <li v-for="(g, i) in elevGrantLines(elevSelPolicy())" :key="i">{{ g }}</li>
+              </ul>
+              <span class="muted small">sudoers is rendered from exactly these rules — nothing more.</span>
+            </div>
             <p class="muted small" style="margin-top:6px">The policy is installed to <span class="mono">/etc/partout/elevation.d/</span> and the sudoers drop-in is rendered from it (visudo-checked) — the exact privilege being granted is visible in the policy before you grant it. Managed with <span class="mono">partout ctl elevation policy</span>.</p>
           </div>
           <div class="form-row" style="margin-top:8px;gap:10px">
@@ -3561,6 +3568,23 @@
           this.provWizLoadSSH();
           this.provWizLoadElevationPolicies();
         }
+      },
+      // The currently selected policy object (for the grant preview).
+      elevSelPolicy() {
+        return this.provWiz.elevationPolicies.find(p => p.name === this.provWiz.elevationPolicy) || null;
+      },
+      // elevGrantLines renders a policy's rules as the human-readable grant
+      // list — the "look before you grant" preview in the wizard.
+      elevGrantLines(p) {
+        const out = [];
+        for (const r of (p && p.rules) || []) {
+          if (!r || !r.allow) continue;
+          if (r.args && r.args.length) out.push(r.allow + " " + r.args.join(" "));
+          else if (r.verbs && r.units) for (const v of r.verbs) for (const u of r.units) out.push(r.allow + " " + v + " " + u);
+          else if (r.files && r.files.length) for (const f of r.files) out.push(r.allow + " " + f);
+          else out.push(r.allow + "  (no arguments)");
+        }
+        return out;
       },
       // Fetch the server-side elevation policies so the operator picks a
       // named privilege document (the seeded default-baseline is the
