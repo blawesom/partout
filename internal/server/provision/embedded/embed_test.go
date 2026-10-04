@@ -12,7 +12,7 @@ import (
 // install path ships the repo copy; provisioning ships the embedded one).
 func TestUpdateGuardMatchesRepo(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
-	repo := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(thisFile)))), "deploy", "systemd", "partout-update-guard.sh")
+	repo := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(thisFile))))), "deploy", "systemd", "partout-update-guard.sh")
 	repoCopy, err := os.ReadFile(repo)
 	if err != nil {
 		t.Fatalf("read repo guard: %v", err)
