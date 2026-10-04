@@ -13,6 +13,7 @@
 package preset
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -256,9 +257,17 @@ func Apply(st *store.Store) (res Result, rerr error) {
 		if err != nil {
 			return res, fmt.Errorf("preset: elevation policy %s invalid: %w", ep.Name, err)
 		}
+		// Canonicalize: the stored rules must be the compact marshal the
+		// policy hash covers — the hand-formatted preset literal would hash
+		// differently and the provisioner's sha256 verification would
+		// (correctly) reject the transfer (field-caught on the v0.9.11 run).
+		canonical, err := json.Marshal(pol.Rules)
+		if err != nil {
+			return res, fmt.Errorf("preset: elevation policy %s: canonicalize: %w", ep.Name, err)
+		}
 		if err := st.CreateElevationPolicy(&store.ElevationPolicy{
 			Name: ep.Name, Description: ep.Description,
-			RulesJSON: ep.RulesJSON, PolicySHA: pol.PolicyHash(),
+			RulesJSON: string(canonical), PolicySHA: pol.PolicyHash(),
 		}); err != nil {
 			return res, fmt.Errorf("preset: create elevation policy %s: %w", ep.Name, err)
 		}

@@ -210,9 +210,17 @@ func (p *Provisioner) Start(host, mode string, opts StartOptions) (*store.Provis
 		if err != nil {
 			return nil, fmt.Errorf("provision: elevation policy %s invalid: %w", ep.Name, err)
 		}
-		if ep.SHA == "" {
-			opts.ElevationPolicies[i].SHA = pol.PolicyHash()
+		// Canonicalize (defense in depth): the transferred file is written
+		// as {"rules":<RulesJSON>} and verified against PolicyHash, which is
+		// the sha256 of the CANONICAL compact marshal — a hand-formatted
+		// input (indented JSON from a local file or a preset literal) must
+		// be normalized or the on-host verification (correctly) rejects it.
+		canonical, err := json.Marshal(pol.Rules)
+		if err != nil {
+			return nil, fmt.Errorf("provision: elevation policy %s: canonicalize: %w", ep.Name, err)
 		}
+		opts.ElevationPolicies[i].RulesJSON = string(canonical)
+		opts.ElevationPolicies[i].SHA = pol.PolicyHash()
 	}
 
 	runID := id.New("prv")

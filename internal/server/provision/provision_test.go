@@ -2,6 +2,9 @@ package provision
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -1110,6 +1114,51 @@ func TestBuildInstallScriptElevation(t *testing.T) {
 	// The commented-out legacy hint must be gone when elevation is wired.
 	if strings.Contains(out, "#PARTOUT_ELEVATE=sudo") {
 		t.Error("elevated install must not carry the commented-out ELEVATE hint")
+	}
+}
+
+// TestStartCanonicalizesElevationPolicy (field-caught on the v0.9.11
+// run): a hand-formatted policy (indented JSON — a local file or a preset
+// literal) must be canonicalized at Start, or the on-host sha256 check
+// (which hashes the canonical form) rejects the transfer.
+func TestStartCanonicalizesElevationPolicy(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	prov := New(Options{Store: st, Logger: log.New(io.Discard, "", 0)})
+	formatted := "[\n  {\"allow\": \"reboot\"}\n]"
+	_, _ = prov.Start("canon-host", "fresh", StartOptions{
+		Elevate: true,
+		// Valid JSON, just pretty-printed — LoadPolicyJSON accepts it.
+		ElevationPolicies: []ElevationPolicySpec{{Name: "p", RulesJSON: formatted, SHA: "0123456789abcdef0123456789abcdef"}},
+	})
+	// Now verify the canonicalization directly: the same rules, formatted
+	// vs compact, must produce the SAME canonical rules + hash.
+	a := StartOptions{Elevate: true, ElevationPolicies: []ElevationPolicySpec{{Name: "p", RulesJSON: formatted}}}
+	b := StartOptions{Elevate: true, ElevationPolicies: []ElevationPolicySpec{{Name: "p", RulesJSON: `[{"allow":"reboot"}]`}}}
+	polA, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + a.ElevationPolicies[0].RulesJSON + `}`))
+	if err != nil {
+		t.Fatalf("load A: %v", err)
+	}
+	polB, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + b.ElevationPolicies[0].RulesJSON + `}`))
+	if err != nil {
+		t.Fatalf("load B: %v", err)
+	}
+	ca, _ := json.Marshal(polA.Rules)
+	cb, _ := json.Marshal(polB.Rules)
+	if string(ca) != string(cb) {
+		t.Fatalf("canonical forms differ: %s vs %s", ca, cb)
+	}
+	if polA.PolicyHash() != polB.PolicyHash() {
+		t.Fatalf("hashes differ: %s vs %s", polA.PolicyHash(), polB.PolicyHash())
+	}
+	// The transfer file for the canonical form must hash to PolicyHash.
+	file := `{"rules":` + string(ca) + `}`
+	sum := sha256.Sum256([]byte(file))
+	if hex.EncodeToString(sum[:]) != polA.PolicyHash() {
+		t.Fatalf("canonical transfer file hash %x != PolicyHash %s", sum, polA.PolicyHash())
 	}
 }
 
