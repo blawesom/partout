@@ -125,3 +125,83 @@ func ReadFile(m Mode, p *Policy, path string) ([]byte, error) {
 	}
 	return elevatedOutput(path)
 }
+
+// ---------------------------------------------------------------------------
+// Runner: one elevation decision for every action surface
+// ---------------------------------------------------------------------------
+
+// Runner decides how one action command is executed: the (name, args) pair
+// to run after applying the elevation policy. Every action surface —
+// dispatched exec, PTY sessions, task step commands, package operations,
+// the reboot step — goes through the same Runner, so the contract holds
+// everywhere: in sudo mode WITH a policy, a matching command elevates and a
+// non-matching one runs UNPRIVILEGED; without a policy (legacy), everything
+// is pushed through `sudo -n` and the host's sudoers drop-in decides
+// (field feedback F10: PTY sessions and task steps previously used the raw
+// Mode and bypassed the policy).
+type Runner interface {
+	// Wrap returns the (name, args) to execute for one action command.
+	Wrap(name string, args ...string) (string, []string)
+	// Elevates reports whether Wrap would run this command elevated.
+	Elevates(name string, args ...string) bool
+	// RunCmd builds a ready-to-start *exec.Cmd under this runner.
+	RunCmd(ctx context.Context, name string, args ...string) *exec.Cmd
+}
+
+// Wrap implements Runner for a bare Mode (legacy: everything through sudo;
+// the host's sudoers file is the authority).
+func (m Mode) Wrap(name string, args ...string) (string, []string) {
+	return m.Run(name, args...)
+}
+
+// Elevates implements Runner for a bare Mode.
+func (m Mode) Elevates(name string, args ...string) bool {
+	return m == Sudo
+}
+
+// PolicyRunner couples the elevation mode with a loaded policy: the
+// agent-side authority on what may run elevated (PRD Decision 3, full).
+type PolicyRunner struct {
+	Mode   Mode
+	Policy *Policy
+	// OutOfScope, when set, is called with the full command line whenever
+	// a command runs unprivileged because no policy rule matches it (the
+	// agent logs it as a first-class event).
+	OutOfScope func(cmdline string)
+}
+
+// NewPolicyRunner builds the policy-aware runner. A nil policy degenerates
+// to the legacy Mode behavior.
+func NewPolicyRunner(m Mode, p *Policy, outOfScope func(string)) *PolicyRunner {
+	return &PolicyRunner{Mode: m, Policy: p, OutOfScope: outOfScope}
+}
+
+// Wrap implements Runner: a policy match elevates; a non-match runs
+// UNPRIVILEGED (and is reported through OutOfScope) instead of being
+// pushed through sudo on faith.
+func (r PolicyRunner) Wrap(name string, args ...string) (string, []string) {
+	if r.Mode == Sudo && r.Policy != nil && r.Policy.Check(name, args) == Denied {
+		if r.OutOfScope != nil {
+			r.OutOfScope(strings.Join(append([]string{name}, args...), " "))
+		}
+		return name, args
+	}
+	return r.Mode.Run(name, args...)
+}
+
+// Elevates implements Runner.
+func (r PolicyRunner) Elevates(name string, args ...string) bool {
+	if r.Mode != Sudo {
+		return false
+	}
+	if r.Policy == nil {
+		return true // legacy: everything is pushed through sudo
+	}
+	return r.Policy.Check(name, args) == Elevated
+}
+
+// RunCmd implements Runner.
+func (r PolicyRunner) RunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	n, a := r.Wrap(name, args...)
+	return exec.CommandContext(ctx, n, a...)
+}

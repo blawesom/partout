@@ -26,9 +26,10 @@ type Executor struct {
 	// fileRoot confines file/template steps to the file root
 	// (docs/spec-file-root.md). Empty = file steps fail closed.
 	fileRoot string
-	// elevate is the host-level elevation policy (PRD Decision 3 slice):
-	// sudo mode runs mutating step commands through `sudo -n`.
-	elevate elevate.Mode
+	// runner decides how step commands run: policy-aware elevation (a
+	// matching command elevates, a non-matching one runs unprivileged) —
+	// the same contract as dispatched exec (PRD Decision 3, full).
+	runner elevate.Runner
 	// secrets resolves a secret ref to its plaintext value.
 	secrets    func(ref string, version int64) (string, error)
 	fileExists func(path string) bool
@@ -41,7 +42,7 @@ type Executor struct {
 }
 
 // NewExecutor builds an executor.
-func NewExecutor(elevateMode elevate.Mode, secrets func(ref string, version int64) (string, error)) *Executor {
+func NewExecutor(runner elevate.Runner, secrets func(ref string, version int64) (string, error)) *Executor {
 	flush := 5 * time.Second
 	if v := os.Getenv("PARTOUT_REBOOT_FLUSH_S"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -49,14 +50,14 @@ func NewExecutor(elevateMode elevate.Mode, secrets func(ref string, version int6
 		}
 	}
 	e := &Executor{
-		elevate: elevateMode,
+		runner:  runner,
 		secrets: secrets,
 		fileExists: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
 		},
 		rebootFlush: flush,
-		rebootCmd:   func() error { return defaultReboot(elevateMode) },
+		rebootCmd:   func() error { return defaultReboot(runner) },
 	}
 	return e
 }
@@ -100,9 +101,10 @@ func (e *Executor) DoReboot(ctx context.Context) (string, string) {
 
 // defaultReboot tries the usual reboot entry points in order. The agent
 // runs unprivileged (systemd unit), so this only works when the agent user
-// has reboot permission (root, sudo, or polkit); in sudo mode the attempts
-// go through `sudo -n` (scoped by the host's sudoers file).
-func defaultReboot(m elevate.Mode) error {
+// has reboot permission (root, sudo, or polkit); the runner applies the
+// elevation policy first (a bare `{"allow":"reboot"}` rule authorizes the
+// plain reboot entry; `{"allow":"systemctl","args":["reboot"]}` the first).
+func defaultReboot(r elevate.Runner) error {
 	cmds := [][]string{
 		{"systemctl", "reboot"},
 		{"shutdown", "-r", "now"},
@@ -110,7 +112,7 @@ func defaultReboot(m elevate.Mode) error {
 	}
 	var lastErr error
 	for _, c := range cmds {
-		n, a := m.Run(c[0], c[1:]...)
+		n, a := r.Wrap(c[0], c[1:]...)
 		if out, err := exec.Command(n, a...).CombinedOutput(); err == nil {
 			return nil
 		} else {
@@ -216,7 +218,7 @@ func (e *Executor) doCommand(ctx context.Context, step *pb.TaskStep) (string, st
 	if cmd == "" {
 		return StateFailed, "empty command"
 	}
-	n, a := e.elevate.Run(cmd, step.GetArgs()...)
+	n, a := e.runner.Wrap(cmd, step.GetArgs()...)
 	c := exec.CommandContext(ctx, n, a...)
 	c.Env = append(os.Environ(), "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 	for k, v := range step.GetEnv() {
@@ -277,7 +279,7 @@ func (e *Executor) doApt(ctx context.Context, pkg, desired string) (string, stri
 		if _, err := exec.CommandContext(ctx, "dpkg-query", "-W", pkg).CombinedOutput(); err == nil {
 			return StateOK, "already installed"
 		}
-		if out, err := e.elevate.RunCmd(ctx, "apt-get", "-y", "install", pkg).CombinedOutput(); err != nil {
+		if out, err := e.runner.RunCmd(ctx, "apt-get", "-y", "install", pkg).CombinedOutput(); err != nil {
 			return StateFailed, fmt.Sprintf("apt install failed: %s", truncate(string(out), 300))
 		}
 		return StateChanged, "installed package"
@@ -285,7 +287,7 @@ func (e *Executor) doApt(ctx context.Context, pkg, desired string) (string, stri
 		if _, err := exec.CommandContext(ctx, "dpkg-query", "-W", pkg).CombinedOutput(); err != nil {
 			return StateOK, "already absent"
 		}
-		if out, err := e.elevate.RunCmd(ctx, "apt-get", "-y", "remove", pkg).CombinedOutput(); err != nil {
+		if out, err := e.runner.RunCmd(ctx, "apt-get", "-y", "remove", pkg).CombinedOutput(); err != nil {
 			return StateFailed, fmt.Sprintf("apt remove failed: %s", truncate(string(out), 300))
 		}
 		return StateChanged, "removed package"
@@ -300,7 +302,7 @@ func (e *Executor) doDnf(ctx context.Context, pkg, desired string) (string, stri
 		if _, err := exec.CommandContext(ctx, "rpm", "-q", pkg).CombinedOutput(); err == nil {
 			return StateOK, "already installed"
 		}
-		if out, err := e.elevate.RunCmd(ctx, "dnf", "-y", "install", pkg).CombinedOutput(); err != nil {
+		if out, err := e.runner.RunCmd(ctx, "dnf", "-y", "install", pkg).CombinedOutput(); err != nil {
 			return StateFailed, fmt.Sprintf("dnf install failed: %s", truncate(string(out), 300))
 		}
 		return StateChanged, "installed package"
@@ -308,7 +310,7 @@ func (e *Executor) doDnf(ctx context.Context, pkg, desired string) (string, stri
 		if _, err := exec.CommandContext(ctx, "rpm", "-q", pkg).CombinedOutput(); err != nil {
 			return StateOK, "already absent"
 		}
-		if out, err := e.elevate.RunCmd(ctx, "dnf", "-y", "remove", pkg).CombinedOutput(); err != nil {
+		if out, err := e.runner.RunCmd(ctx, "dnf", "-y", "remove", pkg).CombinedOutput(); err != nil {
 			return StateFailed, fmt.Sprintf("dnf remove failed: %s", truncate(string(out), 300))
 		}
 		return StateChanged, "removed package"
@@ -334,7 +336,7 @@ func (e *Executor) doService(ctx context.Context, step *pb.TaskStep) (string, st
 		if active {
 			return StateOK, "already active"
 		}
-		if out, err := e.elevate.RunCmd(ctx, "systemctl", "start", svc).CombinedOutput(); err != nil {
+		if out, err := e.runner.RunCmd(ctx, "systemctl", "start", svc).CombinedOutput(); err != nil {
 			return StateFailed, fmt.Sprintf("start failed: %s", truncate(string(out), 300))
 		}
 		return StateChanged, "started service"
@@ -342,7 +344,7 @@ func (e *Executor) doService(ctx context.Context, step *pb.TaskStep) (string, st
 		if !active {
 			return StateOK, "already stopped"
 		}
-		if out, err := e.elevate.RunCmd(ctx, "systemctl", "stop", svc).CombinedOutput(); err != nil {
+		if out, err := e.runner.RunCmd(ctx, "systemctl", "stop", svc).CombinedOutput(); err != nil {
 			return StateFailed, fmt.Sprintf("stop failed: %s", truncate(string(out), 300))
 		}
 		return StateChanged, "stopped service"
@@ -360,7 +362,7 @@ func (e *Executor) doUser(step *pb.TaskStep) (string, string) {
 	if _, err := exec.Command("id", name).CombinedOutput(); err == nil {
 		return StateOK, "user exists"
 	}
-	if out, err := e.elevate.RunCmd(context.Background(), "useradd", "--system", "--no-create-home", name).CombinedOutput(); err != nil {
+	if out, err := e.runner.RunCmd(context.Background(), "useradd", "--system", "--no-create-home", name).CombinedOutput(); err != nil {
 		return StateFailed, fmt.Sprintf("useradd failed: %s", truncate(string(out), 300))
 	}
 	return StateChanged, "created user"
@@ -375,7 +377,7 @@ func (e *Executor) doGroup(step *pb.TaskStep) (string, string) {
 	if _, err := exec.Command("getent", "group", name).CombinedOutput(); err == nil {
 		return StateOK, "group exists"
 	}
-	if out, err := e.elevate.RunCmd(context.Background(), "groupadd", name).CombinedOutput(); err != nil {
+	if out, err := e.runner.RunCmd(context.Background(), "groupadd", name).CombinedOutput(); err != nil {
 		return StateFailed, fmt.Sprintf("groupadd failed: %s", truncate(string(out), 300))
 	}
 	return StateChanged, "created group"

@@ -39,14 +39,16 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	onResult ResultFunc
-	// elevate: in sudo mode sessions start as `sudo -n -- name args...`
-	// (a root terminal, scoped by the host's sudoers file).
-	elevate elevate.Mode
+	// runner: the policy-aware elevation decision — in sudo mode WITH a
+	// policy, a matching session command starts as `sudo -n -- name args...`
+	// and a non-matching one starts unprivileged (field feedback F10: PTY
+	// sessions previously bypassed the policy and always ran sudo).
+	runner elevate.Runner
 }
 
 // NewManager creates a Manager; onResult is invoked on each session exit.
-func NewManager(elevate elevate.Mode, onResult ResultFunc) *Manager {
-	return &Manager{sessions: make(map[string]*Session), onResult: onResult, elevate: elevate}
+func NewManager(runner elevate.Runner, onResult ResultFunc) *Manager {
+	return &Manager{sessions: make(map[string]*Session), onResult: onResult, runner: runner}
 }
 
 // Open starts a PTY session running name+args with the given window size.
@@ -56,7 +58,7 @@ func (m *Manager) Open(sessionID, name string, args []string,
 	env map[string]string, cols, rows int32,
 	onData func(sessionID string, data []byte),
 ) error {
-	n, a := m.elevate.Run(name, args...)
+	n, a := m.runner.Wrap(name, args...)
 	cmd := exec.Command(n, a...)
 	cmd.Env = cleanEnv(env, cols, rows)
 

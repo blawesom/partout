@@ -51,14 +51,18 @@ func (d Decision) String() string {
 	return "denied"
 }
 
-// Rule is one elevation grant. Exactly one matcher must be set:
+// Rule is one elevation grant. The matcher is optional:
 //
 //	Args:  the full argument vector, element-wise globs
 //	        (e.g. ["-c", "-f", "/etc/haproxy/haproxy.cfg"]).
-//	Verbs + Units: argv[0] ∈ verbs AND argv[1] matches a unit glob,
+//	Verbs + Units: argv[0] ∩ verbs AND argv[1] matches a unit glob,
 //	        and nothing else (e.g. systemctl restart haproxy*).
 //	Files: argv is exactly one path matching a file glob
 //	        (e.g. cat /etc/haproxy/*).
+//	None set: the bare command — the grant matches ONLY a zero-argument
+//	        invocation (e.g. `reboot`, `poweroff`). In sudoers this renders
+//	        as `path ""` (the empty-args specifier), not a bare command
+//	        (which would match any arguments).
 //
 // Env lists the variables allowed to pass through elevation for this
 // grant (rendered as sudoers SETENV).
@@ -112,6 +116,9 @@ func (r Rule) matches(name string, args []string) bool {
 				}
 			}
 			return false
+		default:
+			// No matcher set: the bare-command grant — zero arguments only.
+			return len(args) == 0
 		}
 	}
 	return false
@@ -142,8 +149,8 @@ func (r Rule) validate(i int) error {
 	if len(r.Files) > 0 {
 		matchers++
 	}
-	if matchers != 1 {
-		return fmt.Errorf("rule %d (%s): set exactly one of args / verbs+units / files", i, r.Allow)
+	if matchers > 1 {
+		return fmt.Errorf("rule %d (%s): set at most one of args / verbs+units / files", i, r.Allow)
 	}
 	if len(r.Verbs) > 0 && len(r.Units) == 0 {
 		return fmt.Errorf("rule %d (%s): verbs require units (the scope)", i, r.Allow)

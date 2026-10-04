@@ -112,7 +112,7 @@ of truth; the sudoers file is rendered from the policy):
 sudo mkdir -p /etc/partout/elevation.d
 sudo install -m 0644 -o root -g root deploy/elevation/elevation-web.json.example /etc/partout/elevation.d/10-web.json
 # 2) Render + install the sudoers wall (visudo-checked before it touches the system)
-sudo partout ctl elevation install-sudoers
+sudo /usr/local/bin/partout ctl elevation install-sudoers
 # 3) Enable elevation in the agent env
 sudo sed -i 's/^# PARTOUT_ELEVATE=.*/PARTOUT_ELEVATE=sudo/' /etc/partout/agent.env
 # 4) sudo needs setuid — the unit's NoNewPrivileges blocks it. Remove that line.

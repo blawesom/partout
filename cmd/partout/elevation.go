@@ -137,7 +137,10 @@ func elevationCheck(policy, sudoersPath, user string) {
 		return
 	}
 	fmt.Printf("DRIFT: %s does not match the policy (sha256 %s…)\n", sudoersPath, pol.PolicyHash()[:12])
-	fmt.Println("reinstall with: sudo partout ctl elevation install-sudoers")
+	// Full path: sudo's secure_path commonly excludes /usr/local/bin, so
+	// the bare `sudo partout …` form fails with "command not found" on
+	// RHEL-family (field feedback F16).
+	fmt.Println("reinstall with: sudo /usr/local/bin/partout ctl elevation install-sudoers")
 	fmt.Println()
 	if d := elevationDiff(string(installed), rendered); d != "" {
 		fmt.Println(d)

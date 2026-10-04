@@ -1,27 +1,60 @@
 {
-  "_comment": "Partout elevation policy example (PRD Decision 3, full slice). Install to /etc/partout/elevation.d/10-web.json (mode 0644, root:root) after editing to the fleet's actual scope, then: sudo partout ctl elevation install-sudoers. The agent runs a command elevated only when a rule matches; the sudoers drop-in is rendered from this file (partout ctl elevation check detects drift). Glob syntax: path.Match — * and ? within a segment, * never crosses /.",
+  "_comment": "Partout elevation policy example (PRD Decision 3, full slice). Install to /etc/partout/elevation.d/10-web.json (mode 0644, root:root) after editing to the fleet's actual scope, then: sudo /usr/local/bin/partout ctl elevation install-sudoers (full path — sudo secure_path). The agent runs a command elevated only when a rule matches; the sudoers drop-in is rendered from this file (partout ctl elevation check detects drift). Glob syntax: path.Match \u2014 * and ? within a segment, * never crosses /. A rule with no matcher (e.g. {\"allow\":\"reboot\"}) grants the command with zero arguments only.",
   "rules": [
     {
       "allow": "systemctl",
-      "verbs": ["status", "show", "start", "stop", "restart", "reload", "try-restart"],
-      "units": ["haproxy*", "nginx*", "caddy*", "partout-*"]
+      "verbs": [
+        "status",
+        "show",
+        "start",
+        "stop",
+        "restart",
+        "reload",
+        "try-restart"
+      ],
+      "units": [
+        "haproxy*",
+        "nginx*",
+        "caddy*",
+        "partout-*"
+      ]
     },
     {
       "allow": "haproxy",
-      "args": ["-c", "-f", "/etc/haproxy/haproxy.cfg"]
+      "args": [
+        "-c",
+        "-f",
+        "/etc/haproxy/haproxy.cfg"
+      ]
     },
     {
       "allow": "nginx",
-      "args": ["-t"]
+      "args": [
+        "-t"
+      ]
     },
     {
       "allow": "cat",
-      "files": ["/etc/haproxy/*", "/etc/nginx/*", "/etc/caddy/*"]
+      "files": [
+        "/etc/haproxy/*",
+        "/etc/nginx/*",
+        "/etc/caddy/*"
+      ]
     },
     {
       "allow": "apt-get|dnf",
-      "args": ["-y", "install", "*"],
-      "env": ["DEBIAN_FRONTEND", "LANG"]
+      "args": [
+        "-y",
+        "install",
+        "*"
+      ],
+      "env": [
+        "DEBIAN_FRONTEND",
+        "LANG"
+      ]
+    },
+    {
+      "allow": "reboot"
     }
   ]
 }

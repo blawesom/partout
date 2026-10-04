@@ -11,9 +11,13 @@
 //     requires them). Names not on PATH on this host are skipped with a
 //     visible comment (e.g. `dnf` on an Ubuntu box) rather than failing the
 //     whole render.
-//   - argument patterns containing wildcards or punctuation are
-//     double-quoted — unquoted `*` is a syntax error in sudoers, and quoted
-//     strings still match as patterns.
+//   - argument patterns are emitted UNQUOTED with only truly special
+//     characters backslash-escaped (backslash, comma, =, :). sudoers
+//     treats a quoted argument as a LITERAL string — `install "*"` matches
+//     only a literal asterisk, never any argument — so wildcards must stay
+//     bare (`install *` matches any single argument, the intended
+//     semantics). Verified empirically on sudo 1.9 (Rocky): unquoted `*`
+//     matches, quoted `"*"` never does.
 //   - env_reset stays ON (the sudoers default). The legacy hand-written
 //     drop-in used `!env_reset` so dispatched `--env K=V` survived
 //     elevation; that blanket grant is retired here — a rule that needs
@@ -42,19 +46,27 @@ func (p *Policy) PolicyHash() string {
 	return hex.EncodeToString(h[:])
 }
 
-// sudoersArg quotes a single argument pattern if it contains any character
-// sudoers would reject or reinterpret unquoted (wildcards, spaces,
-// punctuation). Quoted strings still match as patterns.
+// sudoersArg renders a single argument pattern for a sudoers command spec.
+// `*` and `?` stay BARE (they are the wildcards — quoting them would make
+// them literal strings that never match); the characters sudoers itself
+// assigns meaning to at this position are backslash-escaped. An empty
+// pattern renders as `""`, sudoers' "no arguments" specifier (used for
+// bare-command grants).
 func sudoersArg(a string) string {
+	if a == "" {
+		return `""`
+	}
+	var b strings.Builder
 	for _, r := range a {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.' || r == '_' || r == '/' || r == '@' || r == '-':
+		switch r {
+		case '\\', ',', '=', ':':
+			b.WriteByte('\\')
+			b.WriteRune(r)
 		default:
-			return `"` + strings.ReplaceAll(a, `"`, `\"`) + `"`
+			b.WriteRune(r)
 		}
 	}
-	return a
+	return b.String()
 }
 
 // sudoersLine renders one command grant: absolute path + quoted argument
@@ -106,6 +118,10 @@ func (p *Policy) RenderSudoers(user string) (string, error) {
 				for _, f := range r.Files {
 					grants = append(grants, grant{abi: abi, args: []string{f}, env: r.Env})
 				}
+			default:
+				// Bare-command grant (zero-argument commands, e.g. `reboot`):
+				// renders as `abi ""` — sudoers' exact no-arguments specifier.
+				grants = append(grants, grant{abi: abi, args: []string{""}, env: r.Env})
 			}
 		}
 	}

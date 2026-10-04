@@ -32,6 +32,15 @@ func TestRenderSudoers(t *testing.T) {
 			t.Errorf("rendered sudoers missing %q", want)
 		}
 	}
+	// Field feedback F6: wildcards must be UNQUOTED. A quoted "*" in
+	// sudoers is a literal asterisk and never matches — every wildcard grant
+	// rendered that way was a dead rule (verified empirically on sudo 1.9).
+	if strings.Contains(out, `"*"`) {
+		t.Errorf("rendered sudoers quotes a wildcard (dead grant): %q", out)
+	}
+	if strings.Contains(out, `"fail2ban*"`) || strings.Contains(out, `"run-*"`) {
+		t.Errorf("rendered sudoers quotes a unit/file glob (dead grant): %q", out)
+	}
 	if !strings.Contains(out, "/etc/haproxy/*") || !strings.Contains(out, "/etc/nginx/*") {
 		t.Error("cat grant missing file globs")
 	}
@@ -84,5 +93,35 @@ func TestRenderSudoersEmptyPolicy(t *testing.T) {
 	empty := mustPolicy(t, `{"rules":[]}`)
 	if _, err := empty.RenderSudoers("partout"); err == nil {
 		t.Error("empty policy: want error")
+	}
+}
+
+// TestRenderSudoersBareCommand (field feedback F11): a rule with no matcher
+// grants the zero-argument invocation and must render as `path ""` —
+// sudoers' exact "no arguments" specifier. A bare command path alone would
+// match ANY arguments (too broad).
+func TestRenderSudoersBareCommand(t *testing.T) {
+	p := mustPolicy(t, `{"rules":[{"allow":"reboot"}]}`)
+	out, err := p.RenderSudoers("partout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `reboot ""`) {
+		t.Errorf("bare grant must render as %q, got:\n%s", `reboot ""`, out)
+	}
+}
+
+// TestBareRuleMatchesZeroArgsOnly (field feedback F11): the agent-side
+// matcher for a bare rule: `reboot` matches, `reboot --force` does not.
+func TestBareRuleMatchesZeroArgsOnly(t *testing.T) {
+	p := mustPolicy(t, `{"rules":[{"allow":"reboot"}]}`)
+	if p.Check("reboot", nil) != Elevated {
+		t.Error("bare rule must match the zero-arg invocation")
+	}
+	if p.Check("reboot", []string{"--force"}) == Elevated {
+		t.Error("bare rule must NOT match an invocation with arguments")
+	}
+	if p.Check("shutdown", []string{"-r", "now"}) == Elevated {
+		t.Error("bare rule must not match other commands")
 	}
 }

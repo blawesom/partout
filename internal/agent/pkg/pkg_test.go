@@ -224,13 +224,13 @@ func TestElevHint(t *testing.T) {
 	permErr := fmt.Errorf("apt-get upgrade: exit 100: E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)")
 	netErr := fmt.Errorf("apt-get upgrade: exit 100: E: Unable to fetch some archives")
 
-	if got := elevHint(elevate.Sudo, permErr); got != permErr {
+	if got := elevHint(elevate.Sudo, "apt-get", []string{"upgrade"}, permErr); got != permErr {
 		t.Fatalf("sudo mode must not append the hint: %v", got)
 	}
-	if got := elevHint(elevate.None, netErr); got != netErr {
+	if got := elevHint(elevate.None, "apt-get", []string{"upgrade"}, netErr); got != netErr {
 		t.Fatalf("unrelated failure must pass through: %v", got)
 	}
-	got := elevHint(elevate.None, permErr)
+	got := elevHint(elevate.None, "apt-get", []string{"upgrade"}, permErr)
 	if !strings.Contains(got.Error(), "PARTOUT_ELEVATE=sudo") || !strings.Contains(got.Error(), "elevation is OFF") {
 		t.Fatalf("permission failure on a non-sudo host must carry the remedy: %v", got)
 	}

@@ -65,14 +65,16 @@ type Backend interface {
 }
 
 // SelectBackend picks the correct distro backend from os-release facts.
-// m is the host-level elevation policy: in sudo mode the mutating calls
-// (Apply, and the metadata refresh inside List) run through `sudo -n`.
-func SelectBackend(facts map[string]string, m elevate.Mode) Backend {
+// r is the elevation runner: in sudo mode the mutating calls (Apply, and
+// the metadata refresh inside List) run through `sudo -n`, scoped by the
+// elevation policy when one is loaded (a non-matching command runs
+// unprivileged — the same contract as dispatched exec).
+func SelectBackend(facts map[string]string, r elevate.Runner) Backend {
 	switch facts["host.distro"] {
 	case "ubuntu", "debian", "linuxmint", "pop":
-		return &aptBackend{mode: m}
+		return &aptBackend{runner: r}
 	case "rhel", "centos", "rocky", "alma", "fedora", "ol":
-		return &dnfBackend{mode: m}
+		return &dnfBackend{runner: r}
 	default:
 		return &noopBackend{}
 	}
@@ -83,7 +85,7 @@ func SelectBackend(facts map[string]string, m elevate.Mode) Backend {
 // ---------------------------------------------------------------------------
 
 type aptBackend struct {
-	mode elevate.Mode
+	runner elevate.Runner
 }
 
 // aptInstRe matches `apt-get upgrade -s` install lines (apt 2.6/2.7):
@@ -100,8 +102,8 @@ func (a *aptBackend) List(ctx context.Context) ([]PkgUpdate, error) {
 	// the agent user cannot write /var/lib/apt/lists, so in sudo mode this
 	// runs elevated. Failure is not fatal — stale lists still produce a
 	// (possibly outdated) update list.
-	if a.mode == elevate.Sudo {
-		_, _ = a.mode.RunCmd(ctx, "apt-get", "-qq", "update").CombinedOutput()
+	if a.runner.Elevates("apt-get", "-qq", "update") {
+		_, _ = a.runner.RunCmd(ctx, "apt-get", "-qq", "update").CombinedOutput()
 	}
 	out, err := run(ctx, time.Minute, "apt-get", "-o", "Dpkg::Progress-Focus=full", "-s", "upgrade")
 	if err != nil {
@@ -124,9 +126,9 @@ func (a *aptBackend) DryRun(ctx context.Context) (string, error) {
 // operator WHAT failed but not that it will keep failing until the host is
 // configured for elevation — this is the error the Updates page shows, so
 // it carries the fix (feedback parity: the message names the remedy).
-func elevHint(m elevate.Mode, err error) error {
-	if err == nil || m == elevate.Sudo {
-		return err
+func elevHint(r elevate.Runner, name string, args []string, err error) error {
+	if err == nil || r.Elevates(name, args...) {
+		return err // it elevated (or elevation is off): the failure is real
 	}
 	s := err.Error()
 	for _, p := range []string{
@@ -144,13 +146,13 @@ func (a *aptBackend) Apply(ctx context.Context) error {
 	// Run non-interactive: DEBIAN_FRONTEND=noninteractive, auto-confirm.
 	// Elevated in sudo mode (installing packages is root work); the shipped
 	// sudoers drop-in passes the caller environment through (!env_reset).
-	c := a.mode.RunCmd(ctx, "apt-get", "-o", "Dpkg::Progress-Focus=full",
+	c := a.runner.RunCmd(ctx, "apt-get", "-o", "Dpkg::Progress-Focus=full",
 		"-y", "-o", "Dpkg::Options::=--force-confdef",
 		"-o", "Dpkg::Options::=--force-confold", "upgrade")
 	c.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	out, err := c.CombinedOutput()
 	if err != nil {
-		return elevHint(a.mode, fmt.Errorf("apt-get upgrade: %w: %s", err, string(out)))
+		return elevHint(a.runner, "apt-get", []string{"upgrade"}, fmt.Errorf("apt-get upgrade: %w: %s", err, string(out)))
 	}
 	return nil
 }
@@ -243,15 +245,15 @@ func parseDpkgQuery(b []byte) []PkgUpdate {
 // ---------------------------------------------------------------------------
 
 type dnfBackend struct {
-	mode elevate.Mode
+	runner elevate.Runner
 }
 
 func (d *dnfBackend) List(ctx context.Context) ([]PkgUpdate, error) {
 	// Best-effort metadata refresh (elevated in sudo mode): a non-privileged
 	// dnf cannot write its metadata cache, so stale metadata would make the
 	// update list go stale forever. Failure is not fatal.
-	if d.mode == elevate.Sudo {
-		_, _ = d.mode.RunCmd(ctx, "dnf", "-q", "makecache").CombinedOutput()
+	if d.runner.Elevates("dnf", "-q", "makecache") {
+		_, _ = d.runner.RunCmd(ctx, "dnf", "-q", "makecache").CombinedOutput()
 	}
 	out, err := run(ctx, time.Minute, "dnf", "check-update")
 	if err != nil {
@@ -277,11 +279,11 @@ func (d *dnfBackend) DryRun(ctx context.Context) (string, error) {
 
 func (d *dnfBackend) Apply(ctx context.Context) error {
 	// Elevated in sudo mode (upgrading packages is root work).
-	c := d.mode.RunCmd(ctx, "dnf", "-y", "upgrade")
+	c := d.runner.RunCmd(ctx, "dnf", "-y", "upgrade")
 	c.Env = append(os.Environ(), "LANG=en_US.UTF-8")
 	out, err := c.CombinedOutput()
 	if err != nil {
-		return elevHint(d.mode, fmt.Errorf("dnf upgrade: %w: %s", err, string(out)))
+		return elevHint(d.runner, "dnf", []string{"-y", "upgrade"}, fmt.Errorf("dnf upgrade: %w: %s", err, string(out)))
 	}
 	return nil
 }

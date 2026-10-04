@@ -96,16 +96,21 @@ func TestNilPolicyDenies(t *testing.T) {
 func TestLoadRejectsBadRules(t *testing.T) {
 	bad := []string{
 		`{"rules":[{"args":["x"]}]}`,                              // empty allow
-		`{"rules":[{"allow":"cat"}]}`,                             // no matcher
 		`{"rules":[{"allow":"cat","files":["/x"],"args":["y"]}]}`, // two matchers
 		`{"rules":[{"allow":"systemctl","verbs":["restart"]}]}`,   // verbs without units
 		`{"rules":[{"allow":"cat","files":["a[b"]}]}`,             // bad glob
-		`{not json`,
+		`{not json`, // bare `"allow":"cat"` (no matcher) is VALID: the
+		// zero-argument bare-command grant (field feedback F11).
 	}
 	for _, s := range bad {
 		if _, err := LoadPolicyJSON([]byte(s)); err == nil {
 			t.Errorf("LoadPolicyJSON(%s): want error", s)
 		}
+	}
+	// A bare rule (no matcher) must load: it grants the command with NO
+	// arguments only (e.g. `reboot`).
+	if _, err := LoadPolicyJSON([]byte(`{"rules":[{"allow":"reboot"}]}`)); err != nil {
+		t.Errorf("bare rule should be valid: %v", err)
 	}
 }
 

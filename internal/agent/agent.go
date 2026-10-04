@@ -152,6 +152,10 @@ type Agent struct {
 	// elevation is the loaded elevation policy (PARTOUT_ELEVATION_POLICY);
 	// nil = legacy behavior (the hand-installed sudoers drop-in decides).
 	elevation *elevate.Policy
+
+	// runner is the policy-aware elevation decision shared by every action
+	// surface (exec dispatch, PTY sessions, task steps, package ops, reboot).
+	runner elevate.Runner
 }
 
 // New builds an Agent. The identity must already be enrolled (server-side row
@@ -234,9 +238,13 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	}
 	// Elevation policy (PRD Decision 3, full slice): the agent-side scope
 	// that sudoers is generated from. nil = legacy (drop-in decides).
-	// A malformed policy fails the agent at startup (fail fast in Run).
+	// A malformed policy is DEGRADED, not fatal (field feedback F12: failing
+	// the agent at startup crash-looped the host out of management on a
+	// config typo): the agent keeps running in legacy elevation mode (the
+	// sudoers wall still bounds privilege) and the error is surfaced as the
+	// partout.elevation fact + the startup log.
 	if pol, perr := elevate.Load(cfg.ElevationPolicy); perr != nil {
-		lg.Printf("agent: ELEVATION POLICY UNAVAILABLE: %v", perr)
+		lg.Printf("agent: ELEVATION POLICY UNAVAILABLE: %v (continuing in legacy elevation mode — fix the policy file; `partout ctl elevation check` diagnoses it)", perr)
 		a.elevationErr = fmt.Errorf("elevation policy: %w", perr)
 	} else if pol != nil {
 		a.elevation = pol
@@ -258,6 +266,12 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	if a.elevationErr != nil {
 		elevSummary["error"] = a.elevationErr.Error()
 	}
+	// The shared elevation runner: with a policy loaded, a matching command
+	// elevates and a non-matching one runs unprivileged; without, legacy
+	// (everything through sudo -n). Every action surface uses it.
+	a.runner = elevate.NewPolicyRunner(a.elevate, a.elevation, func(cmdline string) {
+		lg.Printf("agent: command (%s) NOT in elevation scope — running unprivileged; add a policy rule to elevate it", cmdline)
+	})
 	if es, err := json.Marshal(elevSummary); err == nil {
 		a.staticFacts["partout.elevation"] = string(es)
 	}
@@ -272,7 +286,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 			return v, nil
 		}
 	}
-	a.taskExec = task.NewExecutor(a.elevate, secLookup)
+	a.taskExec = task.NewExecutor(a.runner, secLookup)
 	a.taskExec.SetFileRoot(a.fileRoot)
 	a.taskRunner = task.New(a.taskExec)
 	a.jobs = jobs.New(filepath.Join(cfg.DataDir, "jobs"), a.taskExec, func(r *jobs.Report) {
@@ -327,7 +341,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 			a.sendJobResult, a.sendTaskResult, a.log)
 	}
 	// Session manager uses a closure that can reach the agent instance.
-	a.sessions = session.NewManager(a.elevate, func(sid string, exitCode int32, state string, durationMs int64) {
+	a.sessions = session.NewManager(a.runner, func(sid string, exitCode int32, state string, durationMs int64) {
 		lg.Printf("agent: session %s finished: %s (exit=%d, %dms)", sid, state, exitCode, durationMs)
 		a.sendUpEnvelopeNoSpool(&pb.Envelope{
 			Kind: pb.EnvelopeKind_SESSION_RESULT,
@@ -354,11 +368,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if a.spoolErr != nil {
 		return fmt.Errorf("agent: offline spool unavailable: %w", a.spoolErr)
 	}
-	// A malformed elevation policy is a startup error, not a drift to run
-	// with: the operator pointed at a scope file and it did not parse.
-	if a.elevationErr != nil {
-		return fmt.Errorf("agent: %w", a.elevationErr)
-	}
+	// A malformed elevation policy is NOT fatal (field feedback F12: it
+	// crash-looped the agent and took the host out of management on a config
+	// typo). The agent continues in legacy elevation mode — the sudoers wall
+	// still bounds privilege — and the error is surfaced as the
+	// partout.elevation fact; the startup log names the remedy.
 	// M8.1: resolve the in-flight update marker BEFORE connecting (once per
 	// process). A version mismatch here means the boot guard already rolled
 	// the binary back; the marker is stale and is cleared (+ N-1 restored,
@@ -1100,7 +1114,9 @@ func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []s
 	}
 	n, a2 := a.elevate.Run(cmdName, args...)
 	if a.elevate == elevate.Sudo {
-		a.log.Printf("agent: run %s (ELEVATED: sudo -n -- %s)", runID, strings.Join(a2, " "))
+		// n,a2 already carry the full sudo prefix — printing "sudo -n --"
+		// again doubled it in the log (field feedback F16).
+		a.log.Printf("agent: run %s (ELEVATED: %s)", runID, strings.Join(append([]string{n}, a2...), " "))
 	}
 	return exec.Run(ctx, n, a2, cwd, env, timeoutS, onChunk)
 }
@@ -1418,7 +1434,7 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 // pkgBackend selects the agent's package backend from the current fact set.
 // The backend is stateless, so a fresh instance is safe to create per op.
 func (a *Agent) pkgBackend() pkg.Backend {
-	return pkg.SelectBackend(a.factset, a.elevate)
+	return pkg.SelectBackend(a.factset, a.runner)
 }
 
 // sendPkgResult sends a PkgResult up the stream (no spooling: pkg ops are

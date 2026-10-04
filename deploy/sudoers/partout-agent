@@ -2,7 +2,7 @@
 #
 # LEGACY FALLBACK: the preferred flow is the elevation policy
 # (deploy/elevation/elevation-web.json.example + PARTOUT_ELEVATION_POLICY),
-# from which `sudo partout ctl elevation install-sudoers` GENERATES this
+# from which `sudo /usr/local/bin/partout ctl elevation install-sudoers` GENERATES this
 # file (visudo-checked; `elevation check` detects drift). Use this
 # hand-written drop-in only when no policy is configured — the agent then
 # runs every action command through `sudo -n` and this file decides.
