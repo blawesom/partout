@@ -36,6 +36,7 @@ import (
 	agentfacts "github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/id"
+	"github.com/blawesom/partout/internal/server/provision/embedded"
 	"github.com/blawesom/partout/internal/sshutil"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -510,7 +511,10 @@ if [ -x /usr/local/bin/partout ]; then echo "remote_version=$(/usr/local/bin/par
 # Existing agent identity (join mode: the run links to this agent instead of
 # waiting for a fresh enrollment — the agent keeps its identity and never
 # consumes the new token).
-echo "agent_uuid=$(sudo -n cat /var/lib/partout/agent/identity.json 2>/dev/null | grep -o '\"uuid\":\"[^\"]*\"' | cut -d'\"' -f4)"
+# identity.json is pretty-printed ("uuid": "…" — whitespace after the
+# colon), so the extraction tolerates it (field-caught: the rigid pattern
+# matched only compact JSON and the join link silently never happened).
+echo "agent_uuid=$(sudo -n cat /var/lib/partout/agent/identity.json 2>/dev/null | grep -o '\"uuid\": *[[:space:]]*\"[^\"]*\"' | cut -d'\"' -f4)"
 echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
 # Host -> server reachability on the control-plane port. The https attempt
 # is deliberately unverified (curl -k): preflight only proves the network
@@ -634,6 +638,22 @@ func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun,
 		if _, err := p.ssh.Copy(ctx, p.caPath, run.Host, remoteCA); err != nil {
 			return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp CA failed: %v", err)))
 		}
+	}
+	// The M8.1 update guard rides along too (installed to
+	// /usr/local/sbin/partout-update-guard by the install script).
+	guardLocal, gerr := os.CreateTemp("", "partout-guard-*")
+	if gerr != nil {
+		return p.failStep(run, 3, fmt.Sprintf("stage update guard: %v", gerr))
+	}
+	if _, err := guardLocal.WriteString(embedded.UpdateGuard); err != nil {
+		guardLocal.Close()
+		os.Remove(guardLocal.Name())
+		return p.failStep(run, 3, fmt.Sprintf("stage update guard: %v", err))
+	}
+	guardLocal.Close()
+	defer os.Remove(guardLocal.Name())
+	if _, err := p.ssh.Copy(ctx, guardLocal.Name(), run.Host, "/tmp/partout-update-guard"); err != nil {
+		return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp update guard failed: %v", err)))
 	}
 	// Elevation policies ride along the same way (D1 bootstrap): the
 	// operator's canonical privilege documents, sha-verified on the target
@@ -860,8 +880,20 @@ BIN=/tmp/partout-%s
 EXPECT=%s
 ACTUAL=$(sha256sum "$BIN" | cut -d' ' -f1)
 if [ "$ACTUAL" != "$EXPECT" ]; then echo "sha256 mismatch: $ACTUAL" >&2; exit 1; fi
-%sinstall -m 0755 "$BIN" /usr/local/bin/partout
+%s# M8.1 layout: the agent's binary lives in an AGENT-WRITABLE dir
+# (/var/lib/partout/bin) with a symlink from /usr/local/bin for operators —
+# the self-swap writes <dir>/partout.old + .new next to the real binary,
+# which a root-owned /usr/local/bin forbids (field-caught on the v0.9.12
+# rollout: "write N-1 retention copy: permission denied").
 id partout >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin partout
+install -d -m 0750 -o partout -g partout /var/lib/partout/bin
+install -m 0755 -o partout -g partout "$BIN" /var/lib/partout/bin/partout
+# /usr/local/bin/partout becomes a symlink (replace a legacy real file).
+rm -f /usr/local/bin/partout
+ln -s /var/lib/partout/bin/partout /usr/local/bin/partout
+# M8.1 boot guard: supervises the self-swap and rolls a failed update back
+# to N-1 (same script as deploy/systemd/partout-update-guard.sh).
+install -m 0755 -o root -g root /tmp/partout-update-guard /usr/local/sbin/partout-update-guard
 mkdir -p /var/lib/partout/agent
 chown partout:partout /var/lib/partout/agent
 chmod 0750 /var/lib/partout/agent
@@ -889,14 +921,22 @@ cat > /etc/systemd/system/partout-agent.service <<'EOF'
 Description=Partout host agent
 After=network-online.target
 Wants=network-online.target
+# M8.1: a crashlooping post-update binary must keep restarting until the
+# boot guard rolls it back; systemd's default start limit would park the
+# unit in failed first.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=partout
 EnvironmentFile=/etc/partout/agent.env
-ExecStart=/usr/local/bin/partout
+# M8.1: the guard supervises the self-swap (N-1 rollback), then execs the
+# real binary from the agent-writable dir.
+Environment=PARTOUT_AGENT_DATA_DIR=/var/lib/partout/agent
+Environment=PARTOUT_GUARD_BIN=/var/lib/partout/bin/partout
+ExecStart=/usr/local/sbin/partout-update-guard
 Restart=always
-RestartSec=5
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target

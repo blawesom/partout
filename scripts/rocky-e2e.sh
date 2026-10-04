@@ -298,6 +298,21 @@ check_grep "sudoers: unquoted wildcard grant (F6)" "$SUDOERS" "dnf -y install \*
 check_grep "sudoers: bare reboot renders as the no-args specifier (F11)" "$SUDOERS" 'reboot ""'
 check_not_grep "sudoers: no quoted globs (F6)" "$SUDOERS" '"\*"'
 
+# --- 8b. join-mode re-provision links the existing agent ------------------------
+step "join-mode re-provision (existing agent, real identity.json)"
+JOINOUT=$("$CTL" provision new --host deploy@localhost --mode join --elevate --service-labels sshd 2>&1) || true
+JRID=$(printf '%s' "$JOINOUT" | grep -o "prv_[a-z0-9]*" | head -1)
+[ -z "$JRID" ] && JRID=$("$CTL" provision list 2>/dev/null | awk '/prv_/{print $1; exit}')
+JFINAL=""
+for i in $(seq 1 60); do
+  JFINAL=$("$CTL" provision get "$JRID" 2>/dev/null | head -1)
+  printf '%s' "$JFINAL" | grep -qE "\[(connected|failed)\]" && break
+  sleep 2
+done
+echo "$JFINAL"
+check_grep "join: run connected (no phantom wait-enroll)" "$JFINAL" "\[connected\]"
+check_grep "join: linked to the EXISTING agent" "$("$CTL" provision get "$JRID" 2>/dev/null)" "agent: *$AGENT_ID"
+
 # --- 9. fact hash matches the store (B1 chain + drift anchor) -------------------
 step "elevation fact hash == store policy sha"
 AGENT_ID=$("$CTL" hosts | awk '/ag_/{print $1; exit}')

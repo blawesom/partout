@@ -1004,10 +1004,28 @@ func (a *Agent) execUpdate(dir *pb.UpdateDirective) {
 	// 6. Restart, then exit. The restart command is issued asynchronously
 	//    (systemctl returns after signaling); systemd kills this process as
 	//    part of the restart. A short sleep lets the command go out first.
+	//    With elevation on, a plain `systemctl …` restart goes through
+	//    sudo -n (field-caught on the v0.9.12 rollout: restart needs root,
+	//    and the raw sh -c ran unprivileged — the default-baseline policy
+	//    grants `systemctl restart partout-*`). Fallback: systemd's
+	//    Restart=always restarts the unit anyway; the command only
+	//    shortens the window.
 	if a.cfg.UpdateRestartCmd != "" {
 		go func() {
-			if err := osexec.CommandContext(context.Background(), "sh", "-c", a.cfg.UpdateRestartCmd).Run(); err != nil {
-				a.log.Printf("agent: update restart command failed: %v", err)
+			var err error
+			if a.elevate == elevate.Sudo {
+				fields := strings.Fields(a.cfg.UpdateRestartCmd)
+				if len(fields) > 0 && fields[0] == "systemctl" {
+					args := append([]string{"-n"}, fields...)
+					err = osexec.CommandContext(context.Background(), "sudo", args...).Run()
+				} else {
+					err = osexec.CommandContext(context.Background(), "sh", "-c", a.cfg.UpdateRestartCmd).Run()
+				}
+			} else {
+				err = osexec.CommandContext(context.Background(), "sh", "-c", a.cfg.UpdateRestartCmd).Run()
+			}
+			if err != nil {
+				a.log.Printf("agent: update restart command failed: %v (systemd Restart=always covers it)", err)
 			}
 		}()
 	}
