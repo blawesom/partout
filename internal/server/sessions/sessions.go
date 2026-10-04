@@ -428,7 +428,7 @@ func (m *Manager) audit(sessionID, agentID, state, errMsg string) {
 		"session_id": sessionID, "state": state, "error": errMsg,
 	})
 	_ = m.st.AppendAudit(store.AuditEvent{
-		TS: now(), Kind: "session", AgentID: agentID,
+		TS: now(), Kind: "session", AgentID: agentID, Actor: "system",
 		Payload: string(payload),
 	})
 }

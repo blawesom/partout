@@ -119,7 +119,7 @@ func (c *Controller) NewRequest(p NewRequestParams) (*store.ApprovalRequest, err
 	if err := c.st.CreateApprovalRequest(req); err != nil {
 		return nil, err
 	}
-	c.audit(req, "requested", "", "")
+	c.audit(req, "requested", req.Actor, "")
 	c.emit(req, "approval.requested")
 	return req, nil
 }
@@ -191,7 +191,7 @@ func (c *Controller) Approve(requestID string, actor Actor) (*store.ApprovalRequ
 	}
 	if err := fn(req, dec); err != nil {
 		c.log.Printf("approvals: %s dispatch: %v", req.ID, err)
-		c.audit(req, "dispatch_error", "", err.Error())
+		c.audit(req, "dispatch_error", req.DecidedBy, err.Error())
 		return req, err
 	}
 	return req, nil
@@ -219,6 +219,9 @@ func (c *Controller) Deny(requestID, reason string, actor Actor) (*store.Approva
 	req.DecidedBy = actor.Principal
 	req.DecidedUnix = time.Now().Unix()
 	req.DecisionReason = reason
+	// Finalize the parked run rows (field feedback F14: the run used to
+	// stay awaiting_approval forever after a deny).
+	c.finalizeParked(req, "denied", "approval denied")
 	c.audit(req, "denied", actor.Principal, reason)
 	c.emit(req, "approval.denied")
 	return req, nil
@@ -230,36 +233,43 @@ func (c *Controller) Deny(requestID, reason string, actor Actor) (*store.Approva
 func (c *Controller) List(state string, limit int) ([]*store.ApprovalRequest, error) {
 	if expired, err := c.st.ExpireApprovalRequests(); err == nil {
 		for _, r := range expired {
-			switch r.ActionClass {
-			case "exec":
-				if r.RunID != "" {
-					_ = c.st.UpdateRunState(r.RunID, "failed", -1, 0)
-					c.audit(r, "expired", "system", "")
-					if r.ExecutionID != "" && c.OnExecExpired != nil {
-						c.OnExecExpired(r.ExecutionID)
-					}
-				}
-			case "session.open":
-				// Finalize the parked session row (best-effort; the session
-				// dispatcher would have opened it on approval).
-				if r.RunID != "" {
-					_ = c.st.UpdateSessionState(r.RunID, "failed", -1, "approval expired")
-					c.audit(r, "expired", "system", "")
-				}
-			case "task.run":
-				if r.RunID != "" {
-					_ = c.st.FinalizeTaskRun(r.RunID, "failed", "approval expired", 0)
-					c.audit(r, "expired", "system", "")
-				}
-			case "job.run":
-				if r.RunID != "" {
-					_ = c.st.FinalizeJobRun(r.RunID, "failed", "approval expired")
-					c.audit(r, "expired", "system", "")
-				}
-			}
+			c.finalizeParked(r, "expired", "approval expired")
 		}
 	}
 	return c.st.ListApprovalRequests(state, limit)
+}
+
+// finalizeParked finalizes the run rows a parked (denied or expired)
+// request was holding (field feedback F14: a DENIED request used to leave
+// the run in awaiting_approval forever). Best-effort per action class.
+func (c *Controller) finalizeParked(r *store.ApprovalRequest, kind, reason string) {
+	switch r.ActionClass {
+	case "exec":
+		if r.RunID != "" {
+			_ = c.st.UpdateRunState(r.RunID, "failed", -1, 0)
+			c.audit(r, kind, "system", reason)
+			if r.ExecutionID != "" && c.OnExecExpired != nil {
+				c.OnExecExpired(r.ExecutionID)
+			}
+		}
+	case "session.open":
+		// Finalize the parked session row (best-effort; the session
+		// dispatcher would have opened it on approval).
+		if r.RunID != "" {
+			_ = c.st.UpdateSessionState(r.RunID, "failed", -1, reason)
+			c.audit(r, kind, "system", reason)
+		}
+	case "task.run":
+		if r.RunID != "" {
+			_ = c.st.FinalizeTaskRun(r.RunID, "failed", reason, 0)
+			c.audit(r, kind, "system", reason)
+		}
+	case "job.run":
+		if r.RunID != "" {
+			_ = c.st.FinalizeJobRun(r.RunID, "failed", reason)
+			c.audit(r, kind, "system", reason)
+		}
+	}
 }
 
 // Get returns one request.

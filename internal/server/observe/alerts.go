@@ -1078,7 +1078,7 @@ func (c *Controller) emit(a *store.Alert, event string) {
 
 func (c *Controller) audit(a *store.Alert) {
 	_ = c.st.AppendAudit(store.AuditEvent{
-		TS: time.Now().Unix(), Kind: "alert", AgentID: a.AgentID,
+		TS: time.Now().Unix(), Kind: "alert", AgentID: a.AgentID, Actor: "system",
 		Payload: `{"alert_id":"` + a.ID + `","rule_id":"` + a.RuleID + `","state":"` + a.State + `","kind":"` + a.Kind + `"}`,
 	})
 }
@@ -1133,7 +1133,7 @@ func (c *Controller) deliverWebhook(r *store.AlertRule, a *store.Alert, event st
 			}
 		}
 		_ = c.st.AppendAudit(store.AuditEvent{
-			TS: time.Now().Unix(), Kind: "alert.webhook", AgentID: a.AgentID,
+			TS: time.Now().Unix(), Kind: "alert.webhook", AgentID: a.AgentID, Actor: "system",
 			Payload: fmt.Sprintf(`{"alert_id":%q,"rule_id":%q,"event":%q,"url":%q,"status":%d,"outcome":%q}`,
 				a.ID, r.ID, event, r.WebhookURL, status, outcome),
 		})
