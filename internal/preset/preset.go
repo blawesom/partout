@@ -150,7 +150,8 @@ type ElevationPolicyDef struct {
 }
 
 // Tasks is the seeded ready-to-run library: the task templates a first-day
-// fleet needs (the daily package update is THE fleet job).
+// fleet needs (the daily package update is THE fleet job; baseline-tools is
+// the day-1 operator kit, distro-guarded so one task serves both families).
 var Tasks = []struct {
 	Name        string
 	Description string
@@ -160,6 +161,22 @@ var Tasks = []struct {
 		Name:        "default-daily-updates",
 		Description: "Apply all available package updates (apt/dnf aware, elevated per the host's elevation policy)",
 		StepsJSON:   `[{"kind":"upgrade","name":"apply all package updates"}]`,
+	},
+	{
+		// The `when` guards are constrained fact expressions (fail-closed):
+		// a step whose guard is false is skipped, so one task serves both
+		// distro families (vim maps to vim-enhanced on RHEL, fail2ban needs
+		// EPEL there).
+		Name:        "default-baseline-tools",
+		Description: "Install the day-1 operator kit (vim, fail2ban, btop) and enable fail2ban — apt/dnf aware, elevated per the host's elevation policy",
+		StepsJSON: `[{"kind":"package","name":"epel-release (RHEL-family)","package":"epel-release","state":"installed","when":"host.distro in ['rocky','rhel','centos','almalinux','ol']"},
+{"kind":"command","name":"install fail2ban (RHEL-family)","command":"dnf","args":["-y","install","fail2ban"],"when":"host.distro in ['rocky','rhel','centos','alma','fedora','ol']"},
+{"kind":"package","name":"install fail2ban (Debian-family)","package":"fail2ban","state":"installed","when":"host.distro in ['ubuntu','debian','linuxmint','pop']"},
+{"kind":"package","name":"vim-enhanced (RHEL-family)","package":"vim-enhanced","state":"installed","when":"host.distro in ['rocky','rhel','centos','alma','fedora','ol']"},
+{"kind":"package","name":"vim (Debian-family)","package":"vim","state":"installed","when":"host.distro in ['ubuntu','debian','linuxmint','pop']"},
+{"kind":"package","name":"btop","package":"btop","state":"installed"},
+{"kind":"command","name":"enable fail2ban","command":"systemctl","args":["enable","fail2ban"]},
+{"kind":"command","name":"start fail2ban","command":"systemctl","args":["start","fail2ban"]}]`,
 	},
 }
 

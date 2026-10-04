@@ -115,8 +115,10 @@ tools for AI assistants — same policy gates, same audit trail.
   (upload an agent release; a draft rollout is pre-armed for you to start).
 - **Elevation** — the privilege documents provisioning ships (the seeded
   `default-baseline` + your own), with each connected host's effective scope
-  matched by hash. **Jobs** — the seeded `default-daily-package-updates` is
-  paused and ready: enable it and every host gets the 04:30 UTC update job.
+  matched by hash. **Jobs / Tasks** — the seeded library is ready to apply:
+  `default-daily-package-updates` (paused; enable it and every host gets the
+  04:30 UTC update job) and `default-baseline-tools` (vim, fail2ban, btop —
+  distro-guarded, one task for apt and dnf hosts).
 - **Assistant** — chat with your fleet in natural language over the same governed
   tool surface: ask "any certs expiring soon on role:web?", request a playbook run
   (it parks on approvals like any write). Configure it in **Settings → Assistant**

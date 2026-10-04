@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/blawesom/partout/internal/agent/elevate"
+	"github.com/blawesom/partout/internal/agent/task"
 
 	"github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/store"
@@ -184,7 +185,8 @@ func TestSeededElevationPoliciesValid(t *testing.T) {
 }
 
 // TestSeededTasksDecode: the seeded task steps must decode (the jobs
-// controller loads them on reconcile).
+// controller loads them on reconcile) — and every `when` guard must parse
+// against the live evaluator (a broken guard skips the step silently).
 func TestSeededTasksDecode(t *testing.T) {
 	for _, td := range Tasks {
 		steps, err := store.DecodeTaskSteps(td.StepsJSON)
@@ -193,6 +195,17 @@ func TestSeededTasksDecode(t *testing.T) {
 		}
 		if len(steps) == 0 {
 			t.Fatalf("preset task %s: no steps", td.Name)
+		}
+		// A real fact set: every guard must EVALUATE (true or false —
+		// a guard that errors against live facts skips its step silently).
+		w := task.NewWhenEvaluator(map[string]string{"host.distro": "rocky"})
+		for _, st := range steps {
+			if st.When == "" {
+				continue
+			}
+			if _, err := w.Eval(st.When); err != nil {
+				t.Fatalf("preset task %s: step %q guard %q: %v", td.Name, st.Name, st.When, err)
+			}
 		}
 	}
 }
