@@ -2074,6 +2074,19 @@ func (c *ctl) cmdSessionReplay(args []string) {
 // stdlib flag package (which stops parsing at the first positional) accepts
 // both `secrets create -value=x NAME` and `secrets create NAME -value=x`
 // (field feedback F16: the second form silently ignored the flag).
+// positionalsOf returns the non-flag tokens (the reorderFlags inverse —
+// with flags moved to the front, the positionals are the tail).
+func positionalsOf(args []string) []string {
+	var pos []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") && strings.Contains(a, "=") {
+			continue
+		}
+		pos = append(pos, a)
+	}
+	return pos
+}
+
 func reorderFlags(args []string) []string {
 	var flags, pos []string
 	for _, a := range args {
@@ -2249,12 +2262,13 @@ func (c *ctl) cmdExternalData(args []string) {
 		}
 		fmt.Printf("refresh: %v rows\n", out["rows"])
 	case "host-eol":
-		if len(args) < 2 {
+		pos := positionalsOf(reorderFlags(args[1:]))
+		if len(pos) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: ctl external-data host-eol <agent_id>")
 			os.Exit(2)
 		}
 		var out map[string]any
-		if err := c.do("GET", "/api/v1/hosts/"+url.PathEscape(args[1])+"/eol", nil, &out); err != nil {
+		if err := c.do("GET", "/api/v1/hosts/"+url.PathEscape(pos[0])+"/eol", nil, &out); err != nil {
 			fmt.Fprintf(os.Stderr, "ctl: host-eol: %v\n", err)
 			os.Exit(1)
 		}
@@ -2276,13 +2290,19 @@ func (c *ctl) cmdPackages(args []string) {
 		fmt.Fprintln(os.Stderr, "usage: ctl packages <updates|apply|actions> ...")
 		os.Exit(2)
 	}
-	switch args[0] {
+	// Flag-order tolerance (F16): the unambiguous -flag=value forms may
+	// come after the positional (`apply ag_x --dry-run`... only with =:
+	// `--dry-run` has no value, keep it simple and pass it through).
+	sub := args[0]
+	rest := reorderFlags(args[1:])
+	switch sub {
 	case "updates":
-		if len(args) < 2 {
+		pos := positionalsOf(rest)
+		if len(pos) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: ctl packages updates <agent_id>")
 			os.Exit(2)
 		}
-		agentID := args[1]
+		agentID := pos[0]
 		var ups []map[string]any
 		if err := c.do("GET", "/api/v1/packages/updates?agent_id="+url.PathEscape(agentID), nil, &ups); err != nil {
 			fmt.Fprintf(os.Stderr, "ctl: updates: %v\n", err)
@@ -2300,21 +2320,25 @@ func (c *ctl) cmdPackages(args []string) {
 		}
 
 	case "apply":
-		if len(args) < 2 {
+		pos := positionalsOf(rest)
+		if len(pos) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: ctl packages apply <agent_id> [--dry-run] [--packages pkg1 pkg2]")
 			os.Exit(2)
 		}
-		agentID := args[1]
+		agentID := pos[0]
 		var pkgs []string
 		dry := false
-		for i := 2; i < len(args); i++ {
-			switch args[i] {
+		for _, a := range rest {
+			switch a {
 			case "--dry-run":
 				dry = true
-			case "--packages":
-				i++
-				if i < len(args) {
-					pkgs = append(pkgs, args[i])
+			}
+		}
+		// --packages takes a space-separated list: scan the original order.
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == "--packages" && i+1 < len(rest) {
+				for j := i + 1; j < len(rest) && !strings.HasPrefix(rest[j], "-"); j++ {
+					pkgs = append(pkgs, rest[j])
 				}
 			}
 		}
