@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -31,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	agentfacts "github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/id"
@@ -143,7 +145,47 @@ var ErrHostBusy = errors.New("provision: an active run for this host already exi
 
 // Start creates a provisioning run in queued state, generates a one-time
 // enrollment token, and kicks off the async state machine.
-func (p *Provisioner) Start(host, mode string) (*store.ProvisionRun, error) {
+// ElevationPolicySpec is one elevation policy to install on the target:
+// either resolved from the server-side store (Name + content) or supplied
+// inline by the caller (CLI local file). SHA is the canonical rules-only
+// hash (elevate.PolicyHash), verified on the target before install.
+type ElevationPolicySpec struct {
+	Name      string `json:"name"`
+	RulesJSON string `json:"rules_json"`
+	SHA       string `json:"sha256"`
+}
+
+// StartOptions are the provision-time knobs (field feedback D1): the
+// elevation bootstrap (policy + sudoers + PARTOUT_ELEVATE wired through
+// the run's root install) and the agent.env extras that need root to set
+// post-provision (service labels, cert paths).
+type StartOptions struct {
+	// Elevate enables elevation on the target: policies are installed to
+	// /etc/partout/elevation.d/, the sudoers drop-in is rendered +
+	// visudo-checked + installed, and agent.env gets PARTOUT_ELEVATE=sudo.
+	Elevate bool
+	// ElevationPolicies are installed in order as numbered drop-ins.
+	ElevationPolicies []ElevationPolicySpec
+	// ServiceLabels / CertPaths are written into agent.env verbatim
+	// (PARTOUT_SERVICE_LABELS / PARTOUT_CERT_PATHS).
+	ServiceLabels string
+	CertPaths     string
+}
+
+// extrasJSON is the persisted display/audit form of the options.
+type extrasJSON struct {
+	Elevate           bool                  `json:"elevate"`
+	ElevationPolicies []ElevationPolicySpec `json:"elevation_policies,omitempty"`
+	ServiceLabels     string                `json:"service_labels,omitempty"`
+	CertPaths         string                `json:"cert_paths,omitempty"`
+}
+
+func (o StartOptions) extras() string {
+	b, _ := json.Marshal(extrasJSON(o))
+	return string(b)
+}
+
+func (p *Provisioner) Start(host, mode string, opts StartOptions) (*store.ProvisionRun, error) {
 	// One active run per host: a second run would race the first on
 	// known_hosts, the install script, and the target's units.
 	if runs, err := p.store.ProvisionRuns(500); err == nil {
@@ -154,14 +196,34 @@ func (p *Provisioner) Start(host, mode string) (*store.ProvisionRun, error) {
 		}
 	}
 
+	// Fail fast on inconsistent elevation options — a policy that does not
+	// parse must never reach the target (the sudoers render happens there,
+	// but the JSON is validated here, server-side).
+	if opts.Elevate && len(opts.ElevationPolicies) == 0 {
+		return nil, fmt.Errorf("provision: --elevate requires at least one --elevation-policy (a store name or a local file)")
+	}
+	for i, ep := range opts.ElevationPolicies {
+		if ep.RulesJSON == "" {
+			return nil, fmt.Errorf("provision: elevation policy %d (%s): empty rules", i, ep.Name)
+		}
+		pol, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + ep.RulesJSON + `}`))
+		if err != nil {
+			return nil, fmt.Errorf("provision: elevation policy %s invalid: %w", ep.Name, err)
+		}
+		if ep.SHA == "" {
+			opts.ElevationPolicies[i].SHA = pol.PolicyHash()
+		}
+	}
+
 	runID := id.New("prv")
 	run := &store.ProvisionRun{
-		ID:      runID,
-		Host:    host,
-		Mode:    mode,
-		State:   "queued",
-		Created: time.Now().Unix(),
-		Updated: time.Now().Unix(),
+		ID:         runID,
+		Host:       host,
+		Mode:       mode,
+		ExtrasJSON: opts.extras(),
+		State:      "queued",
+		Created:    time.Now().Unix(),
+		Updated:    time.Now().Unix(),
 	}
 
 	// Create the run first so a failure here cannot leave an orphaned
@@ -196,7 +258,7 @@ func (p *Provisioner) Start(host, mode string) (*store.ProvisionRun, error) {
 	p.runs[runID] = ar
 	p.mu.Unlock()
 
-	go p.run(ctx, ar, run, token)
+	go p.run(ctx, ar, run, token, opts)
 	return run, nil
 }
 
@@ -324,7 +386,7 @@ func (p *Provisioner) ReapStale() {
 
 // run executes the state machine. It blocks on the confirm channel while the
 // run is paused at key_confirm.
-func (p *Provisioner) run(ctx context.Context, ar *activeRun, run *store.ProvisionRun, token string) {
+func (p *Provisioner) run(ctx context.Context, ar *activeRun, run *store.ProvisionRun, token string, opts StartOptions) {
 	defer func() {
 		p.mu.Lock()
 		delete(p.runs, run.ID)
@@ -357,11 +419,11 @@ func (p *Provisioner) run(ctx context.Context, ar *activeRun, run *store.Provisi
 		return
 	}
 	// Step 3: transfer.
-	if !p.stepTransfer(ctx, run) {
+	if !p.stepTransfer(ctx, run, opts) {
 		return
 	}
 	// Step 4: install.
-	if !p.stepInstall(ctx, run, token) {
+	if !p.stepInstall(ctx, run, token, opts) {
 		return
 	}
 	// Step 5: wait-enroll (terminal: connected or failed).
@@ -518,7 +580,7 @@ fi
 
 // stepTransfer scp's the server binary (and, when TLS is on, the root CA)
 // to the host. Returns true to continue.
-func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun) bool {
+func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun, opts StartOptions) bool {
 	p.setState(run, "transferring", "transfer", "")
 	p.beginStep(run, 3)
 
@@ -544,13 +606,45 @@ func (p *Provisioner) stepTransfer(ctx context.Context, run *store.ProvisionRun)
 			return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp CA failed: %v", err)))
 		}
 	}
+	// Elevation policies ride along the same way (D1 bootstrap): the
+	// operator's canonical privilege documents, sha-verified on the target
+	// before anything trusts them.
+	for _, ep := range opts.ElevationPolicies {
+		local := p.writeTempPolicy(ep)
+		if local == "" {
+			return p.failStep(run, 3, fmt.Sprintf("elevation policy %s: cannot stage content", ep.Name))
+		}
+		defer os.Remove(local)
+		remote := "/tmp/partout-elev-" + ep.SHA[:12]
+		if _, err := p.ssh.Copy(ctx, local, run.Host, remote); err != nil {
+			return p.failStep(run, 3, p.authHint(fmt.Sprintf("scp elevation policy %s failed: %v", ep.Name, err)))
+		}
+	}
 	p.finishStep(run, 3)
 	return true
 }
 
+// writeTempPolicy stages one policy's canonical JSON in a temp file for
+// scp ("" on failure).
+func (p *Provisioner) writeTempPolicy(ep ElevationPolicySpec) string {
+	f, err := os.CreateTemp("", "partout-elev-*.json")
+	if err != nil {
+		return ""
+	}
+	// The drop-in must be a full {"rules":[...]} document (the store keeps
+	// the canonical bare array; the on-disk format is the document form).
+	if _, err := f.WriteString(`{"rules":` + ep.RulesJSON + `}`); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return ""
+	}
+	f.Close()
+	return f.Name()
+}
+
 // stepInstall runs the install script as root on the host. Returns true to
 // continue.
-func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, token string) bool {
+func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, token string, opts StartOptions) bool {
 	p.setState(run, "installing", "install", "")
 	p.beginStep(run, 4)
 
@@ -567,6 +661,8 @@ func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, 
 		wipe:       wipeScript(run.Mode),
 		serverHost: p.serverHost,
 		token:      token,
+		elevation:  elevationScript(opts),
+		envExtras:  agentEnvExtras(opts),
 	}
 	// The CA fingerprint is part of the install contract when TLS is on:
 	// the script verifies it before trusting /etc/partout/ca.crt.
@@ -639,6 +735,76 @@ type installSpec struct {
 	caSHA12, caSHA    string // root-CA fingerprint; both empty = TLS off
 	wipe              string // mode-specific prelude ("" for join)
 	serverHost, token string
+	// elevation is the D1 bootstrap block ("" = no elevation): installs
+	// the transferred policies to /etc/partout/elevation.d/, renders +
+	// visudo-checks + installs the sudoers drop-in (as root, on the
+	// target), and wires PARTOUT_ELEVATE in agent.env.
+	elevation string
+	// envExtras are extra agent.env lines (service labels, cert paths).
+	envExtras string
+}
+
+// slugPolicyName makes a policy name filesystem-safe for its drop-in.
+func slugPolicyName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		out = "policy"
+	}
+	return out
+}
+
+// elevationScript renders the root-side elevation bootstrap for the
+// install script. Policies were transferred as /tmp/partout-elev-<sha12>
+// and are verified against the full sha before install (the same contract
+// as the binary and the CA).
+func elevationScript(opts StartOptions) string {
+	if !opts.Elevate || len(opts.ElevationPolicies) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Elevation bootstrap (PRD Decision 3, onboarding): install the\n")
+	b.WriteString("# operator's elevation policies, then render + visudo-check + install\n")
+	b.WriteString("# the sudoers drop-in FROM them (single source of truth). Runs as root;\n")
+	b.WriteString("# a bad policy aborts the install here, at the earliest possible moment.\n")
+	b.WriteString("mkdir -p /etc/partout/elevation.d\n")
+	for i, ep := range opts.ElevationPolicies {
+		fmt.Fprintf(&b, "ELEV=/tmp/partout-elev-%s\n", ep.SHA[:12])
+		fmt.Fprintf(&b, "ELEVACT=$(sha256sum \"$ELEV\" | cut -d' ' -f1)\n")
+		fmt.Fprintf(&b, "if [ \"$ELEVACT\" != %s ]; then echo \"elevation policy %s sha256 mismatch: $ELEVACT\" >&2; exit 1; fi\n",
+			shellQuote(ep.SHA), ep.Name)
+		fmt.Fprintf(&b, "install -m 0644 -o root -g root \"$ELEV\" /etc/partout/elevation.d/%02d-%s.json\n", (i+1)*10, slugPolicyName(ep.Name))
+		b.WriteString("rm -f \"$ELEV\"\n")
+	}
+	// Render + install sudoers from the same policy (visudo-checked before
+	// anything is touched). Full path: sudo's secure_path may not include
+	// /usr/local/bin on the target.
+	b.WriteString("PARTOUT_ELEVATION_POLICY=/etc/partout/elevation.d /usr/local/bin/partout ctl elevation install-sudoers || { echo \"elevation: install-sudoers failed (bad policy?)\" >&2; exit 1; }\n")
+	return b.String()
+}
+
+// agentEnvExtras renders the additional agent.env lines from the options.
+func agentEnvExtras(opts StartOptions) string {
+	var b strings.Builder
+	if opts.Elevate {
+		b.WriteString("PARTOUT_ELEVATE=sudo\n")
+		b.WriteString("PARTOUT_ELEVATION_POLICY=/etc/partout/elevation.d\n")
+	}
+	if opts.ServiceLabels != "" {
+		fmt.Fprintf(&b, "PARTOUT_SERVICE_LABELS=%s\n", opts.ServiceLabels)
+	}
+	if opts.CertPaths != "" {
+		fmt.Fprintf(&b, "PARTOUT_CERT_PATHS=%s\n", opts.CertPaths)
+	}
+	return b.String()
 }
 
 func buildInstallScript(s installSpec) string {
@@ -673,17 +839,16 @@ chown partout:partout /home/partout
 chmod 0750 /home/partout
 mkdir -p /etc/partout
 umask 077
-%s# agent identity material lives under DATA_DIR (0700); the CA is a public cert
+%s%s# agent identity material lives under DATA_DIR (0700); the CA is a public cert
 cat > /etc/partout/agent.env <<'EOF'
 PARTOUT_MODE=agent
 PARTOUT_SERVER=%s
 PARTOUT_TOKEN=%s
 PARTOUT_DATA_DIR=/var/lib/partout/agent
 # Elevation (opt-in, PRD Decision 3): package applies and other
-# root-requiring actions need it — uncomment after installing the
-# sudoers scope (deploy/sudoers/partout-agent, or an elevation policy
-# via "partout ctl elevation install-sudoers"), then restart the agent.
-#PARTOUT_ELEVATE=sudo
+# root-requiring actions need it — the sudoers scope is an elevation
+# policy installed by the provisioner (--elevate) or by hand
+# ("partout ctl elevation install-sudoers").
 %sEOF
 chmod 0640 /etc/partout/agent.env
 cat > /etc/systemd/system/partout-agent.service <<'EOF'
@@ -708,7 +873,7 @@ systemctl enable partout-agent
 systemctl restart partout-agent
 rm -f "$BIN"
 echo INSTALL_OK
-`, s.binSHA12, s.binSHA, s.wipe, caBlock, s.serverHost, s.token, envCA)
+`, s.binSHA12, s.binSHA, s.wipe, caBlock, s.elevation, s.serverHost, s.token, s.envExtras+envCA)
 }
 
 // stepWaitEnroll polls until the agent from this run has connected. Terminal:
@@ -904,7 +1069,16 @@ func (p *Provisioner) reconfirmWait(ctx context.Context, ar *activeRun, runID, t
 			p.log.Printf("provision: %s resume after re-confirm: %v", runID, err)
 			return
 		}
-		p.run(ctx, ar, run, token)
+		// The provision-time options were persisted on the run row; a
+		// re-confirmed key gate resumes with the same plan.
+		var opts StartOptions
+		if run.ExtrasJSON != "" {
+			var ex extrasJSON
+			if err := json.Unmarshal([]byte(run.ExtrasJSON), &ex); err == nil {
+				opts = StartOptions(ex)
+			}
+		}
+		p.run(ctx, ar, run, token, opts)
 	case <-ctx.Done():
 		if r, err := p.store.ProvisionRun(runID); err == nil && r.State == "key_confirm" {
 			p.setTerminal(r, "cancelled", "key confirmation cancelled")

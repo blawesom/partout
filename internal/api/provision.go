@@ -3,6 +3,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -27,6 +28,17 @@ func (h *Handler) RegisterProvision(mux *http.ServeMux) {
 type createRunRequest struct {
 	Host string `json:"host"`
 	Mode string `json:"mode"`
+	// D1 onboarding options: elevation bootstrap + agent.env extras.
+	Elevate           bool               `json:"elevate"`
+	ElevationPolicies []elevationRefSpec `json:"elevation_policies"`
+	ServiceLabels     string             `json:"service_labels"`
+	CertPaths         string             `json:"cert_paths"`
+}
+
+// elevationRefSpec is one policy by store name, or inline rules.
+type elevationRefSpec struct {
+	Name  string          `json:"name"`
+	Rules json.RawMessage `json:"rules"`
 }
 
 func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +64,49 @@ func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 			"mode must be fresh or join", nil)
 		return
 	}
-	run, err := h.prov.Start(req.Host, req.Mode)
+	// Resolve the elevation policies: store names and/or inline rules →
+	// concrete content for the provisioner (fail fast on anything bad).
+	var policies []provision.ElevationPolicySpec
+	for _, ref := range req.ElevationPolicies {
+		if len(ref.Rules) > 0 {
+			policies = append(policies, provision.ElevationPolicySpec{
+				Name: ref.Name, RulesJSON: string(ref.Rules),
+			})
+			continue
+		}
+		if ref.Name == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "elevation policy: name or rules required", nil)
+			return
+		}
+		p, err := h.st.ElevationPolicy(ref.Name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "unknown elevation policy: "+ref.Name, nil)
+			return
+		}
+		policies = append(policies, provision.ElevationPolicySpec{
+			Name: p.Name, RulesJSON: p.RulesJSON, SHA: p.PolicySHA,
+		})
+	}
+	// --elevate with no explicit policy defaults to the seeded baseline
+	// (ready-to-apply posture: the operator is admin; the grant is visible
+	// in the run detail and revocable by re-provisioning).
+	if req.Elevate && len(policies) == 0 {
+		p, err := h.st.ElevationPolicy("default-baseline")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"--elevate needs --elevation-policy or a seeded default-baseline policy (partout ctl preset apply)", nil)
+			return
+		}
+		policies = append(policies, provision.ElevationPolicySpec{
+			Name: p.Name, RulesJSON: p.RulesJSON, SHA: p.PolicySHA,
+		})
+	}
+	run, err := h.prov.Start(req.Host, req.Mode, provision.StartOptions{
+		Elevate:           req.Elevate,
+		ElevationPolicies: policies,
+		ServiceLabels:     req.ServiceLabels,
+		CertPaths:         req.CertPaths,
+	})
 	if err != nil {
 		// A concurrent run for the same host is a conflict, not a server
 		// error — the operator should see which run holds the host.

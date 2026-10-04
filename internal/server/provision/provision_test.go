@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -130,7 +131,7 @@ func waitForState(t *testing.T, st *store.Store, runID, wantState string) *store
 func TestProvisionFreshKeyConfirm(t *testing.T) {
 	prov, st := newTestProvisioner(t)
 
-	run, err := prov.Start("web01", "fresh")
+	run, err := prov.Start("web01", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestProvisionHandoffNonSystemd(t *testing.T) {
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	run, err := prov.Start("web02", "fresh")
+	run, err := prov.Start("web02", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -279,7 +280,7 @@ exit 0
 // error, never panic with "close of closed channel".
 func TestConfirmKeyIsIdempotent(t *testing.T) {
 	prov, st := newTestProvisioner(t)
-	run, err := prov.Start("web-dc", "fresh")
+	run, err := prov.Start("web-dc", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -300,7 +301,7 @@ func TestConfirmKeyIsIdempotent(t *testing.T) {
 // TestRacingConfirmsDoNotPanic exercises simultaneous confirms.
 func TestRacingConfirmsDoNotPanic(t *testing.T) {
 	prov, st := newTestProvisioner(t)
-	run, err := prov.Start("web-race", "fresh")
+	run, err := prov.Start("web-race", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -324,7 +325,7 @@ func TestRacingConfirmsDoNotPanic(t *testing.T) {
 // returning success and leaving it in key_confirm forever.
 func TestConfirmAfterRestartFailsRun(t *testing.T) {
 	prov, st := newTestProvisioner(t)
-	run, err := prov.Start("web-restart", "fresh")
+	run, err := prov.Start("web-restart", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -353,12 +354,12 @@ func TestConfirmAfterRestartFailsRun(t *testing.T) {
 // with a remediation message and leaves already-terminal runs untouched.
 func TestReapStaleFailsStrandedRuns(t *testing.T) {
 	prov, st := newTestProvisioner(t)
-	a, err := prov.Start("web-stranded", "fresh")
+	a, err := prov.Start("web-stranded", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start a: %v", err)
 	}
 	waitForState(t, st, a.ID, "key_confirm")
-	b, err := prov.Start("web-done", "fresh")
+	b, err := prov.Start("web-done", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start b: %v", err)
 	}
@@ -415,7 +416,7 @@ func TestProvisionUnreachableServerFailsPreflight(t *testing.T) {
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	run, err := prov.Start("web-nr", "fresh")
+	run, err := prov.Start("web-nr", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -528,7 +529,7 @@ exit 0
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	run, err := prov.Start("web-auth", "fresh")
+	run, err := prov.Start("web-auth", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -630,7 +631,7 @@ func TestPreflightLoopbackBindMessage(t *testing.T) {
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	run, err := prov.Start("web-lb", "fresh")
+	run, err := prov.Start("web-lb", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -710,7 +711,7 @@ exit 0
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	run, err := prov.Start("web-dns", "fresh")
+	run, err := prov.Start("web-dns", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -813,7 +814,7 @@ exit 0
 		t.Fatalf("AddKey: %v", err)
 	}
 
-	run, err := prov.Start("web-ca", "join")
+	run, err := prov.Start("web-ca", "join", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -902,7 +903,7 @@ exit 0
 		ConnectTimeout: 5,
 	}
 
-	run, err := prov.Start("ai", "fresh")
+	run, err := prov.Start("ai", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1001,7 +1002,7 @@ exit 0
 
 	// Phase 1: the host was reinstalled; its key changed.
 	t.Setenv("PROV_ROTATED", "1")
-	run, err := prov.Start("web-rot", "fresh")
+	run, err := prov.Start("web-rot", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1046,16 +1047,16 @@ exit 0
 func TestStartRejectsConcurrentRunForHost(t *testing.T) {
 	prov, st := newTestProvisioner(t)
 
-	a, err := prov.Start("web-dup", "fresh")
+	a, err := prov.Start("web-dup", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	waitForState(t, st, a.ID, "key_confirm") // non-terminal
 
-	if _, err := prov.Start("web-dup", "fresh"); !errors.Is(err, ErrHostBusy) {
+	if _, err := prov.Start("web-dup", "fresh", StartOptions{}); !errors.Is(err, ErrHostBusy) {
 		t.Fatalf("second Start for same host: err = %v, want ErrHostBusy", err)
 	}
-	if _, err := prov.Start("web-other", "fresh"); err != nil {
+	if _, err := prov.Start("web-other", "fresh", StartOptions{}); err != nil {
 		t.Fatalf("Start for a different host: %v", err)
 	}
 
@@ -1063,7 +1064,7 @@ func TestStartRejectsConcurrentRunForHost(t *testing.T) {
 	if err := st.SetProvisionRunState(a.ID, "cancelled", "connect", "test"); err != nil {
 		t.Fatalf("cancel first: %v", err)
 	}
-	third, err := prov.Start("web-dup", "fresh")
+	third, err := prov.Start("web-dup", "fresh", StartOptions{})
 	if err != nil {
 		t.Fatalf("Start after terminal: %v", err)
 	}
@@ -1073,4 +1074,63 @@ func TestStartRejectsConcurrentRunForHost(t *testing.T) {
 		t.Fatalf("cancel third: %v", err)
 	}
 	waitForState(t, st, third.ID, "cancelled")
+}
+
+// TestBuildInstallScriptElevation (D1): the elevation bootstrap block is
+// present with --elevate (policy install + sudoers render + env wiring)
+// and absent without it.
+func TestBuildInstallScriptElevation(t *testing.T) {
+	spec := installSpec{
+		binSHA12: "abc", binSHA: "abcdef", serverHost: "s:8443", token: "tok",
+	}
+	plain := buildInstallScript(spec)
+	if strings.Contains(plain, "elevation.d") {
+		t.Error("plain install must not touch /etc/partout/elevation.d")
+	}
+
+	spec.elevation = elevationScript(StartOptions{
+		Elevate: true,
+		ElevationPolicies: []ElevationPolicySpec{{
+			Name: "baseline", RulesJSON: `[{"allow":"reboot"}]`, SHA: "0123456789abcdef0123456789abcdef",
+		}},
+	})
+	spec.envExtras = agentEnvExtras(StartOptions{Elevate: true})
+	out := buildInstallScript(spec)
+	for _, want := range []string{
+		"/etc/partout/elevation.d/10-baseline.json",
+		"ctl elevation install-sudoers",
+		"PARTOUT_ELEVATE=sudo",
+		"PARTOUT_ELEVATION_POLICY=/etc/partout/elevation.d",
+		"0123456789abcdef", // sha verification of the transferred policy
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("elevation install script missing %q", want)
+		}
+	}
+	// The commented-out legacy hint must be gone when elevation is wired.
+	if strings.Contains(out, "#PARTOUT_ELEVATE=sudo") {
+		t.Error("elevated install must not carry the commented-out ELEVATE hint")
+	}
+}
+
+// TestElevationScriptValidates: options with unparsable rules are
+// rejected at Start (before anything reaches the host).
+func TestStartRejectsBadElevationPolicy(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	prov := New(Options{Store: st, Logger: log.New(io.Discard, "", 0)})
+	_, err = prov.Start("x", "fresh", StartOptions{
+		Elevate:           true,
+		ElevationPolicies: []ElevationPolicySpec{{Name: "bad", RulesJSON: `[{not json`}},
+	})
+	if err == nil {
+		t.Fatal("Start must reject an unparsable elevation policy")
+	}
+	_, err = prov.Start("x", "fresh", StartOptions{Elevate: true})
+	if err == nil {
+		t.Fatal("Start must reject --elevate without policies")
+	}
 }

@@ -844,3 +844,120 @@ func (c *Controller) audit(kind, jobID, selectorText string, n int, actor string
 		c.sse.Emit("job."+kind, map[string]any{"job_id": jobID})
 	}
 }
+
+// StartReconcile runs a periodic assignment reconcile: for every ENABLED
+// job, hosts that now match its selector but hold no assignment get one
+// (with a fresh signed decision), and hosts that no longer match are
+// unassigned. This is what makes a seeded/paused job reach agents that
+// joined (or became selector-matching, e.g. via tags) after the job was
+// created — create/update push is not enough on a growing fleet.
+func (c *Controller) StartReconcile(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if n := c.reconcileOnce(ctx); n > 0 && c.log != nil {
+					c.log.Printf("jobs: reconcile: %d assignment(s) pushed", n)
+				}
+			}
+		}
+	}()
+}
+
+// reconcileOnce is one reconcile pass; it returns the number of
+// assignments pushed. Best-effort per job: one bad job cannot stop the
+// sweep.
+func (c *Controller) reconcileOnce(ctx context.Context) int {
+	jobs, err := c.st.ListJobs()
+	if err != nil {
+		return 0
+	}
+	pushed := 0
+	for _, job := range jobs {
+		if !job.Enabled {
+			continue
+		}
+		// Resolve the selector against the CURRENT fleet.
+		r := store.NewResolver(c.st)
+		agents, err := r.ResolveSelector(job.Selector)
+		if err != nil {
+			continue // bad selector on a user job: leave as-is
+		}
+		assigned, err := c.st.JobAssignmentsForJob(job.ID)
+		if err != nil {
+			continue
+		}
+		has := make(map[string]bool, len(assigned))
+		for _, a := range assigned {
+			has[a.AgentID] = true
+		}
+		matching := make(map[string]bool, len(agents))
+		for _, a := range agents {
+			matching[a.ID] = true
+			if has[a.ID] {
+				continue
+			}
+			// New match: fresh signed decision for this host, then push.
+			decision, reason := c.hostTaskRunDecision(job.ID, a.ID)
+			if decision == nil {
+				if c.log != nil {
+					c.log.Printf("jobs: reconcile %s -> %s: denied (%s)", job.ID, a.ID, reason)
+				}
+				continue
+			}
+			if c.pushAssignment(job, a.ID, decision) {
+				pushed++
+			}
+		}
+		// Drop assignments that no longer match.
+		for _, a := range assigned {
+			if !matching[a.AgentID] {
+				_ = c.st.UnassignJob(job.ID, a.AgentID)
+				if c.h != nil {
+					_ = c.h.SendJobUnassign(a.AgentID, job.ID)
+				}
+			}
+		}
+	}
+	return pushed
+}
+
+// pushAssignment stores + pushes one assignment (reconcile path). The
+// overlap/failure policies keep their defaults on the reconcile path (the
+// job row does not persist them).
+func (c *Controller) pushAssignment(job *store.Job, agentID string, decision *pb.Decision) bool {
+	if err := c.st.AssignJob(&store.JobAssignment{JobID: job.ID, AgentID: agentID}); err != nil {
+		return false
+	}
+	ver, err := c.st.TaskVersion(job.TaskID, job.TaskVersion)
+	if err != nil || ver == nil {
+		return false
+	}
+	steps, err := store.DecodeTaskSteps(ver.StepsJSON)
+	if err != nil {
+		return false
+	}
+	ja := &pb.JobAssignment{
+		JobId:       job.ID,
+		Name:        job.Name,
+		Cron:        job.Cron,
+		Timezone:    "UTC",
+		TaskId:      job.TaskID,
+		TaskVersion: int32(job.TaskVersion),
+		Steps:       toPBSteps(steps),
+		MaxRunS:     int32(job.MaxRunSeconds),
+		Version:     job.Updated,
+		Decision:    decision,
+	}
+	if c.h == nil {
+		return false
+	}
+	return c.h.SendJobAssign(agentID, ja) == nil
+}

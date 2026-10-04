@@ -194,7 +194,7 @@ func DecodeTaskSteps(stepsJSON string) ([]TaskStep, error) {
 // in task_versions.steps_json. `When` is a constrained fact expression
 // (not free-form code); a false guard yields state "skipped".
 type TaskStep struct {
-	Kind     string            `json:"kind"`               // command|file|package|service|user|group|template|assert|reboot
+	Kind     string            `json:"kind"`               // command|file|package|upgrade|service|user|group|template|assert|reboot
 	Name     string            `json:"name,omitempty"`     // display name
 	When     string            `json:"when,omitempty"`     // constrained fact expression
 	Command  string            `json:"command,omitempty"`  // for kind=command

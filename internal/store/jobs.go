@@ -269,3 +269,16 @@ func (s *Store) UpdateJobAssignmentState(jobID, agentID, state string, ranAt int
 		state, ranAt, jobID, agentID)
 	return err
 }
+
+// GetJobByName returns a job by its unique name (preset + lookup by name).
+func (s *Store) GetJobByName(name string) (*Job, error) {
+	row := s.db.QueryRow(`SELECT id, name, task_id, task_version, cron, selector, max_run_s, enabled, created, updated FROM jobs WHERE name=?`, name)
+	var j Job
+	if err := row.Scan(&j.ID, &j.Name, &j.TaskID, &j.TaskVersion, &j.Cron, &j.Selector, &j.MaxRunSeconds, &j.Enabled, &j.Created, &j.Updated); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: get job by name: %w", err)
+	}
+	return &j, nil
+}

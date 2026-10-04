@@ -260,6 +260,12 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		"mode": string(a.elevate), "sudo": a.elevate == elevate.Sudo,
 	}
 	if a.elevation != nil {
+		// The canonical rules-only hash: the server-side policy store
+		// computes the same value, so a host's effective scope can be
+		// matched against the operator's canonical documents fleet-wide.
+		elevSummary["hash"] = a.elevation.PolicyHash()
+	}
+	if a.elevation != nil {
 		elevSummary["rules"] = len(a.elevation.Rules)
 		elevSummary["sources"] = a.elevation.Source()
 	}
@@ -287,6 +293,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		}
 	}
 	a.taskExec = task.NewExecutor(a.runner, secLookup)
+	a.taskExec.SetLogger(lg)
 	a.taskExec.SetFileRoot(a.fileRoot)
 	a.taskRunner = task.New(a.taskExec)
 	a.jobs = jobs.New(filepath.Join(cfg.DataDir, "jobs"), a.taskExec, func(r *jobs.Report) {

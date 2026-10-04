@@ -215,6 +215,28 @@
           </label>
         </div>
         <p class="muted small" style="margin-top:8px">{{ provWizModeHint }}</p>
+
+        <!-- Elevation bootstrap (D1): privilege document + env extras wired
+             through the run's root install — no out-of-band SSH needed. -->
+        <div class="card" style="margin-top:14px;padding:10px 12px;background:var(--bg2,rgba(127,127,127,.06))">
+          <label style="display:flex;gap:8px;align-items:center;cursor:pointer">
+            <input type="checkbox" v-model="provWiz.elevate" />
+            <b>Enable elevation</b> <span class="muted small">— package updates, service control and reboots work on day 1</span>
+          </label>
+          <div v-if="provWiz.elevate" style="margin-top:8px">
+            <label class="fld"><span>Elevation policy</span>
+              <select v-model="provWiz.elevationPolicy" @focus="provWizLoadElevationPolicies()">
+                <option value="" disabled>select a policy…</option>
+                <option v-for="p in provWiz.elevationPolicies" :key="p.id" :value="p.name">{{ p.name }} ({{ (p.rules||[]).length }} rules)</option>
+              </select>
+            </label>
+            <p class="muted small" style="margin-top:6px">The policy is installed to <span class="mono">/etc/partout/elevation.d/</span> and the sudoers drop-in is rendered from it (visudo-checked) — the exact privilege being granted is visible in the policy before you grant it. Managed with <span class="mono">partout ctl elevation policy</span>.</p>
+          </div>
+          <div class="form-row" style="margin-top:8px;gap:10px">
+            <label class="fld" style="flex:1"><span>Service labels <span class="muted small">(optional)</span></span><input v-model="provWiz.serviceLabels" class="mono" placeholder="fail2ban,sshd" /></label>
+            <label class="fld" style="flex:1"><span>Cert paths <span class="muted small">(optional)</span></span><input v-model="provWiz.certPaths" class="mono" placeholder="/etc/letsencrypt/live" /></label>
+          </div>
+        </div>
         <p v-if="provWizKnownHost" class="small" style="margin-top:6px">
           <template v-if="provWiz.mode==='fresh'">
             <span style="color:var(--warning,#d97706);font-weight:600">⚠ {{ provWizKnownHost }} looks already enrolled.</span>
@@ -239,6 +261,14 @@
           <tbody>
             <tr><td class="muted" style="width:130px">Target</td><td class="mono">{{ provWiz.host }}</td></tr>
             <tr><td class="muted">Mode</td><td>{{ provWiz.mode }} <span class="muted small">— {{ provWizModeShort }}</span></td></tr>
+          <tr><td class="muted">Elevation</td><td>
+            <template v-if="provWiz.elevate"><b>enabled</b> — policy <span class="mono">{{ provWiz.elevationPolicy || "(server default)" }}</span></template>
+            <template v-else><span class="muted">off (the agent runs unprivileged; package/service/reboot actions will fail until enabled)</span></template>
+          </td></tr>
+          <tr v-if="provWiz.serviceLabels.trim() || provWiz.certPaths.trim()"><td class="muted">Extras</td><td class="small">
+            <span v-if="provWiz.serviceLabels.trim()">labels: <span class="mono">{{ provWiz.serviceLabels }}</span> </span>
+            <span v-if="provWiz.certPaths.trim()">certs: <span class="mono">{{ provWiz.certPaths }}</span></span>
+          </td></tr>
             <tr><td class="muted">SSH access</td><td>
               <template v-if="provWiz.sshBusy"><span class="muted small">checking…</span></template>
               <template v-else-if="provWiz.sshStatus && (provWiz.sshStatus.file_keys||[]).length">
@@ -2182,7 +2212,8 @@
         ahKnownIds: null, ahWatchStarted: 0, ahConnect: "idle", ahHostId: "", // connection watch
         provRuns: [],
         batchText: "", batchMode: "fresh", batchBusy: false, batchMsg: "",
-        provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "" },
+        provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "",
+           elevate: false, elevationPolicies: [], elevationPolicy: "", serviceLabels: "", certPaths: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
@@ -3291,7 +3322,8 @@
       openProvWizard() {
         // Starting a fresh wizard detaches any previous watch; the earlier
         // run keeps going server-side and stays visible in the Runs table.
-        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "" };
+        this.provWiz = { open: true, phase: "target", host: this.provHost || "", mode: this.provMode || "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "",
+                         elevate: this.provWiz.elevate || false, elevationPolicies: this.provWiz.elevationPolicies || [], elevationPolicy: this.provWiz.elevationPolicy || "", serviceLabels: this.provWiz.serviceLabels || "", certPaths: this.provWiz.certPaths || "" };
       },
       dismissGettingStarted() {
         this.gsDismissed = true;
@@ -3399,7 +3431,22 @@
         if (this.provWiz.phase === "target" && this.provWiz.host.trim()) {
           this.provWiz.phase = "confirm";
           this.provWizLoadSSH();
+          this.provWizLoadElevationPolicies();
         }
+      },
+      // Fetch the server-side elevation policies so the operator picks a
+      // named privilege document (the seeded default-baseline is the
+      // ready-to-apply day-1 profile).
+      async provWizLoadElevationPolicies() {
+        if (this.provWiz.elevationPolicies.length) return;
+        try {
+          const list = await this.api("/elevation/policies", { toast: false });
+          this.provWiz.elevationPolicies = list || [];
+          if (!this.provWiz.elevationPolicy) {
+            const def = this.provWiz.elevationPolicies.find(p => p.name === "default-baseline");
+            if (def) this.provWiz.elevationPolicy = def.name;
+          }
+        } catch (e) { /* leave the list empty; the checkbox stays usable */ }
       },
       // Fetch the identity-key readiness report so the confirm screen can show
       // the operator exactly which key will be used (or that none was found)
@@ -3418,7 +3465,11 @@
       async provWizStart() {
         this.provWiz.busy = true;
         try {
-          const d = await this.api("/provision-runs", { method: "POST", body: { host: this.provWiz.host.trim(), mode: this.provWiz.mode } });
+          const body = { host: this.provWiz.host.trim(), mode: this.provWiz.mode,
+            elevate: this.provWiz.elevate, service_labels: this.provWiz.serviceLabels.trim(), cert_paths: this.provWiz.certPaths.trim() };
+          if (this.provWiz.elevate && this.provWiz.elevationPolicy)
+            body.elevation_policies = [{ name: this.provWiz.elevationPolicy }];
+          const d = await this.api("/provision-runs", { method: "POST", body });
           this.provWiz.runId = d.id;
           this.provWiz.phase = "live";
           // Event-driven from here: the provision.* SSE events for this run

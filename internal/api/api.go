@@ -239,6 +239,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// M6: alert engine (PRD R23/R25). Read/list routes; rule CRUD.
 	handler.RegisterAlerts(mux)
+	handler.RegisterElevationPolicies(mux)
 
 	// M3: secrets (PRD §5.7). Routes 503 until a master key is installed.
 	handler.RegisterSecrets(mux)

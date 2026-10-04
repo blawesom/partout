@@ -653,7 +653,12 @@ Commands: `enroll-token [--ttl S]`, `hosts`, `run --selector S -- CMD [ARGS…]`
 the subcommand.
 
 `provision` drives fleet-SSH host provisioning (PRD R17): `new --host user@host
-[--mode fresh|join]` starts a run; `get RUN_ID` shows state + per-step output; when a
+[--mode fresh|join] [--elevate [--elevation-policy NAME|FILE]…]
+[--service-labels a,b] [--cert-paths /dir]` starts a run — `--elevate`
+bootstraps elevation through the run's root install (policy + sudoers +
+`PARTOUT_ELEVATE=sudo`; defaults to the seeded `default-baseline` policy),
+`--service-labels`/`--cert-paths` set the agent-env knobs that need root
+post-provision; `get RUN_ID` shows state + per-step output; when a
 host key is new to `known_hosts` the run pauses at `key_confirm` until `key RUN_ID
 confirm|deny`; `cancel RUN_ID` aborts. States: `queued → connecting → key_confirm →
 confirming → preflight → transferring → installing → enrolling → connected` (terminals
@@ -755,8 +760,13 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
    → 200. (The Web UI is shipped — open the main listener in a browser and log in as the admin
    user; the API and UI share the same auth.)
 3. Mint an enrollment token: `partout ctl enroll-token --server … --token $ADMIN`.
-4. On the first host: install the agent (§3.2) with that token → `GET
-   /api/v1/hosts` shows it `connected` with facts within ~10 s.
+4. On the first host: provision it — `partout ctl provision new --host
+   user@host --elevate` (ships the binary + CA + the seeded
+   `default-baseline` elevation policy, renders the sudoers drop-in and
+   starts the agent elevated) — or install the agent by hand (§3.2) with
+   that token → `GET /api/v1/hosts` shows it `connected` with facts
+   within ~10 s. The seeded `default-daily-package-updates` job (paused)
+   is ready to enable on the Jobs page.
 5. Bind + expose: if the server sits behind a reverse proxy on the same host,
    set `PARTOUT_ADDR=127.0.0.1` so the control plane is not reachable from the
    network at all (the edge is the only path in). Note: a loopback bind is

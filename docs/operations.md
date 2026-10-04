@@ -271,7 +271,22 @@ kernel's wall can be kept, and checked, in sync. Example
 
 - **Bare commands**: a rule with no matcher — `{"allow":"reboot"}` — grants the command **with zero arguments only** (rendered in sudoers as `path ""`, the exact no-arguments specifier). Use it for `reboot`/`poweroff`-style entry points.
 - **Invalid policy = degraded, not fatal**: a policy file that fails to load is reported (startup log + the `partout.elevation` fact carries the error) and the agent continues in **legacy elevation mode** — everything through `sudo -n`, the sudoers wall still bounding privilege. Fix the file and re-run `partout ctl elevation install-sudoers`.
-- **Enable** (per host):
+- **Enable — at provisioning (recommended)**: the bootstrap rides the
+  provision run's root install; no out-of-band SSH is needed:
+  ```
+  partout ctl provision new --host deploy@web01 --elevate \
+      --elevation-policy default-baseline \
+      --service-labels fail2ban,sshd
+  ```
+  `--elevate` defaults to the seeded `default-baseline` policy (the day-1
+  profile: package updates/installs for apt+dnf, standard fleet service
+  control, `hostnamectl set-hostname`, bare `reboot`). `--elevation-policy`
+  is repeatable and takes a **server-store name** (see below) or a local
+  `.json` file; the wizard has the same section. The policy is
+  sha256-verified in transfer, installed to `/etc/partout/elevation.d/`,
+  and the sudoers drop-in is rendered **on the host** (visudo-checked)
+  before the agent starts with `PARTOUT_ELEVATE=sudo`.
+- **Enable — by hand (fallback, or hosts provisioned before this)**:
   1. Install the policy: `sudo install -m 0644 -o root -g root
      elevation-web.json.example /etc/partout/elevation.d/10-web.json` (edit to
      the fleet's actual scope first).
@@ -282,6 +297,16 @@ kernel's wall can be kept, and checked, in sync. Example
      `systemctl daemon-reload && systemctl restart partout-agent`.
   4. Verify: `partout ctl elevation show` (effective scope) and
      `partout ctl elevation check` (policy ↔ installed drop-in drift).
+- **The server-side policy store** is the canonical place your privilege
+  documents live: `partout ctl elevation policy
+  <create|list|show|update|delete>` (admin; the wizard and provisioning
+  pick from it). Each stored policy carries a canonical `policy_sha256` —
+  agents report their effective policy hash as the `partout.elevation`
+  fact, so a host's installed scope can be matched against the store
+  fleet-wide. Updating a stored policy does NOT touch already-provisioned
+  hosts (the wall is host-owned): re-provision with `--mode join` or ship
+  it with your config management — `partout ctl elevation check` on the
+  host detects drift either way.
 - **Semantics.** With a policy loaded and `PARTOUT_ELEVATE=sudo`, the policy is
   the agent-side authority: a matching command runs elevated; a non-matching
   one runs **unprivileged** (the agent log says so) instead of being pushed

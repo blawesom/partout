@@ -63,6 +63,9 @@ commands:
   approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
   alerts <list|rules>                         view alerts + alert rules (M6)
   provision <new|list|get|key|cancel>        host provisioning over fleet SSH (admin)
+           new --host u@h [--mode fresh|join] [--elevate
+             [--elevation-policy NAME|FILE]...] [--service-labels a,b]
+             [--cert-paths /dir]   D1: elevation bootstrap + env extras
   ca                       fetch the server root CA (PEM) for agent TLS enrollment
   tls <status|rotate>      mTLS leaf status / rotate agent leaves
   files stat  --agent A --path P             show file metadata
@@ -78,7 +81,9 @@ commands:
   secrets <list|create|rotate|revoke|delete>   managed secrets (values write-only)
   update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
            release signing + the one-command fleet update (M8.1)
-  elevation <show|check|install-sudoers>
+  elevation <show|check|install-sudoers>    local elevation policy (on the host)
+  elevation policy <create|list|show|update|delete>
+           the server-side elevation policy store (remote)
            elevation policy (PRD Decision 3): view the loaded scope, detect
            sudoers drift, and render/install the sudoers drop-in from it
   packages <updates|apply|actions> <agent_id>  OS package updates (apt/dnf; dry-run first)
@@ -110,7 +115,8 @@ commands:
 
 	// db-backup and the local update subcommands (keygen/sign/verify) need no
 	// server round-trip; every other command needs the server address.
-	localOnly := fs.Arg(0) == "db-backup" || fs.Arg(0) == "help" || fs.Arg(0) == "elevation" ||
+	localOnly := fs.Arg(0) == "db-backup" || fs.Arg(0) == "help" ||
+		(fs.Arg(0) == "elevation" && fs.Arg(1) != "policy") || // show/check/install-sudoers are local; `policy` is the remote store
 		(fs.Arg(0) == "update" && (fs.Arg(1) == "keygen" || fs.Arg(1) == "sign" || fs.Arg(1) == "verify"))
 	if *server == "" && !localOnly {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
@@ -190,6 +196,10 @@ commands:
 	case "update":
 		c.cmdUpdate(rest)
 	case "elevation":
+		if len(rest) > 0 && rest[0] == "policy" {
+			c.elevationPolicy(rest[1:])
+			return
+		}
 		cmdElevation(rest)
 	case "packages":
 		c.cmdPackages(rest)
@@ -1409,22 +1419,50 @@ func (c *ctl) cmdProvision(args []string) {
 }
 
 func (c *ctl) provisionNew(args []string) {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("provision new", flag.ExitOnError)
 	host := fs.String("host", "", "target host (ssh user@host)")
 	mode := fs.String("mode", "fresh", "fresh | join")
+	// D1 onboarding: the elevation bootstrap + agent.env extras.
+	elevate := fs.Bool("elevate", false, "enable elevation on the target (installs the elevation policies, renders + installs the sudoers drop-in, sets PARTOUT_ELEVATE=sudo); defaults to the seeded default-baseline policy when no --elevation-policy is given")
+	var policies []string
+	fs.Func("elevation-policy", "elevation policy to install (repeatable): a server-store name or a local .json file", func(v string) error {
+		policies = append(policies, v)
+		return nil
+	})
+	serviceLabels := fs.String("service-labels", "", "PARTOUT_SERVICE_LABELS for the agent (comma-separated unit names to monitor, e.g. fail2ban,sshd)")
+	certPaths := fs.String("cert-paths", "", "PARTOUT_CERT_PATHS for the agent (comma-separated extra cert directories)")
 	fs.Parse(args)
 	if *host == "" {
 		fatal(fmt.Errorf("--host is required"))
+	}
+	// Resolve each policy ref: a local file (exists on disk) → inline
+	// rules; otherwise a server-store name.
+	var polRefs []map[string]any
+	for _, ref := range policies {
+		if b, err := os.ReadFile(ref); err == nil {
+			polRefs = append(polRefs, map[string]any{"rules": json.RawMessage(b)})
+			continue
+		}
+		polRefs = append(polRefs, map[string]any{"name": ref})
+	}
+	body := map[string]any{
+		"host": *host, "mode": *mode,
+		"elevate": *elevate, "elevation_policies": polRefs,
+		"service_labels": *serviceLabels, "cert_paths": *certPaths,
 	}
 	var res struct {
 		ID    string `json:"id"`
 		State string `json:"state"`
 		Host  string `json:"host"`
 	}
-	if err := c.do("POST", "/api/v1/provision-runs", map[string]string{"host": *host, "mode": *mode}, &res); err != nil {
+	if err := c.do("POST", "/api/v1/provision-runs", body, &res); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("run %s started for %s (state: %s)\n", res.ID, res.Host, res.State)
+	if *elevate {
+		fmt.Println("elevation: bootstrap included (policy + sudoers + PARTOUT_ELEVATE wired at install)")
+	}
 	fmt.Println("watch with:  partout ctl provision get", res.ID)
 	fmt.Println("confirm a new host key with:  partout ctl provision key", res.ID, "confirm")
 }
@@ -2743,6 +2781,87 @@ func (c *ctl) cmdJobs(args []string) {
 
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: jobs: unknown subcommand %q\n", args[0])
+		os.Exit(2)
+	}
+}
+
+// elevationPolicy drives the SERVER-SIDE elevation policy store: the
+// canonical privilege documents provisioning ships to hosts.
+func (c *ctl) elevationPolicy(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: ctl elevation policy <create|list|show|update|delete>")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "list":
+		var list []map[string]any
+		if err := c.do("GET", "/api/v1/elevation/policies", nil, &list); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%-24s %-16s %-5s %s\n", "NAME", "ID", "RULES", "SHA256")
+		for _, p := range list {
+			n, _ := p["rules"].([]any)
+			fmt.Printf("%-24s %-16s %-5d %s…\n", strval(p["name"]), strval(p["id"]), len(n), strval(p["policy_sha256"])[:12])
+		}
+		if len(list) == 0 {
+			fmt.Println("(no elevation policies — `partout ctl preset apply` seeds default-baseline)")
+		}
+	case "create", "update":
+		usage := "usage: ctl elevation policy " + sub + " <name> <policy.json> [description]"
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, usage)
+			os.Exit(2)
+		}
+		name := rest[0]
+		b, err := os.ReadFile(rest[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: read policy:", err)
+			os.Exit(1)
+		}
+		desc := ""
+		if len(rest) > 2 {
+			desc = rest[2]
+		}
+		body := map[string]any{"name": name, "description": desc, "rules": json.RawMessage(b)}
+		var out map[string]any
+		if sub == "create" {
+			if err := c.do("POST", "/api/v1/elevation/policies", body, &out); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+		} else {
+			if err := c.do("PUT", "/api/v1/elevation/policies/"+url.PathEscape(name), body, &out); err != nil {
+				fmt.Fprintln(os.Stderr, "error:", err)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("%sd elevation policy %q (sha256 %s…)\n", sub, strval(out["name"]), strval(out["policy_sha256"])[:12])
+	case "show":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: ctl elevation policy show <name|id>")
+			os.Exit(2)
+		}
+		var out map[string]any
+		if err := c.do("GET", "/api/v1/elevation/policies/"+url.PathEscape(rest[0]), nil, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+	case "delete":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: ctl elevation policy delete <name|id>")
+			os.Exit(2)
+		}
+		if err := c.do("DELETE", "/api/v1/elevation/policies/"+url.PathEscape(rest[0]), nil, nil); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Println("deleted", rest[0])
+	default:
+		fmt.Fprintf(os.Stderr, "ctl: elevation policy: unknown subcommand %q\n", sub)
 		os.Exit(2)
 	}
 }

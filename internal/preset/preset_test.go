@@ -3,6 +3,8 @@ package preset
 import (
 	"testing"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
+
 	"github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -16,23 +18,42 @@ func TestApplySeedsAndIdempotent(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	cp, ca, err := Apply(st)
+	res, err := Apply(st)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(cp) != len(Policies) {
-		t.Fatalf("first apply created %d policies, want %d", len(cp), len(Policies))
+	if len(res.Policies) != len(Policies) {
+		t.Fatalf("first apply created %d policies, want %d", len(res.Policies), len(Policies))
 	}
-	if len(ca) != len(Alerts) {
-		t.Fatalf("first apply created %d alerts, want %d", len(ca), len(Alerts))
+	if len(res.Alerts) != len(Alerts) {
+		t.Fatalf("first apply created %d alerts, want %d", len(res.Alerts), len(Alerts))
+	}
+	if len(res.ElevationPolicies) != len(ElevationPolicies) {
+		t.Fatalf("first apply created %d elevation policies, want %d", len(res.ElevationPolicies), len(ElevationPolicies))
+	}
+	if len(res.Tasks) != len(Tasks) {
+		t.Fatalf("first apply created %d tasks, want %d", len(res.Tasks), len(Tasks))
+	}
+	if len(res.Jobs) != len(Jobs) {
+		t.Fatalf("first apply created %d jobs, want %d", len(res.Jobs), len(Jobs))
+	}
+	// The seeded job must be PAUSED (ready to apply, running nothing).
+	for _, jd := range Jobs {
+		j, err := st.GetJobByName(jd.Name)
+		if err != nil || j == nil {
+			t.Fatalf("seeded job %s missing", jd.Name)
+		}
+		if j.Enabled {
+			t.Fatalf("seeded job %s must be paused (enabled=false)", jd.Name)
+		}
 	}
 
-	cp2, ca2, err := Apply(st)
+	res2, err := Apply(st)
 	if err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
-	if len(cp2) != 0 || len(ca2) != 0 {
-		t.Fatalf("re-apply created (%d policies, %d alerts), want (0,0): %v %v", len(cp2), len(ca2), cp2, ca2)
+	if len(res2.Policies) != 0 || len(res2.Alerts) != 0 || len(res2.ElevationPolicies) != 0 || len(res2.Tasks) != 0 || len(res2.Jobs) != 0 {
+		t.Fatalf("re-apply created rows, want none: %+v", res2)
 	}
 }
 
@@ -45,7 +66,7 @@ func TestApplyRestoresMissingOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	if _, _, err := Apply(st); err != nil {
+	if _, err := Apply(st); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 
@@ -74,15 +95,15 @@ func TestApplyRestoresMissingOnly(t *testing.T) {
 		t.Fatalf("DeleteAlertRule: %v", err)
 	}
 
-	cp, ca, err := Apply(st)
+	cp, err := Apply(st)
 	if err != nil {
 		t.Fatalf("re-apply: %v", err)
 	}
-	if len(cp) != 1 || cp[0] != "default-require-approval-reboot" {
+	if len(cp.Policies) != 1 || cp.Policies[0] != "default-require-approval-reboot" {
 		t.Fatalf("restored policies = %v, want only the deleted default", cp)
 	}
-	if len(ca) != 1 || ca[0] != alerts[0].Name {
-		t.Fatalf("restored alerts = %v, want only the deleted default", ca)
+	if len(cp.Alerts) != 1 || cp.Alerts[0] != alerts[0].Name {
+		t.Fatalf("restored alerts = %v, want only the deleted default", cp.Alerts)
 	}
 }
 
@@ -142,4 +163,36 @@ func firstWord(s string) string {
 		}
 	}
 	return s
+}
+
+// TestSeededElevationPoliciesValid: every seeded policy must load as an
+// elevation policy AND render valid sudoers (provisioning ships it as a
+// drop-in document; a bad preset would break every --elevate run).
+func TestSeededElevationPoliciesValid(t *testing.T) {
+	for _, ep := range ElevationPolicies {
+		pol, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + ep.RulesJSON + `}`))
+		if err != nil {
+			t.Fatalf("preset elevation policy %s: %v", ep.Name, err)
+		}
+		if _, err := pol.RenderSudoers("partout"); err != nil {
+			t.Fatalf("preset elevation policy %s: render: %v", ep.Name, err)
+		}
+		if pol.PolicyHash() == "" {
+			t.Fatalf("preset elevation policy %s: empty hash", ep.Name)
+		}
+	}
+}
+
+// TestSeededTasksDecode: the seeded task steps must decode (the jobs
+// controller loads them on reconcile).
+func TestSeededTasksDecode(t *testing.T) {
+	for _, td := range Tasks {
+		steps, err := store.DecodeTaskSteps(td.StepsJSON)
+		if err != nil {
+			t.Fatalf("preset task %s: %v", td.Name, err)
+		}
+		if len(steps) == 0 {
+			t.Fatalf("preset task %s: no steps", td.Name)
+		}
+	}
 }

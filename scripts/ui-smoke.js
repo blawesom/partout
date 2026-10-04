@@ -957,6 +957,15 @@ async function main() {
       check("wizard: join hint for enrolled host", /in place, preserving its identity/.test(d.body.textContent), "no join hint");
       inst.provWiz.host = "smoke@127.0.0.1"; inst.provWiz.mode = "fresh"; // restore for the rest
     }
+    // Elevation bootstrap section (D1): checkbox, policy select, extras.
+    check("wizard: elevation section (off)", d.body.textContent.includes("Enable elevation"), "no elevation section");
+    inst.provWiz.elevate = true;
+    inst.provWiz.elevationPolicies = [{ id: "epl_1", name: "default-baseline", rules: [{}, {}, {}] }];
+    inst.provWiz.elevationPolicy = "default-baseline";
+    inst.provWiz.serviceLabels = "fail2ban,sshd";
+    await sleep(150);
+    check("wizard: elevation policy select", d.body.textContent.includes("default-baseline (3 rules)"), "policy option not shown");
+    check("wizard: service labels input", !!d.querySelector("input[placeholder=\"fail2ban,sshd\"]"), "labels input missing");
     // advance to confirm
     inst.openProvWizard(); inst.provWiz.host = "smoke@127.0.0.1"; inst.provWizNext();
     await sleep(200);

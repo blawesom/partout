@@ -6,6 +6,7 @@ package task
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -39,6 +40,8 @@ type Executor struct {
 	// rebootCmd performs the reboot (default: systemctl reboot →
 	// shutdown -r now → reboot). Injectable for tests.
 	rebootCmd func() error
+	// log is optional (the executor is also built in tests without one).
+	log *log.Logger
 }
 
 // NewExecutor builds an executor.
@@ -122,6 +125,16 @@ func defaultReboot(r elevate.Runner) error {
 	return fmt.Errorf("reboot command failed (agent needs reboot permission, e.g. run as root or grant sudo/polkit): %v", lastErr)
 }
 
+// logf logs through the executor's optional logger (no-op without one).
+func (e *Executor) logf(format string, args ...any) {
+	if e.log != nil {
+		e.log.Printf(format, args...)
+	}
+}
+
+// SetLogger installs an optional logger.
+func (e *Executor) SetLogger(lg *log.Logger) { e.log = lg }
+
 // SetFileRoot installs the file root for file/template steps (no-op with an
 // empty root: those steps then fail closed).
 func (e *Executor) SetFileRoot(root string) {
@@ -190,6 +203,8 @@ func (e *Executor) doStep(ctx context.Context, step *pb.TaskStep) (string, strin
 		return e.doFile(step)
 	case "package":
 		return e.doPackage(ctx, step)
+	case "upgrade":
+		return e.doUpgrade(ctx, step)
 	case "service":
 		return e.doService(ctx, step)
 	case "user":
@@ -270,6 +285,47 @@ func (e *Executor) doPackage(ctx context.Context, step *pb.TaskStep) (string, st
 	default:
 		return StateFailed, fmt.Sprintf("no pkg backend for %q", distro)
 	}
+}
+
+// doUpgrade applies ALL available package updates (distro-aware). This is
+// the step behind the seeded default-daily-updates task/job: the #1 fleet
+// job, cross-distro, without per-distro command steps. Runs through the
+// elevation runner — the seeded default-baseline policy grants exactly
+// these commands.
+func (e *Executor) doUpgrade(ctx context.Context, step *pb.TaskStep) (string, string) {
+	distro := e.getFact("host.distro")
+	var refresh, apply []string
+	switch distro {
+	case "ubuntu", "debian", "linuxmint", "pop":
+		refresh = []string{"apt-get", "-qq", "update"}
+		apply = []string{"apt-get", "-y", "upgrade"}
+	case "rhel", "centos", "rocky", "alma", "fedora", "ol":
+		refresh = []string{"dnf", "-q", "makecache"}
+		apply = []string{"dnf", "-y", "upgrade"}
+	default:
+		return StateFailed, fmt.Sprintf("no pkg backend for %q", distro)
+	}
+	// Metadata refresh first (best-effort: a stale-cache upgrade is still an
+	// upgrade; a failed refresh on an unreachable mirror should not skip it).
+	if out, err := e.runner.RunCmd(ctx, refresh[0], refresh[1:]...).CombinedOutput(); err != nil {
+		e.logf("upgrade step: metadata refresh failed (continuing): %s", truncate(string(out), 200))
+	}
+	out, err := e.runner.RunCmd(ctx, apply[0], apply[1:]...).CombinedOutput()
+	if err != nil {
+		return StateFailed, fmt.Sprintf("upgrade failed: %s", truncate(string(out), 300))
+	}
+	summary := truncate(string(out), 300)
+	if isNoOpUpgrade(string(out)) {
+		return StateOK, "no updates available"
+	}
+	return StateChanged, summary
+}
+
+// isNoOpUpgrade reports whether package-manager output says nothing was
+// upgraded (apt "0 upgraded" / dnf "Nothing to do").
+func isNoOpUpgrade(out string) bool {
+	return strings.Contains(out, "0 upgraded, 0 newly installed") ||
+		strings.Contains(out, "Nothing to do.")
 }
 
 func (e *Executor) doApt(ctx context.Context, pkg, desired string) (string, string) {

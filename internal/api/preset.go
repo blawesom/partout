@@ -28,24 +28,30 @@ func (h *Handler) handlePresetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handlePresetApply(w http.ResponseWriter, r *http.Request) {
-	policies, alerts, err := preset.Apply(h.st)
+	res, err := preset.Apply(h.st)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "apply preset", err)
 		return
 	}
 	actor, _ := h.actorFor(r)
 	h.audit("preset.apply", actor, map[string]string{
-		"created_policies": joinOrNone(policies),
-		"created_alerts":   joinOrNone(alerts),
+		"created_policies":           joinOrNone(res.Policies),
+		"created_alerts":             joinOrNone(res.Alerts),
+		"created_elevation_policies": joinOrNone(res.ElevationPolicies),
+		"created_tasks":              joinOrNone(res.Tasks),
+		"created_jobs":               joinOrNone(res.Jobs),
 	})
 	// If new policy rows were added, push the updated bundle so agents
 	// re-check against the new rule set immediately.
-	if len(policies) > 0 {
+	if len(res.Policies) > 0 {
 		h.ctrl.BroadcastPolicyBundle()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"created_policies": policies,
-		"created_alerts":   alerts,
+		"created_policies":           res.Policies,
+		"created_alerts":             res.Alerts,
+		"created_elevation_policies": res.ElevationPolicies,
+		"created_tasks":              res.Tasks,
+		"created_jobs":               res.Jobs,
 	})
 }
 

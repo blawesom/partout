@@ -303,10 +303,11 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		// Seed the fleet-management defaults (safety-net policies +
 		// standard alert rules) so a fresh server is usable out of the
 		// box. Additive and idempotent; rows are named default-*.
-		if cp, ca, err := preset.Apply(st); err != nil {
+		if pres, err := preset.Apply(st); err != nil {
 			lg.Printf("WARNING: preset seed failed: %v (run `partout ctl preset apply`)", err)
-		} else if len(cp) > 0 || len(ca) > 0 {
-			lg.Printf("FIRST RUN: preset applied (%d policies, %d alert rules) — review under Policies and Alerts", len(cp), len(ca))
+		} else if len(pres.Policies) > 0 || len(pres.Alerts) > 0 || len(pres.ElevationPolicies) > 0 || len(pres.Tasks) > 0 || len(pres.Jobs) > 0 {
+			lg.Printf("FIRST RUN: preset applied (%d policies, %d alert rules, %d elevation policies, %d tasks, %d paused jobs) — review under Policies, Alerts, Elevation, Tasks and Jobs",
+				len(pres.Policies), len(pres.Alerts), len(pres.ElevationPolicies), len(pres.Tasks), len(pres.Jobs))
 		}
 	}
 	apiH.SetAuthController(authC)
@@ -428,6 +429,10 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	h.JobRunResultHook = func(agentID string, r *pb.JobRunResult) {
 		jobC.OnRunResult(agentID, r)
 	}
+	// Assignment reconcile: enabled jobs reach agents that joined (or
+	// became selector-matching) after the job was created — without it a
+	// seeded/paused job enabled later would never reach a growing fleet.
+	jobC.StartReconcile(ctx, 30*time.Second)
 
 	// M8.1 step 3: rollout orchestrator (canary -> waves over signed
 	// self-update directives). Its policy class is update.apply; a

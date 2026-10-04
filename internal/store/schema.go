@@ -600,10 +600,20 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
   created    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_assistant_messages_session ON assistant_messages(session_id);
+
+CREATE TABLE IF NOT EXISTS elevation_policies (
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL UNIQUE,
+  description  TEXT NOT NULL DEFAULT '',
+  rules_json   TEXT NOT NULL,           -- canonical rules array (elevate.Rule)
+  policy_sha256 TEXT NOT NULL,          -- canonical rules-only hash (matches the agent fact)
+  created      INTEGER NOT NULL DEFAULT 0,
+  updated      INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 21
+const currentSchemaVersion = 22
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

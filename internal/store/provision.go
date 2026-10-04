@@ -12,7 +12,8 @@ import (
 type ProvisionRun struct {
 	ID           string `json:"id"`
 	Host         string `json:"host"`
-	Mode         string `json:"mode"` // fresh | update
+	Mode         string `json:"mode"`                  // fresh | update
+	ExtrasJSON   string `json:"extras_json,omitempty"` // provision-time options (elevation, labels) — display/audit only
 	State        string `json:"state"`
 	KeyType      string `json:"key_type,omitempty"`
 	Fingerprint  string `json:"fingerprint,omitempty"`
@@ -53,9 +54,9 @@ func CapExcerpt(s string) string {
 // CreateProvisionRun inserts a new run (already in queued state).
 func (s *Store) CreateProvisionRun(r ProvisionRun) error {
 	_, err := s.db.Exec(
-		`INSERT INTO provision_runs(id, host, mode, state, key_type, fingerprint, key_line, token_hash, agent_id, step, error, created, updated)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.Host, r.Mode, r.State, nullStr(r.KeyType), nullStr(r.Fingerprint), nullStr(r.KeyLine), nullStr(r.TokenHash), nullStr(r.AgentID), nullStr(r.Step), nullStr(r.Error), r.Created, r.Updated,
+		`INSERT INTO provision_runs(id, host, mode, extras_json, state, key_type, fingerprint, key_line, token_hash, agent_id, step, error, created, updated)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.Host, r.Mode, r.ExtrasJSON, r.State, nullStr(r.KeyType), nullStr(r.Fingerprint), nullStr(r.KeyLine), nullStr(r.TokenHash), nullStr(r.AgentID), nullStr(r.Step), nullStr(r.Error), r.Created, r.Updated,
 	)
 	return err
 }
@@ -125,7 +126,7 @@ func (s *Store) ProvisionRunForToken(tokenHash string) (string, error) {
 // ProvisionRun returns one run by id.
 func (s *Store) ProvisionRun(id string) (*ProvisionRun, error) {
 	return scanProvisionRun(s.db.QueryRow(
-		`SELECT id, host, mode, state, key_type, fingerprint, key_line, resolved_host, token_hash, agent_id, step, error, created, updated
+		`SELECT id, host, mode, extras_json, state, key_type, fingerprint, key_line, resolved_host, token_hash, agent_id, step, error, created, updated
 		 FROM provision_runs WHERE id=?`, id))
 }
 
@@ -135,7 +136,7 @@ func (s *Store) ProvisionRuns(limit int) ([]*ProvisionRun, error) {
 		limit = 50
 	}
 	rows, err := s.db.Query(
-		`SELECT id, host, mode, state, key_type, fingerprint, key_line, resolved_host, token_hash, agent_id, step, error, created, updated
+		`SELECT id, host, mode, extras_json, state, key_type, fingerprint, key_line, resolved_host, token_hash, agent_id, step, error, created, updated
 		 FROM provision_runs ORDER BY created DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -212,10 +213,11 @@ type rowScanner interface {
 
 func scanProvisionRun(r rowScanner) (*ProvisionRun, error) {
 	pr := &ProvisionRun{}
-	var keyType, fingerprint, keyLine, resolvedHost, tokenHash, agentID, step, errText sql.NullString
-	if err := r.Scan(&pr.ID, &pr.Host, &pr.Mode, &pr.State, &keyType, &fingerprint, &keyLine, &resolvedHost, &tokenHash, &agentID, &step, &errText, &pr.Created, &pr.Updated); err != nil {
+	var keyType, fingerprint, keyLine, resolvedHost, tokenHash, agentID, step, errText, extras sql.NullString
+	if err := r.Scan(&pr.ID, &pr.Host, &pr.Mode, &extras, &pr.State, &keyType, &fingerprint, &keyLine, &resolvedHost, &tokenHash, &agentID, &step, &errText, &pr.Created, &pr.Updated); err != nil {
 		return nil, err
 	}
+	pr.ExtrasJSON = extras.String
 	pr.KeyType = keyType.String
 	pr.Fingerprint = fingerprint.String
 	pr.KeyLine = keyLine.String
