@@ -54,9 +54,14 @@ func (h *Handler) handleCreateExecution(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "bad_request", "selector is required", nil)
 		return
 	}
-	// Inject the requester's RBAC role so the policy engine can gate on it
-	// (actor_roles in the rule match). The client-provided value is ignored.
+	// Inject the requester's RBAC role and principal so the policy engine
+	// can gate on them (actor_roles in the rule match; created_by
+	// attribution + the exec.dispatch audit row). Both are taken from the
+	// token, never from the body — the client-supplied values are ignored
+	// (feedback parity: a run the assistant requested is attributed to the
+	// user whose token drove it, exactly like a UI dispatch).
 	req.ActorRole = h.roleFor(r)
+	req.CreatedBy, _ = h.actorFor(r)
 	res, err := h.ctrl.Dispatch(r.Context(), req)
 	if err != nil {
 		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)

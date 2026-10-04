@@ -7,16 +7,19 @@
 package observe
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/id"
 	"github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/sse"
@@ -744,8 +747,17 @@ func (c *Controller) resolveUpdateRun(r *store.AlertRule) int {
 
 // --- update_drift (M8.1.1) ---
 
+// serverVersion is the drift baseline when the release store is empty:
+// the running server binary's version. A variable (not facts.Version
+// directly) so tests can pin a realistic baseline against a dev build.
+var serverVersion = facts.Version
+
 // updateDrift compares every enrolled agent's reported version against the
-// release store's latest agent release. Agents do not report their arch,
+// release store's latest agent release; when the store is EMPTY the
+// server's own version is the baseline — that is what `partout update`
+// would converge the fleet to, and drift against it must still alert (an
+// operator who upgrades the server binary directly, without registering
+// releases, is the common beta flow). Agents do not report their arch,
 // so the comparison uses the newest version across archs (exact in the
 // supported single-arch fleet model); the message lists per-arch latest so
 // a mixed fleet still reads unambiguously.
@@ -760,13 +772,16 @@ func (c *Controller) updateDrift() (latest map[string]string, behind []*store.Ag
 			latest[m.Arch] = m.Version
 		}
 	}
-	if len(latest) == 0 {
-		return latest, nil, nil // nothing in the store: nothing to be behind
-	}
 	newest := ""
-	for _, v := range latest {
-		if newest == "" || version.Compare(v, newest) > 0 {
-			newest = v
+	if len(latest) == 0 {
+		// Nothing registered in the release store: the running server
+		// binary is the convergence target (operations.md upgrades).
+		newest = serverVersion
+	} else {
+		for _, v := range latest {
+			if newest == "" || version.Compare(v, newest) > 0 {
+				newest = v
+			}
 		}
 	}
 	agents, err := c.st.Agents()
@@ -819,7 +834,7 @@ func (c *Controller) evalUpdateDrift(r *store.AlertRule) int {
 		}
 	}
 	msg := fmt.Sprintf("%d agent(s) behind the latest release (%s): %s",
-		len(behind), latestSummary(latest), strings.Join(parts, "; "))
+		len(behind), driftBaseline(latest), strings.Join(parts, "; "))
 	if c.fire(r, "", r.ID+"|drift", msg) {
 		return 1
 	}
@@ -857,6 +872,16 @@ func latestSummary(latest map[string]string) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ", ")
+}
+
+// driftBaseline renders the drift baseline for alert messages: the
+// release store's latest per arch, or the running server version when
+// nothing is registered (the direct-binary-upgrade flow).
+func driftBaseline(latest map[string]string) string {
+	if len(latest) == 0 {
+		return "server " + serverVersion
+	}
+	return latestSummary(latest)
 }
 
 // --- security_updates (M5.1) ---
@@ -989,6 +1014,7 @@ func (c *Controller) fire(r *store.AlertRule, agentID, dedup, message string) bo
 	}
 	c.emit(got, "alert.firing")
 	c.audit(got)
+	c.deliverWebhook(r, got, "firing")
 	return true
 }
 
@@ -1005,6 +1031,9 @@ func (c *Controller) resolve(dedupKeys []string) int {
 		if a, err := c.st.GetAlertByDedup(k); err == nil && a != nil {
 			c.emit(a, "alert.resolved")
 			c.audit(a)
+			if rule, rerr := c.st.GetAlertRule(a.RuleID); rerr == nil && rule != nil {
+				c.deliverWebhook(rule, a, "resolved")
+			}
 		}
 	}
 	return n
@@ -1052,6 +1081,63 @@ func (c *Controller) audit(a *store.Alert) {
 		TS: time.Now().Unix(), Kind: "alert", AgentID: a.AgentID,
 		Payload: `{"alert_id":"` + a.ID + `","rule_id":"` + a.RuleID + `","state":"` + a.State + `","kind":"` + a.Kind + `"}`,
 	})
+}
+
+// webhookClient is the delivery HTTP client: bounded so a slow receiver
+// cannot stall the engine's evaluate loop (deliveries run on their own
+// goroutine, but the timeout bounds the goroutine's life).
+var webhookClient = &http.Client{Timeout: 10 * time.Second}
+
+// deliverWebhook POSTs the alert to the rule's external channel (PRD §5.4
+// "alert channel system" — first channel: webhook). Fire-and-record: NO
+// retry (a missed delivery is visible as an alert.webhook audit row with
+// the error), and a failed delivery never blocks or fails the alert
+// itself — the in-app alert fired regardless. Async: the engine's tick
+// never waits on a receiver.
+func (c *Controller) deliverWebhook(r *store.AlertRule, a *store.Alert, event string) {
+	if r == nil || r.WebhookURL == "" {
+		return
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil && c.log != nil {
+				c.log.Printf("observe/alerts: webhook panic: %v", rec)
+			}
+		}()
+		body, err := json.Marshal(map[string]any{
+			"event": event, "alert_id": a.ID, "rule_id": r.ID,
+			"rule": r.Name, "kind": r.Kind, "severity": r.Severity,
+			"host_id": a.AgentID, "message": a.Message,
+			"started_at": a.StartedAt,
+		})
+		if err != nil {
+			return
+		}
+		outcome := ""
+		status := 0
+		req, err := http.NewRequest(http.MethodPost, r.WebhookURL, bytes.NewReader(body))
+		if err == nil {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "partout-alerts")
+			var resp *http.Response
+			resp, err = webhookClient.Do(req)
+			if resp != nil {
+				status = resp.StatusCode
+				resp.Body.Close()
+			}
+		}
+		if err != nil || status < 200 || status > 299 {
+			outcome = fmt.Sprintf("error: %v (status %d)", err, status)
+			if c.log != nil {
+				c.log.Printf("observe/alerts: webhook %s %s: %s", event, r.WebhookURL, outcome)
+			}
+		}
+		_ = c.st.AppendAudit(store.AuditEvent{
+			TS: time.Now().Unix(), Kind: "alert.webhook", AgentID: a.AgentID,
+			Payload: fmt.Sprintf(`{"alert_id":%q,"rule_id":%q,"event":%q,"url":%q,"status":%d,"outcome":%q}`,
+				a.ID, r.ID, event, r.WebhookURL, status, outcome),
+		})
+	}()
 }
 
 // --- first-failed tracking (service_failed delay window) ---

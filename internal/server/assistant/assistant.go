@@ -39,7 +39,7 @@ var ErrDisabled = errors.New("assistant: not configured (set the endpoint in Set
 
 // ErrKeyStoreUnavailable is returned when storing an endpoint API key is
 // requested but no secrets master key is configured.
-var ErrKeyStoreUnavailable = errors.New("assistant: cannot store an endpoint API key (configure the secrets master key: PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY), or use a keyless local endpoint")
+var ErrKeyStoreUnavailable = errors.New("assistant: cannot store an endpoint API key (enable secrets from the web UI, or set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY), or use a keyless local endpoint")
 
 // Service is the assistant engine.
 type Service struct {
@@ -63,14 +63,31 @@ func New(st *store.Store, api mcp.API, master []byte, lg *log.Logger) *Service {
 	return &Service{st: st, api: api, lg: lg, master: master, active: map[string]context.CancelFunc{}}
 }
 
+// SetKeyMaster adopts a secrets master key for sealing endpoint API keys
+// (the Setup checklist's one-click bootstrap wires it this way). It
+// succeeds only when no master key was set at construction — a service
+// built keyless cannot yet have sealed anything, so adoption is safe; a
+// service that already holds a key refuses, so a bootstrap can never
+// silently invalidate stored keys. Returns true when the key was adopted.
+func (s *Service) SetKeyMaster(master []byte) bool {
+	if s.master != nil || master == nil {
+		return false
+	}
+	s.master = master
+	return true
+}
+
 // Event is one SSE event of a turn (docs/assistant.md §4). Event-level, not
-// token-level: the UI renders chips and cards, not prose deltas.
+// token-level: the UI renders chips and cards, not prose deltas. Tool
+// result events carry Meta (the parsed approval/execution ids) so the chat
+// renders the same artifacts a user-issued action produces.
 type Event struct {
-	Type    string `json:"type"` // assistant_delta|tool_call|tool_result|approval_required|egress|done|error
-	Content string `json:"content,omitempty"`
-	Tool    string `json:"tool,omitempty"`
-	Args    string `json:"args,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	Type    string    `json:"type"` // assistant_delta|tool_call|tool_result|approval_required|egress|done|error
+	Content string    `json:"content,omitempty"`
+	Tool    string    `json:"tool,omitempty"`
+	Args    string    `json:"args,omitempty"`
+	Detail  string    `json:"detail,omitempty"`
+	Meta    *ToolMeta `json:"meta,omitempty"` // parsed ids (tool result events)
 }
 
 // ---- config ---------------------------------------------------------------
@@ -376,7 +393,7 @@ func (s *Service) RunTurn(ctx context.Context, sessID, userText, token, userID, 
 			// but a model can still name others — refuse, as a tool error.
 			if !allow[name] {
 				res := fmt.Sprintf("tool %q is not available under the %q profile", name, profile)
-				s.persistTool(sessID, name, tc.Function.Arguments, res)
+				s.persistTool(sessID, name, tc.Function.Arguments, res, nil)
 				emit(Event{Type: "tool_call", Tool: name, Args: tc.Function.Arguments})
 				emit(Event{Type: "tool_result", Tool: name, Content: res})
 				continue
@@ -391,18 +408,29 @@ func (s *Service) RunTurn(ctx context.Context, sessID, userText, token, userID, 
 				}
 			}
 			var result string
+			var callErr error
 			if tool == nil {
 				result = fmt.Sprintf("tool %q not found", name)
 			} else {
-				result, err = tool.Call(tctx, s.api, token, args)
-				if err != nil {
-					result = "error: " + err.Error()
+				result, callErr = tool.Call(tctx, s.api, token, args)
+				if callErr != nil {
+					result = "error: " + callErr.Error()
 				}
 			}
 			if len(result) > maxToolResultBytes {
 				result = result[:maxToolResultBytes] + "\n…[truncated]"
 			}
-			s.persistTool(sessID, name, tc.Function.Arguments, result)
+			// Feedback parity: keep the structured half of the result
+			// (approval/execution ids) beside the text the model reads. The
+			// chat renders its confirmations from these ids, so
+			// "approval required" can only be claimed when a request actually
+			// exists — the old substring match also fired on read-only results
+			// that merely mention approvals (policy listings, audit queries).
+			var meta *ToolMeta
+			if callErr == nil {
+				meta = parseToolMeta(result)
+			}
+			s.persistTool(sessID, name, tc.Function.Arguments, result, meta)
 
 			// Audit the action half (Decision 18): session, model, tool,
 			// prompt hash — never the prompt content.
@@ -411,20 +439,21 @@ func (s *Service) RunTurn(ctx context.Context, sessID, userText, token, userID, 
 				s.lg.Printf("assistant: audit tool_call: %v", err)
 			}
 
-			if strings.Contains(strings.ToLower(result), "approval") {
-				emit(Event{Type: "approval_required", Tool: name, Content: result})
+			if meta.Parked() {
+				emit(Event{Type: "approval_required", Tool: name, Content: result, Meta: meta})
 			} else {
-				emit(Event{Type: "tool_result", Tool: name, Content: result})
+				emit(Event{Type: "tool_result", Tool: name, Content: result, Meta: meta})
 			}
 		}
 	}
 }
 
-// persistTool appends a tool row to the transcript.
-func (s *Service) persistTool(sessID, name, args, result string) {
+// persistTool appends a tool row to the transcript (meta = the parsed
+// structured ids, persisted for session reloads).
+func (s *Service) persistTool(sessID, name, args, result string, meta *ToolMeta) {
 	_, _ = s.st.AppendAssistantMessage(&store.AssistantMessage{
 		SessionID: sessID, Role: "tool", Content: result,
-		ToolName: name, ToolArgs: args,
+		ToolName: name, ToolArgs: args, Meta: meta.JSON(),
 	})
 }
 

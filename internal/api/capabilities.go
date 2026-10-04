@@ -32,7 +32,10 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"jobs":     h.jobs != nil,
 		"tasks":    h.tasks != nil,
 		"packages": h.pkgs != nil,
-		"secrets":  h.secretsMgr != nil,
+		// Secrets master key: env, or the data-dir default file the UI
+		// bootstrap creates (POST /api/v1/secrets/bootstrap installs the
+		// manager at runtime).
+		"secrets": h.secretsMgr != nil,
 
 		// External data (EOL / vulnerability feeds) — wired when installed.
 		"external_data": h.extdata != nil,

@@ -379,10 +379,15 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 
 	// R26/M9: LLM assistant — reuses the same in-process tool surface (one
 	// tool surface, two front doors, PRD Decision 17). The endpoint API key
-	// is sealed at rest under the secrets master key when one is configured;
-	// keyless local endpoints (Ollama/vLLM) work without it.
+	// is sealed at rest under the secrets master key when one is configured
+	// (env, data-dir default file, or the UI bootstrap — the assistant
+	// adopts the key then); keyless local endpoints (Ollama/vLLM) work
+	// without it.
+	secretKeyPath := serversecrets.DefaultKeyPath(filepath.Dir(cfg.DBPath))
+	apiH.SetSecretsKeyPath(secretKeyPath)
+	apiH.SetBackupDir(filepath.Join(filepath.Dir(cfg.DBPath), "backups"))
 	var assistantMaster []byte
-	if master, err := serversecrets.LoadMasterKey(); err == nil {
+	if master, err := serversecrets.LoadMasterKeyWithDefault(secretKeyPath); err == nil {
 		assistantMaster = master
 	} else if !errors.Is(err, serversecrets.ErrDisabled) {
 		lg.Printf("server: assistant key storage disabled (%v)", err)
@@ -500,9 +505,11 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		sm.OnDisconnect(agentID)
 	}
 
-	// M3: secrets (PRD §5.7). The feature is enabled only when a master key
-	// is configured; otherwise the endpoints stay 503 with a clear reason.
-	if master, err := serversecrets.LoadMasterKey(); err == nil {
+	// M3: secrets (PRD §5.7). The feature is enabled when a master key is
+	// configured (env, or the data-dir default file created by the UI's
+	// one-click bootstrap); otherwise the endpoints stay 503 with a clear
+	// reason — and the Setup checklist offers to enable it in one click.
+	if master, err := serversecrets.LoadMasterKeyWithDefault(secretKeyPath); err == nil {
 		secMgr, err := serversecrets.New(st, h, master, lg)
 		if err != nil {
 			return fmt.Errorf("secrets manager: %w", err)
@@ -512,7 +519,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	} else if !errors.Is(err, serversecrets.ErrDisabled) {
 		return fmt.Errorf("secrets: %w", err)
 	} else {
-		lg.Printf("server: secrets feature disabled (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY to enable)")
+		lg.Printf("server: secrets feature disabled (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY, or enable it from the web UI's Setup checklist)")
 	}
 
 	// Interrupted-run sweeper (1.0 gate, roadmap item 20): a disconnect marks

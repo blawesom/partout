@@ -158,6 +158,13 @@ type EOLState struct {
 // EOLStateFor computes the EOL state for a host from its os-release facts
 // (distro = host.distro, cycle = host.distro_version). Unknown distro or
 // empty cache → "unknown" (patch gating treats unknown as not-ended).
+//
+// Cycle matching falls back one version component at a time: endoflife.date
+// publishes MAJOR cycles for the RHEL family (rocky "10", rhel "9") while
+// os-release VERSION_ID carries the point release ("10.2", "9.4") — an
+// exact-only match returned "unknown" for those distros forever, no matter
+// how fresh the cache. Ubuntu/Debian/Alpine VERSION_IDs equal their feed
+// cycles and keep matching exactly on the first try.
 func (r *Refresher) EOLStateFor(distro, cycle string) EOLState {
 	st := EOLState{Distro: distro, Cycle: cycle, State: "unknown"}
 	rows, err := r.st.ListEOLCache()
@@ -170,13 +177,23 @@ func (r *Refresher) EOLStateFor(distro, cycle string) EOLState {
 	}
 	match := -1
 	var newest int64
-	for i, row := range rows {
-		if row.Distro != proj || row.Cycle != cycle {
-			continue
+	cyc := cycle
+	for match < 0 && cyc != "" {
+		for i, row := range rows {
+			if row.Distro != proj || row.Cycle != cyc {
+				continue
+			}
+			match = i
+			if row.FetchedAt > newest {
+				newest = row.FetchedAt
+			}
 		}
-		match = i
-		if row.FetchedAt > newest {
-			newest = row.FetchedAt
+		if match < 0 {
+			if i := strings.LastIndex(cyc, "."); i > 0 {
+				cyc = cyc[:i] // "10.2" → "10" (major-cycle feeds)
+			} else {
+				break
+			}
 		}
 	}
 	if match < 0 {

@@ -32,7 +32,10 @@ type AssistantSession struct {
 }
 
 // AssistantMessage is one transcript row: user prompt, assistant prose, or
-// a tool call/result (role=tool, ToolName + ToolArgs set).
+// a tool call/result (role=tool, ToolName + ToolArgs set). Meta is the
+// structured half of a tool result (feedback parity): parsed ids the write
+// surfaces return (approval/execution/run), so the chat renders real
+// artifacts instead of grepping the text.
 type AssistantMessage struct {
 	ID        int64
 	SessionID string
@@ -40,6 +43,7 @@ type AssistantMessage struct {
 	Content   string
 	ToolName  string
 	ToolArgs  string
+	Meta      string // JSON (tool rows only), e.g. {"approval_ids":["apr_…"]}
 	Created   int64
 }
 
@@ -149,9 +153,9 @@ func (s *Store) AppendAssistantMessage(m *AssistantMessage) (int64, error) {
 		m.Created = now()
 	}
 	res, err := s.db.Exec(`
-		INSERT INTO assistant_messages (session_id, role, content, tool_name, tool_args, created)
-		VALUES (?,?,?,?,?,?)
-	`, m.SessionID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.Created)
+		INSERT INTO assistant_messages (session_id, role, content, tool_name, tool_args, meta, created)
+		VALUES (?,?,?,?,?,?,?)
+	`, m.SessionID, m.Role, m.Content, m.ToolName, m.ToolArgs, m.Meta, m.Created)
 	if err != nil {
 		return 0, err
 	}
@@ -166,7 +170,7 @@ func (s *Store) AppendAssistantMessage(m *AssistantMessage) (int64, error) {
 // ListAssistantMessages returns a session's transcript, oldest first.
 func (s *Store) ListAssistantMessages(sessionID string) ([]*AssistantMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, role, content, tool_name, tool_args, created
+		SELECT id, session_id, role, content, tool_name, tool_args, meta, created
 		FROM assistant_messages WHERE session_id=? ORDER BY id
 	`, sessionID)
 	if err != nil {
@@ -176,7 +180,7 @@ func (s *Store) ListAssistantMessages(sessionID string) ([]*AssistantMessage, er
 	var out []*AssistantMessage
 	for rows.Next() {
 		var m AssistantMessage
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.ToolName, &m.ToolArgs, &m.Created); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.ToolName, &m.ToolArgs, &m.Meta, &m.Created); err != nil {
 			return nil, err
 		}
 		out = append(out, &m)

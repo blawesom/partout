@@ -144,6 +144,17 @@ Documented escape hatch for writing elsewhere: use a `command` step
   file surface (absolute paths)** in the UI. Optional server toggle
   `PARTOUT_REQUIRE_FILE_ROOT` (default `false` in beta; intended `true` at
   1.0) rejects file ops to legacy agents.
+- **Fail-closed ≠ legacy.** An agent ≥0.9.5 whose root could not be
+  prepared reports `partout.file_root_error` (the reason, e.g. `fs: create
+  file root /home/partout: permission denied`). The UI then shows the real
+  diagnosis — root unavailable, remedy inline (`mkdir -p` + `chown`, or
+  `PARTOUT_FILE_ROOT`) — instead of the legacy "upgrade the agent"
+  advice, and a `PARTOUT_REQUIRE_FILE_ROOT` refusal quotes the agent's own
+  reason. The fact is agent-level **static state**: it is re-applied over
+  every facts collection (the first facts batch used to replace the
+  factset wholesale and wipe it, making every 0.9.5+ agent look legacy).
+  `partout doctor` (agent/embedded mode) checks the root read-only and
+  prints the same remedy.
 
 ## 8. Audit
 

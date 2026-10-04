@@ -50,6 +50,12 @@ sudo systemctl enable --now partout-server.service
 
 ### 4. Agent (managed host)
 
+The unit's sandbox keeps `/home` read-only **except the file root**
+(`ProtectHome=read-only` + `ReadWritePaths=/var/lib/partout /home/partout`):
+the agent's file surface is jailed to `/home/partout`, and it must be able
+ to read and write exactly that directory — `ProtectHome=true` hid the
+ root entirely and silently disabled the file surface.
+
 ```bash
 sudo cp partout-agent.service /etc/systemd/system/
 # M8.1: boot guard that supervises the agent's signed self-update

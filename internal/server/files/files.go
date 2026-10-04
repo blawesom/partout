@@ -314,10 +314,15 @@ func (c *Controller) doSend(ctx context.Context, agentID string, op *pb.FileOp) 
 	// File-root gate (docs/spec-file-root.md): when enabled, file ops to an
 	// agent that reports no file root (pre-file-root / legacy agent) are
 	// refused — the server would be forwarding absolute-path semantics it
-	// can no longer reason about.
+	// can no longer reason about. A 0.9.5+ agent that cannot prepare its
+	// root reports partout.file_root_error: surface the real reason and
+	// remedy instead of the legacy "upgrade the agent" advice.
 	if c.requireFileRoot {
 		fl, err := c.st.LatestFacts(agentID)
 		if err != nil || fl.Data["partout.file_root"] == "" {
+			if err == nil && fl.Data["partout.file_root_error"] != "" {
+				return nil, fmt.Errorf("files: agent file root unavailable (%s) — the file surface is disabled (fail closed); create the root on the host and restart the agent, or set PARTOUT_FILE_ROOT", fl.Data["partout.file_root_error"])
+			}
 			return nil, ErrLegacyFileSurface
 		}
 	}

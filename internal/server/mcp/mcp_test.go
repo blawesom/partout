@@ -108,7 +108,9 @@ func TestMCPToolsList(t *testing.T) {
 	}
 	for _, want := range []string{"list_hosts", "get_host_facts", "get_audit", "list_approvals",
 		"run_command", "apply_updates", "create_secret", "decide_approval", "list_services", "list_certificates",
-		"list_alerts", "set_host_tag", "delete_host_tag", "add_host_role", "remove_host_role", "delete_host"} {
+		"list_alerts", "set_host_tag", "delete_host_tag", "add_host_role", "remove_host_role", "delete_host",
+		// PRD §10.3 read tools (detail variants).
+		"get_service_state", "get_cert_detail", "list_sessions", "get_session"} {
 		if _, ok := byName[want]; !ok {
 			t.Fatalf("missing tool %q", want)
 		}

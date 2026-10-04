@@ -105,7 +105,7 @@ Done (decisions D1–D5 per PRD review):
 ### M3 — Automation (complete)
 
 Done so far:
-- ✅ **Secrets** (PRD §5.7, arch §5.5): server-side encrypted store — master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`, per-secret keys = HKDF(master, secret_id), values AES-256-GCM at rest, versioned. **No master key → feature disabled with a clear message** (503 on the endpoints).
+- ✅ **Secrets** (PRD §5.7, arch §5.5): server-side encrypted store — master key from `PARTOUT_SECRET_KEY_FILE` (0600), `PARTOUT_SECRET_KEY`, or the UI-bootstrap data-dir default (`<db dir>/secret.key`; `POST /api/v1/secrets/bootstrap` enables at runtime — Setup checklist), per-secret keys = HKDF(master, secret_id), values AES-256-GCM at rest, versioned. **No master key → feature disabled with a clear message** (503 on the endpoints, one-click enable from the UI).
 - ✅ **Rotation**: new version revokes all prior versions; audit records which version each materialization used (`secret_bindings`). Revoke and delete included.
 - ✅ **E2E distribution**: `SecretMaterialize{ref, version, eph_pub, sealed, cache_ttl_s}` down envelope. Server decrypts at-rest, seals with an **ephemeral X25519** ECDH key to the agent's enrolled transport key (HKDF → AES-256-GCM). Cleartext held in server memory for one materialization only; the sealed form is bound to that agent (a different agent cannot open it — tested).
 - ✅ **Agent cache** (`internal/agent/secrets`): in-memory for the declaring run's lifetime; with `offline_ttl_s > 0` persists the **sealed form only** (0600 JSON, never plaintext — asserted by test) so a restart within the window still serves the value offline. Fail-closed otherwise ("secret unavailable").
@@ -686,6 +686,45 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     endpoint). The next release after v0.9.8 is the **1.0 beta**: all 1.0 features in,
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
+
+- **v0.9.10 — perceived-quality hardening (all from live user feedback,
+  verified before fixing).** Everything since the v0.9.9 tag:
+
+  - **Setup wizard for gated features**: a post-login checklist turns the
+    capability probe around — one-click secrets bootstrap
+    (`POST /api/v1/secrets/bootstrap`, master key into
+    `<db dir>/secret.key`, env keys keep precedence) and the assistant
+    settings link; the keyless assistant adopts the key at runtime.
+  - **Assistant feedback parity** (invariant, docs/assistant.md §8.1): the
+    chat's approval claim was a substring grep (fired on policy listings,
+    audit queries); tool results now parse into a persisted `meta`
+    (approval/execution ids) and render execution chips + approval cards
+    with inline Approve/Deny; `created_by` is stamped from the token on
+    every dispatch path; `TestAssistantFeedbackParity` pins REST ≡
+    assistant. MCP stdio ≡ HTTP transports pinned too.
+  - **File-root truthfulness**: the root fact was wiped by every facts
+    batch (all agents ≥0.9.5 looked "legacy"), uncreatable roots now
+    report `partout.file_root_error` with the remedy inline,
+    `partout doctor` checks the root, and the stock unit carves the root
+    out of its sandbox.
+  - **Honesty pass**: 503s pass the server's reason through (the client
+    replaced it with a false "not in this build"), nav distinguishes
+    off-by-config from not-in-build, fleet version skew is visible
+    (doctor + per-host badge), `partout doctor` gained a read-only DB
+    evidence pack (empty audit actors, stuck executions, expired
+    approvals, the fact-wipe signature).
+  - **Live-audit gaps**: `update_drift` falls back to the server version
+    when the release store is empty (and `update_drift`/
+    `security_updates` rules became creatable — the forms existed, the API
+    rejected them); EOL lookup resolves RHEL-family point releases
+    (10.2 → cycle 10 — was "unknown" forever); alert rules gained a
+    webhook channel (JSON POST on firing + resolved, fire-and-record);
+    `POST /api/v1/server/backup`; `GET /hosts/{id}/elevation`;
+    `/openapi.json` answers 501 JSON; four PRD §10.3 MCP read tools;
+    `file.exists` matches exactly.
+  - **Standing instruments**: `scripts/beta-gate.sh` (the one-command
+    release battery), `scripts/check-config-docs.sh` (env-var ↔ docs
+    lint), `docs/walkthrough.md` (the moderated-operator instrument).
 
 - **v0.9.9 — the 1.0-scoped beta: item 20 + the LLM assistant.** Everything
   since the v0.9.8 tag:

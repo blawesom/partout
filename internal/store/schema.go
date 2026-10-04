@@ -451,6 +451,8 @@ CREATE TABLE IF NOT EXISTS alert_rules (
                --       {"cert_days_remaining":30}, {"config_drift_tolerance":0}
   severity   TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('info','warning','critical')),
   enabled    INTEGER NOT NULL DEFAULT 1,
+  webhook_url TEXT NOT NULL DEFAULT '',
+               -- optional external channel: POST on firing + resolved
   created_by TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -594,13 +596,14 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
   content    TEXT NOT NULL,
   tool_name  TEXT NOT NULL DEFAULT '',
   tool_args  TEXT NOT NULL DEFAULT '',   -- JSON, tool rows only
+  meta       TEXT NOT NULL DEFAULT '',   -- JSON, tool rows only: parsed result ids (feedback parity)
   created    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_assistant_messages_session ON assistant_messages(session_id);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 19
+const currentSchemaVersion = 21
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

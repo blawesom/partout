@@ -8,6 +8,8 @@
 //	POST   /api/v1/secrets/{name}/rotate   new version {value}
 //	POST   /api/v1/secrets/{name}/revoke   revoke current version
 //	DELETE /api/v1/secrets/{name}          delete
+//	POST   /api/v1/secrets/bootstrap       one-click enable (Setup checklist):
+//	                                   generate+adopt the data-dir master key
 //
 // Values are write-only: no read endpoint ever returns a value.
 package api
@@ -31,10 +33,59 @@ func (h *Handler) RegisterSecrets(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/secrets/{name}/rotate", h.requireRole(roleAdmin)(http.HandlerFunc(h.secretRotate)))
 	mux.Handle("POST /api/v1/secrets/{name}/revoke", h.requireRole(roleAdmin)(http.HandlerFunc(h.secretRevoke)))
 	mux.Handle("DELETE /api/v1/secrets/{name}", h.requireRole(roleAdmin)(http.HandlerFunc(h.secretDelete)))
+	// One-click enable from the Setup checklist (works while the feature is
+	// off — that is its point — so it is not gated on secretsMgr).
+	mux.Handle("POST /api/v1/secrets/bootstrap", h.requireRole(roleAdmin)(http.HandlerFunc(h.secretBootstrap)))
 }
 
 // SetSecrets installs the secret manager (nil = feature disabled → 503).
 func (h *Handler) SetSecrets(sm *secrets.Manager) { h.secretsMgr = sm }
+
+// SetSecretsKeyPath sets the data-dir default master-key file used by the
+// UI bootstrap (POST /api/v1/secrets/bootstrap). Empty (never called)
+// disables bootstrap — the feature is then env-config only.
+func (h *Handler) SetSecretsKeyPath(p string) { h.secretsKeyPath = p }
+
+// secretBootstrap is the Setup checklist's one-click enable: generate a
+// master key into the data-dir default file (adopting an existing one),
+// install the manager at runtime and let the assistant adopt the key for
+// sealing its endpoint credentials. Admin-only; when the feature is
+// already on it answers 409 (never rotates anything).
+func (h *Handler) secretBootstrap(w http.ResponseWriter, r *http.Request) {
+	if h.secretsMgr != nil {
+		writeError(w, http.StatusConflict, "secrets_already_enabled",
+			"secrets feature is already enabled (master key configured)", nil)
+		return
+	}
+	if h.secretsKeyPath == "" {
+		writeError(w, http.StatusServiceUnavailable, "bootstrap_unavailable",
+			"secrets bootstrap is not available on this server (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY)", nil)
+		return
+	}
+	master, err := secrets.BootstrapKey(h.secretsKeyPath)
+	if err != nil {
+		writeError(w, http.StatusConflict, "bootstrap_failed", err.Error(), nil)
+		return
+	}
+	sm, err := secrets.New(h.st, h.streamH, master, h.log)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "secrets manager: "+err.Error(), nil)
+		return
+	}
+	h.secretsMgr = sm
+	// The assistant seals its endpoint API key under the master key; when it
+	// was built keyless (nothing sealed yet) it adopts the fresh key so the
+	// operator can configure a hosted endpoint right after this click.
+	if h.assistant != nil {
+		h.assistant.SetKeyMaster(master)
+	}
+	principal, _ := h.actorFor(r)
+	h.audit("secrets.bootstrap", principal, map[string]string{
+		"key_file": h.secretsKeyPath,
+	})
+	h.log.Printf("server: secrets feature enabled (bootstrap from web UI; key file %s)", h.secretsKeyPath)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "key_file": h.secretsKeyPath})
+}
 
 func (h *Handler) secretList(w http.ResponseWriter, r *http.Request) {
 	if h.secretsMgr == nil {

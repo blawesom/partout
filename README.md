@@ -1,6 +1,6 @@
 # Partout
 
-> **Status: beta (v0.9.9 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
+> **Status: beta (v0.9.10 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
 > before the 1.0 GA flip)** — the full feature set (observe,
 > execute, patch, update rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your

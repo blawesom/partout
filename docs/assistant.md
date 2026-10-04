@@ -1,6 +1,6 @@
 # Partout — LLM Assistant (design)
 
-**Status:** ✅ implemented — 1.0 slice shipped in v0.9.9 (the 1.0-scoped beta) · **PRD:** R26 (§4), Decisions 17–19 (§15.1), Milestone M9 (§14) · **Mockup:** [`mockups/assistant.html`](mockups/assistant.html)
+**Status:** ✅ implemented — 1.0 slice shipped in v0.9.9, hardened in v0.9.10 (feedback parity) · **PRD:** R26 (§4), Decisions 17–19 (§15.1), Milestone M9 (§14) · **Mockup:** [`mockups/assistant.html`](mockups/assistant.html)
 **Companions:** `PRD.md` (R11 MCP, §10.3), `docs/architecture.md` (§10 API, §11 Frontend),
 `docs/ui-guidelines.md` (tokens, state vocabulary, capability gating), `internal/server/mcp/`
 (tool registry, `API` interface).
@@ -89,7 +89,11 @@ Key decisions:
 
 SSE, not token streaming: the client renders **events** (tool chips, result summaries,
 approval cards) which is what a control-plane UI wants; token-level streaming adds little
-value and complicates cancellation/audit.
+value and complicates cancellation/audit. `tool_result`/`approval_required` events (and
+the persisted tool messages) carry a `meta` object — the parsed approval/execution/run
+ids from the write surfaces' structured responses — which is what the cards and chips
+render from (feedback parity, §8.1); `approval_required` is emitted only when a request
+actually parked, never from grepping the result text.
 
 ## 5. Components & effort
 
@@ -136,19 +140,58 @@ wall clock (default 120 s), max tool-result bytes per call (truncated, default 3
 3. **RBAC.** Assistant capabilities = user role ∩ profile. A viewer gets readonly regardless
    of configuration.
 4. **Key handling.** Endpoint API key lives in the secrets vault, write-only, never returned;
-   egress to the LLM uses it server-side only — the browser never sees it.
+   egress to the LLM uses it server-side only — the browser never sees it. The key is
+   sealed under the secrets master key; a server started without one (env or
+   bootstrapped `<db dir>/secret.key`) runs keyless — local endpoints (Ollama/vLLM) need
+   no key. The Setup checklist's one-click secrets bootstrap also lets the assistant
+   adopt the fresh key at runtime, so a hosted endpoint can be configured immediately
+   after.
 
 ## 8. UX (see mockup)
 
 - **Assistant** sidebar entry (gated like MCP: off/hidden when no endpoint configured).
 - Chat column: user messages, assistant prose, **tool chips** (name + one-line result +
-  audit link), **approval cards** (parked action, payload, decide link), cancel button.
+  execution chip linking to the run it created), **approval cards** (parked action, payload,
+  Approve/Deny inline for admins — same confirm dialogs and API as the Approvals page),
+  cancel button.
 - Session header: profile selector (capped by role), endpoint + model, egress badge.
 - **Settings > Assistant** (admin): endpoint URL, model, caps, default profile, key status
   (set/reset), capabilities-probe result.
 - Quick wins after the 1.0 slice: "Explain" buttons on alert/execution detail views (read-only single
   call), alert-triage drafts proposing remediation playbooks (parked as approvals),
   scheduled natural-language checks, fleet-drift reports.
+
+### 8.1 Feedback parity (invariant)
+
+Anything the assistant creates, produces, recommends or prepares must end up in the
+same state — from a feedback/information standpoint — as if the user had performed it
+from the UI:
+
+- **One write path.** Assistant tool calls run through the same REST router with the
+  user's token, so rows, SSE events, policy gates, approvals and audit kinds are
+  literally the same code. Server-side parity is structural, not maintained.
+- **Attribution.** Executions record `created_by` from the authenticated principal
+  (stamped by the API layer; client-supplied values are ignored, like the role). An
+  assistant-requested run is attributed to the user whose token drove it — the
+  `assistant.tool_call` audit row (session id + prompt hash) correlates the turn.
+- **Structured confirmations, never text grepping.** Write surfaces return structured
+  results (`runs[].state="awaiting_approval"` + `approval_id`; `202
+  {"state":"approval_required"}`). The tool-loop parses these into a `meta`
+  persisted on the tool message, and the chat renders from the parsed ids: execution
+  chips (→ exec detail), approval cards (id, state, payload, decide link).
+  "approval required" can therefore only appear when a request actually exists — the
+  retired substring match also fired on read-only results that merely mention
+  approvals (policy listings, audit queries).
+- **Same deciders.** Approval cards offer the same Approve/Deny affordance as the
+  Approvals page and follow `approval.approved`/`denied` SSE live. The model itself
+  can still never decide (`decide_approval` is unreachable from every profile).
+- **Enforcement.** `TestAssistantFeedbackParity` drives the same governed action
+  through the REST surface and an assistant tool call, and asserts the observable
+  state is indistinguishable (approval rows, attribution, transcript ids).
+
+Boundary: parity of *feedback*, never of *authority*. Recommendations still prefill
+the canonical forms rather than executing (nothing auto-runs; a human always presses
+the button) — and the system treats both button-pressers identically afterwards.
 
 ## 9. Phasing
 

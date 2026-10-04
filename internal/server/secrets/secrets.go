@@ -1,7 +1,12 @@
 // Package secrets implements the server-side secret store (M3, PRD §5.7):
 //
-//   - Master key from PARTOUT_SECRET_KEY_FILE (0600) or PARTOUT_SECRET_KEY.
-//     No key configured → the feature is disabled with a clear error.
+//   - Master key, in precedence order: PARTOUT_SECRET_KEY_FILE (0600),
+//     PARTOUT_SECRET_KEY, or the data-dir default file (<db dir>/secret.key,
+//     created by the web UI's one-click bootstrap — Setup checklist on the
+//     fleet page, or POST /api/v1/secrets/bootstrap). Env vars win so
+//     ops-managed deployments keep control; the data-dir file makes the
+//     embedded/local mode zero-config. No key configured → the feature is
+//     disabled with a clear error.
 //   - Values are encrypted at rest with per-secret keys derived via HKDF from
 //     the master key; versioned; a rotation revokes all prior versions.
 //   - Distribution is E2E: the server decrypts the at-rest ciphertext, then
@@ -13,13 +18,16 @@
 package secrets
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -43,32 +51,18 @@ const (
 const MaxValue = 64 << 10
 
 // ErrDisabled is returned when no master key is configured.
-var ErrDisabled = errors.New("secrets: no master key configured (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY)")
+var ErrDisabled = errors.New("secrets: no master key configured (set PARTOUT_SECRET_KEY_FILE or PARTOUT_SECRET_KEY, or enable secrets from the web UI)")
+
+// DefaultKeyPath returns the data-dir default master-key location: the
+// directory holding the database (same trust boundary, same backups).
+func DefaultKeyPath(dbDir string) string { return filepath.Join(dbDir, "secret.key") }
 
 // LoadMasterKey reads the 32-byte master key from a file or env value.
 // The file must be mode 0600; file/env contents may be raw 32 bytes or
 // base64 of 32 bytes.
 func LoadMasterKey() ([]byte, error) {
 	if f := os.Getenv("PARTOUT_SECRET_KEY_FILE"); f != "" {
-		fi, err := os.Stat(f)
-		if err != nil {
-			return nil, fmt.Errorf("secrets: master key file: %w", err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			return nil, fmt.Errorf("secrets: master key file %s must be mode 0600 (got %o)", f, perm)
-		}
-		b, err := os.ReadFile(f)
-		if err != nil {
-			return nil, fmt.Errorf("secrets: read key file: %w", err)
-		}
-		b = []byte(strings.TrimSpace(string(b)))
-		if k, err := base64.StdEncoding.DecodeString(string(b)); err == nil && len(k) == 32 {
-			b = k
-		}
-		if len(b) != 32 {
-			return nil, fmt.Errorf("secrets: master key file must hold 32 bytes (or base64 of 32), got %d", len(b))
-		}
-		return b, nil
+		return loadKeyFile(f)
 	}
 	if e := os.Getenv("PARTOUT_SECRET_KEY"); e != "" {
 		b := []byte(e)
@@ -81,6 +75,82 @@ func LoadMasterKey() ([]byte, error) {
 		return b, nil
 	}
 	return nil, ErrDisabled
+}
+
+// LoadMasterKeyWithDefault is LoadMasterKey with a data-dir fallback: the
+// env vars keep precedence (ops-managed deployments), and when neither is
+// set a key file previously created by the UI bootstrap (DefaultKeyPath) is
+// picked up without further configuration.
+func LoadMasterKeyWithDefault(defaultPath string) ([]byte, error) {
+	if k, err := LoadMasterKey(); err == nil {
+		return k, nil
+	} else if !errors.Is(err, ErrDisabled) {
+		return nil, err // env key configured but invalid: fail loudly, do not silently fall back
+	}
+	if defaultPath != "" {
+		if _, err := os.Stat(defaultPath); err == nil {
+			return loadKeyFile(defaultPath)
+		}
+	}
+	return nil, ErrDisabled
+}
+
+// loadKeyFile reads and validates a master-key file (mode 0600, 32 raw bytes
+// or base64 of 32).
+func loadKeyFile(f string) ([]byte, error) {
+	fi, err := os.Stat(f)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: master key file: %w", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		return nil, fmt.Errorf("secrets: master key file %s must be mode 0600 (got %o)", f, perm)
+	}
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return nil, fmt.Errorf("secrets: read key file: %w", err)
+	}
+	b = []byte(strings.TrimSpace(string(b)))
+	if k, err := base64.StdEncoding.DecodeString(string(b)); err == nil && len(k) == 32 {
+		b = k
+	}
+	if len(b) != 32 {
+		return nil, fmt.Errorf("secrets: master key file must hold 32 bytes (or base64 of 32), got %d", len(b))
+	}
+	return b, nil
+}
+
+// BootstrapKey generates a fresh 32-byte master key, persists it mode 0600
+// at path and returns it. It backs the web UI's one-click enable (Setup
+// checklist / POST /api/v1/secrets/bootstrap). When a key file already
+// exists it is adopted, not overwritten — a bootstrap can never silently
+// rotate away from a key that already guards data.
+func BootstrapKey(path string) ([]byte, error) {
+	if k, err := loadKeyFile(path); err == nil {
+		return k, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err // exists but wrong mode/size: do not clobber, surface it
+	}
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		return nil, fmt.Errorf("secrets: generate key: %w", err)
+	}
+	// O_EXCL: two racing bootstraps cannot interleave writes; the loser
+	// re-reads the winner's key above on retry.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return loadKeyFile(path)
+		}
+		return nil, fmt.Errorf("secrets: create key file: %w", err)
+	}
+	if _, err := f.Write(k); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("secrets: write key file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("secrets: write key file: %w", err)
+	}
+	return k, nil
 }
 
 // KeyFor derives the 32-byte AES-256-GCM key guarding one secret at rest.

@@ -2,6 +2,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,6 +21,10 @@ func (h *Handler) RegisterHosts(mux *http.ServeMux) {
 	mux.Handle("DELETE /api/v1/hosts/{id}/tags/{key}", h.requireRole(roleOperator)(http.HandlerFunc(h.handleDeleteHostTag)))
 	mux.Handle("PUT /api/v1/hosts/{id}/roles/{role}", h.requireRole(roleOperator)(http.HandlerFunc(h.handleAddHostRole)))
 	mux.Handle("DELETE /api/v1/hosts/{id}/roles/{role}", h.requireRole(roleOperator)(http.HandlerFunc(h.handleDeleteHostRole)))
+	// Elevation posture (summary only — the full sudoers scope stays on
+	// the host via `partout ctl elevation show`): mode, rule count,
+	// sources, load errors, from the agent's partout.elevation fact.
+	mux.Handle("GET /api/v1/hosts/{id}/elevation", h.requireRole(roleViewer)(http.HandlerFunc(h.handleHostElevation)))
 
 	mux.Handle("GET /api/v1/groups", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGroups)))
 	mux.Handle("POST /api/v1/groups", h.requireRole(roleOperator)(http.HandlerFunc(h.handleGroups)))
@@ -378,4 +383,33 @@ func (h *Handler) handleGroups(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "bad_request", "method not allowed", nil)
 	}
+}
+
+// handleHostElevation returns the host's elevation posture from the agent's
+// partout.elevation fact (mode, rule count, policy sources, load errors).
+// Deliberately a summary: the full rule set is the host's sudoers scope —
+// a privilege-target list — and stays inspectable only on the host
+// (`partout ctl elevation show`).
+func (h *Handler) handleHostElevation(w http.ResponseWriter, r *http.Request) {
+	fl, err := h.st.LatestFacts(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "no facts for host", nil)
+		return
+	}
+	raw := fl.Data["partout.elevation"]
+	if raw == "" {
+		// Pre-elevation-reporting agent: say so rather than guessing.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mode": "unknown", "reported": false,
+			"note": "agent does not report elevation posture (pre-0.9.9); check on the host with `partout ctl elevation show`",
+		})
+		return
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "malformed elevation fact", nil)
+		return
+	}
+	out["reported"] = true
+	writeJSON(w, http.StatusOK, out)
 }

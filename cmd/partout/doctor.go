@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/blawesom/partout/internal/agent/facts"
+	agentfs "github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/sshutil"
 )
@@ -119,6 +120,13 @@ func runDoctor() error {
 	checkSSHKey(cfg, r)
 	checkReleaseKey(cfg, r)
 	checkProvisioning(cfg, r)
+	if cfg.Mode == "agent" || cfg.Mode == "embedded" {
+		checkFileRoot(cfg, r)
+	}
+	if cfg.Mode == "server" || cfg.Mode == "embedded" {
+		checkFleetVersions(cfg, r)
+		checkDBHealth(cfg, r)
+	}
 
 	fmt.Println()
 	if r.fails > 0 {
@@ -129,6 +137,51 @@ func runDoctor() error {
 	fmt.Printf("doctor: %d warning(s), no failures — ready\n", r.warns)
 	r.print()
 	return nil
+}
+
+// checkFileRoot verifies the agent file-surface root (docs/spec-file-root.md)
+// read-only: an unusable root disables the file surface (fail closed) — the
+// most common cause of a "no file root reported" banner on an upgraded
+// fleet (the agent runs unprivileged and cannot create /home/partout
+// itself on hosts provisioned before v0.9.5, whose /home is root-owned).
+// Deliberately creates nothing: report what the agent would find.
+func checkFileRoot(cfg *config.Config, r *doctorResult) {
+	root := strings.TrimSpace(cfg.FileRoot)
+	if root == "" {
+		root = agentfs.DefaultFileRoot
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		r.add(dfail, "file root", err.Error())
+		return
+	}
+	info, err := os.Lstat(abs)
+	if os.IsNotExist(err) {
+		// The agent creates the root (0750) at startup when the parent is
+		// writable by the agent user; doctor runs as the operator, who may
+		// or may not be that user — so this is a warning with the remedy,
+		// not a failure.
+		r.add(dwarn, "file root",
+			abs+" does not exist — the agent creates it at startup when the parent is writable; if it is not: sudo mkdir -p "+abs+" && sudo chown partout:partout "+abs+" && sudo chmod 0750 "+abs)
+		return
+	}
+	if err != nil {
+		r.add(dfail, "file root", err.Error())
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		r.add(dfail, "file root", abs+" is a symlink — not allowed (the root must be a real directory)")
+		return
+	}
+	if !info.IsDir() {
+		r.add(dfail, "file root", abs+" is not a directory")
+		return
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		r.add(dfail, "file root", abs+" is not writable by this user — the file surface would be disabled (fail closed); chown it to the agent user")
+		return
+	}
+	r.add(dok, "file root", abs+" (file surface confined to this directory)")
 }
 
 // ---------------------------------------------------------------------------

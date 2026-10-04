@@ -3,9 +3,13 @@ package observe
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -830,5 +834,112 @@ func TestSecurityUpdatesFireResolve(t *testing.T) {
 	res, _ = c.EvaluateOnce()
 	if res.Resolved != 1 {
 		t.Fatalf("tick 4: %+v, want 1 resolved", res)
+	}
+}
+
+// TestUpdateDriftServerBaseline: with NOTHING in the release store (the
+// direct-binary-upgrade flow), the running server's version is the drift
+// baseline — agents behind the server still alert instead of silently
+// passing ("nothing in the store: nothing to be behind" used to swallow
+// the whole fleet).
+func TestUpdateDriftServerBaseline(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindUpdateDrift, "all", `{"min_drifted":1}`, "warning", true)
+
+	// No releases registered. Pin the baseline (a dev build's
+	// "0.0.0-dev" cannot be drifted below).
+	saved := serverVersion
+	serverVersion = "9.9.9"
+	t.Cleanup(func() { serverVersion = saved })
+
+	seedHost(t, st, "ag_lag", `{}`)
+	_ = st.SetAgentVersion("ag_lag", "9.9.7")
+	seedHost(t, st, "ag_ok", `{}`)
+	_ = st.SetAgentVersion("ag_ok", "9.9.9")
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("empty-store drift tick: %+v, want 1 fired (server baseline)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 {
+		t.Fatalf("firing alerts = %d, want 1", len(alerts))
+	}
+	if !contains(alerts[0].Message, "server 9.9.9") || !contains(alerts[0].Message, "ag_lag") {
+		t.Errorf("message %q should name the server baseline and the lagging host", alerts[0].Message)
+	}
+}
+
+// TestAlertWebhookDelivery: a rule with a webhook_url POSTs the alert as
+// JSON on firing AND on resolve; a failing receiver never breaks the
+// engine (fire-and-record, no retry — the miss is an alert.webhook audit
+// row). This is the first external alert channel (PRD §5.4).
+func TestAlertWebhookDelivery(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+
+	var mu sync.Mutex
+	var got []map[string]any
+	rcv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		mu.Lock()
+		got = append(got, m)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer rcv.Close()
+
+	rule := makeRule(t, st, KindServiceFailed, "all", `{"service_failed_minutes":0}`, "warning", true)
+	rule.WebhookURL = rcv.URL
+	if err := st.UpdateAlertRule(rule); err != nil {
+		t.Fatalf("UpdateAlertRule: %v", err)
+	}
+
+	seedHost(t, st, "ag_wh", unitFacts("failed"))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("webhook tick: %+v, want 1 fired", res)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 1
+	})
+	if got[0]["event"] != "firing" || got[0]["kind"] != KindServiceFailed ||
+		got[0]["host_id"] != "ag_wh" || got[0]["message"] == "" || got[0]["rule"] == "" {
+		t.Fatalf("firing webhook payload = %+v", got[0])
+	}
+
+	// Host heals -> resolve -> second delivery with event=resolved.
+	seedHost(t, st, "ag_wh", unitFacts("active"))
+	_, _ = c.EvaluateOnce()
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 2
+	})
+	if got[1]["event"] != "resolved" {
+		t.Fatalf("resolved webhook payload = %+v", got[1])
+	}
+
+	// A dead receiver is recorded, never fatal.
+	rule.WebhookURL = "http://127.0.0.1:1/dead"
+	if err := st.UpdateAlertRule(rule); err != nil {
+		t.Fatal(err)
+	}
+	seedHost(t, st, "ag_wh", unitFacts("failed"))
+	if res, _ = c.EvaluateOnce(); res.Fired != 1 {
+		t.Fatalf("re-fire with dead receiver: %+v", res)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 3s")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

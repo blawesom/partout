@@ -24,11 +24,12 @@ func (h *Handler) RegisterStatic() {
 	api := h.router
 	h.router = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
-		// API namespace (including the bare /api) and the health probes are
-		// never the SPA; everything else GET is. A bare /api must not be served
-		// the SPA document, which would mislead a client expecting JSON.
+		// API namespace (including the bare /api), the health probes, and
+		// the machine-readable stubs (openapi.json) are never the SPA;
+		// everything else GET is. A bare /api must not be served the SPA
+		// document, which would mislead a client expecting JSON.
 		if r.Method == http.MethodGet &&
-			p != "/api" && !strings.HasPrefix(p, "/api/") && p != "/healthz" && p != "/readyz" {
+			p != "/api" && !strings.HasPrefix(p, "/api/") && p != "/healthz" && p != "/readyz" && p != "/openapi.json" {
 			h.serveUI(w, r)
 			return
 		}

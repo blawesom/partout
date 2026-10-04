@@ -170,6 +170,8 @@ func (s *Store) applySchema() error {
 		{table: "agents", column: "tls_pub", def: "TEXT NOT NULL DEFAULT ''"},
 		{table: "agents", column: "tls_not_after", def: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "provision_runs", column: "resolved_host", def: "TEXT"},
+		{table: "assistant_messages", column: "meta", def: "TEXT NOT NULL DEFAULT ''"},
+		{table: "alert_rules", column: "webhook_url", def: "TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return fmt.Errorf("store: ensure columns: %w", err)
 	}

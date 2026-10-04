@@ -385,14 +385,11 @@ func (p *parser) parseOperand() (any, error) {
 		return false, nil
 	case tkIdent:
 		p.next()
-		// file.exists('path') predicate.
-		if t.text == "file" || strings.HasPrefix(t.text, "file.") {
-			if t.text == "file" {
-				// Next token must be the ".exists" continuation captured as an ident
-				// containing a dot, OR we treat "file.exists" as one token already.
-				// Our tokenizer merges dotted idents, so "file.exists" arrives as
-				// one token; handled below.
-			}
+		// file.exists('path') predicate. The tokenizer merges dotted
+		// identifiers, so the whole predicate arrives as ONE token — match
+		// it exactly: a substring check used to silently accept typos like
+		// `file.existsfoo('/x')` as `file.exists`.
+		if strings.HasPrefix(t.text, "file.") {
 			return p.parseFilePredicateFrom(t)
 		}
 		if val, ok := p.facts[t.text]; ok {
@@ -408,7 +405,7 @@ func (p *parser) parseOperand() (any, error) {
 // identifier token (which includes ".exists" because the tokenizer merges
 // dotted identifiers).
 func (p *parser) parseFilePredicateFrom(lead *token) (any, error) {
-	if !strings.Contains(lead.text, "exists") {
+	if lead.text != "file.exists" {
 		return nil, fmt.Errorf("when: file predicate must be file.exists('path')")
 	}
 	if p.peek() == nil || p.peek().typ != tkLParen {

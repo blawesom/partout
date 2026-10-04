@@ -66,6 +66,10 @@ type Agent struct {
 	streamC *stream.Client
 	start   time.Time
 	factset map[string]string
+	// staticFacts are agent-level facts that outlive fact collection
+	// (file root state). sendFacts re-applies them over each fresh
+	// Collector() snapshot — see New().
+	staticFacts map[string]string
 
 	// obsCollecting guards the observe-facts collection goroutine (M5):
 	// a tick arriving while the previous collection is still running is
@@ -198,17 +202,29 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		spooled:       make(map[string]bool),
 		activeRunners: make(map[string]context.CancelFunc),
 		fsCfg:         fs.Config{},
+		staticFacts:   map[string]string{},
 	}
 	// File root (docs/spec-file-root.md): the file surface is confined to
 	// this directory; no role, flag, or parameter can reach outside it.
 	// Unusable root → file surface disabled (fail closed), other agent
-	// functions unaffected.
+	// functions unaffected — and the REASON is reported as the
+	// partout.file_root_error fact so the server can tell a fail-closed
+	// 0.9.5+ agent from a genuine pre-file-root legacy agent and print the
+	// real remedy instead of "upgrade the agent".
+	// staticFacts outlive fact collection: sendFacts replaces the factset
+	// with each fresh Collector() snapshot, so agent-level state is
+	// re-applied there (regression: the file-root fact used to vanish on
+	// the first facts batch, making every 0.9.5+ agent look legacy).
 	if fr, err := fs.PrepareFileRoot(cfg.FileRoot); err != nil {
 		lg.Printf("agent: file root unavailable: %v — file surface disabled (fail closed)", err)
+		a.staticFacts["partout.file_root_error"] = err.Error()
 	} else {
 		a.fileRoot = fr
 		lg.Printf("agent: file root: %s (all file operations are confined to this directory)", fr)
-		a.factset["partout.file_root"] = fr
+		a.staticFacts["partout.file_root"] = fr
+	}
+	for k, v := range a.staticFacts {
+		a.factset[k] = v
 	}
 	// Elevation (PRD Decision 3, host-level slice). Config is validated at
 	// Load; this cannot fail, but keep the parse explicit.
@@ -225,6 +241,25 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	} else if pol != nil {
 		a.elevation = pol
 		lg.Printf("agent: elevation policy loaded (%d rules from %s) — %s", len(pol.Rules), strings.Join(pol.Source(), ", "), describeElevation(pol))
+	}
+	// Elevation posture (static fact): everything the control plane may
+	// see of the host's elevation scope — mode, rule count, policy
+	// sources, load errors. The full rule set deliberately stays on the
+	// host (`partout ctl elevation show`): it IS the sudoers scope, a
+	// privilege-target list (GET /api/v1/hosts/{id}/elevation serves this
+	// summary).
+	elevSummary := map[string]any{
+		"mode": string(a.elevate), "sudo": a.elevate == elevate.Sudo,
+	}
+	if a.elevation != nil {
+		elevSummary["rules"] = len(a.elevation.Rules)
+		elevSummary["sources"] = a.elevation.Source()
+	}
+	if a.elevationErr != nil {
+		elevSummary["error"] = a.elevationErr.Error()
+	}
+	if es, err := json.Marshal(elevSummary); err == nil {
+		a.staticFacts["partout.elevation"] = string(es)
 	}
 	// Task runner (M3, PRD §5.5): secrets lookup uses the E2E cache.
 	var secLookup func(ref string, version int64) (string, error)
@@ -484,7 +519,14 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 
 // sendFacts sends a FactsBatch envelope (full snapshot; deltas are M1+).
 func (a *Agent) sendFacts(ctx context.Context, full bool) error {
-	a.factset = facts.Collector(a.id, a.cfg.FactsInterval)
+	m := facts.Collector(a.id, a.cfg.FactsInterval)
+	// Agent-level facts (file root state) survive re-collection: without
+	// this the file-root fact vanished on the first facts batch and the
+	// server showed every 0.9.5+ agent as a "legacy agent".
+	for k, v := range a.staticFacts {
+		m[k] = v
+	}
+	a.factset = m
 	return a.streamC.Send(ctx, &pb.Envelope{
 		Kind: pb.EnvelopeKind_FACTS_BATCH,
 		Payload: &pb.Envelope_Facts{Facts: &pb.FactsBatch{

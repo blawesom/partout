@@ -139,7 +139,8 @@ One Pinia `capabilities` store is loaded after login and read by nav, routes, an
 |---|---|---|
 | **Enabled** | capability `true` **and** role allows | normal |
 | **Role-gated** | capability `true`, role insufficient | disabled, lock icon, tooltip **"Requires operator role"** / **"Requires admin role"** |
-| **Not in this build** | capability `false` or absent | disabled, `Not yet available` chip, tooltip names the milestone: **"Not yet available — approvals (M4)"** |
+| **Off (configured)** | capability strictly `false` — the build wires it, the server is not configured (e.g. secrets without a master key) | disabled, `off` chip, tooltip **"Off — not configured on this server (see the Setup checklist on the fleet page)"** — the remedy, never a false "not in this build" |
+| **Not in this build** | capability absent/`undefined` | disabled, `n/a` chip, tooltip names the capability: **"Not yet available — approvals (M4)"** |
 | **Absent** | never planned | not rendered |
 
 ### Hard rules
@@ -223,7 +224,7 @@ UI labels are presentation names; the PRD/API nouns stay authoritative.
 | Observe · Services | Observe → Services | `/services`, `/services?agent_id=&name=` |
 | Observe · Certificates | Observe → Certificates | `/certificates`, `/certificates?days_remaining_lt=` |
 | Observe · Configs | Observe → Configs | `/configs`, `/configs?kind=&agent_id=` |
-| Assistant | Assistant (R26) | `/assistant/config`, `/assistant/sessions`, `/assistant/sessions/{id}/chat` (SSE) |
+| Assistant | Assistant (R26) | `/assistant/config`, `/assistant/sessions`, `/assistant/sessions/{id}/chat` (SSE); chat renders execution chips + approval cards from the parsed tool-result ids (`meta`) — feedback parity: assistant-issued actions surface exactly like user-issued ones, and `decide_approval` is never assistant-reachable (see docs/assistant.md §8.1) |
 
 ### Routes
 
@@ -824,15 +825,39 @@ Five small surfaces make a brand-new server self-explanatory:
   guardrails** (→ Policies / Alerts) and **3 · keep the fleet current** (→
   Updates) are secondary links. Dismissal is persisted per-browser in
   `localStorage` (`partout.gs.dismissed`) so it does not reappear.
+- **Fleet page — setup checklist (post-login wizard).** The capability probe
+  runs both ways: a control renders only when the build wires it (§4), and a
+  capability the build *supports* but that is currently off is surfaced as a
+  fixable step rather than a silently hidden nav entry. A dismissible card
+  (“Finish setting up this server”) shows only while the probe reports a
+  false `secrets` or `assistant` (strictly `=== false`, so older builds whose
+  probes lack the key stay quiet). Steps: **1 · enable the secrets store**
+  (admin-only CTA; non-admins are told to ask one) — one click POSTs
+  `/api/v1/secrets/bootstrap`, which generates a master key into the data-dir
+  default file (`<db dir>/secret.key`, 0600 — same trust boundary as the
+  database, covered by the same backups) and installs the manager at
+  runtime: no restart, no env plumbing. Env keys (`PARTOUT_SECRET_KEY_FILE`/
+  `PARTOUT_SECRET_KEY`) keep precedence for ops-managed deployments, and the
+  bootstrap *adopts* an existing key file rather than overwriting it. A
+  keyless assistant adopts the key too, so a hosted endpoint API key can be
+  sealed immediately after. **2 · configure the assistant** (→ Assistant
+  settings; the nav entry lights up once the endpoint passes its probe).
+  Dismissal persists per-browser (`partout.setup.dismissed`); the Secrets
+  page repeats the enable banner while the feature is off (the create form
+  only renders when the capability is true).
 
 Guards: `scripts/ui-smoke.js` (checklist: clears `hosts` on the fleet page →
 asserts the card + the primary onboarding CTA → `dismissGettingStarted()` →
 asserts it is gone; login hint: clears `token` to render the logged-out view → asserts
 the hint → restores `token` → asserts the shell returns; cleartext: asserts no
 warn-box on the loopback smoke origin → fakes a non-loopback http origin → asserts
-the warn-box → fakes https → asserts it is gone, plus the `isLoopbackHost` matrix)
-and `TestUIShape_CleartextLoginBanner` (pins the binding, the computed, and the
-`PARTOUT_TLS=on` remedy against silent removal).
+the warn-box → fakes https → asserts it is gone, plus the `isLoopbackHost` matrix;
+setup checklist: fakes `caps.secrets`/`caps.assistant` off → asserts the card, the
+admin enable-secrets CTA and `bootstrapSecrets` → dismisses → asserts persistence in
+`partout.setup.dismissed` → restores) and `TestUIShape_CleartextLoginBanner` (pins the
+binding, the computed, and the `PARTOUT_TLS=on` remedy against silent removal);
+`TestSecretsBootstrap` pins the bootstrap end-to-end at the API layer (key file mode,
+capability flip, 409 on re-run, assistant key adoption).
 
 ## 23. Tooltip mechanism (`data-tip`)
 

@@ -63,6 +63,8 @@ type Handler struct {
 	releaseVerifyKey  ed25519.PublicKey      // optional: verify upload signatures at registration (PARTOUT_RELEASE_VERIFY_KEY); nil = store-and-forward
 	autoDraftRollouts bool                   // M8.1.1: auto-draft a parked rollout on agent release upload
 	assistant         *assistant.Service     // R26 LLM assistant; nil until SetAssistant (routes 503)
+	secretsKeyPath    string                 // data-dir default master-key file (UI bootstrap target; empty = no bootstrap)
+	backupDir         string                 // snapshot destination for POST /server/backup; empty = endpoint 503
 }
 
 // New builds the REST handler and its router.
@@ -90,6 +92,15 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// GET /healthz — health check.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	// GET /openapi.json — honest 501 (PRD §10.1: "Full OpenAPI spec is a
+	// later deliverable"). Without this route the SPA fallback served
+	// HTML at a .json path — a content-type lie for every automated
+	// consumer that probed it.
+	mux.HandleFunc("GET /openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotImplemented, "not_implemented",
+			"the OpenAPI spec is a post-1.0 deliverable; the REST surface is documented in PRD §10.1 and docs/deployment.md", nil)
 	})
 
 	// GET /api/v1/version — server version (same value `partout --version`
@@ -245,6 +256,9 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// Capability probe for the UI's data-driven gating (ui-guidelines B1).
 	handler.RegisterCapabilities(mux)
+
+	// Ops plane: control-plane backup trigger (admin).
+	mux.Handle("POST /api/v1/server/backup", handler.requireRole(roleAdmin)(http.HandlerFunc(handler.handleServerBackup)))
 
 	handler.router = mux
 	handler.mux = mux

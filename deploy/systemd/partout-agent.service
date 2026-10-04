@@ -25,9 +25,14 @@ RestartSec=3
 # Hardening: the agent only opens outbound connections.
 NoNewPrivileges=true
 ProtectSystem=full
-ReadWritePaths=/var/lib/partout
+# File root (docs/spec-file-root.md): the file surface is jailed to
+# /home/partout. ProtectHome=read-only keeps /home,/root,/run/user
+# read-only EXCEPT the carved-out root below — ProtectHome=true hid
+# /home/partout entirely and disabled the file surface even when the
+# directory existed.
+ProtectHome=read-only
+ReadWritePaths=/var/lib/partout /home/partout
 PrivateTmp=true
-ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

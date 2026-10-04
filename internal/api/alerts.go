@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -42,6 +43,8 @@ var validRuleKinds = map[string]bool{
 	observe.KindConfigInvalid:     true,
 	observe.KindConfigDrift:       true,
 	observe.KindUpdateRun:         true,
+	observe.KindUpdateDrift:       true,
+	observe.KindSecurityUpdates:   true,
 }
 
 var validSeverities = map[string]bool{"info": true, "warning": true, "critical": true}
@@ -67,7 +70,8 @@ func ruleJSON(r *store.AlertRule) map[string]any {
 	return map[string]any{
 		"id": r.ID, "name": r.Name, "kind": r.Kind, "selector": r.Selector,
 		"thresholds": thresholds, "severity": r.Severity, "enabled": r.Enabled,
-		"created_at": r.CreatedAt, "updated_at": r.UpdatedAt,
+		"webhook_url": r.WebhookURL,
+		"created_at":  r.CreatedAt, "updated_at": r.UpdatedAt,
 	}
 }
 
@@ -141,12 +145,13 @@ func existingThresholds(raw string) map[string]any {
 }
 
 type ruleBody struct {
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Selector   string `json:"selector"`
-	Thresholds any    `json:"thresholds"`
-	Severity   string `json:"severity"`
-	Enabled    *bool  `json:"enabled"`
+	Name       string  `json:"name"`
+	Kind       string  `json:"kind"`
+	Selector   string  `json:"selector"`
+	Thresholds any     `json:"thresholds"`
+	Severity   string  `json:"severity"`
+	Enabled    *bool   `json:"enabled"`
+	WebhookURL *string `json:"webhook_url"` // optional external channel (POST on firing + resolved)
 }
 
 func (b *ruleBody) validate() error {
@@ -154,7 +159,7 @@ func (b *ruleBody) validate() error {
 		return errors.New("name is required")
 	}
 	if !validRuleKinds[b.Kind] {
-		return errors.New("kind must be one of: service_failed, service_restarting, cert_expiring, config_invalid, config_drift, update_run")
+		return errors.New("kind must be one of: service_failed, service_restarting, cert_expiring, config_invalid, config_drift, update_run, update_drift")
 	}
 	if b.Selector == "" {
 		b.Selector = "all"
@@ -164,6 +169,12 @@ func (b *ruleBody) validate() error {
 	}
 	if !validSeverities[b.Severity] {
 		return errors.New("severity must be one of: info, warning, critical")
+	}
+	if b.WebhookURL != nil && *b.WebhookURL != "" {
+		u, err := url.Parse(*b.WebhookURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("webhook_url must be an http(s) URL")
+		}
 	}
 	return validateThresholds(b.Kind, b.Thresholds)
 }
@@ -178,6 +189,7 @@ var thresholdIntKeys = map[string][]string{
 	observe.KindServiceRestarting: {"service_restart_rate_per_hour"},
 	observe.KindCertExpiring:      {"cert_days_remaining"},
 	observe.KindConfigDrift:       {"config_drift_tolerance"},
+	observe.KindUpdateDrift:       {"min_drifted"},
 }
 
 func validateThresholds(kind string, t any) error {
@@ -236,7 +248,15 @@ func (b *ruleBody) toRule(actor string) *store.AlertRule {
 		Name: b.Name, Kind: b.Kind, Selector: b.Selector,
 		Thresholds: string(thresholds), Severity: b.Severity,
 		Enabled: enabled, CreatedBy: actor,
+		WebhookURL: derefStr(b.WebhookURL),
 	}
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func (h *Handler) ruleCreate(w http.ResponseWriter, r *http.Request) {
@@ -299,6 +319,9 @@ func (h *Handler) ruleUpdate(w http.ResponseWriter, r *http.Request) {
 	if b.Enabled == nil {
 		enabled := existing.Enabled
 		b.Enabled = &enabled
+	}
+	if b.WebhookURL == nil {
+		b.WebhookURL = &existing.WebhookURL
 	}
 	if err := b.validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)

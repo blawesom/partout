@@ -9,6 +9,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -89,7 +90,17 @@ func (h *Handler) approvalGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "approval request not found", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, approvalJSON(req))
+	// Detail carries the parked payload (the exact cmd/args an approval
+	// would unleash) — the list stays metadata-only. The chat's approval
+	// cards render from this, same as any future Approvals detail view.
+	out := approvalJSON(req)
+	if req.PayloadJSON != "" {
+		var payload map[string]any
+		if json.Unmarshal([]byte(req.PayloadJSON), &payload) == nil {
+			out["payload"] = payload
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) approvalApprove(w http.ResponseWriter, r *http.Request) {

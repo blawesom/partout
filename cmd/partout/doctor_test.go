@@ -311,3 +311,64 @@ func TestCheckProvisioningTLSSAN(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorFileRoot covers the agent file-root check (docs/spec-file-root.md):
+// a usable root passes with its canonical path, a missing root warns with the
+// create-it remedy (the agent creates it at startup only when the parent is
+// writable — typical gap on hosts provisioned pre-0.9.5), and a symlink or
+// non-writable root fails (the file surface would be disabled, fail closed).
+func TestDoctorFileRoot(t *testing.T) {
+	// Usable root: ok, canonical path in the detail.
+	root := t.TempDir()
+	cfg := newTestConfig()
+	cfg.FileRoot = root
+	r := &doctorResult{}
+	checkFileRoot(cfg, r)
+	if r.fails != 0 || r.warns != 0 {
+		t.Fatalf("usable root should pass, got %+v", r.checks)
+	}
+	if len(r.checks) != 1 || !strings.Contains(r.checks[0].detail, root) {
+		t.Fatalf("expected the canonical path in the detail, got %+v", r.checks)
+	}
+
+	// Missing root: warn with the mkdir/chown remedy, never a hard fail
+	// (the agent may still create it itself).
+	cfg2 := newTestConfig()
+	cfg2.FileRoot = filepath.Join(t.TempDir(), "gone")
+	r2 := &doctorResult{}
+	checkFileRoot(cfg2, r2)
+	if r2.fails != 0 || r2.warns != 1 {
+		t.Fatalf("missing root should warn once, got %+v", r2.checks)
+	}
+	if !strings.Contains(r2.checks[0].detail, "mkdir -p") {
+		t.Fatalf("missing-root warning must carry the remedy, got %+v", r2.checks)
+	}
+
+	// Symlink root: fail (the root must be a real directory).
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg3 := newTestConfig()
+	cfg3.FileRoot = link
+	r3 := &doctorResult{}
+	checkFileRoot(cfg3, r3)
+	if r3.fails != 1 || !strings.Contains(r3.checks[0].detail, "symlink") {
+		t.Fatalf("symlink root must fail, got %+v", r3.checks)
+	}
+
+	// Read-only root: fail (fail closed at runtime).
+	ro := t.TempDir()
+	if err := os.Chmod(ro, 0o555); err != nil {
+		t.Skipf("cannot chmod (running as root?): %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+	cfg4 := newTestConfig()
+	cfg4.FileRoot = ro
+	r4 := &doctorResult{}
+	checkFileRoot(cfg4, r4)
+	if r4.fails != 1 {
+		t.Fatalf("read-only root must fail (as non-root), got %+v", r4.checks)
+	}
+}

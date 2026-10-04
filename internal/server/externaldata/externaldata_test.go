@@ -117,6 +117,11 @@ func TestEOLStateFor(t *testing.T) {
 		{Distro: "ubuntu", Cycle: "24.04", EOLDate: eolFar, FetchedAt: now.Unix()},  // supported
 		{Distro: "debian", Cycle: "12", EOLDate: eolFar,
 			ExtendedSupport: now.AddDate(2, 0, 0).Format("2006-01-02"), FetchedAt: now.Unix()},
+		// RHEL family: the feed publishes MAJOR cycles while os-release
+		// VERSION_ID carries the point release ("10.2") — the regression
+		// that returned "unknown" for every RHEL-family host forever.
+		{Distro: "rockylinux", Cycle: "10", EOLDate: eolFar, FetchedAt: now.Unix()},
+		{Distro: "rhel", Cycle: "9", EOLDate: eolSoon, FetchedAt: now.Unix()},
 	}
 	if err := st.ReplaceEOLCache(rows); err != nil {
 		t.Fatal(err)
@@ -131,6 +136,19 @@ func TestEOLStateFor(t *testing.T) {
 	}
 	if s := r.EOLStateFor("ubuntu", "24.04"); s.State != "supported" {
 		t.Fatalf("24.04 = %q, want supported: %+v", s.State, s)
+	}
+	// Point releases resolve to the major cycle (rocky 10.2 → cycle 10,
+	// rhel 9.4 → cycle 9) — exact-match-only used to return unknown here.
+	if s := r.EOLStateFor("rocky", "10.2"); s.State != "supported" {
+		t.Fatalf("rocky 10.2 = %q, want supported (major-cycle fallback): %+v", s.State, s)
+	}
+	if s := r.EOLStateFor("rhel", "9.4"); s.State != "ending_soon" {
+		t.Fatalf("rhel 9.4 = %q, want ending_soon (major-cycle fallback): %+v", s.State, s)
+	}
+	// A point release of an unknown major cycle still falls through to
+	// unknown (never matches a longer/shorter unrelated cycle).
+	if s := r.EOLStateFor("rocky", "11.1"); s.State != "unknown" {
+		t.Fatalf("rocky 11.1 = %q, want unknown: %+v", s.State, s)
 	}
 	// Unknown distro → unknown.
 	if s := r.EOLStateFor("gentoo", "any"); s.State != "unknown" {

@@ -634,6 +634,21 @@
                 <a @click.prevent="go('policies')" class="gs-link">Policies</a><span class="muted"> · </span><a @click.prevent="go('obs-alerts')" class="gs-link">Alerts</a></li>
             </ol>
           </div>
+          <div v-if="!setupDismissed && (caps.secrets === false || caps.assistant === false)" class="card gs-card" style="margin-bottom:16px">
+            <div class="head">
+              <h2>Finish setting up this server</h2>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="dismissSetup()" aria-label="dismiss">✕</button>
+            </div>
+            <ol class="gs-steps">
+              <li v-if="caps.secrets === false" class="gs-primary"><b>Enable the secrets store</b> — values are encrypted at rest under a master key generated on this server and kept <span class="mono">0600</span> next to the database (env keys still take precedence for ops-managed deployments).
+                <template v-if="isAdmin"><button class="btn primary sm" style="margin-left:8px" :disabled="secretBootBusy" @click="bootstrapSecrets()">Enable secrets →</button></template>
+                <template v-else><span class="muted">Ask an admin to enable it.</span></template>
+              </li>
+              <li v-if="caps.assistant === false" :class="{'gs-primary': caps.secrets !== false}"><b>Configure the assistant</b> — an OpenAI-compatible endpoint; a local Ollama/vLLM keeps all data on-host.
+                <a @click.prevent="go('assistant')" class="gs-link">Assistant</a></li>
+            </ol>
+          </div>
           <div v-if="hosts.length && !firstCmdDismissed && !gsDismissed" class="card gs-card" style="margin-bottom:16px">
             <div class="head">
               <h2>Your first host is connected</h2>
@@ -681,7 +696,7 @@
                   </td>
                   <td><span class="badge" :class="agentBadge(h.state).cls">{{ agentBadge(h.state).label }}</span></td>
                   <td class="muted">{{ h.os || '—' }}</td>
-                  <td class="mono">{{ h.version || '—' }}</td>
+                  <td class="mono">{{ h.version || '—' }}<span v-if="versionSkew(h)" class="badge warn small" style="margin-left:6px" :data-tip="'agent ' + h.version + ' ≠ server ' + serverVersion + ' — legacy/skew code paths apply until upgraded (Updates page)'">skew</span></td>
                   <td class="muted">{{ fmtAgo(h.last_seen) }}</td>
                 </tr>
                 <tr v-if="!hostsLoading && !visibleHosts.length"><td colspan="5"><div class="empty"><div class="big">▦</div><template v-if="fleetFilter.trim()">No hosts match <b>{{ fleetFilter }}</b>.</template><template v-else-if="scope">No hosts in <b>#{{ scope }}</b>.</template><template v-else>No hosts enrolled yet.<div style="margin-top:10px"><button class="btn primary sm" :disabled="!isOperator" @click="openAddHost">Add your first host</button></div></template></div></td></tr>
@@ -788,17 +803,18 @@
           <div class="card">
             <div class="head"><h2>Recent executions</h2></div>
             <table class="tbl">
-              <thead><tr><th>ID</th><th>Command</th><th>Selector</th><th>State</th><th>When</th><th></th></tr></thead>
+              <thead><tr><th>ID</th><th>Command</th><th>Selector</th><th>State</th><th>By</th><th>When</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="e in executions" :key="e.id" class="click" tabindex="0" @click="go('exec/'+e.id)" @keydown.enter.prevent="go('exec/'+e.id)">
                   <td class="mono">{{ e.id }}</td>
                   <td class="mono">{{ e.cmd }}<template v-if="e.args && e.args.length"> {{ e.args.join(' ') }}</template></td>
                   <td class="mono">{{ e.selector }}</td>
                   <td><span class="badge" :class="execBadge(e.state)">{{ e.state }}</span></td>
+                  <td class="muted">{{ e.created_by || '—' }}</td>
                   <td class="muted">{{ fmtAgo(e.created) }}</td>
                   <td class="row-actions"><button class="btn sm" :disabled="!isOperator" @click.stop="rerunExecution(e)" title="Prefill the form with this command (nothing auto-runs)">↻ Re-run</button></td>
                 </tr>
-                <tr v-if="!executions.length"><td colspan="5"><div class="empty">No executions yet.</div></td></tr>
+                <tr v-if="!executions.length"><td colspan="6"><div class="empty">No executions yet.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -942,6 +958,7 @@
           <h1 class="page">Files</h1>
           <p class="page-sub">Host file browser. Reads are open to viewers; upload / edit / perm are policy-gated (<span class="mono">file.write</span> / <span class="mono">file.perm</span>) and audited. Edits are compare-and-swap — a save aborts if the file changed since you opened it.</p>
           <div v-if="fileHost && fileRoot" class="info-box"><b>File root:</b> <span class="mono">{{ fileRoot }}</span> — every path below is relative to this directory. The no-escape invariant: no role or parameter can reach outside the root through the file surface.</div>
+          <div v-else-if="fileHost && fileRootError" class="warn-box"><b>File root unavailable on this agent:</b> <span class="mono">{{ fileRootError }}</span> — the file surface is disabled (fail closed), this is not a legacy agent. Fix on the host: <span class="mono">sudo mkdir -p /home/partout && sudo chown partout:partout /home/partout && sudo chmod 0750 /home/partout</span> (or set <span class="mono">PARTOUT_FILE_ROOT</span> in <span class="mono">/etc/partout/agent.env</span>), then restart the agent.</div>
           <div v-else-if="fileHost" class="warn-box"><b>Legacy agent:</b> no file root reported — the file surface on this host is not confined to a root (pre file-root agent). Upgrade the agent; with <span class="mono">PARTOUT_REQUIRE_FILE_ROOT</span> set, file ops to this host are refused.</div>
           <div class="toolbar">
             <select :value="fileHost" style="max-width:260px" @change="pickFileHost($event.target.value)">
@@ -1387,7 +1404,13 @@
         <section v-else-if="page==='secrets'">
           <h1 class="page">Secrets</h1>
           <p class="page-sub">Encrypted at rest; values are write-only and never displayed.</p>
-          <div class="card" style="margin-bottom:12px">
+          <div v-if="caps.secrets === false" class="card" style="margin-bottom:12px">
+            <b>Secrets are disabled</b> — no master key is configured on this server.
+            <template v-if="isAdmin"> The checklist can generate one (kept <span class="mono">0600</span> next to the database).
+              <button class="btn primary sm" style="margin-left:8px" :disabled="secretBootBusy" @click="bootstrapSecrets()">Enable secrets →</button></template>
+            <template v-else> <span class="muted">Ask an admin to enable it.</span></template>
+          </div>
+          <div v-if="caps.secrets" class="card" style="margin-bottom:12px">
             <div class="form-row" style="align-items:flex-end">
               <label class="fld"><span>Name</span><input v-model="secretForm.name" class="mono" placeholder="db-password" /></label>
               <label class="fld" style="flex:1"><span>Value</span><input v-model="secretForm.value" type="password" placeholder="secret value" /></label>
@@ -1577,7 +1600,24 @@
                 <div v-else-if="m.role==='assistant' && m.tool_name!=='tool_calls'" style="max-width:90%;white-space:pre-wrap"><span class="badge info small" style="display:block;width:fit-content;margin-bottom:2px">Assistant</span>{{ m.content }}</div>
                 <div v-else-if="m.role==='tool'" style="border:1px dashed var(--border);border-radius:8px;padding:6px 10px">
                   <span class="mono small"><b>{{ m.tool_name }}</b></span>
-                  <span v-if="isApprovalResult(m.content)" class="badge warn small">approval required</span>
+                  <template v-if="m.meta">
+                    <a v-if="m.meta.execution_id" @click.prevent="go('exec/'+m.meta.execution_id)" class="gs-link mono small" title="open the execution this action created">{{ m.meta.execution_id }} →</a>
+                    <span v-if="m.meta.run_ids && m.meta.run_ids.length" class="muted small mono">{{ m.meta.run_ids.length }} run{{ m.meta.run_ids.length===1?'':'s' }}</span>
+                  </template>
+                  <div v-for="aid in (m.meta && m.meta.approval_ids) || []" :key="aid" style="margin-top:6px;border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+                    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                      <span class="badge warn small">approval required</span>
+                      <span class="mono small">{{ aid }}</span>
+                      <span v-if="assistantApprovals[aid]" class="badge small" :class="assistantApprovals[aid].state==='approved'?'ok':(assistantApprovals[aid].state==='pending'?'warn':'neutral')">{{ assistantApprovals[aid].state }}</span>
+                      <div class="spacer"></div>
+                      <template v-if="isAdmin && assistantApprovals[aid] && assistantApprovals[aid].state==='pending'">
+                        <button class="btn ok sm" :disabled="apprBusy===aid" @click="decideApproval(aid,'approve')">Approve</button>
+                        <button class="btn danger sm" :disabled="apprBusy===aid" @click="decideApproval(aid,'deny')">Deny</button>
+                      </template>
+                      <a @click.prevent="go('approvals')" class="gs-link small">Approvals →</a>
+                    </div>
+                    <p class="mono small" style="margin:6px 0 0;white-space:pre-wrap">{{ approvalPayloadText(assistantApprovals[aid] && assistantApprovals[aid].payload) || 'Parked by a require_approval rule — a human decides.' }}</p>
+                  </div>
                   <details style="margin-top:4px"><summary class="muted small">result</summary><pre class="console" style="max-height:220px;overflow:auto;white-space:pre-wrap">{{ m.content }}</pre></details>
                 </div>
               </div>
@@ -2043,6 +2083,9 @@
                 <label class="fld" v-if="ruleForm.kind==='security_updates'" style="max-width:240px"><span>Fire when ≥ N packages</span>
                   <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
                 <p class="cap" v-if="ruleForm.kind==='security_updates'" style="margin:8px 0 0">Host-scoped: one alert per host with ≥ N packages carrying a CVE at or above the severity floor (from the periodic security scan). Resolves when the host is patched below the floor.</p>
+                <label class="fld" style="max-width:420px"><span>Webhook URL <span class="muted">(optional external channel)</span></span>
+                  <input v-model="ruleForm.webhook" class="mono" placeholder="https://hooks.example.com/alerts" /></label>
+                <p class="cap" style="margin:0">On firing AND resolved, the alert is POSTed as JSON to this URL (10 s timeout, no retry — failures land in the audit log as <span class="mono">alert.webhook</span>). Empty = in-app only.</p>
                 <div class="toolbar" style="margin-top:10px">
                   <label class="lbl" style="margin:0"><input type="checkbox" v-model="ruleForm.enabled" /> enabled</label>
                   <div class="spacer"></div>
@@ -2055,7 +2098,7 @@
             </div>
           </div>
           <div v-else class="notavail">
-            <span class="tag">M6 · not yet available</span>
+            <span class="tag">not yet available</span>
             <h3>Alert engine not wired on this server</h3>
             <p>Rebuild/upgrade the server to get the alert engine.</p>
           </div>
@@ -2104,6 +2147,8 @@
         groups: [], scope: null, scopeHostIds: null, scopeErr: "",
         fleetFilter: "",
         gsDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.gs.dismissed") === "1"),
+        setupDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.setup.dismissed") === "1"),
+        secretBootBusy: false,
         secureDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.secure.dismissed") === "1"),
         firstCmdDismissed: (typeof localStorage !== "undefined" && localStorage.getItem("partout.nudge.firstcmd") === "1"),
         _returnRoute: "", // route to return to after session-expiry re-login
@@ -2116,11 +2161,11 @@
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
         assistantCfg: null, assistantForm: { base_url: "", model: "", api_key: "", max_tool_calls: 15, timeout_s: 120, default_profile: "readonly", enabled: false, key_set: false },
-        assistantProbe: null, assistantSession: null, assistantMsgs: [], assistantInput: "", assistantProfile: "readonly", assistantBusy: false, assistantAbort: null,
+        assistantProbe: null, assistantSession: null, assistantMsgs: [], assistantInput: "", assistantProfile: "readonly", assistantBusy: false, assistantAbort: null, assistantApprovals: {},
         audit: [], auditKind: "", auditActor: "", auditRange: "", auditMore: "",
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
-        fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null, fileRoot: "",
+        fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null, fileRoot: "", fileRootError: "",
         updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null, jobNote: {}, // per-job dispatch outcome, rendered under the affected row
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
@@ -2434,8 +2479,15 @@
         if (res.status === 401) { this.sessionExpired(); throw new ApiError(401, "unauthorized"); }
         if (res.status === 503) {
           this.refreshCaps();
-          if (wantToast) this.notify("err", "feature disabled in this build (503)");
-          throw new ApiError(503, "disabled");
+          // Honesty pass: the server's 503s carry the real reason (which
+          // feature, why it's off, what to do — e.g. "secrets feature
+          // disabled: no master key configured"). Show THAT, never the old
+          // generic "feature disabled in this build" — which was usually
+          // false (the feature is in the build; it isn't configured).
+          let d503 = null; try { d503 = await res.json(); } catch (e) { }
+          const msg503 = (d503 && d503.message) || "service unavailable";
+          if (wantToast) this.notify("err", msg503 + (d503 && d503.code ? " (" + d503.code + ")" : ""));
+          throw new ApiError(503, msg503, d503 && d503.code, d503);
         }
         let data = null; try { data = await res.json(); } catch (e) { }
         if (!res.ok) {
@@ -2496,12 +2548,18 @@
       navEnabled(n) { return this.capOn(n.cap) && (!n.admin || this.isAdmin); },
       navTitle(n) {
         if (n.admin && !this.isAdmin) return "Requires admin role";
-        if (!this.capOn(n.cap)) return "Not yet available — " + n.cap + " not in this build";
+        if (!this.capOn(n.cap)) {
+          // Two different truths, never merged: the probe says false = the
+          // feature exists in this build but is not configured (remedy: the
+          // Setup checklist); undefined = the build doesn't wire it at all.
+          if (this.caps[n.cap] === false) return "Off — not configured on this server (see the Setup checklist on the fleet page)";
+          return "Not yet available — " + n.cap + " not in this build";
+        }
         return "";
       },
       navTag(n) {
         if (n.admin && !this.isAdmin) return "admin";
-        if (!this.capOn(n.cap)) return "off";
+        if (!this.capOn(n.cap)) return this.caps[n.cap] === false ? "off" : "n/a";
         return "";
       },
       navClick(n) { if (this.navEnabled(n)) this.go(n.key); },
@@ -2766,7 +2824,7 @@
           if (this.page === "session") { this._destroyTerm(); this.loadSessionReplay(); }
           else if (this.page === "sessions") this.loadSessions();
         }
-        else if (kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") { this.loadNavBadges(); if (this.page === "approvals") this.loadApprovals(); }
+        else if (kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") { this.loadNavBadges(); if (this.page === "approvals") this.loadApprovals(); if (this.assistantSession) this.loadAssistantApprovals(true); }
         else if (kind === "alert.firing" || kind === "alert.resolved") { this.loadNavBadges(); if (this.page === "obs-alerts") this.loadAlerts(); }
       },
       async loadPageData() {
@@ -3229,6 +3287,24 @@
         this.gsDismissed = true;
         try { localStorage.setItem("partout.gs.dismissed", "1"); } catch (e) { /* private mode: fine */ }
       },
+      dismissSetup() {
+        this.setupDismissed = true;
+        try { localStorage.setItem("partout.setup.dismissed", "1"); } catch (e) { /* private mode: fine */ }
+      },
+      // Setup checklist (post-login onboarding): one-click enable of the
+      // secrets store. The server generates the master key into its
+      // data-dir default file and installs the manager at runtime — no
+      // restart, no env plumbing. The api() wrapper toasts failures
+      // (e.g. 409 = already enabled by someone else).
+      async bootstrapSecrets() {
+        this.secretBootBusy = true;
+        try {
+          await this.api("/secrets/bootstrap", { method: "POST" });
+          await this.refreshCaps();
+          this.notify("ok", "secrets enabled — master key generated on this server");
+          this.loadPageData();
+        } finally { this.secretBootBusy = false; }
+      },
       dismissSecureCard() {
         this.secureDismissed = true;
         try { localStorage.setItem("partout.secure.dismissed", "1"); } catch (e) { /* private mode: fine */ }
@@ -3533,7 +3609,7 @@
       ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0, update_drift: 1 })[kind] || 0; },
       newRuleForm() {
         this.ruleErr = "";
-        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", severityMin: "high", enabled: true };
+        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", severityMin: "high", enabled: true, webhook: "" };
       },
       editRule(r) {
         this.ruleErr = "";
@@ -3545,6 +3621,7 @@
           thresh: (key && t[key] != null) ? t[key] : this.ruleDefaultThresh(r.kind),
           status: (t.status != null) ? t.status : "paused_failure,failed",
           severityMin: (t.min_severity != null) ? t.min_severity : "high",
+          webhook: r.webhook_url || "",
         };
       },
       thresholdsFor(kind) {
@@ -3564,7 +3641,7 @@
         const f = this.ruleForm;
         if (!f || !f.name) return;
         this.ruleBusy = f.id || "new"; this.ruleErr = "";
-        const body = { name: f.name, kind: f.kind, selector: f.selector || "all", severity: f.severity, enabled: f.enabled, thresholds: this.thresholdsFor(f.kind) };
+        const body = { name: f.name, kind: f.kind, selector: f.selector || "all", severity: f.severity, enabled: f.enabled, thresholds: this.thresholdsFor(f.kind), webhook_url: f.webhook || "" };
         try {
           if (f.id) await this.api("/alerts/rules/" + encodeURIComponent(f.id), { method: "PUT", body });
           else await this.api("/alerts/rules", { body });
@@ -3576,7 +3653,7 @@
       async toggleRule(r) {
         this.ruleBusy = r.id; this.ruleErr = "";
         try {
-          await this.api("/alerts/rules/" + encodeURIComponent(r.id), { method: "PUT", body: { name: r.name, kind: r.kind, selector: r.selector, severity: r.severity, enabled: !r.enabled, thresholds: r.thresholds || {} } });
+          await this.api("/alerts/rules/" + encodeURIComponent(r.id), { method: "PUT", body: { name: r.name, kind: r.kind, selector: r.selector, severity: r.severity, enabled: !r.enabled, thresholds: r.thresholds || {}, webhook_url: r.webhook_url || "" } });
           this.loadRules();
         } catch (e) { this.ruleErr = e.message; } finally { this.ruleBusy = ""; }
       },
@@ -3645,6 +3722,8 @@
           const d = await this.api("/assistant/sessions/" + encodeURIComponent(this.assistantSession.id));
           this.assistantMsgs = d.messages || [];
         } catch (e) { this.assistantMsgs = []; }
+        this.assistantApprovals = {};
+        this.loadAssistantApprovals();
       },
       async assistantNewSession() {
         try {
@@ -3701,8 +3780,13 @@
         else if (ev.type === "tool_result" || ev.type === "approval_required") {
           for (let i = this.assistantMsgs.length - 1; i >= 0; i--) {
             const m = this.assistantMsgs[i];
-            if (m.role === "tool" && m.tool_name === ev.tool && m.content === "…") { m.content = ev.content; break; }
+            if (m.role === "tool" && m.tool_name === ev.tool && m.content === "…") { m.content = ev.content; m.meta = ev.meta || null; break; }
           }
+          // Feedback parity: a real park (parsed approval ids) fetches the
+          // approval detail so the card can offer the same Approve/Deny the
+          // Approvals page does. approval_required without ids never occurs
+          // — the backend only emits it for a real park.
+          if (ev.type === "approval_required") this.loadAssistantApprovals();
         } else if (ev.type === "error") this.assistantMsgs.push({ id: "e" + Date.now(), role: "assistant", content: "⚠ " + ev.content });
       },
       async assistantCancel() {
@@ -3720,7 +3804,37 @@
         try { await this.api("/assistant/config/reset-key", { body: {} }); this.assistantForm.key_set = false; this.notify("ok", "Endpoint key cleared"); }
         catch (e) { this.notify("bad", "Reset failed: " + e.message); }
       },
-      isApprovalResult(text) { return /approval/i.test(text || ""); },
+      // Version skew (operations.md "version_mismatch"): the fleet badge
+      // flags agents not at the server's version — the precondition for
+      // every legacy/skew code path. v-insensitive (a stamped "0.9.9"
+      // matches a reported "v0.9.9").
+      versionSkew(h) {
+        if (!this.serverVersion || !h.version) return false;
+        const strip = (s) => s.replace(/^v/, "");
+        return strip(h.version) !== strip(this.serverVersion);
+      },
+      // --- assistant: approval cards (feedback parity) ---
+      // Cards render from the tool message's parsed ids (meta.approval_ids),
+      // never from grepping the result text, and offer the same Approve/Deny
+      // affordance the Approvals page does (decideApproval — same confirm
+      // dialogs, same API).
+      assistantApprovalIds() {
+        const ids = new Set();
+        for (const m of this.assistantMsgs) for (const id of (m.meta && m.meta.approval_ids) || []) ids.add(id);
+        return [...ids];
+      },
+      async loadAssistantApprovals(force) {
+        if (force) this.assistantApprovals = {};
+        for (const id of this.assistantApprovalIds()) {
+          if (this.assistantApprovals[id]) continue;
+          try { this.assistantApprovals[id] = await this.api("/approvals/" + encodeURIComponent(id), { silent: true }); } catch (e) { /* gone (retention) — the id chip stays */ }
+        }
+      },
+      approvalPayloadText(p) {
+        if (!p) return "";
+        if (p.cmd) return "$ " + p.cmd + (p.args && p.args.length ? " " + p.args.join(" ") : "");
+        try { return JSON.stringify(p); } catch (e) { return ""; }
+      },
       protocolHost() { return location.protocol + '//' + location.host; },
       mcpSnippet() {
         if (!this.mcpInfo) return '';
@@ -3745,6 +3859,7 @@
           const body = verb === "deny" && this._denyReason ? { reason: this._denyReason } : {};
           await this.api("/approvals/" + encodeURIComponent(id) + "/" + verb, { method: "POST", body });
           this.loadApprovals();
+          this.loadAssistantApprovals(true); // chat cards follow the decision
         } catch (e) {
           this.apprMsg = (verb === "approve" ? "Approve" : "Deny") + " failed: " + e.message;
         } finally { this.apprBusy = ""; }
@@ -3978,9 +4093,9 @@
         } catch (e) { this.notify("err", "download failed: " + e.message); }
       },
       fileUp() { this.fileDir = parentPath(this.fileDir); this.listFiles(); },
-      pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.fileRoot = ""; this.listFiles(); this.loadFileRoot(id); },
+      pickFileHost(id) { this.fileHost = id; this.fileDir = "/"; this.fileRoot = ""; this.fileRootError = ""; this.listFiles(); this.loadFileRoot(id); },
       // Load the selected host's file root fact (docs/spec-file-root.md).
-      async loadFileRoot(id) { try { const d = await this.api("/hosts/" + encodeURIComponent(id) + "/facts", { toast: false }); this.fileRoot = (d.facts && d.facts["partout.file_root"]) || ""; } catch (e) { this.fileRoot = ""; } },
+      async loadFileRoot(id) { try { const d = await this.api("/hosts/" + encodeURIComponent(id) + "/facts", { toast: false }); this.fileRoot = (d.facts && d.facts["partout.file_root"]) || ""; this.fileRootError = (d.facts && d.facts["partout.file_root_error"]) || ""; } catch (e) { this.fileRoot = ""; this.fileRootError = ""; } },
       // ---- File dialog: view / edit-CAS / perm (M2 API was ahead of the UI) ----
       openFileDlg(f) {
         const path = joinPath(this.fileDir, f.name);

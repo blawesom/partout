@@ -1,6 +1,6 @@
 # Partout — Deployment
 
-**Status:** v0.9.9 — reflects the current implementation
+**Status:** v0.9.10 — reflects the current implementation
 (M0–M8.1 complete: Web UI, M4 approvals + MCP + OAuth2, M6.1 alert rule kinds,
 v0.7.x in-stream mTLS rotation / offline down-queue dispatch / provisioning
 fresh+join modes / `partout --version`, **M8.1 fleet updates**: release store +
@@ -587,10 +587,11 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_TLS` / `--tls` | **off** | `on` → local root-CA bootstrap + mTLS on the gRPC stream; REST/SSE stay bearer-auth |
 | `PARTOUT_TLS_SERVER_NAMES` / `--tls-names` | **localhost,127.0.0.1,\<hostname\>** | comma-separated SANs for the server leaf |
 | `PARTOUT_TOKEN_ADMIN` / `--admin-token` | *(empty)* | admin bearer token |
+| `PARTOUT_NGINX_CONF` / `PARTOUT_HAPROXY_CONF` / `PARTOUT_CADDY_CONF` | `nginx: /etc/nginx/nginx.conf` · `haproxy: /etc/haproxy/haproxy.cfg` · `caddy: /etc/caddy/Caddyfile` | (M5 observe) config-file paths for service/cert discovery — the agent reads them directly (with `sudo -n cat` fallback per the sudoers scope) |
 | `PARTOUT_TOKEN_OPERATOR` / `--operator-token` | *(empty)* | operator bearer token |
 | `PARTOUT_TOKEN_VIEWER` / `--viewer-token` | *(empty)* | viewer bearer token |
 | `PARTOUT_ADMIN_PASSWORD` / `--admin-password` | *(empty)* | first-run admin-user bootstrap password (M4); otherwise a random password is generated into `<db dir>/admin_password.txt` (0600). Prefer the env var — a flag value is visible in `ps` |
-| `PARTOUT_SECRET_KEY_FILE` / `PARTOUT_SECRET_KEY` | *(empty)* | secrets master key (PRD §5.7): key file (mode `0600`) or env var; per-secret keys derived via HKDF. No key → the secrets feature is disabled at startup |
+| `PARTOUT_SECRET_KEY_FILE` / `PARTOUT_SECRET_KEY` | *(empty)* | secrets master key (PRD §5.7), in precedence order: key file (mode `0600`), env var, or the data-dir default `<db dir>/secret.key` (created by the web UI's one-click enable — Setup checklist, or `POST /api/v1/secrets/bootstrap`); per-secret keys derived via HKDF. No key anywhere → the secrets feature is disabled (enable it from the UI, no restart needed) |
 | `PARTOUT_SESSION_RETENTION_DAYS` | **30** | retention sweeper window for session recordings (PRD §9) |
 | `PARTOUT_INTERRUPTED_TTL_S` | **86400** | (1.0 gate, item 20) how long a disconnect-`interrupted` run may stay interrupted before the sweeper resolves it to `not_delivered` (the agent-side spool window — after 24 h a replayed result can no longer arrive). `0` disables the sweep (runs stay interrupted) |
 | `PARTOUT_ASSISTANT_RETENTION_DAYS` | **30** | (R26) assistant transcript retention — same window as session recordings; sessions and messages purge together |

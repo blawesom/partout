@@ -238,9 +238,91 @@ async function main() {
     check("fleet: checklist primary CTA", [...d.querySelectorAll(".gs-primary button.btn.primary")].some((b) => b.textContent.includes("Start onboarding")), "primary onboarding CTA missing");
     w.__partout.dismissGettingStarted();
     await sleep(250);
-    check("fleet: checklist dismissible", !d.querySelector(".gs-card"), "checklist still shown after dismiss");
+    // Scope to the getting-started card: the setup checklist card shares the
+    // .gs-card class and may legitimately be visible on the same page.
+    check("fleet: checklist dismissible", ![...d.querySelectorAll(".gs-card")].some((c) => c.textContent.includes("Onboard your first host")), "checklist still shown after dismiss");
     w.__partout.hosts = savedHosts;
     await sleep(250);
+  }
+
+  // --- Setup checklist: off capabilities surface as fixable steps ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const savedCaps = inst.caps, savedSetup = inst.setupDismissed;
+    inst.caps = { ...(inst.caps || {}), secrets: false, assistant: false };
+    inst.setupDismissed = false;
+    await sleep(250);
+    const card = [...d.querySelectorAll(".card")].find((c) => c.textContent.includes("Finish setting up this server"));
+    check("setup: card on off capabilities", !!card, "no setup card");
+    if (card) {
+      const btn = [...card.querySelectorAll("button")].find((b) => b.textContent.includes("Enable secrets"));
+      check("setup: one-click secrets CTA", !!btn && typeof inst.bootstrapSecrets === "function", "no enable-secrets CTA");
+      check("setup: assistant step links to its page", !![...card.querySelectorAll("a.gs-link")].find((a) => a.textContent.includes("Assistant")), "no assistant link");
+    }
+    inst.dismissSetup();
+    await sleep(200);
+    check("setup: dismissible", !d.body.textContent.includes("Finish setting up this server"), "card not dismissed");
+    check("setup: dismissal persisted", w.localStorage.getItem("partout.setup.dismissed") === "1", "localStorage not set");
+    inst.caps = savedCaps; inst.setupDismissed = savedSetup;
+    try { w.localStorage.removeItem("partout.setup.dismissed"); } catch (e) {}
+    await sleep(150);
+  }
+
+  // --- Assistant chat: approval cards + execution chips (feedback parity) ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const savedSess = inst.assistantSession, savedMsgs = inst.assistantMsgs, savedApr = inst.assistantApprovals, savedCfg = inst.assistantCfg;
+    w.location.hash = "#/assistant"; await sleep(300);
+    inst.assistantCfg = { enabled: true, base_url: "http://smoke.local/v1", model: "smoke-model", default_profile: "full" };
+    inst.assistantSession = { id: "asst_smoke", profile: "full" };
+    inst.assistantMsgs = [
+      { id: 1, role: "user", content: "run uptime on the web host" },
+      { id: 2, role: "tool", tool_name: "run_command", content: "{\"execution_id\":\"exec_smoke\"}", meta: { approval_ids: ["apr_smoke"], execution_id: "exec_smoke", run_ids: ["run_smoke"] } },
+    ];
+    inst.assistantApprovals = { apr_smoke: { state: "pending", payload: { cmd: "uptime", args: [] } } };
+    await sleep(250);
+    const toolSpan = [...d.querySelectorAll("span")].find((s) => s.textContent.trim() === "run_command");
+    const toolRow = toolSpan && toolSpan.parentElement;
+    check("assistant: exec chip on tool result", !!toolRow && toolRow.textContent.includes("exec_smoke"), "no execution chip");
+    const card = toolRow && [...toolRow.querySelectorAll("div")].find((el) => el.textContent.includes("approval required"));
+    check("assistant: approval card renders from meta", !!card && card.textContent.includes("apr_smoke"), "no approval card");
+    if (card) {
+      check("assistant: card shows the parked payload", card.textContent.includes("$ uptime"), "payload not shown");
+      const btn = [...card.querySelectorAll("button")].find((b) => b.textContent.includes("Approve"));
+      check("assistant: card offers the Approvals-page decision", !!btn, "no Approve/Deny in card");
+    }
+    // No-meta tool result must NOT claim an approval (the old regex did).
+    inst.assistantMsgs = [{ id: 3, role: "tool", tool_name: "list_policies", content: "{\"items\":[{\"effect\":\"require_approval\"}]}" }];
+    await sleep(200);
+    check("assistant: read-only result claims no approval", !d.body.textContent.includes("approval required"), "false positive on a policy listing");
+    inst.assistantSession = savedSess; inst.assistantMsgs = savedMsgs || []; inst.assistantApprovals = savedApr || {}; inst.assistantCfg = savedCfg;
+    w.location.hash = "#/fleet"; await sleep(300); // later checks walk the fleet page
+  }
+
+  // --- Honesty pass: 503s carry the server's reason (no generic lie) ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const stub = new Response(JSON.stringify({ code: "secrets_disabled", message: "secrets feature disabled: no master key configured" }), { status: 503, headers: { "Content-Type": "application/json" } });
+    const realFetch2 = w.fetch;
+    w.fetch = () => Promise.resolve(stub);
+    let caught = null;
+    try { await inst.api("/secrets"); } catch (e) { caught = e; }
+    w.fetch = realFetch2;
+    check("api: 503 carries the server reason", !!caught && String(caught.message).includes("master key") && !String(caught.message).includes("in this build"), "503 message: " + (caught && caught.message));
+  }
+
+  // --- Honesty pass: nav off vs not-in-build; version-skew badge ---
+  if (w.__partout) {
+    const inst = w.__partout;
+    const savedCaps = inst.caps, savedSV = inst.serverVersion;
+    inst.caps = { secrets: false };
+    check("nav: off-cap tooltip says 'not configured'", inst.navTitle({ cap: "secrets" }).includes("not configured"), inst.navTitle({ cap: "secrets" }));
+    inst.caps = {};
+    check("nav: absent-cap tooltip says 'not in this build'", inst.navTitle({ cap: "secrets" }).includes("not in this build"), inst.navTitle({ cap: "secrets" }));
+    inst.caps = savedCaps;
+    inst.serverVersion = "9.9.9";
+    check("fleet: version-skew badge logic", inst.versionSkew({ version: "0.0.1" }) && !inst.versionSkew({ version: "v9.9.9" }), "skew comparison broken");
+    inst.serverVersion = savedSV;
   }
 
   // --- First-command nudge: fleet 0 -> 1 teaches the core loop ---
@@ -422,6 +504,20 @@ async function main() {
   const fileRows = d.querySelectorAll("table.tbl tbody tr").length;
   check("files: real entries", fileRows > 2, "file rows=" + fileRows + " (400/empty => broken)");
   check("files: directory row", [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("📁")));
+  // File-root reporting (docs/spec-file-root.md): the agent's root fact
+  // must survive fact collection (the first facts batch used to wipe it,
+  // making every agent look legacy) — the info box, not the legacy banner.
+  check("files: file root info box", [...d.querySelectorAll(".info-box")].some((x) => x.textContent.includes("File root:")), "no file-root info box (fact wiped or missing)");
+  if (w.__partout) {
+    const savedRoot = w.__partout.fileRoot, savedErr = w.__partout.fileRootError;
+    w.__partout.fileRoot = ""; w.__partout.fileRootError = "fs: create file root /home/partout: permission denied";
+    await sleep(200);
+    const box = [...d.querySelectorAll(".warn-box")].find((x) => x.textContent.includes("File root unavailable"));
+    check("files: honest unavailable banner", !!box && box.textContent.includes("permission denied") && box.textContent.includes("mkdir -p"), "no fail-closed banner with the reason + remedy");
+    check("files: unavailable is not 'legacy'", !d.body.textContent.includes("Legacy agent"), "fail-closed agent misreported as legacy");
+    w.__partout.fileRoot = savedRoot; w.__partout.fileRootError = savedErr;
+    await sleep(150);
+  }
   // Browse into a directory that has regular files so a Download action renders.
   if (w.__partout) { w.__partout.fileDir = "/etc"; w.__partout.listFiles(); }
   await sleep(1200);

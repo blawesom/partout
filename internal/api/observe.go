@@ -144,6 +144,7 @@ func (h *Handler) handleListCertificates(w http.ResponseWriter, r *http.Request)
 		Cert   observe.CertFact `json:"cert"`
 	}
 	items := make([]certEntry, 0)
+	wantPath := q.Get("path")
 	for _, hd := range docs {
 		if agentID != "" && hd.agentID != agentID {
 			continue
@@ -153,6 +154,11 @@ func (h *Handler) handleListCertificates(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		for _, c := range cf.Items {
+			// Single-cert detail (MCP get_cert_detail / deep links): an
+			// exact path match on one host.
+			if wantPath != "" && c.Path != wantPath {
+				continue
+			}
 			if maxDays > 0 {
 				// An unknown expiry (NotAfter==0 from an unparsed date) has
 				// DaysRemaining 0, which would otherwise pass every

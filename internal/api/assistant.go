@@ -212,10 +212,20 @@ func (h *Handler) handleAssistantSessionGet(w http.ResponseWriter, r *http.Reque
 	}
 	items := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
-		items = append(items, map[string]any{
+		it := map[string]any{
 			"id": m.ID, "role": m.Role, "content": m.Content,
 			"tool_name": m.ToolName, "tool_args": m.ToolArgs, "created": m.Created,
-		})
+		}
+		// Feedback parity: the transcript carries the parsed tool-result ids
+		// so a reloaded session renders the same approval cards / execution
+		// chips the live turn did.
+		if m.Meta != "" {
+			var meta map[string]any
+			if json.Unmarshal([]byte(m.Meta), &meta) == nil {
+				it["meta"] = meta
+			}
+		}
+		items = append(items, it)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": sessionToMap(ss), "messages": items})
 }

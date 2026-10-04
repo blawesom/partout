@@ -584,7 +584,13 @@ limits per agent and per principal. All configurable via env vars.
 
 ### 10.1 REST (v1)
 
-Illustrative. Full OpenAPI spec is a later deliverable.
+Illustrative. Full OpenAPI spec is a later deliverable (`GET /openapi.json`
+answers 501 JSON until then — never HTML). Shipped deviations from the
+illustrative paths below, all functional equivalents: package updates live
+under `GET /api/v1/packages/updates?agent_id=` / `POST /api/v1/packages/apply`
+(rather than `/hosts/{id}/updates`), and host tags are
+`PUT|DELETE /api/v1/hosts/{id}/tags/{key}` (rather than
+`POST /api/v1/hosts/{id}/tags`).
 
 ```
 # Hosts & targeting

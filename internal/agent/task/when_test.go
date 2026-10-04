@@ -71,6 +71,10 @@ func TestWhenFileExists(t *testing.T) {
 		{`file.exists('/tmp/partout')`, true, false},
 		{`file.exists('/nonexistent')`, false, false},
 		{`!file.exists('/nonexistent')`, true, false},
+		// The predicate must match exactly — a substring check used to
+		// silently accept `file.existsfoo(…)` as `file.exists`.
+		{`file.existsfoo('/tmp/partout')`, false, true},
+		{`file.size('/tmp/partout')`, false, true},
 	}
 	for _, tc := range tests {
 		got, err := w.Eval(tc.expr)

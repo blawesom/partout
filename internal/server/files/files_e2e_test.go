@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -428,6 +429,23 @@ func TestFilesRequireFileRoot(t *testing.T) {
 	// Legacy agent (no file_root fact): refused.
 	if _, err := fc.Stat(ctx, "ag_files", "hello.txt", actor); err == nil {
 		t.Fatal("file op to a legacy agent should be refused")
+	}
+
+	// A 0.9.5+ agent whose root could not be prepared reports
+	// partout.file_root_error: the refusal must say so (the real reason and
+	// remedy), not the legacy "upgrade the agent" advice.
+	if err := st.UpsertFacts(store.Facts{
+		AgentID: "ag_files",
+		Data:    map[string]string{"partout.file_root_error": "fs: create file root /home/partout: permission denied"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fc.Stat(ctx, "ag_files", "hello.txt", actor)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), "file root unavailable") {
+		t.Fatalf("refusal must surface the agent's own reason, got: %v", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "legacy") {
+		t.Fatalf("fail-closed agent misreported as legacy: %v", err)
 	}
 
 	// Agent reports a file root: allowed.

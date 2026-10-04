@@ -1,6 +1,6 @@
 # Partout — Operations
 
-**Status:** v0.9.9 — day-2 runbook for the control plane. Reflects the current
+**Status:** v0.9.10 — day-2 runbook for the control plane. Reflects the current
 implementation (M0–M8.1 complete, Web UI shipped) where stated; steps for features
 that ship later are marked *(proposed)*.
 **Companion docs:** `PRD.md`, `docs/architecture.md`, `docs/deployment.md`
@@ -53,7 +53,7 @@ Where everything lives (for backup/restore/troubleshooting):
 | Server DB | `PARTOUT_DB_PATH` (default `./partout.db`) | SQLite WAL *(Postgres proposed)*; `<db dir>/tls/` holds the CA + server leaf when `PARTOUT_TLS=on`; `<db dir>/admin_password.txt` (0600) holds the first-run admin password until rotated |
 | Server output / recordings | DB `output_chunks` + `session_records` | command output chunks and PTY session recordings, retention-bounded (PRD §9) |
 | Server extern cache | DB `eol_cache` + `vuln_cache` | EOL dates and vulnerability data (architecture §8) |
-| Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`) or `PARTOUT_SECRET_KEY` | **critical** — losing it = lost secret store (PRD §5.7) |
+| Secret key | `PARTOUT_SECRET_KEY_FILE` (mode `0600`), `PARTOUT_SECRET_KEY`, or the UI-bootstrap default `<db dir>/secret.key` (0600) | **critical** — losing it = lost secret store (PRD §5.7). The UI's one-click enable (Setup checklist / `POST /api/v1/secrets/bootstrap`) generates and adopts it at runtime; env keys take precedence |
 | Server config | `/etc/partout/server.env` (systemd) | env vars (PRD R15) |
 | Server SSH dir | `PARTOUT_SSH_DIR` (default: service user's `$HOME/.ssh`) | fleet keys + `known_hosts` used for provisioning (R17) — **critical asset**: server compromise ⇒ fleet-key exposure |
 | Server UI/API | `http(s)://:8443` | main listener |
@@ -224,10 +224,11 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
 
 ### 3.5 Secrets management
 
-- **Secret key backup**: `PARTOUT_SECRET_KEY_FILE` is the single point of truth for the
-  encrypted secret store. **No in-place rotation in v1** (PRD: KMS/HSM is post-v1).
-  Backup this file and consider a secure escrow (e.g. a hardware token, vault, or
-  multi-party key-sharing scheme).
+- **Secret key backup**: the master key file is the single point of truth for the
+  encrypted secret store — `PARTOUT_SECRET_KEY_FILE` when configured, else the
+  UI-bootstrap default `<db dir>/secret.key` (0600). **No in-place rotation in v1**
+  (PRD: KMS/HSM is post-v1). Backup this file and consider a secure escrow (e.g. a
+  hardware token, vault, or multi-party key-sharing scheme).
 - **Secret rotation**: create a new version in the store; bind it to the target; prior
   bindings are invalidated (PRD §5.7). Audit records which version each run used.
 - **Secret leak** (value exposed in command args): the audit log captures the full-fidelity
@@ -328,7 +329,10 @@ default `/home/partout`, set per host via `PARTOUT_FILE_ROOT` / `--file-root`
   functions are unaffected.
 - The current root is the `partout.file_root` fact (visible on the host page;
   the Files page shows a banner). Change the root by editing `agent.env` and
-  restarting the agent — it is deliberately not an API operation.
+  restarting the agent — it is deliberately not an API operation. An agent
+  whose root could not be prepared reports `partout.file_root_error` and the
+  Files page shows the reason with the remedy instead of the legacy banner
+  (`partout doctor` on the host checks the same thing read-only).
 - Mixed fleet: `PARTOUT_REQUIRE_FILE_ROOT=true` (server) refuses file ops to
   agents that report no root (legacy). Default off during beta; flip it on
   after upgrading all agents, then legacy hosts appear with a warning banner
@@ -342,7 +346,7 @@ default `/home/partout`, set per host via `PARTOUT_FILE_ROOT` / `--file-root`
 
 | What | How | RPO target |
 |---|---|---|
-| Server DB (SQLite) | **Shipped:** `scripts/backup.sh` + `deploy/systemd/partout-backup.timer` (daily, `Persistent=true`, retention 14) — atomic hot snapshot via `partout ctl db-backup` (VACUUM INTO; no sqlite3 CLI needed, server may be running). Manual: `partout ctl db-backup <db> <out>`, or `sqlite3 partout.db ".backup '…'"` | per-hour or nightly |
+| Server DB (SQLite) | **Shipped:** `scripts/backup.sh` + `deploy/systemd/partout-backup.timer` (daily, `Persistent=true`, retention 14) — atomic hot snapshot via `partout ctl db-backup` (VACUUM INTO; no sqlite3 CLI needed, server may be running). Manual: `partout ctl db-backup <db> <out>`, or `sqlite3 partout.db ".backup '…'"`. **Remote trigger:** `POST /api/v1/server/backup` (admin) — the same atomic snapshot from the control plane (UI/CLI/MCP), audited as `server.backup`; lands in `<db dir>/backups/` with the timer's naming | per-hour or nightly |
 | Server output / recordings | in-DB (`output_chunks` + `session_records`); included in the DB backup | daily |
 | Extern cache | in-DB (`eol_cache` + `vuln_cache`); included in the DB backup | nightly |
 | Secret key file | encrypted offsite copy (GPG, HSM) | **always available** |
@@ -357,6 +361,12 @@ anchor for forensics.
 
 ### 4.2 Upgrades (M8.1: signed one-command)
 
+**Pre-release: run the gate.** `scripts/beta-gate.sh` — the one-command
+battery (unit tests, lints, UI smoke, install/update harnesses, backup,
+offline dispatch, TLS rotation, real-systemd self-update, full `partout
+update` E2E). A beta tag is not cut unless the gate is green; the
+fleet-provision E2E is opt-in (`PARTOUT_GATE_FLEET=1`).
+
 **The standard path (v0.8.0+): `partout update`** — server + fleet to N+1 in one
 command, one status line at the end:
 
@@ -370,6 +380,16 @@ partout update --from-file ./dist/partout --version 0.9.6 [--sha256 <hex>]
 # Signed layout (Ed25519, fail closed): publish via scripts/release-publish.sh
 partout update --repo https://releases.example.com/partout
 ```
+
+The update tool's own environment (documented here because it is operator
+config the deployment table cannot see — `check-config-docs.sh` pins this):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PARTOUT_ADMIN_TOKEN` | *(empty)* | admin bearer token for `partout update` (alias of `PARTOUT_TOKEN`; the flag `--token` wins) |
+| `PARTOUT_RELEASE_REPO` | *(empty)* | signed release repo base URL (same as `--repo`) |
+| `PARTOUT_RELEASE_KEY_PRIV` | *(empty)* | Ed25519 private key (b64) to sign releases locally — `scripts/release-publish.sh` writes it; `partout update` verifies against the repo's public key |
+| `PARTOUT_PASSWORD` | *(empty)* | password for `partout ctl auth login` (same as `--password`; prefer the prompt) |
 
 How it supervises each hop:
 - **Artifacts** are proven before anything is touched (fail closed). Beta
@@ -491,6 +511,12 @@ Partout observes **hosts**; you also need to observe the control plane:
   member) for that case.
 - **Metrics**: Prometheus / OTLP metrics export is a post-v1 enhancement (not in v1 scope;
   the alert channel + log tail is the v1 observability surface).
+- **External alert channel (webhook)**: any alert rule may carry a `webhook_url`
+  (rule form / `PUT /api/v1/alerts/rules/{id}`); on firing **and** resolved the alert is
+  POSTed as JSON (`event`, `rule`, `kind`, `severity`, `host_id`, `message`) with a 10 s
+  timeout — fire-and-record, no retry: a missed delivery appears as an `alert.webhook`
+  audit row with the error. Point it at your chatops receiver (Slack/Discord/Teams
+  gateways, Alertmanager webhook format adapters) or anything that accepts JSON POST.
 
 ---
 
@@ -674,8 +700,10 @@ Decision tree:
 | Only some certificates are listed | Discovery is capped (512 files per collection; >1 MiB files and symlinks skipped) and restricted to `/etc/ssl`, `/etc/pki/tls` plus `PARTOUT_CERT_PATHS` | Add the deployment's cert directory to `PARTOUT_CERT_PATHS`. Raise the cap only if the host genuinely needs it |
 | Observe facts stop updating on a busy host | A collector subprocess hit its timeout, or collection is slower than `PARTOUT_OBSERVE_FACTS_INTERVAL` so overlapping ticks are skipped | Check agent logs; raise `PARTOUT_OBSERVE_FACTS_INTERVAL` if collection is legitimately slow, or narrow `PARTOUT_CERT_PATHS` |
 | Services list looks empty though units are running | Custom-units-only filter: distro units are excluded unless labelled | Add the unit name to `PARTOUT_SERVICE_LABELS`, or place a unit file/drop-in under `/etc/systemd/system` |
-| `version_mismatch` on the host | Server and agent versions are beyond compatibility skew | Upgrade the agent to match the server (or vice versa) |
-| "secret key missing" at startup | `PARTOUT_SECRET_KEY_FILE` or `PARTOUT_SECRET_KEY` not configured | Set the key; the secrets feature is disabled until then |
+| Files page: "File root unavailable" banner / `file root unavailable` refusals | The agent's root could not be prepared (typical on hosts provisioned pre-0.9.5: `/home/partout` was never created and `/home` is root-owned; the agent runs unprivileged) — the agent reports `partout.file_root_error` | `sudo mkdir -p /home/partout && sudo chown partout:partout /home/partout && sudo chmod 0750 /home/partout`, then `sudo systemctl restart partout-agent` (or set `PARTOUT_FILE_ROOT` in `agent.env`); `partout doctor` prints the same diagnosis |
+| Files page: "Legacy agent" banner | The host's agent predates v0.9.5 (no file-root support at all) | Upgrade the agent to ≥ the server version; with `PARTOUT_REQUIRE_FILE_ROOT=true` file ops to it are refused |
+| Fleet version skew (nav badge "skew" on host rows, doctor "fleet versions") | An enrolled agent reports a version different from the server's — legacy/skew code paths apply to it (e.g. pre-file-root semantics) | Upgrade the agent to match the server via the Updates page (rollouts), or vice versa; `partout doctor` names every skewed version |
+| "secret key missing" at startup | `PARTOUT_SECRET_KEY_FILE` or `PARTOUT_SECRET_KEY` not configured and no bootstrapped `<db dir>/secret.key` exists | Set the key, or log in and use the web UI's Setup checklist (one-click enable; no restart) |
 | `apply-updates` fails on `ended` host | EOL gate (host is past end-of-support, defaults to require-approval) | Approve manually or remove the EOL gate from the rule |
 | `packages list-updates` / `apply` fails with repo/GPG errors | The host's own package manager is broken (e.g. a third-party repo's GPG key is stale — `grafana`, `tailscale` are frequent offenders); `dnf` fails *silently* until `--disablerepo=…` is added | Fix the repo keys on the host (`rpm --import …`, or remove the broken repo); the package surface only reports what `dnf`/`apt`/`apk` report, it does not repair the host's repos |
 | Policy stale → jobs fail closed | Agent hasn't received a fresh bundle in >48 h (A8), server unreachable | Restore server; agents will fetch the bundle on reconnect |

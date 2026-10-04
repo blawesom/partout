@@ -319,7 +319,7 @@ func DefaultTools() []*Tool {
 		},
 		{
 			Name:        "list_alerts",
-			Description: "List alerts from the alert engine (M6, R25): firing and recently resolved alerts over service/cert/config facts. Filter by state (firing|resolved) and severity (info|warning|critical).",
+			Description: "List alerts from the alert engine: firing and recently resolved alerts over service/cert/config facts. Filter by state (firing|resolved) and severity (info|warning|critical).",
 			InputSchema: objSchema(map[string]any{
 				"state":    strProp("filter by state (firing|resolved); empty = all"),
 				"severity": strProp("filter by severity (info|warning|critical)"),
@@ -341,7 +341,7 @@ func DefaultTools() []*Tool {
 		},
 		{
 			Name:        "list_services",
-			Description: "Fleet service health from agent-collected facts (M5, R18): unit state, enabled, deps, labels. Filter by label/state/name.",
+			Description: "Fleet service health from agent-collected facts: unit state, enabled, deps, labels. Filter by label/state/name.",
 			InputSchema: objSchema(map[string]any{
 				"label": strProp("filter by label"),
 				"state": strProp("filter by state (active|failed|inactive)"),
@@ -356,8 +356,58 @@ func DefaultTools() []*Tool {
 			},
 		},
 		{
+			Name:        "get_service_state",
+			Description: "Single systemd unit state + deps on one host.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host (ag_…)"),
+				"name":     strProp("exact unit name, e.g. nginx.service"),
+			}, "agent_id", "name"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/services"+query(
+					[2]string{"agent_id", argStr(args, "agent_id")},
+					[2]string{"name", argStr(args, "name")},
+				), nil)
+			},
+		},
+		{
+			Name:        "get_cert_detail",
+			Description: "Single certificate with chain status on one host.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("host (ag_…)"),
+				"path":     strProp("certificate file path, e.g. /etc/ssl/certs/app.pem"),
+			}, "agent_id", "path"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/certificates"+query(
+					[2]string{"agent_id", argStr(args, "agent_id")},
+					[2]string{"path", argStr(args, "path")},
+				), nil)
+			},
+		},
+		{
+			Name:        "list_sessions",
+			Description: "List PTY session recordings: id, host, command, duration, state.",
+			InputSchema: objSchema(map[string]any{
+				"agent_id": strProp("filter by host (ag_…)"),
+			}),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/sessions"+query(
+					[2]string{"agent_id", argStr(args, "agent_id")},
+				), nil)
+			},
+		},
+		{
+			Name:        "get_session",
+			Description: "One PTY session recording: metadata, command, timing, close state.",
+			InputSchema: objSchema(map[string]any{
+				"session_id": strProp("session id"),
+			}, "session_id"),
+			Call: func(ctx context.Context, api API, token string, args map[string]any) (string, error) {
+				return doCall(ctx, api, token, "GET", "/api/v1/sessions/"+url.PathEscape(argStr(args, "session_id")), nil)
+			},
+		},
+		{
 			Name:        "list_certificates",
-			Description: "Fleet TLS certificate inventory (M5, R20): expiry, days remaining, subject, SAN, chain status. Filter by host and/or max days remaining.",
+			Description: "Fleet TLS certificate inventory: expiry, days remaining, subject, SAN, chain status. Filter by host and/or max days remaining.",
 			InputSchema: objSchema(map[string]any{
 				"agent_id":          strProp("filter by host id"),
 				"days_remaining_lt": strProp("only certs expiring in fewer than N days"),
@@ -375,7 +425,7 @@ func DefaultTools() []*Tool {
 		},
 		{
 			Name:        "list_configs",
-			Description: "Webservice config facts per host (M5, R19): haproxy/nginx validity + topology (backends, line/brace depth).",
+			Description: "Webservice config facts per host: haproxy/nginx validity + topology (backends, line/brace depth).",
 			InputSchema: objSchema(map[string]any{
 				"agent_id": strProp("filter by host id"),
 				"kind":     strProp("filter by config kind (haproxy|nginx)"),

@@ -1,6 +1,6 @@
 # Partout — Architecture
 
-**Status:** Draft v0.9.9 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine + M7 write actions + M8.1 fleet updates + Decision 3 elevation policy (implementation-level design; §6.1 elevation/fs/config and §12.2 reflect the shipped implementation)
+**Status:** Draft v0.9.10 — observe layer + M4 governance (approvals, MCP, OAuth2) + M6 alert engine + M7 write actions + M8.1 fleet updates + Decision 3 elevation policy (implementation-level design; §6.1 elevation/fs/config and §12.2 reflect the shipped implementation)
 **Companion docs:** `PRD.md` (product), `docs/deployment.md`, `docs/operations.md`
 
 This document is the implementation-level design. The PRD is the source of truth for *what* and
@@ -526,8 +526,11 @@ Rule (one declarative object, stored in `policies`):
 
 - Store: `secrets` + `secret_versions` (append-only until rotation), `secret_bindings`
   (secret → selector → materialization mode: env / temp file / template value).
-- Keys: master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`; per-secret
-  keys = HKDF(master, secret_id) (PRD §5.7). No key → feature disabled at startup with a clear
+- Keys: master key from `PARTOUT_SECRET_KEY_FILE` (0600) or `PARTOUT_SECRET_KEY`, or
+  the data-dir default file (`<db dir>/secret.key`) created by the web UI's one-click
+  bootstrap (`POST /api/v1/secrets/bootstrap`, which installs the manager at runtime);
+  env takes precedence. Per-secret
+  keys = HKDF(master, secret_id) (PRD §5.7). No key → feature disabled with a clear
   error.
 - Distribution: `SecretMaterialize{ref, version, eph_pub, sealed, cache_ttl_s}` over the
   authenticated (TLS) stream. The server decrypts the at-rest ciphertext, then seals the
