@@ -272,7 +272,14 @@ func (d *dnfBackend) List(ctx context.Context) ([]PkgUpdate, error) {
 func (d *dnfBackend) DryRun(ctx context.Context) (string, error) {
 	out, err := run(ctx, time.Minute, "dnf", "upgrade", "--assumeno")
 	if err != nil {
-		return "", fmt.Errorf("dnf upgrade --assumeno: %w", err)
+		// `--assumeno` answers "no" at the transaction prompt: dnf prints
+		// the summary and exits 1 ("Operation aborted"). That is the dry-run
+		// outcome, not a failure — field feedback F8: treating exit 1 as an
+		// error made every dnf apply die at its mandatory dry-run step.
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return summarizeDNF(out), nil
+		}
+		return "", fmt.Errorf("dnf upgrade --assumeno: %w: %s", err, truncateStr(out, 300))
 	}
 	return summarizeDNF(out), nil
 }
@@ -326,6 +333,14 @@ func parseDNFCheck(out string) []PkgUpdate {
 }
 
 // summarizeDNF takes dnf output and returns the last ~20 lines (summary).
+// truncateStr bounds an error-message excerpt.
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + " …"
+}
+
 func summarizeDNF(out string) string {
 	lines := strings.Split(out, "\n")
 	if len(lines) > 20 {
@@ -393,7 +408,12 @@ func run(ctx context.Context, timeout time.Duration, name string, args ...string
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("%s: timed out after %s", name, timeout)
 		}
-		return "", err
+		// Keep the output alongside the error: package managers signal
+		// ordinary outcomes via exit codes (dnf check-update exits 100 when
+		// updates exist, `dnf upgrade --assumeno` exits 1 after printing the
+		// transaction) — callers parse it (field feedback F7: returning ""
+		// made the dnf update list permanently empty).
+		return strings.TrimSpace(string(out)), err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
