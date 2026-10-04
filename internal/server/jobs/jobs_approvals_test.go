@@ -193,11 +193,22 @@ func TestJobRunNowRequireApprovalParksAndApprove(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("job run not dispatched after approval")
 	}
-	final, err := st.GetJobRun(apprErr.RunID)
-	if err != nil || final == nil {
-		t.Fatalf("GetJobRun final: %v", err)
-	}
-	if final.State != "dispatched" {
-		t.Fatalf("job run state = %s, want dispatched (err=%q)", final.State, final.Error)
+	// F9 contract: the agent's TaskRunResult now FINALIZES the manual job
+	// run (it used to be dropped and the row stuck at "dispatched" forever).
+	// The bufconn agent replies "succeeded" immediately, so the row should
+	// reach that terminal state shortly after the dispatch.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		final, err := st.GetJobRun(apprErr.RunID)
+		if err != nil || final == nil {
+			t.Fatalf("GetJobRun final: %v", err)
+		}
+		if final.State == "succeeded" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job run state = %s, want succeeded (the TaskRunResult must finalize the manual run; err=%q)", final.State, final.Error)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
