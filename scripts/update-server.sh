@@ -47,6 +47,19 @@ WORK=""
 
 usage() { grep '^#   update-server.sh\|^#       ' "$0" | sed 's/^# \{0,3\}//'; exit 2; }
 
+# hcurl: the health/API probe. A TLS server (PARTOUT_TLS=on — the
+# recommended posture) serves the self-signed LOCAL root CA, which plain
+# `curl -sf https://…` refuses to verify: every postcheck would fail and
+# every supervised update would roll back (field-caught on the v0.9.12
+# fleet update). Probe loopback with verification skipped — the operator
+# supervised the binary; the probe is about process health, not identity.
+hcurl() {
+  case "$HEALTH" in
+    https:*) curl -sfk "$@" ;;
+    *) curl -sf "$@" ;;
+  esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW="$2"; shift 2;;
@@ -87,7 +100,7 @@ cleanup() { rm -rf "$WORK" 2>/dev/null || true; }
 trap cleanup EXIT
 
 api() { # api <path> -> body (admin token)
-  curl -sf -m 10 -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1$1"
+  hcurl -m 10 -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1$1"
 }
 
 # count_hosts prints the number of hosts the API reports, using only base
@@ -131,7 +144,7 @@ log "selftest: running the new binary's embedded suite"
 
 # ---- snapshot (pre-swap baseline) ------------------------------------------
 PRE_AGENTS=0
-if [ -n "$TOKEN" ] && curl -sf -m 5 -o /dev/null "$HEALTH/healthz"; then
+if [ -n "$TOKEN" ] && hcurl -m 5 -o /dev/null "$HEALTH/healthz"; then
   PRE_AGENTS="$(count_hosts)"
   # An unreadable API here would make the reconnect check meaningless later;
   # say so instead of silently comparing against a bogus baseline.
@@ -147,7 +160,7 @@ log "snapshot: $PRE_AGENTS agent(s) connected before swap"
 log "stop: stopping $SERVICE"
 systemctl stop "$SERVICE"
 for i in $(seq 1 20); do
-  curl -sf -m 2 -o /dev/null "$HEALTH/healthz" 2>/dev/null || break
+  hcurl -m 2 -o /dev/null "$HEALTH/healthz" 2>/dev/null || break
   sleep 0.5
 done
 
@@ -180,8 +193,8 @@ postcheck() {
   local i
   local now
   for i in $(seq 1 "$POST_TIMEOUT"); do
-    if curl -sf -m 2 -o /dev/null "$HEALTH/healthz" \
-       && [ -n "$TOKEN" ] && curl -sf -m 5 -o /dev/null -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1/hosts"; then
+    if hcurl -m 2 -o /dev/null "$HEALTH/healthz" \
+       && [ -n "$TOKEN" ] && hcurl -m 5 -o /dev/null -H "Authorization: Bearer $TOKEN" "$HEALTH/api/v1/hosts"; then
       if [ -z "$PRE_AGENTS" ]; then
         # No trustworthy baseline: healthz + authenticated API is all we can
         # assert, and we already said so above.
@@ -212,7 +225,7 @@ systemctl stop "$SERVICE" 2>/dev/null || true
 mv -f "$BIN.prev" "$BIN"
 systemctl start "$SERVICE" 2>/dev/null || true
 for i in $(seq 1 30); do
-  curl -sf -m 2 -o /dev/null "$HEALTH/healthz" 2>/dev/null && break
+  hcurl -m 2 -o /dev/null "$HEALTH/healthz" 2>/dev/null && break
   sleep 1
 done
 fail "update to $VERSION failed postcheck; rolled back to previous binary (backup: $SAVED_BK)"
