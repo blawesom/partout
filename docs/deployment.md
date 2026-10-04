@@ -367,6 +367,20 @@ Verify: `curl -sf http://localhost:8443/healthz` → `{"status":"ok"}`.
 > not an interactive `--create-admin` prompt. Manual agent install (§3.2) remains the
 > fallback.
 
+**No-toolchain / no-git hosts:** each release also ships an **installer bundle**
+(`partout_install_<version>_linux_<arch>.tar.gz`) — the static binary +
+`install-server.sh` + `backup.sh` + the systemd units side by side, so the
+day-1 path needs neither a Go toolchain nor a repo clone:
+
+```bash
+tar xzf partout_install_<version>_linux_amd64.tar.gz
+sudo bash install_<version>_linux_amd64/install-server.sh \
+     --binary install_<version>_linux_amd64/partout --tls on
+```
+
+(The script resolves the units and `backup.sh` relative to itself; the
+`--deploy-dir`/repo layout below still works for checkouts.)
+
 ### 3.2 Bare binary + systemd — **agent** *(implemented — `deploy/systemd/`)*
 
 ```

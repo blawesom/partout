@@ -74,6 +74,10 @@ TEST_ROOT="${PARTOUT_INSTALL_TEST_ROOT:-}"
 
 usage() { grep '^#   sudo bash\|^#     --' "$0" | sed 's/^# \{0,3\}//'; exit 2; }
 
+# The release bundle ships the binary next to the installer; default to it
+# when present (the repo layout keeps ./partout).
+[ -x "$SCRIPT_DIR/partout" ] && BIN_SRC="$SCRIPT_DIR/partout"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --binary) BIN_SRC="$2"; shift 2;;
@@ -112,8 +116,14 @@ UNIT_DIR="$(p /etc/systemd/system)"
 BACKUP_INSTALL="$(p /usr/local/sbin/partout-backup.sh)"
 DB_P="$(p "$DB")" # the path the doctor call and summary show
 
-[ -n "$DEPLOY_DIR" ] || DEPLOY_DIR="$SCRIPT_DIR/../deploy/systemd"
+# Deploy dir + backup script resolve next to the installer first (the
+# release's installer BUNDLE layout: install-server.sh + backup.sh +
+# systemd/ side by side), then the repo layout — so the bundle works with
+# zero flags and a repo checkout keeps working.
+[ -n "$DEPLOY_DIR" ] || DEPLOY_DIR="$SCRIPT_DIR/systemd"
+[ -d "$DEPLOY_DIR" ] || DEPLOY_DIR="$SCRIPT_DIR/../deploy/systemd"
 BACKUP_SRC="$SCRIPT_DIR/backup.sh"
+[ -f "$BACKUP_SRC" ] || BACKUP_SRC="$SCRIPT_DIR/scripts/backup.sh"
 
 # ---------------------------------------------------------------------------
 # helpers

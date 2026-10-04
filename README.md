@@ -91,9 +91,24 @@ Light + dark themes — the topbar toggle persists per-browser and defaults to t
 
 ## Quick start
 
-Build once (or grab the prebuilt static binary from the latest
-[release](https://github.com/blawesom/partout/releases) — `partout_<version>_linux_<arch>`,
-SHA-256SUMS included — if you don't have a Go toolchain), then run a server and an
+**Installing a server on a fresh Linux host — no toolchain, no git checkout
+needed:** grab the **installer bundle** from the latest
+[release](https://github.com/blawesom/partout/releases) —
+`partout_install_<version>_linux_<arch>.tar.gz` ships the static binary +
+`install-server.sh` + the systemd units side by side:
+
+```bash
+curl -sLO https://github.com/blawesom/partout/releases/latest/download/partout_install_<version>_linux_amd64.tar.gz \
+     -O https://github.com/blawesom/partout/releases/latest/download/SHA-256SUMS
+sha256sum -c SHA-256SUMS --ignore-missing
+tar xzf partout_install_<version>_linux_amd64.tar.gz
+sudo bash install_<version>_linux_amd64/install-server.sh \
+     --binary install_<version>_linux_amd64/partout --tls on \
+     --tls-names <server-ip-or-fqdn>
+```
+
+From a repo checkout instead: build once (or grab the bare
+`partout_<version>_linux_<arch>` binary), then run a server and an
 agent (or an all-in-one demo process).
 
 ```bash
@@ -151,6 +166,20 @@ PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' \
 
 If you deliberately want plaintext (air-gapped lab, SSH tunnel, testing), the same
 flow works without `PARTOUT_TLS`/`PARTOUT_TLS_CA` — but keep it on loopback.
+
+> **Can't reach `https://<server>:8443` from your workstation?** The port is
+> often firewalled to the fleet only (cloud security groups commonly open
+> just SSH). The one-liner tunnel, from the operator machine:
+>
+> ```bash
+> ssh -N -L 8443:<server-ip>:8443 <user>@<server-ip> &      # tunnel
+> grep -q my-partout /etc/hosts || echo 127.0.0.1 my-partout | sudo tee -a /etc/hosts
+> partout ctl hosts --server https://my-partout:8443 --ca-file ca.crt --token $ADMIN
+> ```
+>
+> The `/etc/hosts` alias must be one of the server's TLS SAN names
+> (`--tls-names`) — see [docs/deployment.md](docs/deployment.md) §1.2 for
+> the full pattern (agents never need this: they reach the server directly).
 
 The host appears in the **Fleet** page; Observe facts fill in after the first upload.
 

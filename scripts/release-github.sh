@@ -45,6 +45,18 @@ for GOARCH in amd64 arm64; do
     -ldflags "-s -w -X github.com/blawesom/partout/internal/agent/facts.Version=$VER" \
     -o "$T/dist/partout_linux_${GOARCH}/partout" ./cmd/partout
   ( cd "$T/dist" && tar czf "partout_${VER}_linux_${GOARCH}.tar.gz" "partout_linux_${GOARCH}" )
+
+  # Installer bundle: binary + install-server.sh + backup.sh + systemd
+  # units, side by side — the day-1 path for a host without a git
+  # checkout (field feedback: a minimal Rocky box has no git, and the
+  # installer used to live only in the repo). install-server.sh resolves
+  # everything relative to itself, so the bundle needs zero flags.
+  mkdir -p "$T/dist/install_${VER}_linux_${GOARCH}/systemd"
+  cp "$T/dist/partout_linux_${GOARCH}/partout" "$T/dist/install_${VER}_linux_${GOARCH}/"
+  cp scripts/install-server.sh scripts/backup.sh "$T/dist/install_${VER}_linux_${GOARCH}/"
+  cp deploy/systemd/partout-server.service deploy/systemd/partout-backup.service \
+     deploy/systemd/partout-backup.timer "$T/dist/install_${VER}_linux_${GOARCH}/systemd/"
+  ( cd "$T/dist" && tar czf "partout_install_${VER}_linux_${GOARCH}.tar.gz" "install_${VER}_linux_${GOARCH}" )
 done
 ( cd "$T/dist" && sha256sum *.tar.gz > SHA-256SUMS )
 
