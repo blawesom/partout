@@ -783,7 +783,11 @@ func elevationScript(opts StartOptions) string {
 	b.WriteString("# operator's elevation policies, then render + visudo-check + install\n")
 	b.WriteString("# the sudoers drop-in FROM them (single source of truth). Runs as root;\n")
 	b.WriteString("# a bad policy aborts the install here, at the earliest possible moment.\n")
-	b.WriteString("mkdir -p /etc/partout/elevation.d\n")
+	// install -d with an EXPLICIT mode: the install script runs under
+	// `umask 077`, so a bare mkdir -p would create the dir 0700 root-only
+	// and the agent could never read its own policy (field-caught on the
+	// v0.9.11 run: the agent degraded to legacy elevation mode).
+	b.WriteString("install -d -m 0755 /etc/partout/elevation.d\n")
 	for i, ep := range opts.ElevationPolicies {
 		fmt.Fprintf(&b, "ELEV=/tmp/partout-elev-%s\n", ep.SHA[:12])
 		fmt.Fprintf(&b, "ELEVACT=$(sha256sum \"$ELEV\" | cut -d' ' -f1)\n")
