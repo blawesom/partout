@@ -1941,6 +1941,17 @@ func (c *ctl) cmdFilePerm(args []string) {
 }
 
 // numStr renders a JSON-decoded number (float64) as an integer string.
+// strOrDash renders nil/empty as "-" (JSON nulls decode to nil).
+func strOrDash(v any) string {
+	if v == nil {
+		return "-"
+	}
+	if s := numStr(v); s != "" {
+		return s
+	}
+	return "-"
+}
+
 func numStr(v any) string {
 	if f, ok := v.(float64); ok {
 		return strconv.FormatInt(int64(f), 10)
@@ -2285,7 +2296,7 @@ func (c *ctl) cmdPackages(args []string) {
 		for _, u := range ups {
 			fmt.Printf("%-30s %-25s %-25s %-8s %s\n",
 				u["name"], u["installed"], u["available"],
-				u["vuln_count"], u["max_severity"])
+				numStr(u["vuln_count"]), strOrDash(u["max_severity"]))
 		}
 
 	case "apply":

@@ -260,13 +260,43 @@ func (d *dnfBackend) List(ctx context.Context) ([]PkgUpdate, error) {
 		// dnf check-update returns 100 if updates available; that's OK.
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == 100 {
-				return parseDNFCheck(out), nil
+				return dnfListWithInstalled(parseDNFCheck(out)), nil
 			}
 		}
 		return nil, fmt.Errorf("dnf check-update: %w", err)
 	}
 	// Exit code 0 means no updates.
 	return nil, nil
+}
+
+// dnfListWithInstalled fills the Installed version of each update from the
+// rpm database (`rpm -qa`, one pass): `dnf check-update` only reports the
+// available side, and the CLI/Updates table used to show an empty INSTALLED
+// column on every RPM host.
+func dnfListWithInstalled(updates []PkgUpdate) []PkgUpdate {
+	inv, err := rpmInventory()
+	if err != nil {
+		return updates // best-effort: the available side is still correct
+	}
+	for i := range updates {
+		updates[i].Installed = inv[updates[i].Name]
+	}
+	return updates
+}
+
+// rpmInventory maps package name -> version-release from `rpm -qa`.
+func rpmInventory() (map[string]string, error) {
+	out, err := run(context.Background(), time.Minute, "rpm", "-qa", "--qf", "%{NAME}\t%{VERSION}-%{RELEASE}\n")
+	if err != nil {
+		return nil, err
+	}
+	inv := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if name, ver, ok := strings.Cut(line, "\t"); ok {
+			inv[name] = ver
+		}
+	}
+	return inv, nil
 }
 
 func (d *dnfBackend) DryRun(ctx context.Context) (string, error) {
