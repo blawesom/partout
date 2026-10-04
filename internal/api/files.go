@@ -234,7 +234,10 @@ func (h *Handler) fileErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", msg, nil)
 	case strings.Contains(msg, "exceeds") || strings.Contains(msg, "cap"):
 		writeError(w, http.StatusRequestEntityTooLarge, "too_large", msg, nil)
-	case strings.Contains(msg, "symlink") || strings.Contains(msg, "invalid path") || strings.Contains(msg, "absolute path"):
+	case strings.Contains(msg, "fs: bad path: path traversal") || strings.Contains(msg, "fs: bad path: path escapes"):
+		writeError(w, http.StatusForbidden, "denied", msg, nil)
+	case strings.Contains(msg, "symlink") || strings.Contains(msg, "invalid path") || strings.Contains(msg, "absolute path") ||
+		strings.Contains(msg, "fs: bad path") || strings.Contains(msg, "missing intermediate directory"):
 		writeError(w, http.StatusBadRequest, "bad_path", msg, nil)
 	case strings.Contains(msg, "no active session") || strings.Contains(msg, "stream closed") || strings.Contains(msg, "deadline exceeded"):
 		writeError(w, http.StatusBadGateway, "agent_unavailable", msg, nil)

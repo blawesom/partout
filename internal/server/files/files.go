@@ -182,6 +182,13 @@ func (c *Controller) Upload(ctx context.Context, agentID, path string, r io.Read
 		c.audit(agentID, "file", "upload", path, beginOp.OpId, actor, "error", 0, 0, "", err.Error())
 		return "", err
 	}
+	if beginRes.Code != 0 {
+		// Field feedback F19: the begin failure used to be ignored and the
+		// chunk loop then ran with an empty temp path ("not an upload temp
+		// file: .").
+		c.audit(agentID, fileAuditKind(beginRes.Code), "upload", path, beginOp.OpId, actor, opStateForCode(beginRes.Code), 0, 0, "", beginRes.Error)
+		return "", fmt.Errorf("files: upload begin: %s (code %d)", beginRes.Error, beginRes.Code)
+	}
 	temp := beginRes.TempPath
 	committed := false
 	defer func() {
@@ -345,7 +352,9 @@ func (c *Controller) doSend(ctx context.Context, agentID string, op *pb.FileOp) 
 
 // do is the read-path helper: dispatch + result + audit.
 func (c *Controller) do(ctx context.Context, agentID string, op *pb.FileOp, actor Actor) (*pb.FileOpResult, error) {
-	opKind := string(op.Kind)
+	// op.Kind is a proto enum: string(op.Kind) renders the raw number as a
+	// rune (the field saw "\u0001" in a download error) — use its name.
+	opKind := op.Kind.String()
 	res, err := c.doSend(ctx, agentID, op)
 	if err != nil {
 		c.audit(agentID, "file", opKind, op.Path, op.OpId, actor, "error", 0, 0, "", err.Error())

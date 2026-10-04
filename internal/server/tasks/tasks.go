@@ -185,14 +185,20 @@ func (c *Controller) dispatchRun(ctx context.Context, runID, taskID string, vers
 		return nil, err
 	}
 
-	// Record per-step results.
-	for _, sr := range result.GetSteps() {
+	// Record per-step results (kind + display name from the dispatched
+	// step definition — field feedback F19: kind/name used to be recorded
+	// as "unknown" with no name).
+	for i, sr := range result.GetSteps() {
+		kind, name := "unknown", ""
+		if i < len(steps) {
+			kind, name = steps[i].GetKind(), steps[i].GetName()
+		}
 		step := &store.TaskRunStep{
 			RunID: runID, StepIdx: int(sr.GetStepIndex()),
-			Kind: "unknown", State: sr.GetState(), Detail: sr.GetDetail(),
+			Kind: kind, Name: name, State: sr.GetState(), Detail: sr.GetDetail(),
 			Started: sr.GetStarted(), Finished: sr.GetFinished(),
 		}
-		if len(steps) > int(sr.GetStepIndex()) {
+		if kind == "unknown" && len(steps) > int(sr.GetStepIndex()) {
 			step.Kind = steps[sr.GetStepIndex()].GetKind()
 		}
 		_ = c.st.RecordTaskRunStep(step)

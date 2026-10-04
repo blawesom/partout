@@ -379,6 +379,60 @@ func DownloadAt(root, path string, offset int64, cfg Config) ([]byte, int64, boo
 // UploadBegin creates the upload temp file (same directory as the target, so
 // the commit rename is atomic on the same filesystem). It enforces the
 // transfer size cap up front. Returns the absolute temp path.
+
+// resolvePathForUpload is ResolvePath with upload semantics: missing
+// INTERMEDIATE directories are created (mkdir -p, 0755, confined to the
+// file root, no symlink components) rather than rejected — the file
+// surface has no separate mkdir op, so a nested upload would otherwise be
+// impossible (field feedback F19). The final component may not exist.
+func resolvePathForUpload(root, path string) (string, error) {
+	if root == "" {
+		return "", ErrRootUnavailable
+	}
+	rel := strings.TrimPrefix(path, "/")
+	rel = filepath.Clean(rel)
+	switch rel {
+	case ".", "":
+		return root, nil
+	case "..":
+		return "", fmt.Errorf("%w: path traversal", ErrBadPath)
+	}
+	if strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: path traversal", ErrBadPath)
+	}
+	full := filepath.Join(root, rel)
+	if r, err := filepath.Rel(root, full); err == nil && (r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator))) {
+		return "", fmt.Errorf("%w: path escapes file root", ErrBadPath)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	prefix := root
+	for i, p := range parts {
+		prefix = filepath.Join(prefix, p)
+		isFinal := i == len(parts)-1
+		info, err := os.Lstat(prefix)
+		if os.IsNotExist(err) {
+			if isFinal {
+				return full, nil // target may not exist yet (upload)
+			}
+			// Create the missing intermediate directory (upload semantics).
+			if err := os.Mkdir(prefix, 0o755); err != nil {
+				return "", fmt.Errorf("fs: mkdir %s: %w", prefix, err)
+			}
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("fs: %s: %w", prefix, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%w: symlink not allowed in path: %s", ErrBadPath, p)
+		}
+		if !isFinal && !info.IsDir() {
+			return "", fmt.Errorf("%w: not a directory: %s", ErrBadPath, p)
+		}
+	}
+	return full, nil
+}
+
 func UploadBegin(root, target string, totalSize int64, cfg Config) (string, error) {
 	cfg = cfg.fill()
 	if totalSize < 0 {
@@ -387,7 +441,7 @@ func UploadBegin(root, target string, totalSize int64, cfg Config) (string, erro
 	if totalSize > cfg.MaxTransfer {
 		return "", fmt.Errorf("%w: transfer size %d exceeds cap %d", ErrCapExceeded, totalSize, cfg.MaxTransfer)
 	}
-	clean, err := ResolvePath(root, target)
+	clean, err := resolvePathForUpload(root, target)
 	if err != nil {
 		return "", err
 	}
