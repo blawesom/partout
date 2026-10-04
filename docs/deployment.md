@@ -140,6 +140,7 @@ Partout — the operator's cluster manager owns availability (PRD §13).
 | Split gRPC listener | *(proposed — `PARTOUT_GRPC_ADDR`, not wired)* | Optional separate port if the operator wants gRPC on its own LB/TLS policy |
 | Agent → server | outbound only | Agent needs only **egress** to the server (gRPC + REST enrollment); never inbound |
 
+- **Cloud security groups / host firewalls**: agents need only **egress to the server's 8443**; the operator needs reachability of 8443 (browser/CLI) or an SSH tunnel. A common cloud posture opens 22 to the operator and 8443 only within the fleet's security group — in that setup, drive the CLI/UI through a tunnel: `ssh -N -L 8443:<server>:8443 user@server` plus a local hosts entry mapping a **leaf-SAN name** (e.g. `partout-server-1`) to 127.0.0.1, then `--server https://partout-server-1:8443`. Provisioning (server→target SSH) still needs the SSH port open from the server.
 - TLS: server-native via a **local root-CA bootstrap** — `PARTOUT_TLS=on` (or `--tls on`)
   generates a root CA + server leaf cert under `<db dir>/tls/` on first run. Plaintext
   `h2c` is the default when TLS is off (no separate H2C switch). The older
@@ -602,7 +603,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_DISABLE_EXTERNAL_DATA_REFRESH` | **false** | air-gap switch: disables all external data fetching, EOL + CVE (PRD §6.3) |
 | `PARTOUT_DATA_DIR` / `--data-dir` | *(empty)* | parsed; reserved for future output blobs — external data cache is in-DB (`eol_cache`/`vuln_cache`) |
 | `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules. **ssh-config aliases work as provision hosts**: the run resolves them via `ssh -G` against that same config before keyscan, and the key-confirm screen shows the resolved target. The wizard's *SSH access* line and `partout doctor` report host-specific `IdentityFile` entries too (keys a conventional-name scan misses) |
-| `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning (the listen address `:8443` is not usable by remote agents). The hostname default only works when every target can resolve it — on routed LANs without DNS, or when `/etc/hosts` maps the hostname to `127.0.1.1`, set an explicit IP/FQDN (the server warns at boot and `doctor` checks it) |
+| `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning — on cloud hosts the default hostname is an internal DNS name remote targets may not resolve; set it to the public IP/FQDN in `/etc/partout/server.env` before provisioning (the listen address `:8443` is not usable by remote agents). The hostname default only works when every target can resolve it — on routed LANs without DNS, or when `/etc/hosts` maps the hostname to `127.0.1.1`, set an explicit IP/FQDN (the server warns at boot and `doctor` checks it) |
 | `PARTOUT_REQUIRE_FILE_ROOT` | **false** | (file root, docs/spec-file-root.md) when true, file ops are refused to agents that report no `partout.file_root` fact (legacy/pre file-root agents). For mixed-fleet cutovers: flip on once every agent is upgraded; default off during beta |
 
 RBAC: when no token is set the server runs in **single-user local mode** (no auth);
@@ -619,9 +620,9 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |
-| `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`) |
+| `PARTOUT_CERT_PATHS` | *(empty)* | (M5) comma-separated paths for cert discovery, in addition to defaults (`/etc/ssl/`, `/etc/pki/tls/`). Discovery is **service-leaf oriented**: cert files referenced by nginx/haproxy/caddy configs are collected first, plus regular files under the default roots. The CA-store **symlink farms** (`/etc/ssl/certs/*`, RHEL's `/etc/pki/tls/certs/*.0` hash links) are deliberately skipped — a stock host legitimately reports zero certificates. To watch a service cert that lives outside the defaults and no standard config, list its directory here (e.g. `/etc/pki/tls/private,/var/lib/partout/tls`) |
 | `PARTOUT_CERT_CA` | *(empty)* | (M5) trust bundle for certificate chain verification; empty = resolve from standard system locations. When none is found, chains are reported as *unchecked*, never as broken |
-| `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated operator labels for custom unit identification |
+| `PARTOUT_SERVICE_LABELS` | *(empty)* | (M5) comma-separated unit names to include in service facts/alerts. **Service facts cover custom units only** (PRD Decision 13: unit files under `/etc/systemd/system/`, or names listed here) — distro-packaged units (sshd, fail2ban, chronyd…) are NOT monitored until listed. To alert on a standard service, name it here (e.g. `PARTOUT_SERVICE_LABELS=fail2ban,sshd`) and restart the agent |
 | `PARTOUT_REBOOT_FLUSH_S` | **5** | (M3) pre-reboot grace for a task `reboot` step (PRD §5.5): the agent waits this long after persisting the resume marker, so the `rebooting` report flushes up the stream before the host goes down |
 | `PARTOUT_RELEASE_KEY` | *(empty)* | (M8.1) Ed25519 **public** key (hex or path) the agent verifies fleet-update releases against; set → strict-signed (unsigned refused) |
 | `PARTOUT_RELEASE_VERIFY_KEY` | *(empty)* | server-side, optional: Ed25519 public key (base64) that every upload's signature must verify against before the release is stored (catches signing mistakes at registration) |
@@ -733,7 +734,7 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 
 ## 6. Bring-up checklist (first deployment, current)
 
-0. **Pre-flight the server host:** `partout doctor` (mode/addr/port/db/tls-taken
+0. **Pre-flight the server host:** `partout doctor --env-file /etc/partout/server.env` (mode/addr/port/db/tls-taken
    from the same env/flag config the server uses). It reports pass/fail for the
    things that otherwise surface as a confusing start failure — port free, DB
    dir writable, TLS mode + SANs (**plain HTTP on a non-loopback bind warns**:

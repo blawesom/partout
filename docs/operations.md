@@ -269,12 +269,14 @@ kernel's wall can be kept, and checked, in sync. Example
 }
 ```
 
+- **Bare commands**: a rule with no matcher — `{"allow":"reboot"}` — grants the command **with zero arguments only** (rendered in sudoers as `path ""`, the exact no-arguments specifier). Use it for `reboot`/`poweroff`-style entry points.
+- **Invalid policy = degraded, not fatal**: a policy file that fails to load is reported (startup log + the `partout.elevation` fact carries the error) and the agent continues in **legacy elevation mode** — everything through `sudo -n`, the sudoers wall still bounding privilege. Fix the file and re-run `partout ctl elevation install-sudoers`.
 - **Enable** (per host):
   1. Install the policy: `sudo install -m 0644 -o root -g root
      elevation-web.json.example /etc/partout/elevation.d/10-web.json` (edit to
      the fleet's actual scope first).
   2. Render + install the sudoers wall (visudo-checked before it touches the
-     system): `sudo partout ctl elevation install-sudoers`.
+     system): `sudo /usr/local/bin/partout ctl elevation install-sudoers` (full path — sudo's secure_path commonly excludes /usr/local/bin).
   3. Set `PARTOUT_ELEVATE=sudo` in `/etc/partout/agent.env`; remove
      `NoNewPrivileges=true` from the agent unit (sudo needs setuid), then
      `systemctl daemon-reload && systemctl restart partout-agent`.
@@ -305,6 +307,7 @@ kernel's wall can be kept, and checked, in sync. Example
 - **Revert**: remove the policy + sudoers file + `PARTOUT_ELEVATE`, restore
   `NoNewPrivileges=true`, restart. The agent is unprivileged again
   immediately; no state is affected.
+- **Watching standard (distro) services**: service facts and `service_failed`/`service_restarting` alerts cover **custom units only** (PRD Decision 13). A stock `fail2ban`/`sshd` is invisible until you opt in: add `PARTOUT_SERVICE_LABELS=fail2ban,sshd` to `/etc/partout/agent.env` and restart the agent (observe refresh ~5 min).
 - **Legacy drop-in** (`deploy/sudoers/partout-agent`): still supported as the
   no-policy fallback (its `!env_reset` trade and dispatch tier apply as
   documented there). New installs should use the policy flow — the drop-in is
@@ -339,6 +342,8 @@ default `/home/partout`, set per host via `PARTOUT_FILE_ROOT` / `--file-root`
   until they report a root.
 
 ---
+
+> **Distro note — baseline tools on RHEL-family**: `fail2ban` lives in EPEL, not the base repos. A baseline task installs `epel-release` first (itself just a package), then `fail2ban`; on Ubuntu/Debian both come from main. `vim` maps to `vim-enhanced` on RHEL-family.
 
 ## 4. Maintenance
 
