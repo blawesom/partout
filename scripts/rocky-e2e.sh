@@ -176,7 +176,14 @@ check "mock systemctl is on PATH" test -x /usr/sbin/systemctl
 
 # --- 2. build -----------------------------------------------------------------
 say "building the binary"
-(cd "$REPO" && CGO_ENABLED=0 go build -o "$WORK/partout" ./cmd/partout)
+# PARTOUT_BIN: a prebuilt (static) binary may be supplied — the CI job
+# builds on the runner (with the Go toolchain cache) and mounts it into
+# the container; locally the script builds in-place.
+if [ -n "${PARTOUT_BIN:-}" ] && [ -x "$PARTOUT_BIN" ]; then
+  cp "$PARTOUT_BIN" "$WORK/partout"
+else
+  (cd "$REPO" && CGO_ENABLED=0 go build -o "$WORK/partout" ./cmd/partout)
+fi
 check "binary reports a version" "$WORK/partout" --version
 
 # --- 3. real install-server.sh, as root, TLS on -------------------------------
