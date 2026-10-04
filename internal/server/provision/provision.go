@@ -431,11 +431,12 @@ func (p *Provisioner) run(ctx context.Context, ar *activeRun, run *store.Provisi
 		return
 	}
 	// Step 4: install.
+	installStarted := time.Now()
 	if !p.stepInstall(ctx, run, token, opts) {
 		return
 	}
 	// Step 5: wait-enroll (terminal: connected or failed).
-	p.stepWaitEnroll(ctx, run)
+	p.stepWaitEnroll(ctx, run, installStarted)
 }
 
 // stepConnect performs the fingerprint gate. Returns true to continue (host
@@ -506,6 +507,10 @@ echo "user=$(whoami)"
 if sudo -n true 2>/dev/null; then echo "sudo=yes"; else echo "sudo=no"; fi
 # Currently-installed partout version (version-diff check). none = not present.
 if [ -x /usr/local/bin/partout ]; then echo "remote_version=$(/usr/local/bin/partout --version 2>/dev/null | awk '{print $2}')"; else echo "remote_version=none"; fi
+# Existing agent identity (join mode: the run links to this agent instead of
+# waiting for a fresh enrollment — the agent keeps its identity and never
+# consumes the new token).
+echo "agent_uuid=$(sudo -n cat /var/lib/partout/agent/identity.json 2>/dev/null | grep -o '\"uuid\":\"[^\"]*\"' | cut -d'\"' -f4)"
 echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
 # Host -> server reachability on the control-plane port. The https attempt
 # is deliberately unverified (curl -k): preflight only proves the network
@@ -546,6 +551,22 @@ fi
 	remoteVer := facts["remote_version"]
 	facts["update"] = versionNote(remoteVer, p.localVersion)
 	p.log.Printf("provision: %s version: remote=%s local=%s (%s)", run.ID, remoteVer, p.localVersion, facts["update"])
+
+	// Join mode + an existing agent: link the run to it NOW (field friction:
+	// the run used to wait for a fresh enrollment that never happens — the
+	// agent keeps its identity and does not consume the token, so wait-enroll
+	// always timed out with "agent did not connect within 60s" even though
+	// the update had fully succeeded).
+	if run.Mode == "join" && facts["agent_uuid"] != "" {
+		if agent, err := p.store.AgentByUUID(facts["agent_uuid"]); err == nil && agent != nil {
+			if err := p.store.LinkProvisionRunAgent(run.ID, agent.ID); err == nil {
+				run.AgentID = agent.ID
+				p.log.Printf("provision: %s join: existing agent %s will be updated in place", run.ID, agent.ID)
+			} else {
+				p.log.Printf("provision: %s join: link agent: %v", run.ID, err)
+			}
+		}
+	}
 
 	if facts["init"] != "systemd" {
 		_ = p.store.FinishProvisionStep(run.ID, 2, "handoff", out, "")
@@ -890,9 +911,42 @@ echo INSTALL_OK
 
 // stepWaitEnroll polls until the agent from this run has connected. Terminal:
 // connected (success) or failed (timeout).
-func (p *Provisioner) stepWaitEnroll(ctx context.Context, run *store.ProvisionRun) {
+func (p *Provisioner) stepWaitEnroll(ctx context.Context, run *store.ProvisionRun, installStarted time.Time) {
 	p.setState(run, "enrolling", stepNames[4], "")
 	p.beginStep(run, 5)
+
+	// Join mode with a linked existing agent (linked at preflight): the agent
+	// keeps its identity and reconnects after the install restarts it — wait
+	// for a fresh connection (last_seen after the install began), not for a
+	// token enrollment that never happens.
+	if run.AgentID != "" {
+		agent, _ := p.store.Agent(run.AgentID)
+		if agent != nil {
+			deadline := time.Now().Add(60 * time.Second)
+			for time.Now().Before(deadline) {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Second):
+				}
+				agent, err := p.store.Agent(run.AgentID)
+				if err == nil && agent != nil && agent.State == "connected" && agent.LastSeen >= installStarted.Unix() {
+					_ = p.store.FinishProvisionStep(run.ID, 5, "done", "", "")
+					p.setTerminal(run, "connected", "")
+					p.audit("provision.completed", fmt.Sprintf(`{"run_id":%q,"agent_id":%q,"mode":%q,"updated":true}`, run.ID, agent.ID, run.Mode))
+					if p.emitter != nil {
+						p.emitter.Emit("provision.connected", map[string]string{"run_id": run.ID, "agent_id": agent.ID})
+					}
+					return
+				}
+			}
+			_ = p.store.FinishProvisionStep(run.ID, 5, "failed", "", "existing agent did not reconnect within 60s")
+			p.setTerminal(run, "failed", "existing agent did not reconnect within 60s")
+			return
+		}
+		// Agent row vanished (removed from the fleet mid-run): fall through
+		// to the token path — the timeout below reports it.
+	}
 
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {

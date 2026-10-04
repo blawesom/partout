@@ -1183,3 +1183,94 @@ func TestStartRejectsBadElevationPolicy(t *testing.T) {
 		t.Fatal("Start must reject --elevate without policies")
 	}
 }
+
+// TestJoinModeLinksExistingAgent (field friction fix): a join-mode run on an
+// already-enrolled host must link to the EXISTING agent (identity preserved,
+// token never consumed) and complete when that agent reconnects — it used to
+// wait for a fresh enrollment and always time out with "agent did not
+// connect within 60s" even though the update succeeded.
+func TestJoinModeLinksExistingAgent(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatalf("store.New: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	// The enrolled agent the join run will find via identity.json.
+	agentUUID := "11111111-2222-4333-8444-555555555555"
+	if err := st.UpsertAgent(store.Agent{
+		ID: "ag_joinme", UUID: agentUUID,
+		ED25519Pub: "cHVi", X25519Pub: "eA==", State: "connected",
+	}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+
+	// Fake fleet whose preflight reports the existing agent's uuid.
+	bin := t.TempDir()
+	ssh := `#!/bin/sh
+case "$*" in
+  *"base64 -d"*) echo "INSTALL_OK"; exit 0 ;;
+  *)
+    echo "os=Ubuntu 24.04"
+    echo "arch=x86_64"
+    echo "init=systemd"
+    echo "user=root"
+    echo "sudo=yes"
+    echo "disk=100000000"
+    echo "reach=yes-plain"
+    echo "agent_uuid=11111111-2222-4333-8444-555555555555"
+    exit 0
+    ;;
+esac
+`
+	for name, body := range map[string]string{
+		"ssh":         ssh,
+		"scp":         "#!/bin/sh\nexit 0\n",
+		"ssh-keyscan": "#!/bin/sh\necho \"$3 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFleetKeyForTest0123456789abcdef\"\nexit 0\n",
+		"ssh-keygen":  "#!/bin/sh\ncase \"$1\" in -F) exit 0 ;; -H) exit 0 ;; -l) cat >/dev/null; echo \"256 SHA256:FakeFleetFingerprint comment (ED25519)\"; exit 0 ;; esac\nexit 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake %s: %v", name, err)
+		}
+	}
+
+	sshCfg := sshutil.Config{
+		SSH:            filepath.Join(bin, "ssh"),
+		SCP:            filepath.Join(bin, "scp"),
+		Keyscan:        filepath.Join(bin, "ssh-keyscan"),
+		Keygen:         filepath.Join(bin, "ssh-keygen"),
+		ConnectTimeout: 5,
+	}
+	prov := New(Options{
+		Store: st, SSH: sshCfg,
+		ServerHost: "srv:8443", BinaryPath: os.Args[0],
+		Logger: log.New(io.Discard, "", 0),
+	})
+	run, err := prov.Start("web-join", "join", StartOptions{})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// The agent "reconnects" (a fresh last_seen) shortly after the install.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		cur, err := st.ProvisionRun(run.ID)
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if cur.State == "connected" {
+			if cur.AgentID != "ag_joinme" {
+				t.Fatalf("linked agent = %q, want ag_joinme", cur.AgentID)
+			}
+			return
+		}
+		if cur.State == "failed" || time.Now().After(deadline) {
+			t.Fatalf("join run state = %s (err=%q)", cur.State, cur.Error)
+		}
+		// Simulate the post-restart heartbeat.
+		if cur.State == "installing" || cur.State == "enrolling" {
+			_ = st.MarkSeen("ag_joinme")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
