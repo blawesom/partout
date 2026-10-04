@@ -687,6 +687,42 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.12 — bootstrap hardening + onboarding polish (all field-caught on
+  the v0.9.11 deployment, FIELD-REPORT-v0.9.11).** Everything since the
+  v0.9.11 tag:
+
+  - **D1 bootstrap fixes**: elevation policies are canonicalized before
+    transfer (the preset's formatted JSON hashed differently than the
+    canonical form — the on-host verification rejected the transfer);
+    `/etc/partout/elevation.d` is created 0755 (the install umask made it
+    0700 root-only — the agent degraded to legacy elevation); the dnf
+    dry-run elevates (dnf refuses to simulate as non-root). All three
+    would have been caught by the new Rocky CI leg — which now exists and
+    asserts them.
+  - **Join-mode re-provision links the existing agent** (identity
+    preserved, token never consumed) — it used to report `failed` at
+    wait-enroll while the update succeeded.
+  - **Installer bundle** (`partout_install_<ver>_<arch>.tar.gz`): binary +
+    install-server.sh + units side by side — the day-1 path needs neither
+    a toolchain nor a git checkout.
+  - **Elevation UI page** (policy store + live fleet posture, hash-matched)
+    and **six MCP tools** over the store (38 tools total); the wizard
+    previews the exact grants before enabling elevation.
+  - **Seeded `default-baseline-tools`** (vim, fail2ban, btop — one task,
+    distro-guarded for apt and dnf hosts) joins the seeded daily-updates
+    job.
+  - **Provisioner home resolution from the passwd database** (a process
+    with dropped privileges and a stale HOME looked in the operator's
+    home — caught by the Rocky rig before it shipped).
+  - **Rocky CI leg** (`scripts/rocky-e2e.sh`, quay.io container via docker
+    run): install-server.sh as root on real Rocky, provision --elevate
+    over real ssh through the TOFU gate, the full D1 assertion chain —
+    32 assertions on every push.
+  - Polish: doctor probes the service user's SSH dir; the packages table
+    formats numbers/nulls and fills INSTALLED from rpm; CLI flag-order
+    tolerance for packages/external-data; the PTY CI flake retries instead
+    of chasing bigger windows.
+
 - **v0.9.11 — field-test hardening + elevation onboarding (from a real
   2-host Rocky 10 deployment; 19 findings + 6 gaps, FIELD-REPORT
   2026-10-04).** Everything since the v0.9.9 tag:

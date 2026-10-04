@@ -1,6 +1,6 @@
 # Partout — Deployment
 
-**Status:** v0.9.11 — reflects the current implementation
+**Status:** v0.9.12 — reflects the current implementation
 (field-tested on a 2-host Rocky 10 fleet; v0.9.11 fixes the field findings —
 the RHEL installer path, the TLS healthz probe, doctor effective-config, sudoers
 wildcard rendering, the dnf package backend, step-level policy gating, PTY/task
