@@ -16,6 +16,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"net"
@@ -91,6 +94,24 @@ func (r *doctorResult) print() {
 // report, and returns an error when a hard check fails (main maps that to a
 // non-zero exit).
 func runDoctor() error {
+	// --env-file <path>: load a systemd-style EnvironmentFile BEFORE the
+	// config so doctor checks the *effective* runtime config (the service
+	// loads /etc/partout/server.env via systemd; a bare `partout doctor`
+	// used to see none of it — field feedback F3). Values already present
+	// in the environment win (flag > env > file > default).
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--env-file" && i+1 < len(args) {
+			if err := loadEnvFile(args[i+1]); err != nil {
+				return fmt.Errorf("doctor: --env-file: %w", err)
+			}
+			i++
+		} else if path, ok := strings.CutPrefix(args[i], "--env-file="); ok {
+			if err := loadEnvFile(path); err != nil {
+				return fmt.Errorf("doctor: --env-file: %w", err)
+			}
+		}
+	}
 	// Parse the server-relevant flags exactly the way the server does, so the
 	// checks reflect what `partout` would actually do.
 	cfg, err := config.Load()
@@ -197,6 +218,14 @@ func checkPortFree(cfg *config.Config, r *doctorResult) {
 	}
 	la, err := net.Listen("tcp", net.JoinHostPort(addr, formatPort(cfg.Port)))
 	if err != nil {
+		// Field feedback D5: doctor run against a LIVE server used to FAIL
+		// here ("address already in use"), which reads as broken when the
+		// docs say to re-run doctor after a config change. If the port is a
+		// healthy partout listener, say so (warning, not failure).
+		if healthyListener(addr, cfg.Port, cfg.TLS) {
+			r.add(dwarn, "port free", fmt.Sprintf("%s:%d is in use by a healthy Partout listener — the server appears to be RUNNING; stop it (systemctl stop partout-server) to check a cold start", orAll(addr), cfg.Port))
+			return
+		}
 		r.add(dfail, "port free", err.Error())
 		return
 	}
@@ -369,9 +398,18 @@ func checkProvisioning(cfg *config.Config, r *doctorResult) {
 	// TLS + provisioning: the leaf must cover the host agents dial, and the
 	// CA gets distributed by the installer automatically.
 	if cfg.TLS {
+		// Field feedback F4: derive the SANs from the ACTUAL leaf certificate
+		// when it exists (the source of truth once the CA is bootstrapped),
+		// falling back to the configured list for a not-yet-bootstrapped
+		// server. The config-derived list false-warned on a live install.
 		names := serverCertNames(cfg.TLSNames)
+		source := "configured"
+		if leaf, err := leafCertSANs(filepath.Join(filepath.Dir(cfg.DBPath), "tls", "server.crt")); err == nil && len(leaf) > 0 {
+			names = leaf
+			source = "leaf certificate"
+		}
 		if !nameCovered(names, hostOnly(sh)) {
-			r.add(dwarn, "provision tls", "server host "+hostOnly(sh)+" is not in the leaf SANs "+strings.Join(names, ",")+" — provisioned agents will fail cert verification (add it to PARTOUT_TLS_SERVER_NAMES or point PARTOUT_SERVER_HOST at a covered name)")
+			r.add(dwarn, "provision tls", "server host "+hostOnly(sh)+" is not in the leaf SANs ("+source+": "+strings.Join(names, ",")+") — provisioned agents will fail cert verification (add it to PARTOUT_TLS_SERVER_NAMES or point PARTOUT_SERVER_HOST at a covered name)")
 		}
 	}
 }
@@ -454,13 +492,14 @@ func formatPort(p int) string { return fmt.Sprintf("%d", p) }
 // doctorFlagSet bundles the server-relevant flags the doctor needs, seeded
 // from the loaded config so flag > env > default holds (same as the server).
 type doctorFlagSet struct {
-	fs    *flag.FlagSet
-	port  *int
-	addr  *string
-	db    *string
-	tls   *string
-	names *string
-	vers  *bool
+	fs      *flag.FlagSet
+	port    *int
+	addr    *string
+	db      *string
+	tls     *string
+	names   *string
+	vers    *bool
+	envfile *string
 }
 
 func newDoctorFlagSet(cfg *config.Config) *doctorFlagSet {
@@ -473,6 +512,10 @@ func newDoctorFlagSet(cfg *config.Config) *doctorFlagSet {
 		tls:   fs.String("tls", tlsDefault(cfg.TLS), "server: TLS mode on|off"),
 		names: fs.String("tls-names", cfg.TLSNames, "server: comma-separated SAN names"),
 		vers:  fs.Bool("version", false, "print the version and exit"),
+		// --env-file is consumed by the pre-scan in runDoctor (it must load
+		// BEFORE config.Load); it is re-declared here only so the flagset
+		// accepts it.
+		envfile: fs.String("env-file", "", "systemd-style environment file loaded before checks (e.g. /etc/partout/server.env)"),
 	}
 }
 
@@ -522,4 +565,85 @@ func checkElevation(cfg *config.Config, r *doctorResult) {
 		return
 	}
 	r.add(dok, "elevation", "sudo -n works (privileged actions elevated per the sudoers scope)")
+}
+
+// loadEnvFile reads a systemd-style environment file (KEY=VALUE lines,
+// # comments, blank lines ignored; surrounding double quotes stripped).
+// Variables already set in the environment are NOT overridden.
+func loadEnvFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq <= 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:eq])
+		v := strings.TrimSpace(line[eq+1:])
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			v = v[1 : len(v)-1]
+		}
+		if _, ok := os.LookupEnv(k); !ok {
+			_ = os.Setenv(k, v)
+		}
+	}
+	return nil
+}
+
+// healthyListener reports whether addr:port answers /healthz like a
+// Partout server (plain HTTP first, then HTTPS with verification skipped —
+// the local root CA is not trusted from the operator's context).
+func healthyListener(addr string, port int, useTLS bool) bool {
+	if addr == "" {
+		addr = "127.0.0.1"
+	}
+	url := fmt.Sprintf("http://%s/healthz", net.JoinHostPort(addr, formatPort(port)))
+	client := &http.Client{Timeout: 2 * time.Second}
+	if resp, err := client.Get(url); err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return true
+		}
+	}
+	if !useTLS {
+		return false
+	}
+	insecure := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // probe only
+	}}
+	url = fmt.Sprintf("https://%s/healthz", net.JoinHostPort(addr, formatPort(port)))
+	if resp, err := insecure.Get(url); err == nil {
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+	return false
+}
+
+// leafCertSANs extracts the DNS + IP SANs from a PEM leaf certificate.
+func leafCertSANs(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, rest := pem.Decode(data)
+	_ = rest
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block in %s", path)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	var sans []string
+	sans = append(sans, cert.DNSNames...)
+	for _, ip := range cert.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	return sans, nil
 }

@@ -138,9 +138,23 @@ http_get() { # <url> -> body on stdout, non-zero on connection failure
 service_active() { systemctl is-active --quiet partout-server.service 2>/dev/null; }
 
 healthz() {
-  local scheme="http" body
+  local scheme="http" body url
   [ "$TLS" = "on" ] && scheme="https"
-  body="$(http_get "$scheme://127.0.0.1:$PORT/healthz" 2>/dev/null)" || return 1
+  url="$scheme://127.0.0.1:$PORT/healthz"
+  # TLS installs serve a self-signed local-CA cert: skip verification for
+  # this localhost probe (field feedback F2: the probe failed cert
+  # verification and reported a healthy server as "did not answer").
+  if command -v curl >/dev/null 2>&1; then
+    body="$(curl -sf --max-time 3 -k "$url" 2>/dev/null)" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    if [ "$scheme" = "https" ]; then
+      body="$(wget -q -O - -T 3 --no-check-certificate "$url" 2>/dev/null)" || return 1
+    else
+      body="$(wget -q -O - -T 3 "$url" 2>/dev/null)" || return 1
+    fi
+  else
+    return 127
+  fi
   printf '%s' "$body" | grep -q '"status"'
 }
 
@@ -216,7 +230,11 @@ else
   fi
   if ! getent passwd partout >/dev/null 2>&1; then
     step user "creating system user partout (nologin, home $VAR_DIR)"
-    run useradd --system --home-dir "$VAR_DIR" --shell /usr/sbin/nologin partout
+    # -g partout: the group was just created above; without it, useradd
+    # tries to create a same-named primary group, which fails on
+    # RHEL-family ("group partout exists") and aborts the install
+    # (field feedback F1).
+    run useradd --system --home-dir "$VAR_DIR" --shell /usr/sbin/nologin -g partout partout
   fi
 fi
 
@@ -319,6 +337,10 @@ else
   step doctor "pre-flight against the effective config"
   DOCTOR_ARGS=(--port "$PORT" --db "$DB_P" --tls "$TLS")
   [ -n "$ADDR" ] && DOCTOR_ARGS+=(--addr "$ADDR")
+  # --env-file: doctor sees the same PARTOUT_* the service will (TLS SAN
+  # names, admin password, tokens) — field feedback F3: the pre-flight
+  # used to check a different config than the one it just wrote.
+  [ -f "$ENV_FILE" ] && DOCTOR_ARGS+=(--env-file "$ENV_FILE")
   if ! "$BIN_INSTALL" doctor "${DOCTOR_ARGS[@]}"; then
     fail "doctor reported a hard failure — fix it and re-run (nothing has been started)"
   fi
@@ -378,6 +400,9 @@ else
 fi
 echo "   Backup    daily 03:00 into $VAR_DIR/backups (partout-backup.timer)"
 echo
+echo " Provisioning needs PARTOUT_SERVER_HOST (the address new agents dial;"
+echo "             the hostname default only works when every target resolves it) —"
+echo "             set it in $ENV_FILE when provisioning remote hosts."
 echo " Next: onboard a host (UI: Fleet → + Add host), review the preset"
 echo " guardrails (Policies / Alerts). Walkthrough: docs/getting-started.md"
 echo " Remove: partout uninstall (--dry-run previews; --purge removes state)"

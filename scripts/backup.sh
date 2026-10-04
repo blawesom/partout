@@ -22,7 +22,22 @@ fi
 mkdir -p "$DIR"
 out="$DIR/partout.db.$(date -u +%Y%m%dT%H%M%SZ).bak"
 
-"$BIN" ctl db-backup "$DB" "$out"
+# Retry on SQLITE_BUSY (field feedback F15): the backup timer fires the
+# moment it is enabled, which can race the server's boot migrations — one
+# failing unit + a critical service_failed alert on a fresh install. A
+# short lock wait + retry closes the window.
+backup_once() {
+    "$BIN" ctl db-backup "$DB" "$out"
+}
+tries=0
+until backup_once; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 10 ]; then
+        echo "backup: db locked after $tries attempts: $out" >&2
+        exit 1
+    fi
+    sleep 3
+done
 
 # Rotate: delete everything older than the newest $RETENTION.
 ls -1t "$DIR"/partout.db.*.bak 2>/dev/null | tail -n +$((RETENTION + 1)) | while read -r old; do
