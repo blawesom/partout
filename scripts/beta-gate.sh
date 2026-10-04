@@ -62,6 +62,14 @@ run_leg "backup-restore"   "" "bash scripts/backup-restore-e2e.sh"
 run_leg "offline-dispatch"  "" "bash scripts/offline-dispatch-e2e.sh"
 run_leg "tls-rotation"      "" "bash scripts/tls-rotation-e2e.sh"
 
+# --- RHEL-family real-install leg (skips on non-RHEL dev boxes; the CI
+# rocky container job runs it on every push) ---
+if command -v dnf >/dev/null 2>&1; then
+  run_leg "rocky-e2e" "" "bash scripts/rocky-e2e.sh"
+else
+  skip=$((skip+1)); ROWS+=("SKIP  rocky-e2e (RHEL-family host or the CI container job)")
+fi
+
 # --- real-systemd legs (systemd as PID 1 + passwordless sudo) ---
 if [ -d /run/systemd/system ] && sudo -n true >/dev/null 2>&1; then
   run_leg "systemd-e2e"    "" "bash scripts/systemd-e2e.sh"

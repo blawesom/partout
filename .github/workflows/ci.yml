@@ -111,6 +111,29 @@ jobs:
       - name: backup-restore disaster drill
         run: bash scripts/backup-restore-e2e.sh
 
+  # The REAL-install leg (RHEL-family): scripts/rocky-e2e.sh runs
+  # install-server.sh as root on a real Rocky 10 (real useradd/visudo/dnf,
+  # no test root), then provisions an agent over real ssh with --elevate
+  # and asserts the whole D1 chain. This is the leg that would have caught
+  # the v0.9.11 bootstrap bugs (policy sha mismatch, elevation.d 0700
+  # under the install umask, the unprivileged dnf dry-run, the RHEL useradd
+  # abort) — none of which the test-root or fake-ssh rigs can see.
+  rocky:
+    name: Rocky (real install + provision + elevation)
+    needs: test
+    # Rocky 10 is published on quay.io (Docker Hub's official image stops
+    # at 9).
+    container: quay.io/rockylinux/rockylinux:10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Real install + provision + elevation (Rocky 10)
+        run: bash scripts/rocky-e2e.sh
+
   # Opt-in real-sshd tests. These exist because the fake-binary unit tests
   # implement ssh's *intended* semantics and therefore cannot catch the fact
   # that OpenSSH resolves ~/.ssh from the passwd database, not $HOME — which
