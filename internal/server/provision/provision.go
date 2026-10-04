@@ -514,7 +514,7 @@ if [ -x /usr/local/bin/partout ]; then echo "remote_version=$(/usr/local/bin/par
 # identity.json is pretty-printed ("uuid": "…" — whitespace after the
 # colon), so the extraction tolerates it (field-caught: the rigid pattern
 # matched only compact JSON and the join link silently never happened).
-echo "agent_uuid=$(sudo -n cat /var/lib/partout/agent/identity.json 2>/dev/null | grep -o '\"uuid\": *[[:space:]]*\"[^\"]*\"' | cut -d'\"' -f4)"
+echo "agent_uuid=$(sudo -n cat /var/lib/partout/agent/identity.json 2>/dev/null | grep -o '"uuid": *[[:space:]]*"[^"]*"' | cut -d'"' -f4)"
 echo "disk=$(df -B1 / 2>/dev/null | awk 'NR==2{print $4}')"
 # Host -> server reachability on the control-plane port. The https attempt
 # is deliberately unverified (curl -k): preflight only proves the network

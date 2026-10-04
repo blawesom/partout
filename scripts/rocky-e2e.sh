@@ -300,6 +300,7 @@ check_not_grep "sudoers: no quoted globs (F6)" "$SUDOERS" '"\*"'
 
 # --- 8b. join-mode re-provision links the existing agent ------------------------
 step "join-mode re-provision (existing agent, real identity.json)"
+AGENT_ID=$("$CTL" hosts | awk '/ag_/{print $1; exit}')
 JOINOUT=$("$CTL" provision new --host deploy@localhost --mode join --elevate --service-labels sshd 2>&1) || true
 JRID=$(printf '%s' "$JOINOUT" | grep -o "prv_[a-z0-9]*" | head -1)
 [ -z "$JRID" ] && JRID=$("$CTL" provision list 2>/dev/null | awk '/prv_/{print $1; exit}')
