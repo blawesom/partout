@@ -79,7 +79,15 @@ guided wizard walks target → plan (with a live SSH-key readiness check) → th
 steps (`connect → preflight → transfer → install → wait-enroll`), streaming live. A new
 host key pauses the run until you confirm the fingerprint — no silent trust.
 `fresh` mode wipes any existing partout agent on the host (clean slate); `join` updates
-in place, identity preserved.
+in place, identity preserved. Check **Enable elevation** and pick a policy (the seeded
+`default-baseline` is the day-1 profile) so package updates, service control and
+reboots work from the first minute — the policy, the sudoers drop-in rendered from it,
+and `PARTOUT_ELEVATE=sudo` are all wired through the run's root install; no extra SSH.
+The CLI equivalent:
+
+```bash
+partout ctl provision new --host deploy@web01 --elevate --service-labels fail2ban,sshd
+```
 
 Bringing up **hosts 2..N**? The Provision page takes a batch — one `user@host` per
 line, each becoming its own run.
@@ -105,6 +113,10 @@ tools for AI assistants — same policy gates, same audit trail.
   `/etc/systemd/system`.
 - **Updates** — CVE-ranked package updates per host, and fleet release rollouts
   (upload an agent release; a draft rollout is pre-armed for you to start).
+- **Elevation** — the privilege documents provisioning ships (the seeded
+  `default-baseline` + your own), with each connected host's effective scope
+  matched by hash. **Jobs** — the seeded `default-daily-package-updates` is
+  paused and ready: enable it and every host gets the 04:30 UTC update job.
 - **Assistant** — chat with your fleet in natural language over the same governed
   tool surface: ask "any certs expiring soon on role:web?", request a playbook run
   (it parks on approvals like any write). Configure it in **Settings → Assistant**
@@ -116,9 +128,10 @@ tools for AI assistants — same policy gates, same audit trail.
 ## 5. From demo to production
 
 The embedded demo is a self-contained process with its own database — starting a real
-server is a fresh start, not a migration. Take the same binary and run it as
-`--mode=server` with TLS on: on a systemd Linux box, **`sudo bash
-scripts/install-server.sh --binary ./partout --tls on`** is the one-command day-1
-install (user, env with generated tokens, units, daily backup timer, doctor,
+server is a fresh start, not a migration. On a systemd Linux box the release's
+**installer bundle** (`partout_install_<version>_linux_<arch>.tar.gz`: binary +
+`install-server.sh` + units) is the one-command day-1 install — no toolchain, no
+git checkout needed (see the README quick start). From a repo checkout:
+**`sudo bash scripts/install-server.sh --binary ./partout --tls on`** (user, env with generated tokens, units, daily backup timer, doctor,
 healthz — see [deployment.md](deployment.md) §3.1); back up the SQLite file
 (`partout ctl db-backup`) — it is the control plane's state.

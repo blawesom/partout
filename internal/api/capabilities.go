@@ -43,6 +43,9 @@ func (h *Handler) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		// M1 host provisioning — wired when a provisioner is installed.
 		"provision": h.prov != nil,
 
+		// Elevation policy store (server-side documents provisioning ships).
+		"elevation": h.st != nil,
+
 		// Local-user identity (PRD Decision 6). When false the server runs in
 		// single-user local mode (all requests are admin); the UI still shows
 		// the account surface, just without a password gate.

@@ -1498,6 +1498,80 @@
           </div>
         </section>
 
+        <!-- ============ ELEVATION ============ -->
+        <section v-else-if="page==='elevation'">
+          <h1 class="page">Elevation</h1>
+          <p class="page-sub">The privilege documents provisioning ships to hosts. The sudoers wall itself is host-owned: updating a policy here does not change already-provisioned hosts — re-provision (join mode) or use your config management; <span class="mono">partout ctl elevation check</span> on the host detects drift.</p>
+
+          <div class="card" style="margin-bottom:12px">
+            <div class="toolbar">
+              <div><strong>Fleet posture</strong> <span class="muted"> — each connected agent's effective elevation scope, matched to a stored policy by its canonical hash.</span></div>
+              <button class="btn sm" @click="loadElevation">Refresh</button>
+            </div>
+            <table class="tbl" style="margin-top:8px">
+              <thead><tr><th>Host</th><th>Mode</th><th>Rules</th><th>Policy (hash match)</th><th>SHA-256</th></tr></thead>
+              <tbody>
+                <tr v-for="f in elev.fleet" :key="f.id" class="click" @click="go('host/'+f.id)">
+                  <td>{{ f.name }}</td>
+                  <td><span class="badge" :class="f.mode==='sudo'?'ok':'neutral'">{{ f.mode || '—' }}</span></td>
+                  <td class="mono">{{ f.rules }}</td>
+                  <td>
+                    <span v-if="f.matched" class="badge ok">{{ f.matched }}</span>
+                    <span v-else-if="f.reported" class="badge neutral" title="No stored policy matches this host's installed scope">custom / unknown</span>
+                    <span v-else class="muted small">not reported (pre-0.9.9 agent)</span>
+                  </td>
+                  <td class="mono small">{{ (f.hash||'').slice(0,12) }}…</td>
+                </tr>
+                <tr v-if="!elev.fleet.length && !pageLoading"><td colspan="5"><div class="empty">No connected hosts.</div></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card">
+            <div class="toolbar">
+              <div><strong>Policies</strong> <span class="muted"> — seeded <span class="mono">default-baseline</span> is the day-1 profile; clone and edit for tighter scopes.</span></div>
+              <button class="btn primary sm" v-if="isAdmin" @click="elevFormNew()">New policy</button>
+            </div>
+            <table class="tbl" style="margin-top:8px">
+              <thead><tr><th>Name</th><th>Rules</th><th>Applied on</th><th>SHA-256</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="p in elev.policies" :key="p.id">
+                  <td><span class="click" @click.stop="elev.open = (elev.open===p.id ? null : p.id)"><b>{{ p.name }}</b></span>
+                      <div v-if="p.description" class="muted small">{{ p.description }}</div>
+                      <div v-if="elev.open===p.id" class="mono small" style="white-space:pre-wrap;background:var(--bg2,rgba(127,127,127,.08));padding:8px;border-radius:6px;margin-top:6px;max-height:240px;overflow:auto">{{ elevRulesText(p) }}</div>
+                  </td>
+                  <td class="mono">{{ (p.rules||[]).length }}</td>
+                  <td>{{ elevAppliedCount(p) }} host(s)</td>
+                  <td class="mono small">{{ (p.policy_sha256||'').slice(0,12) }}…</td>
+                  <td>
+                    <button class="btn sm" v-if="isAdmin" @click="elevFormEdit(p)">Edit</button>
+                    <button class="btn danger sm" v-if="isAdmin" @click="elevDelete(p)">Delete</button>
+                  </td>
+                </tr>
+                <tr v-if="!elev.policies.length && !pageLoading"><td colspan="5"><div class="empty">No elevation policies — apply the preset (<span class="mono">partout ctl preset apply</span>) to seed default-baseline.</div></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- create/edit form -->
+          <div class="card" v-if="elev.form" style="margin-top:12px">
+            <div class="toolbar"><div><strong>{{ elev.form.id ? 'Edit' : 'New' }} elevation policy</strong></div></div>
+            <div class="form-row" style="gap:10px;margin-top:8px">
+              <label class="fld" style="max-width:280px"><span>Name</span><input v-model="elev.form.name" class="mono" placeholder="web-baseline" :disabled="!!elev.form.id" /></label>
+              <label class="fld" style="flex:1"><span>Description</span><input v-model="elev.form.description" placeholder="what this grants, for humans" /></label>
+            </div>
+            <label class="fld" style="margin-top:8px"><span>Rules (JSON array)</span>
+              <textarea v-model="elev.form.rulesText" rows="10" class="mono" style="width:100%" placeholder='[{"allow":"dnf","args":["-y","upgrade"]}]'></textarea>
+            </label>
+            <div class="toolbar" style="margin-top:8px">
+              <span v-if="elev.msg" style="color:var(--bad,#b00)">{{ elev.msg }}</span>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="elev.form=null; elev.msg=''">Cancel</button>
+              <button class="btn primary sm" :disabled="elev.busy" @click="elevSave()">{{ elev.form.id ? 'Save' : 'Create' }}</button>
+            </div>
+          </div>
+        </section>
+
         <!-- ============ APPROVALS ============ -->
         <section v-else-if="page==='approvals'">
           <h1 class="page">Approvals</h1>
@@ -2215,6 +2289,7 @@
         provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "",
            elevate: false, elevationPolicies: [], elevationPolicy: "", serviceLabels: "", certPaths: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
+        elev: { policies: [], fleet: [], busy: false, open: null, form: null, msg: "" },
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
         taskFormOpen: false, taskCreateBusy: false, taskForm: { name: "", description: "", steps: [] },
@@ -2568,6 +2643,7 @@
             { key: "approvals", label: "Approvals", icon: "☑", cap: "approvals", badge: "approvals" },
             { key: "policies", label: "Policies", icon: "§", cap: "policies" },
             { key: "secrets", label: "Secrets", icon: "🔒", cap: "secrets" },
+            { key: "elevation", label: "Elevation", icon: "⤴", cap: "elevation" },
             { key: "audit", label: "Audit", icon: "≡", cap: "audit" },
           ] },
           { key: "admin", label: "Admin", items: [
@@ -2859,6 +2935,57 @@
         else if (kind === "approval.requested" || kind === "approval.approved" || kind === "approval.denied") { this.loadNavBadges(); if (this.page === "approvals") this.loadApprovals(); if (this.assistantSession) this.loadAssistantApprovals(true); }
         else if (kind === "alert.firing" || kind === "alert.resolved") { this.loadNavBadges(); if (this.page === "obs-alerts") this.loadAlerts(); }
       },
+      // ---- Elevation (server-side policy store + fleet posture) ----
+      async loadElevation() {
+        this.elev.busy = true;
+        try {
+          const pols = await this.api("/elevation/policies", { toast: false });
+          this.elev.policies = pols || [];
+          if (!this.hosts.length) await this.loadHosts();
+          const connected = this.hosts.filter(h => h.state === "connected");
+          const fleet = await Promise.all(connected.map(async h => {
+            let e = null;
+            try { e = await this.api("/hosts/" + encodeURIComponent(h.id) + "/elevation", { toast: false }); } catch (err) { e = null; }
+            const f = { id: h.id, name: this.hostName(h), mode: e && e.mode, rules: e && e.rules, hash: e && e.hash, reported: !!(e && e.reported), matched: "" };
+            if (f.hash) {
+              const m = this.elev.policies.find(p => p.policy_sha256 === f.hash);
+              f.matched = m ? m.name : "";
+            }
+            return f;
+          }));
+          this.elev.fleet = fleet;
+        } catch (e) {
+          this.notify("err", "elevation load failed: " + e.message);
+        } finally { this.elev.busy = false; }
+      },
+      elevAppliedCount(p) { return this.elev.fleet.filter(f => f.hash === p.policy_sha256).length; },
+      elevRulesText(p) { try { return JSON.stringify(p.rules, null, 1); } catch (e) { return "" + p.rules; } },
+      elevFormNew() { this.elev.msg = ""; this.elev.form = { name: "", description: "", rulesText: JSON.stringify([{ allow: "dnf", args: ["-y", "upgrade"] }], null, 1) }; },
+      elevFormEdit(p) {
+        this.elev.msg = ""; this.elev.open = p.id;
+        this.elev.form = { id: p.id, name: p.name, description: p.description || "", rulesText: this.elevRulesText(p) };
+      },
+      async elevSave() {
+        this.elev.busy = true; this.elev.msg = "";
+        try {
+          const f = this.elev.form;
+          const body = { name: f.name, description: f.description, rules: JSON.parse(f.rulesText) };
+          if (f.id) await this.api("/elevation/policies/" + encodeURIComponent(f.id), { method: "PUT", body });
+          else await this.api("/elevation/policies", { method: "POST", body });
+          this.elev.form = null;
+          this.notify("ok", "elevation policy saved");
+          await this.loadElevation();
+        } catch (e) { this.elev.msg = e.message; } finally { this.elev.busy = false; }
+      },
+      async elevDelete(p) {
+        if (!confirm("Delete elevation policy " + p.name + "? Hosts already provisioned with it keep running their installed copy.")) return;
+        try {
+          await this.api("/elevation/policies/" + encodeURIComponent(p.id), { method: "DELETE" });
+          this.notify("ok", "deleted " + p.name);
+          await this.loadElevation();
+        } catch (e) { this.notify("err", e.message); }
+      },
+
       async loadPageData() {
         // Central loading flag: a page shows a "Loading…" indicator (and
         // suppresses its empty state) while its data is fetched, so an empty
@@ -2870,7 +2997,7 @@
         // Files, Updates, Jobs and the Observe pages need the host list (default
         // host selection, per-host run target, host filter dropdowns). Load it
         // first if a deep link lands here before the fleet page ever ran.
-        if (["exec", "audit", "approvals", "files", "updates", "jobs", "tasks", "sessions", "provision", "obs-services", "obs-certs", "obs-configs", "obs-alerts"].includes(this.page) && !this.hosts.length) {
+        if (["exec", "audit", "approvals", "files", "updates", "jobs", "tasks", "sessions", "provision", "elevation", "obs-services", "obs-certs", "obs-configs", "obs-alerts"].includes(this.page) && !this.hosts.length) {
           await this.loadHosts();
         }
         switch (this.page) {
@@ -2886,6 +3013,7 @@
           case "tasks": await this.loadTasks(); await this.loadPlaybooks(); await this.loadTaskRuns(); break;
           case "updates": await this.loadUpdates(); this.loadPkgActions(); this.loadExtStatus(); this.loadReleases(); this.loadRuns(); break;
           case "secrets": await this.loadSecrets(); break;
+          case "elevation": await this.loadElevation(); break;
           case "policies": await this.loadPolicies(); await this.loadPreset(); break;
           case "approvals": await this.loadApprovals(); break;
           case "obs-alerts": await this.loadAlerts(); this.loadRules();

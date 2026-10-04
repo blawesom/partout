@@ -828,6 +828,14 @@ async function main() {
   check("secrets: create form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create secret")), "no Create secret button");
   check("secrets: rotate action", [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Rotate"), "no Rotate button");
 
+  // Elevation page: the server-side policy store (seeded default-baseline)
+  // + the fleet posture table.
+  await visit("#/elevation");
+  check("elevation: page", d.body.textContent.includes("privilege documents provisioning ships"), "page copy missing");
+  check("elevation: seeded default-baseline", rowsWithText(d, "default-baseline") > 0, "seeded policy row missing");
+  check("elevation: fleet posture card", d.body.textContent.includes("Fleet posture"), "posture card missing");
+  check("elevation: new-policy button (admin)", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("New policy")), "no New policy button");
+
   await visit("#/policies");
   check("policies: name", rowsWithText(d, "deny-rm") > 0, "policy name missing");
   check("policies: match chip", rowsWithText(d, "command_regex") > 0, "match not rendered");
