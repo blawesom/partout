@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -232,6 +233,22 @@ func main() {
 }
 
 // ---- server -----------------------------------------------------------------
+
+// homeDirPasswdFirst resolves the current user's home directory the way
+// OpenSSH does — from the passwd database, not $HOME. A server process
+// started with dropped privileges but a stale HOME (setpriv, some
+// supervisors) would otherwise look for its SSH keys in the operator's
+// home ("mkdir /root/.ssh: permission denied" — caught by the Rocky CI
+// rig). $HOME is the fallback when the passwd entry is unusable.
+func homeDirPasswdFirst() string {
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		if fi, err := os.Stat(u.HomeDir); err == nil && fi.IsDir() {
+			return u.HomeDir
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
 
 func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// Bind the port BEFORE creating any state. On a real port conflict the
@@ -608,9 +625,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// local hostname).
 	sshDir := os.Getenv("PARTOUT_SSH_DIR")
 	if sshDir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			sshDir = filepath.Join(home, ".ssh")
-		}
+		sshDir = filepath.Join(homeDirPasswdFirst(), ".ssh")
 	}
 	serverHost := config.DefaultServerHost()
 	binPath, _ := os.Executable()
