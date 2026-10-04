@@ -197,36 +197,55 @@ func TestSessionOpenDataClose(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	sess, err := sm.Open(ctx, sessions.OpenRequest{
-		AgentID: "ag_sess", Cmd: "/bin/sh", Cols: 80, Rows: 24,
-		Record: true, Actor: "local", Role: "local",
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if sess.State != "open" {
-		t.Fatalf("state=%s, want open", sess.State)
-	}
-
 	// Wait for the agent's recorded data frame to land before closing. The
 	// fake agent replies to SESSION_OPEN with a SESSION_DATA uplink; if we
 	// closed before it was recorded, the close could drop it and the replay
 	// assertion below would flake. Under full-suite CI load (-race, all
 	// packages in parallel on a 2-core runner) the round trip has been
-	// observed to exceed 20 s — scheduler starvation, not a defect — so the
-	// budget is generous; a missing frame is still a hard fail, not a hang.
-	// (60 s proved too tight on the 2-core CI runner under the full -race
-	// suite — it timed out twice in four runs — so the budget is 150 s.)
-	dataDeadline := time.Now().Add(150 * time.Second)
-	for {
-		recs, _ := sm.Replay(sess.ID)
-		if len(recs) == 1 && string(recs[0].Data) == "hello pty\n" {
-			break
+	// observed to exceed 20 s — scheduler starvation, not a defect.
+	//
+	// Budget history: 60 s was too tight (timed out twice in four runs), and
+	// even 150 s timed out once on a pathologically loaded runner (test job
+	// 4m56s vs the usual 2m40s). Rather than chase ever-larger single
+	// windows, the wait now RETRIES with a fresh session: a scheduling cliff
+	// can strand the first session's uplink (retry succeeds), while a real
+	// regression fails deterministically on both attempts — still a hard
+	// fail, not a hang and not a skip.
+	var sess *store.Session
+	for attempt := 1; attempt <= 2; attempt++ {
+		var err error
+		sess, err = sm.Open(ctx, sessions.OpenRequest{
+			AgentID: "ag_sess", Cmd: "/bin/sh", Cols: 80, Rows: 24,
+			Record: true, Actor: "local", Role: "local",
+		})
+		if err != nil {
+			t.Fatalf("Open (attempt %d): %v", attempt, err)
 		}
-		if time.Now().After(dataDeadline) {
-			t.Fatalf("recorded data frame did not arrive (recs=%+v)", recs)
+		if sess.State != "open" {
+			t.Fatalf("state=%s, want open", sess.State)
 		}
-		time.Sleep(20 * time.Millisecond)
+		dataDeadline := time.Now().Add(75 * time.Second)
+		for {
+			recs, _ := sm.Replay(sess.ID)
+			if len(recs) == 1 && string(recs[0].Data) == "hello pty\n" {
+				break
+			}
+			if time.Now().After(dataDeadline) {
+				if attempt == 2 {
+					t.Fatalf("recorded data frame did not arrive on either attempt (recs=%+v)", recs)
+				}
+				// Stranded by a scheduling cliff: close and retry with a fresh
+				// session rather than failing a healthy build.
+				_ = sm.Close(sess.ID)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if len(sess.ID) > 0 {
+			if recs, _ := sm.Replay(sess.ID); len(recs) == 1 && string(recs[0].Data) == "hello pty\n" {
+				break // frame landed
+			}
+		}
 	}
 
 	// Close the session (triggers the fake agent's result).
@@ -237,10 +256,11 @@ func TestSessionOpenDataClose(t *testing.T) {
 	// Wait for the result to finalize the session row.
 	deadline := time.Now().Add(5 * time.Second)
 	var got *store.Session
+	var gerr error
 	for {
-		got, err = st.GetSession(sess.ID)
-		if err != nil {
-			t.Fatalf("GetSession: %v", err)
+		got, gerr = st.GetSession(sess.ID)
+		if gerr != nil {
+			t.Fatalf("GetSession: %v", gerr)
 		}
 		if got.State == "closed" {
 			break
