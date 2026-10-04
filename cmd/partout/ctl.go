@@ -36,6 +36,10 @@ type ctl struct {
 	base   string // http://host:port
 	token  string
 	client *http.Client
+	// caConfigured reports whether --ca-file was given: when the caller
+	// speaks https without it, only the `ca` bootstrap command may skip
+	// verification (fetching the trust anchor itself — field feedback F5).
+	caConfigured bool
 }
 
 func runCtl(args []string) {
@@ -77,7 +81,7 @@ commands:
   elevation <show|check|install-sudoers>
            elevation policy (PRD Decision 3): view the loaded scope, detect
            sudoers drift, and render/install the sudoers drop-in from it
-  packages <updates|apply|actions> --agent A  OS package updates (apt/dnf; dry-run first)
+  packages <updates|apply|actions> <agent_id>  OS package updates (apt/dnf; dry-run first)
   cve <list|scan> [--agent A] [--min-cvss F] [--json]  package CVE findings (OSV);
                            exit 1 if any finding matches — CI/cron gate
   services [--agent A] [--state S] [--name N]   systemd units across the fleet
@@ -118,6 +122,9 @@ commands:
 	}
 
 	scheme := "http"
+	if strings.HasPrefix(*server, "https://") {
+		scheme = "https" // explicit https without --ca-file: system roots only
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	if *caFile != "" {
 		scheme = "https"
@@ -142,9 +149,10 @@ commands:
 	}
 
 	c := &ctl{
-		base:   base,
-		token:  *token,
-		client: client,
+		base:         base,
+		token:        *token,
+		client:       client,
+		caConfigured: *caFile != "",
 	}
 	sub, rest := fs.Arg(0), fs.Args()[1:]
 
@@ -284,6 +292,20 @@ func (c *ctl) cmdCA() {
 	var res struct {
 		Cert string `json:"cert"`
 	}
+	// Bootstrap mode (field feedback F5): fetching the CA from a TLS server
+	// without already having the CA used to be impossible — the https
+	// client failed verification against the self-signed local CA, and
+	// without --ca-file the CLI spoke plain http. The CA is the trust
+	// anchor being bootstrapped, so a one-shot verification skip is the
+	// documented TOFU pattern (verify the fingerprint out-of-band after).
+	if strings.HasPrefix(c.base, "https://") && !c.caConfigured {
+		saved := c.client
+		c.client = &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // CA bootstrap fetch
+		}}
+		defer func() { c.client = saved }()
+		fmt.Fprintln(os.Stderr, "ctl: fetching CA without verification (bootstrap) — verify its fingerprint out-of-band before trusting it")
+	}
 	if err := c.do("GET", "/api/v1/tls/ca", nil, &res); err != nil {
 		fatal(err)
 	}
@@ -397,6 +419,20 @@ func (c *ctl) cmdAuth(args []string) {
 	}
 	// Could not persist; print the token for manual use.
 	fmt.Println(res.Token)
+}
+
+// withRunTimeout swaps the HTTP client for a blocking run call (tasks/jobs/
+// playbooks run): the default 30 s client timeout used to CANCEL long task
+// runs mid-flight — a package-install task died with "timeout: context
+// canceled" (field feedback F16). 10 minutes matches the server's
+// opTimeout for one task run.
+func (c *ctl) withRunTimeout(fn func()) {
+	saved := c.client
+	long := *saved
+	long.Timeout = 10 * time.Minute
+	c.client = &long
+	defer func() { c.client = saved }()
+	fn()
 }
 
 // ---- HTTP helpers -----------------------------------------------------------
@@ -1983,6 +2019,25 @@ func (c *ctl) cmdSessionReplay(args []string) {
 
 // ---- secrets (M3, PRD §5.7) -------------------------------------------------
 
+// reorderFlags moves flag tokens before positional arguments so the
+// stdlib flag package (which stops parsing at the first positional) accepts
+// both `secrets create -value=x NAME` and `secrets create NAME -value=x`
+// (field feedback F16: the second form silently ignored the flag).
+func reorderFlags(args []string) []string {
+	var flags, pos []string
+	for _, a := range args {
+		// Only the unambiguous -flag=value form is moved: a space-separated
+		// value after a positional is inherently ambiguous (is it the value
+		// or the next positional?), so it keeps flag-first semantics.
+		if strings.HasPrefix(a, "-") && strings.Contains(a, "=") {
+			flags = append(flags, a)
+		} else {
+			pos = append(pos, a)
+		}
+	}
+	return append(flags, pos...)
+}
+
 func (c *ctl) cmdSecrets(args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: ctl secrets <list|create|rotate|revoke|delete> ...")
@@ -2025,6 +2080,7 @@ func (c *ctl) secretList() {
 }
 
 func (c *ctl) secretCreate(args []string) {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("secrets create", flag.ExitOnError)
 	value := fs.String("value", "", "secret value (required)")
 	valueFile := fs.String("value-file", "", "read value from file (mutually exclusive with -value)")
@@ -2058,6 +2114,7 @@ func (c *ctl) secretCreate(args []string) {
 }
 
 func (c *ctl) secretRotate(args []string) {
+	args = reorderFlags(args)
 	fs := flag.NewFlagSet("secrets rotate", flag.ExitOnError)
 	value := fs.String("value", "", "new value (required)")
 	valueFile := fs.String("value-file", "", "read new value from file")
@@ -2274,7 +2331,11 @@ func (c *ctl) cmdCVE(args []string) {
 		}
 	case "scan":
 		var res map[string]any
-		if err := c.do("POST", "/api/v1/security/scan", nil, &res); err != nil {
+		path := "/api/v1/security/scan"
+		if *agent != "" {
+			path += "?agent_id=" + url.PathEscape(*agent)
+		}
+		if err := c.do("POST", path, nil, &res); err != nil {
 			fatal(err)
 		}
 		fmt.Printf("scanned %d host(s)\n", int(num(res["scanned"])))
@@ -2473,7 +2534,9 @@ func (c *ctl) cmdTasks(args []string) {
 		}
 		body := map[string]string{"agent_id": args[2]}
 		var out map[string]any
-		if err := c.do("POST", "/api/v1/tasks/"+args[1]+"/run", body, &out); err != nil {
+		var err error
+		c.withRunTimeout(func() { err = c.do("POST", "/api/v1/tasks/"+args[1]+"/run", body, &out) })
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -2647,7 +2710,9 @@ func (c *ctl) cmdJobs(args []string) {
 		}
 		body := map[string]string{"agent_id": args[2]}
 		var out map[string]any
-		if err := c.do("POST", "/api/v1/jobs/"+args[1]+"/run", body, &out); err != nil {
+		var err error
+		c.withRunTimeout(func() { err = c.do("POST", "/api/v1/jobs/"+args[1]+"/run", body, &out) })
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}

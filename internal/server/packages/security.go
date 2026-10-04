@@ -151,3 +151,12 @@ func VulnIDsFromList(ids []string) string {
 	}
 	return strings.Join(ids, ",")
 }
+
+// SecurityScanAgent runs one scan pass for a single agent (the CLI's
+// `cve scan --agent` filter — it used to be accepted and silently ignored).
+func (c *Controller) SecurityScanAgent(ctx context.Context, agentID string) error {
+	if c.extdata == nil {
+		return fmt.Errorf("security scan: CVE correlation not configured")
+	}
+	return c.scanAgent(ctx, agentID)
+}

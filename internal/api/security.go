@@ -76,6 +76,15 @@ func (h *Handler) securityScan(w http.ResponseWriter, r *http.Request) {
 	actor, _ := h.actorFor(r)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
+	if agentID := r.URL.Query().Get("agent_id"); agentID != "" {
+		if err := h.pkgs.SecurityScanAgent(ctx, agentID); err != nil {
+			writeError(w, http.StatusInternalServerError, "scan_failed", err.Error(), nil)
+			return
+		}
+		h.audit("security.scan", actor, map[string]string{"agent_id": agentID})
+		writeJSON(w, http.StatusOK, map[string]any{"scanned": 1, "ok": true})
+		return
+	}
 	n, err := h.pkgs.SecurityScan(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "scan_failed", err.Error(), nil)
