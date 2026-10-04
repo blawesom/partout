@@ -1219,6 +1219,7 @@
           </div>
           <template v-if="updTab==='packages'">
           <p class="page-sub">Package updates for the selected host. Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
+          <div v-if="updHost && updElevation && updElevation.mode !== 'sudo'" class="warn-box" style="margin-bottom:12px"><b>Elevation is off on this host</b> — package applies run as the unprivileged agent user and will fail with permission errors (dry runs still work<template v-if="updElevation.reported === false">; this agent predates elevation reporting — upgrade it</template>). Enable on the host: install the sudoers scope (<span class="mono">deploy/sudoers/partout-agent</span> or an elevation policy via <span class="mono">partout ctl elevation install-sudoers</span>), set <span class="mono">PARTOUT_ELEVATE=sudo</span> in <span class="mono">/etc/partout/agent.env</span>, then restart the agent.</div>
           <div class="toolbar">
             <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
@@ -2166,7 +2167,7 @@
         sessions: [], sessionReplay: null, sessionLive: null,
         ptyHost: "", ptyCmd: "bash", ptyBusy: false, ptyErr: "",
         fileHost: "", fileDir: "/", fileEntries: [], fileLoading: false, fileDlg: null, upDlg: null, fileRoot: "", fileRootError: "",
-        updHost: "", jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null, jobNote: {}, // per-job dispatch outcome, rendered under the affected row
+        updHost: "", updElevation: null, jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null, jobNote: {}, // per-job dispatch outcome, rendered under the affected row
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null, pkgChecked: {},
@@ -3095,6 +3096,15 @@
         this.pkgChecked = {}; // row selections are per-host; a host switch or refresh starts clean
         try { const d = await this.api("/packages/updates?agent_id=" + encodeURIComponent(this.updHost)); this.updates = d.items || d || []; } catch (e) { this.updates = []; }
         this.loadSecurity();
+        this.loadUpdElevation();
+      },
+      // Elevation preflight (feedback parity): the posture comes from the
+      // agent's partout.elevation fact — warn BEFORE the apply fails with a
+      // raw permission error, with the enable remedy inline.
+      async loadUpdElevation() {
+        this.updElevation = null;
+        if (!this.updHost) return;
+        try { this.updElevation = await this.api("/hosts/" + encodeURIComponent(this.updHost) + "/elevation", { silent: true, toast: false }); } catch (e) { /* posture unknown — the banner stays off */ }
       },
       // --- Security (M5.1 periodic CVE scan) ---
       async loadSecurity() {

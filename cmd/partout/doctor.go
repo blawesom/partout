@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -122,6 +123,7 @@ func runDoctor() error {
 	checkProvisioning(cfg, r)
 	if cfg.Mode == "agent" || cfg.Mode == "embedded" {
 		checkFileRoot(cfg, r)
+		checkElevation(cfg, r)
 	}
 	if cfg.Mode == "server" || cfg.Mode == "embedded" {
 		checkFleetVersions(cfg, r)
@@ -492,3 +494,32 @@ func applyDoctorFlags(cfg *config.Config, d *doctorFlagSet) {
 }
 
 func (d *doctorFlagSet) parse(args []string) error { return d.fs.Parse(args) }
+
+// sudoProbe runs `sudo -n true` — injectable in tests.
+var sudoProbe = func() error {
+	return exec.Command("sudo", "-n", "true").Run()
+}
+
+// checkElevation verifies the host-level elevation mode (PRD Decision 3):
+// with PARTOUT_ELEVATE off, package applies and every other root-requiring
+// action fail with raw permission errors (the most common "applying system
+// updates fails" report on provisioned hosts — provisioning deliberately
+// does not enable elevation). With sudo on, the sudoers scope must
+// actually answer non-interactively.
+func checkElevation(cfg *config.Config, r *doctorResult) {
+	if cfg.Elevate != "sudo" {
+		r.add(dwarn, "elevation",
+			"off (PARTOUT_ELEVATE unset/none) — package applies and other root-requiring actions fail with permission errors as the unprivileged agent user; to enable: install the sudoers scope (deploy/sudoers/partout-agent, or an elevation policy via `partout ctl elevation install-sudoers`), set PARTOUT_ELEVATE=sudo in the agent env, restart the agent")
+		return
+	}
+	if err := sudoProbe(); err != nil {
+		r.add(dwarn, "elevation",
+			"PARTOUT_ELEVATE=sudo but `sudo -n true` failed — the sudoers scope is missing or wrong (run as the agent user for the exact error); see deploy/sudoers/partout-agent")
+		return
+	}
+	if os.Geteuid() == 0 {
+		r.add(dok, "elevation", "sudo -n works — trivially: doctor runs as root; probe again as the agent user for a real check")
+		return
+	}
+	r.add(dok, "elevation", "sudo -n works (privileged actions elevated per the sudoers scope)")
+}

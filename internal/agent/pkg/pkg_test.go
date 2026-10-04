@@ -2,6 +2,8 @@ package pkg
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/blawesom/partout/internal/agent/elevate"
 	"strings"
 	"testing"
@@ -212,5 +214,28 @@ func TestRunHonoursTimeout(t *testing.T) {
 func TestRunNilStdin(t *testing.T) {
 	if _, err := run(context.Background(), 5*time.Second, "true"); err != nil {
 		t.Fatalf("run(true): %v", err)
+	}
+}
+
+// elevHint: a permission-shaped failure on a non-sudo host carries the
+// elevation remedy (it is the user-facing message on the Updates page);
+// sudo mode and unrelated failures pass through untouched.
+func TestElevHint(t *testing.T) {
+	permErr := fmt.Errorf("apt-get upgrade: exit 100: E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)")
+	netErr := fmt.Errorf("apt-get upgrade: exit 100: E: Unable to fetch some archives")
+
+	if got := elevHint(elevate.Sudo, permErr); got != permErr {
+		t.Fatalf("sudo mode must not append the hint: %v", got)
+	}
+	if got := elevHint(elevate.None, netErr); got != netErr {
+		t.Fatalf("unrelated failure must pass through: %v", got)
+	}
+	got := elevHint(elevate.None, permErr)
+	if !strings.Contains(got.Error(), "PARTOUT_ELEVATE=sudo") || !strings.Contains(got.Error(), "elevation is OFF") {
+		t.Fatalf("permission failure on a non-sudo host must carry the remedy: %v", got)
+	}
+	// The original error stays wrapped (errors.Is chains keep working).
+	if !errors.Is(got, permErr) {
+		t.Fatalf("original error must stay wrapped")
 	}
 }

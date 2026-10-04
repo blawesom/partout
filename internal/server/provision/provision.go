@@ -679,6 +679,11 @@ PARTOUT_MODE=agent
 PARTOUT_SERVER=%s
 PARTOUT_TOKEN=%s
 PARTOUT_DATA_DIR=/var/lib/partout/agent
+# Elevation (opt-in, PRD Decision 3): package applies and other
+# root-requiring actions need it — uncomment after installing the
+# sudoers scope (deploy/sudoers/partout-agent, or an elevation policy
+# via "partout ctl elevation install-sudoers"), then restart the agent.
+#PARTOUT_ELEVATE=sudo
 %sEOF
 chmod 0640 /etc/partout/agent.env
 cat > /etc/systemd/system/partout-agent.service <<'EOF'

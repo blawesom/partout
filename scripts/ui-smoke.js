@@ -674,6 +674,20 @@ async function main() {
     check("updates: Sel. all checks every row", Object.keys(w.__partout.pkgChecked).length === rowChecks.length, "Sel. all did not check all rows");
     selSecBtn.click(); // leave a deterministic state for later checks
   }
+  // Elevation preflight (feedback parity): the smoke agent runs unprivileged
+  // with PARTOUT_ELEVATE unset — the banner must say so, with the remedy,
+  // BEFORE an apply fails with a raw permission error. Checked after the row
+  // poll above: the posture fetch trails the updates-list load (the agent's
+  // backend only answers once host.distro lands), and each poll iteration
+  // re-runs loadUpdates → loadUpdElevation.
+  {
+    let elevBanner = false;
+    for (let i = 0; i < 10 && !elevBanner; i++) {
+      elevBanner = [...d.querySelectorAll(".warn-box")].some((x) => x.textContent.includes("Elevation is off") && x.textContent.includes("PARTOUT_ELEVATE=sudo"));
+      if (!elevBanner) { if (w.__partout) await w.__partout.loadUpdElevation(); await sleep(300); }
+    }
+    check("updates: elevation-off banner with remedy", elevBanner, "no elevation preflight banner");
+  }
   check("updates: package actions card", d.body.textContent.includes("Package actions"), "actions card missing");
   check("updates: EOL data status + refresh", d.body.textContent.includes("EOL data:") && [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Refresh EOL data")), "ext-data controls missing");
   check("updates: EOL status has data-tip", !!d.querySelector(".ext-status[data-tip]"), "no data-tip on ext-status");

@@ -118,6 +118,28 @@ func (a *aptBackend) DryRun(ctx context.Context) (string, error) {
 	return summarizeAptUpgrade(out), nil
 }
 
+// elevHint appends the elevation remedy when a mutating package
+// operation failed in a way that says "this needed root" and elevation
+// is OFF on the host. The raw apt/dnf "Permission denied" tells the
+// operator WHAT failed but not that it will keep failing until the host is
+// configured for elevation — this is the error the Updates page shows, so
+// it carries the fix (feedback parity: the message names the remedy).
+func elevHint(m elevate.Mode, err error) error {
+	if err == nil || m == elevate.Sudo {
+		return err
+	}
+	s := err.Error()
+	for _, p := range []string{
+		"Permission denied", "permission denied", "lock file", "are you root",
+		"superuser privileges", "cannot open lock", "This command has to be run",
+	} {
+		if strings.Contains(s, p) {
+			return fmt.Errorf("%w — elevation is OFF on this host: package applies run as the unprivileged agent user. Enable: install the sudoers scope (deploy/sudoers/partout-agent, or an elevation policy via `partout ctl elevation install-sudoers`), set PARTOUT_ELEVATE=sudo in /etc/partout/agent.env, and restart the agent", err)
+		}
+	}
+	return err
+}
+
 func (a *aptBackend) Apply(ctx context.Context) error {
 	// Run non-interactive: DEBIAN_FRONTEND=noninteractive, auto-confirm.
 	// Elevated in sudo mode (installing packages is root work); the shipped
@@ -128,7 +150,7 @@ func (a *aptBackend) Apply(ctx context.Context) error {
 	c.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 	out, err := c.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("apt-get upgrade: %w: %s", err, string(out))
+		return elevHint(a.mode, fmt.Errorf("apt-get upgrade: %w: %s", err, string(out)))
 	}
 	return nil
 }
@@ -259,7 +281,7 @@ func (d *dnfBackend) Apply(ctx context.Context) error {
 	c.Env = append(os.Environ(), "LANG=en_US.UTF-8")
 	out, err := c.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dnf upgrade: %w: %s", err, string(out))
+		return elevHint(d.mode, fmt.Errorf("dnf upgrade: %w: %s", err, string(out)))
 	}
 	return nil
 }

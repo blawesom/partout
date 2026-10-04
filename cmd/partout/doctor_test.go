@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -371,4 +372,33 @@ func TestDoctorFileRoot(t *testing.T) {
 	if r4.fails != 1 {
 		t.Fatalf("read-only root must fail (as non-root), got %+v", r4.checks)
 	}
+}
+
+// TestDoctorElevation: elevation off (the provisioning default) warns
+// with the enable remedy — the most common "applying system updates
+// fails" cause; a working sudo probe is ok, a broken one warns.
+func TestDoctorElevation(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Elevate = ""
+	r := &doctorResult{}
+	checkElevation(cfg, r)
+	if r.warns != 1 || !strings.Contains(r.checks[0].detail, "PARTOUT_ELEVATE=sudo") {
+		t.Fatalf("elevation off should warn with the remedy, got %+v", r.checks)
+	}
+
+	cfg.Elevate = "sudo"
+	saved := sudoProbe
+	sudoProbe = func() error { return nil }
+	r2 := &doctorResult{}
+	checkElevation(cfg, r2)
+	if r2.warns != 0 || r2.fails != 0 {
+		t.Fatalf("working sudo should pass, got %+v", r2.checks)
+	}
+	sudoProbe = func() error { return fmt.Errorf("sudo: a password is required") }
+	r3 := &doctorResult{}
+	checkElevation(cfg, r3)
+	if r3.warns != 1 || !strings.Contains(r3.checks[0].detail, "sudoers scope is missing") {
+		t.Fatalf("broken sudo should warn about the scope, got %+v", r3.checks)
+	}
+	sudoProbe = saved
 }

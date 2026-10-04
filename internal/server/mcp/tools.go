@@ -496,7 +496,9 @@ func DefaultTools() []*Tool {
 			Name: "apply_updates",
 			Description: "Apply package updates on one host (operator+). Policy-gated (pkg.apply); " +
 				"with dry_run=true it only reports what would change (read-only, not gated). " +
-				"Blocks until the op completes or fails.",
+				"Blocks until the op completes or fails. Applying is root work: the host must have " +
+				"elevation configured (PARTOUT_ELEVATE=sudo + the sudoers scope) — otherwise the " +
+				"apply fails with permission errors.",
 			InputSchema: objSchema(map[string]any{
 				"agent_id": strProp("host id (ag_…)"),
 				"packages": arrProp("string", "package names to update (empty = all available)"),
