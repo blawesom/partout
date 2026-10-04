@@ -1,7 +1,8 @@
 # Partout
 
-> **Status: beta (v0.9.10 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
-> before the 1.0 GA flip)** — the full feature set (observe,
+> **Status: beta (v0.9.11 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
+> before the 1.0 GA flip; v0.9.11 hardens the field-test findings and ships elevation
+> onboarding — the server-side policy store + `provision --elevate` + day-1 presets)** — the full feature set (observe,
 > execute, patch, update rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your
 > `partout.db` regularly.

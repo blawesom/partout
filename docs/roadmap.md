@@ -687,6 +687,50 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.11 — field-test hardening + elevation onboarding (from a real
+  2-host Rocky 10 deployment; 19 findings + 6 gaps, FIELD-REPORT
+  2026-10-04).** Everything since the v0.9.9 tag:
+
+  - **Installer/install path**: `install-server.sh` aborted on
+    RHEL-family (`useradd` vs the pre-created group); its TLS healthz
+    probe failed cert verification against the local CA; the backup
+    timer raced the server's boot migrations (SQLITE_BUSY → a critical
+    alert on day 1 — backup.sh now retries).
+  - **`partout doctor` sees the effective config**: `--env-file`
+    (systemd-style, the installer passes it), the provision-TLS check
+    reads the ACTUAL leaf cert SANs, and a port-in-use on a live healthy
+    server is an actionable warning, not a FAIL.
+  - **Elevation correctness**: the sudoers renderer quoted wildcards
+    (quoted `*` is a literal in sudoers — every wildcard grant was a
+    dead rule); PTY sessions and task steps now go through the same
+    policy-aware runner as exec dispatch; bare-command rules
+    (`{"allow":"reboot"}` = zero-args only) are expressible; an invalid
+    policy degrades (legacy elevation + fact) instead of crash-looping
+    the agent.
+  - **Policy gating**: task `command`/`reboot` steps evaluate as
+    exec-class actions at dispatch AND in the agent guardrail — a
+    `require_approval` reboot rule now gates task steps too.
+  - **dnf backend**: update lists are no longer empty (exit-100 output
+    is parsed), and `packages apply` survives its `--assumeno` dry-run.
+  - **Job results + approvals**: manual RunNow runs finalize (the result
+    used to sit in an unread slot); `approvals deny` finalizes the parked
+    run rows; audit rows carry actors.
+  - **CLI batch**: `ctl ca` bootstrap fetch on TLS servers, 10-minute
+    client timeouts for `tasks/jobs run`, `secrets create NAME
+    -value=x` accepted, `cve scan --agent` filters, help texts corrected.
+  - **Files**: upload-begin result checked, nested uploads create
+    intermediate dirs, clean 400/403 error mapping, task step Kind+Name
+    recorded.
+  - **Elevation onboarding (the D1 ask)**: server-side elevation policy
+    store (`ctl elevation policy`, canonical sha256 per policy; agents
+    report their effective hash), provision-time bootstrap
+    (`provision new --elevate [--elevation-policy NAME|FILE]…` +
+    `--service-labels`/`--cert-paths`, same fields in the wizard), seeded
+    day-1 presets (`default-baseline` policy, `default-daily-updates`
+    task with the new distro-aware `upgrade` step kind, paused
+    `default-daily-package-updates` job), and a job-assignment reconcile
+    loop so enabled jobs reach agents that joined later.
+
 - **v0.9.10 — perceived-quality hardening (all from live user feedback,
   verified before fixing).** Everything since the v0.9.9 tag:
 

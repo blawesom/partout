@@ -1,6 +1,12 @@
 # Partout — Deployment
 
-**Status:** v0.9.10 — reflects the current implementation
+**Status:** v0.9.11 — reflects the current implementation
+(field-tested on a 2-host Rocky 10 fleet; v0.9.11 fixes the field findings —
+the RHEL installer path, the TLS healthz probe, doctor effective-config, sudoers
+wildcard rendering, the dnf package backend, step-level policy gating, PTY/task
+elevation parity — and ships elevation onboarding: the server-side elevation
+policy store + `provision new --elevate` + seeded day-1 presets, §4.3 +
+operations §3.6)
 (M0–M8.1 complete: Web UI, M4 approvals + MCP + OAuth2, M6.1 alert rule kinds,
 v0.7.x in-stream mTLS rotation / offline down-queue dispatch / provisioning
 fresh+join modes / `partout --version`, **M8.1 fleet updates**: release store +
