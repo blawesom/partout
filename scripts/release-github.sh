@@ -86,7 +86,12 @@ wc -l < "$T/notes.md" | xargs echo "  notes lines:"
 cp "$T/dist"/*.tar.gz "$T/"
 cp "$T/dist/SHA-256SUMS" "$T/"
 
-ASSETS=("$T"/partout_"${VER}"_linux_*.tar.gz "$T/SHA-256SUMS")
+# NB: two distinct globs — the plain binaries and the INSTALLER bundles
+# (partout_install_…) both match partout*_linux_*, but a single
+# `partout_*` glob would also catch future name families; keep it
+# explicit so a typo cannot silently drop an asset (v0.9.12 initially
+# shipped without the bundles for exactly this reason).
+ASSETS=("$T"/partout_"${VER}"_linux_*.tar.gz "$T"/partout_install_"${VER}"_linux_*.tar.gz "$T/SHA-256SUMS")
 
 if [ "${DRY_RUN:-0}" = "1" ]; then
   echo
