@@ -215,7 +215,9 @@ func TestSessionOpenDataClose(t *testing.T) {
 	// packages in parallel on a 2-core runner) the round trip has been
 	// observed to exceed 20 s — scheduler starvation, not a defect — so the
 	// budget is generous; a missing frame is still a hard fail, not a hang.
-	dataDeadline := time.Now().Add(60 * time.Second)
+	// (60 s proved too tight on the 2-core CI runner under the full -race
+	// suite — it timed out twice in four runs — so the budget is 150 s.)
+	dataDeadline := time.Now().Add(150 * time.Second)
 	for {
 		recs, _ := sm.Replay(sess.ID)
 		if len(recs) == 1 && string(recs[0].Data) == "hello pty\n" {
