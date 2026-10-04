@@ -201,6 +201,7 @@ var ElevationPolicies = []ElevationPolicyDef{
   {"allow":"apt-get","args":["-qq","update"]},
   {"allow":"apt-get","args":["-o","Dpkg::Progress-Focus=full","-y","-o","Dpkg::Options::=--force-confdef","-o","Dpkg::Options::=--force-confold","upgrade"]},
   {"allow":"dnf","args":["check-update"]},
+  {"allow":"dnf","args":["upgrade","--assumeno"]},
   {"allow":"hostnamectl","args":["set-hostname","*"]},
   {"allow":"systemctl","verbs":["status","show","start","stop","restart","reload","try-restart","enable","disable","is-active","is-enabled"],"units":["partout-*","fail2ban*","sshd*","nginx*","haproxy*","caddy*"]},
   {"allow":"reboot"}

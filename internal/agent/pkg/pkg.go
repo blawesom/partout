@@ -270,18 +270,24 @@ func (d *dnfBackend) List(ctx context.Context) ([]PkgUpdate, error) {
 }
 
 func (d *dnfBackend) DryRun(ctx context.Context) (string, error) {
-	out, err := run(ctx, time.Minute, "dnf", "upgrade", "--assumeno")
+	// Through the elevation runner (field-caught on the v0.9.11 run): dnf
+	// refuses to simulate as a non-root user on RHEL ("This command has to
+	// be run with superuser privileges"), so the dry-run must be eligible
+	// for elevation like the apply — the default-baseline policy grants the
+	// `dnf upgrade --assumeno` form.
+	c := d.runner.RunCmd(ctx, "dnf", "upgrade", "--assumeno")
+	out, err := c.CombinedOutput()
 	if err != nil {
 		// `--assumeno` answers "no" at the transaction prompt: dnf prints
 		// the summary and exits 1 ("Operation aborted"). That is the dry-run
 		// outcome, not a failure — field feedback F8: treating exit 1 as an
 		// error made every dnf apply die at its mandatory dry-run step.
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			return summarizeDNF(out), nil
+			return summarizeDNF(string(out)), nil
 		}
-		return "", fmt.Errorf("dnf upgrade --assumeno: %w: %s", err, truncateStr(out, 300))
+		return "", fmt.Errorf("dnf upgrade --assumeno: %w: %s", err, truncateStr(string(out), 300))
 	}
-	return summarizeDNF(out), nil
+	return summarizeDNF(string(out)), nil
 }
 
 func (d *dnfBackend) Apply(ctx context.Context) error {
