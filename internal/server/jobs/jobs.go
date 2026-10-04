@@ -29,6 +29,7 @@ import (
 	sel "github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/stream"
+	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
@@ -147,7 +148,7 @@ func (c *Controller) Create(ctx context.Context, spec Job, actor Actor) (*store.
 	// be allowed to run task.run. A denied host rejects the whole write
 	// (fail closed; no orphan job row, nothing assigned). A create whose
 	// selector matches no host is rejected up front (user error).
-	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role)
+	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role, toPBSteps(steps))
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +175,7 @@ func (c *Controller) Create(ctx context.Context, spec Job, actor Actor) (*store.
 		c.log.Printf("jobs: resolve %s: %v", jobID, err)
 		return job, fmt.Errorf("jobs: resolve selector: %w", err)
 	}
-	c.audit("create", jobID, spec.Selector, 0)
+	c.audit("create", jobID, spec.Selector, 0, actor.Principal)
 	return job, nil
 }
 
@@ -233,7 +234,7 @@ func (c *Controller) Update(ctx context.Context, jobID string, spec Job, actor A
 	// Policy gate BEFORE mutating: re-authorization is required on every
 	// save (a fresh signed Decision per host, bound to the current bundle
 	// version). Denied → no change is persisted.
-	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role)
+	decisions, err := c.gatePolicy(jobID, spec.Selector, actor.Role, toPBSteps(steps))
 	if err != nil {
 		return nil, err
 	}
@@ -255,12 +256,12 @@ func (c *Controller) Update(ctx context.Context, jobID string, spec Job, actor A
 	// Editing a selector can drop hosts: unassign them so they stop firing
 	// (PRD §5.4 acceptance) and discard their signed decision.
 	c.reconcileAssignments(jobID, current)
-	c.audit("update", jobID, spec.Selector, len(current))
+	c.audit("update", jobID, spec.Selector, len(current), actor.Principal)
 	return job, nil
 }
 
 // Delete removes a job + unassigns from all hosts.
-func (c *Controller) Delete(ctx context.Context, jobID string) error {
+func (c *Controller) Delete(ctx context.Context, jobID string, actor Actor) error {
 	assignments, _ := c.st.JobAssignmentsForJob(jobID)
 	for _, a := range assignments {
 		_ = c.st.UnassignJob(jobID, a.AgentID)
@@ -271,7 +272,7 @@ func (c *Controller) Delete(ctx context.Context, jobID string) error {
 	if err := c.st.DeleteJob(jobID); err != nil {
 		return fmt.Errorf("jobs: delete: %w", err)
 	}
-	c.audit("delete", jobID, "", 0)
+	c.audit("delete", jobID, "", 0, actor.Principal)
 	return nil
 }
 
@@ -366,7 +367,7 @@ func (c *Controller) reconcileAssignments(jobID string, current map[string]bool)
 // version). If any host is denied, returns a *PolicyError naming the hosts.
 // Evaluation happens BEFORE any job state is persisted, so a denied write
 // leaves the store untouched.
-func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*pb.Decision, error) {
+func (c *Controller) gatePolicy(jobID, selector, actorRole string, steps []*pb.TaskStep) (map[string]*pb.Decision, error) {
 	// Fail closed without a signing identity: a job that cannot carry a
 	// verifiable Decision would be denied by the agent at fire time, so
 	// reject the write with a clear misconfiguration error instead.
@@ -395,7 +396,7 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*
 				act.HostRoles = roles
 			}
 		}
-		decision, effect, reason := c.signTaskRunDecision(jobID, actorRole, act)
+		decision, effect, reason := c.signTaskRunDecision(jobID, actorRole, act, steps)
 		if decision == nil {
 			if effect == policy.EffectRequireApproval {
 				// A job carries a STANDING decision pushed to the agent; it
@@ -419,13 +420,16 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string) (map[string]*
 // signTaskRunDecision evaluates the task.run action class and, when allowed,
 // signs a Decision bound to runID. effect is the policy effect (ok=false
 // means it was not allow; reason carries the denial/approval reason).
-func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Action) (*pb.Decision, string, string) {
+func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Action, steps []*pb.TaskStep) (*pb.Decision, string, string) {
 	if c.ident == nil {
 		// Callers gate on this up front; keep the failure closed.
 		return nil, policy.EffectDeny, "server signing identity not configured"
 	}
 	rules, _ := c.st.GetPolicyRules()
-	decision := policy.Evaluate(rules, act)
+	// Step-level gating (F13): command-like steps evaluate as exec-class
+	// actions too — a standing job decision must not carry a step a
+	// cmd-regex rule denies (or would park for approval).
+	decision := tasks.EvaluateRunSteps(rules, act, steps)
 	if decision.Effect != policy.EffectAllow {
 		return nil, decision.Effect, decision.Reason
 	}
@@ -494,7 +498,7 @@ func (c *Controller) OnRunResult(agentID string, r *pb.JobRunResult) {
 	}
 	// Update the assignment's last-run state.
 	_ = c.st.UpdateJobAssignmentState(r.JobId, agentID, r.State, r.FinishedAt)
-	c.audit("run", r.JobId, "", 0)
+	c.audit("run", r.JobId, "", 0, "agent")
 	// SSE event.
 	if c.sse != nil {
 		c.sse.Emit("job.run", map[string]any{
@@ -594,6 +598,14 @@ func (c *Controller) ReissueForHost(hostID string) error {
 // the current policy bundle (or returns the denial reason).
 func (c *Controller) hostTaskRunDecision(jobID, hostID string) (*pb.Decision, string) {
 	act := policy.Action{HostID: hostID, ActionClass: policy.ActionTaskRun}
+	var pbSteps []*pb.TaskStep
+	if job, err := c.st.GetJob(jobID); err == nil && job != nil {
+		if ver, err := c.st.TaskVersion(job.TaskID, job.TaskVersion); err == nil && ver != nil {
+			if steps, err := store.DecodeTaskSteps(ver.StepsJSON); err == nil {
+				pbSteps = toPBSteps(steps)
+			}
+		}
+	}
 	if host, _ := c.st.Agent(hostID); host != nil {
 		if tags, _ := c.st.Tags(hostID); len(tags) > 0 {
 			act.HostTags = tags
@@ -602,7 +614,7 @@ func (c *Controller) hostTaskRunDecision(jobID, hostID string) (*pb.Decision, st
 			act.HostRoles = roles
 		}
 	}
-	decision, _, reason := c.signTaskRunDecision(jobID, "system", act)
+	decision, _, reason := c.signTaskRunDecision(jobID, "system", act, pbSteps)
 	return decision, reason
 }
 
@@ -654,7 +666,7 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 			act.HostRoles = roles
 		}
 	}
-	decision, effect, _ := c.signTaskRunDecision(runID, actor.Role, act)
+	decision, effect, _ := c.signTaskRunDecision(runID, actor.Role, act, toPBSteps(steps))
 	if decision == nil {
 		if effect == policy.EffectRequireApproval && c.approvals != nil {
 			// Park: record the run as awaiting_approval + create the request.
@@ -679,7 +691,7 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 				_ = c.st.FinalizeJobRun(runID, "failed", "approval request: "+err.Error())
 				return fmt.Errorf("jobs: approval request: %w", err)
 			}
-			c.audit("run-parked", jobID, agentID, 0)
+			c.audit("run-parked", jobID, agentID, 0, actor.Principal)
 			if c.sse != nil {
 				c.sse.Emit("job.run-parked", map[string]any{
 					"job_id": jobID, "agent_id": agentID,
@@ -695,7 +707,7 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 			Error: "denied by policy",
 		})
 		_ = c.st.FinalizeJobRun(runID, "denied", "denied by policy")
-		c.audit("run-denied", jobID, "", 0)
+		c.audit("run-denied", jobID, "", 0, actor.Principal)
 		if effect == policy.EffectRequireApproval {
 			return &PolicyError{Reason: "task.run for host " + agentID + " requires approval but the approvals engine is not wired; failing closed"}
 		}
@@ -709,16 +721,60 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 		ScheduledAt: time.Now().Unix(), Trigger: "manual", State: "running",
 	}
 	_ = c.st.CreateJobRun(run)
-	_ = c.h.SendTaskRun(agentID, &pb.TaskRun{
+	if err := c.h.SendTaskRun(agentID, &pb.TaskRun{
 		RunId:       runID,
 		TaskId:      job.TaskID,
 		TaskVersion: int32(job.TaskVersion),
 		Steps:       toPBSteps(steps),
 		Decision:    decision,
-	})
+	}); err != nil {
+		_ = c.st.FinalizeJobRun(runID, "failed", "dispatch: "+err.Error())
+		c.audit("run", jobID, "", 0, actor.Principal)
+		return err
+	}
 	_ = c.st.FinalizeJobRun(runID, "dispatched", "")
-	c.audit("run", jobID, "", 0)
+	c.audit("run", jobID, "", 0, actor.Principal)
+	// The run is dispatched as a TaskRun, so its result arrives as a
+	// TaskRunResult — wait for it asynchronously and finalize the job run
+	// row (field feedback F9: the result used to land in an unread pending
+	// slot and the row stayed "dispatched" forever). A late/replayed result
+	// (stream drop, server restart) is caught by the TaskResultHook →
+	// OnTaskRunResult fallback wired in main.go.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if tr, err := c.h.WaitTaskResult(ctx, runID); err == nil {
+			c.OnTaskRunResult(agentID, runID, tr)
+		}
+	}()
 	return nil
+}
+
+// OnTaskRunResult finalizes a manual (RunNow) job run from the agent's
+// TaskRunResult — the run id is a jr_* dispatched via SendTaskRun, so the
+// ordinary JobRunResult path never fires for it. A no-op when the run id is
+// not a job run (task runs are handled by the tasks controller).
+func (c *Controller) OnTaskRunResult(agentID, runID string, tr *pb.TaskRunResult) {
+	run, err := c.st.GetJobRun(runID)
+	if err != nil || run == nil {
+		return // not a job run: nothing to finalize
+	}
+	status := tr.GetState()
+	if status == "" {
+		status = "failed"
+	}
+	if err := c.st.FinalizeJobRun(runID, status, tr.GetError()); err != nil {
+		c.log.Printf("jobs: finalize manual run %s: %v", runID, err)
+		return
+	}
+	_ = c.st.UpdateJobAssignmentState(run.JobID, agentID, status, time.Now().Unix())
+	c.audit("run", run.JobID, "", 0, "agent")
+	if c.sse != nil {
+		c.sse.Emit("job.run", map[string]any{
+			"job_id": run.JobID, "agent_id": agentID,
+			"state": status, "run_id": runID,
+		})
+	}
 }
 
 // DispatchApprovedJobRun re-dispatches a parked manual job run after its
@@ -753,24 +809,36 @@ func (c *Controller) DispatchApprovedJobRun(req *store.ApprovalRequest, dec *pb.
 		Decision:    dec,
 	}); err != nil {
 		_ = c.st.FinalizeJobRun(req.RunID, "failed", "dispatch: "+err.Error())
-		c.audit("run-error", run.JobID, req.AgentID, 0)
+		c.audit("run-error", run.JobID, req.AgentID, 0, "approvals")
 		return fmt.Errorf("jobs: dispatch: %w", err)
 	}
 	_ = c.st.FinalizeJobRun(req.RunID, "dispatched", "")
-	c.audit("run", run.JobID, req.AgentID, 1)
+	c.audit("run", run.JobID, req.AgentID, 1, "approvals")
+	// Same as RunNow: wait for the TaskRunResult asynchronously so the row
+	// is finalized (field feedback F9).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if tr, err := c.h.WaitTaskResult(ctx, req.RunID); err == nil {
+			c.OnTaskRunResult(req.AgentID, req.RunID, tr)
+		}
+	}()
 	return nil
 }
 
 // audit records a job audit event + SSE.
-func (c *Controller) audit(kind, jobID, selectorText string, n int) {
+func (c *Controller) audit(kind, jobID, selectorText string, n int, actor string) {
 	payload, _ := json.Marshal(map[string]any{
 		"kind":     kind,
 		"job_id":   jobID,
 		"selector": selectorText,
 		"hosts":    n,
 	})
+	if actor == "" {
+		actor = "system"
+	}
 	_ = c.st.AppendAudit(store.AuditEvent{
-		TS: time.Now().Unix(), Kind: "job", Payload: string(payload),
+		TS: time.Now().Unix(), Kind: "job", Actor: actor, Payload: string(payload),
 	})
 	if c.sse != nil {
 		c.sse.Emit("job."+kind, map[string]any{"job_id": jobID})

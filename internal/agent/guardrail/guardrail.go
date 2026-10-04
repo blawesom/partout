@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	"github.com/blawesom/partout/internal/policy"
@@ -208,6 +209,23 @@ func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 	return true, ""
 }
 
+// stepCommandLine renders the command line a task step would execute, for
+// cmd-regex policy matching (mirrors the server-side gate in
+// internal/server/tasks). Returns ("", false) for non-command steps.
+func stepCommandLine(s *pb.TaskStep) (string, bool) {
+	switch s.GetKind() {
+	case "command":
+		if s.GetCommand() == "" {
+			return "", false
+		}
+		return strings.TrimSpace(strings.Join(append([]string{s.GetCommand()}, s.GetArgs()...), " ")), true
+	case "reboot":
+		return "reboot", true
+	default:
+		return "", false
+	}
+}
+
 // RecheckPkg verifies a package op's Decision the same way as commands and
 // file ops: bundle version, signature, local re-eval over the pkg action
 // class, and the server decision effect. Fails closed on any mismatch.
@@ -287,6 +305,32 @@ func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
 	if dec.Effect != policy.EffectAllow {
 		return false, fmt.Sprintf("guardrail: local recheck says %s (%s)",
 			dec.Effect, dec.Reason)
+	}
+	// Step-level re-check (field feedback F13): every command-like step is
+	// re-evaluated locally as an exec-class action, so a cmd-regex deny (or
+	// require-approval) rule gates task steps exactly as it gates dispatched
+	// exec. Fails closed.
+	for _, step := range run.GetSteps() {
+		cl, isCmd := stepCommandLine(step)
+		if !isCmd {
+			continue
+		}
+		sa := action
+		sa.ActionClass = policy.ActionExec
+		sa.CommandLine = cl
+		if fields := strings.Fields(cl); len(fields) > 0 {
+			sa.Cmd = fields[0]
+			if len(fields) > 1 {
+				sa.Args = fields[1:]
+			} else {
+				sa.Args = nil
+			}
+		}
+		sd := policy.Evaluate(g.rules, sa)
+		if sd.Effect != policy.EffectAllow {
+			return false, fmt.Sprintf("guardrail: task step (%s) local recheck says %s (%s)",
+				cl, sd.Effect, sd.Reason)
+		}
 	}
 	if d.Effect != policy.EffectAllow {
 		return false, fmt.Sprintf("guardrail: server decision is %s", d.Effect)

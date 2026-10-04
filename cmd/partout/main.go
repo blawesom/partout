@@ -448,7 +448,13 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// Post-reboot task resumes: a TaskRunResult with no live waiter
 	// finalizes the existing run row in place (PRD §5.5).
 	h.TaskResultHook = func(agentID, runID string, tr *pb.TaskRunResult) {
-		taskC.OnLateResult(agentID, runID, tr)
+		if taskC.OnLateResult(agentID, runID, tr) {
+			return
+		}
+		// Not a task run: manual job runs (RunNow) arrive here when their
+		// live waiter is gone (stream drop, server restart) — field feedback
+		// F9: the result used to be dropped and the row stuck "dispatched".
+		jobC.OnTaskRunResult(agentID, runID, tr)
 	}
 	sm := sessions.New(st, h, sseB, lg)
 	sm.SetIdentity(ident)

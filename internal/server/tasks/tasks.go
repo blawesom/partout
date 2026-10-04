@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/blawesom/partout/internal/certutil"
@@ -101,7 +102,10 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 			}
 		}
 		rules, _ := c.st.GetPolicyRules()
-		decision := policy.Evaluate(rules, act)
+		// Step-level gating (F13): command-like steps are evaluated as
+		// exec-class actions too, so cmd-regex rules (e.g. the preset
+		// require-approval reboot rule) apply to task steps, not just exec.
+		decision := EvaluateRunSteps(rules, act, steps)
 		switch decision.Effect {
 		case policy.EffectDeny:
 			_ = c.st.FinalizeTaskRun(runID, "failed", "denied by policy: "+decision.Reason, 0)
@@ -306,10 +310,12 @@ func (c *Controller) RunPlaybook(ctx context.Context, playbookID string, actor A
 // waiter: typically a post-reboot resume of a run whose original dispatch
 // already timed out (PRD §5.5). It finalizes the existing row in place and
 // records the reported steps. A no-op when the run id is unknown.
-func (c *Controller) OnLateResult(agentID, runID string, tr *pb.TaskRunResult) {
+// It reports whether the run id was a known task run (false = the caller
+// may route the result elsewhere, e.g. to manual job runs).
+func (c *Controller) OnLateResult(agentID, runID string, tr *pb.TaskRunResult) bool {
 	run, err := c.st.TaskRun(runID)
 	if err != nil || run == nil {
-		return // unknown run: nothing to finalize
+		return false // unknown run: nothing to finalize
 	}
 	for _, sr := range tr.GetSteps() {
 		_ = c.st.RecordTaskRunStep(&store.TaskRunStep{
@@ -327,6 +333,7 @@ func (c *Controller) OnLateResult(agentID, runID string, tr *pb.TaskRunResult) {
 	_ = c.st.FinalizeTaskRun(runID, status, errMsg, 0)
 	c.log.Printf("tasks: late result for %s (agent %s): %s %s", runID, agentID, status, errMsg)
 	c.audit(agentID, runID, Actor{Principal: "agent", Role: "agent"}, status, 0, "")
+	return true
 }
 
 // GetRun returns one task run by ID.
@@ -375,4 +382,85 @@ func (c *Controller) audit(agentID, runID string, actor Actor, state string, app
 			"state": state, "actor": actor.Principal,
 		})
 	}
+}
+
+// ---- step-level policy gating (field feedback F13) -------------------------
+//
+// The cmd-regex policy rules (including the preset
+// default-require-approval-reboot) used to match only dispatched exec
+// commands: a task `reboot` step ran straight to execution and was stopped
+// solely by the privilege wall. Task steps are now evaluated as exec-class
+// actions at dispatch time (and re-checked by the agent guardrail), so a
+// rule that gates `reboot` gates it everywhere.
+
+// stepCommandLine renders the command line a step would execute, for
+// cmd-regex policy matching. Returns ("", false) for non-command steps.
+func stepCommandLine(s *pb.TaskStep) (string, bool) {
+	switch s.GetKind() {
+	case "command":
+		if s.GetCommand() == "" {
+			return "", false
+		}
+		return strings.TrimSpace(strings.Join(append([]string{s.GetCommand()}, s.GetArgs()...), " ")), true
+	case "reboot":
+		// The reboot step's execution surface: the reboot command itself
+		// (defaultReboot tries `systemctl reboot`, `shutdown -r now`, then
+		// `reboot`). Match the conservative literal the preset rules use.
+		return "reboot", true
+	default:
+		return "", false
+	}
+}
+
+// StepActions builds one exec-class policy action per command-like step,
+// from the same host/actor context as the task.run-class action.
+func StepActions(base policy.Action, steps []*pb.TaskStep) []policy.Action {
+	var out []policy.Action
+	for _, s := range steps {
+		cl, ok := stepCommandLine(s)
+		if !ok {
+			continue
+		}
+		a := base
+		a.ActionClass = policy.ActionExec
+		a.CommandLine = cl
+		fields := strings.Fields(cl)
+		if len(fields) > 0 {
+			a.Cmd = fields[0]
+			if len(fields) > 1 {
+				a.Args = fields[1:]
+			} else {
+				a.Args = nil
+			}
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// EvaluateRunSteps evaluates the task.run action class AND every
+// command-like step (as exec-class actions); the worst effect wins
+// (deny > require_approval > allow). This is what tasks.Run and the jobs
+// controller gate on before signing a dispatch Decision.
+func EvaluateRunSteps(rules []policy.Rule, act policy.Action, steps []*pb.TaskStep) policy.Decision {
+	combined := policy.Evaluate(rules, act)
+	rank := func(effect string) int {
+		switch effect {
+		case policy.EffectDeny:
+			return 3
+		case policy.EffectRequireApproval:
+			return 2
+		default:
+			return 1
+		}
+	}
+	for _, sa := range StepActions(act, steps) {
+		d := policy.Evaluate(rules, sa)
+		if rank(d.Effect) > rank(combined.Effect) {
+			combined = d
+		}
+		// Merge matched-rule attribution so the audit shows why.
+		combined.MatchedRules = append(combined.MatchedRules, d.MatchedRules...)
+	}
+	return combined
 }

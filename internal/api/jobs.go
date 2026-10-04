@@ -135,7 +135,7 @@ func (h *Handler) jobUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) jobDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.jobs.Delete(r.Context(), id); err != nil {
+	if err := h.jobs.Delete(r.Context(), id, h.jobActor(r)); err != nil {
 		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
 		return
 	}
