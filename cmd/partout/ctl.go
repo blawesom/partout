@@ -81,11 +81,10 @@ commands:
   secrets <list|create|rotate|revoke|delete>   managed secrets (values write-only)
   update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
            release signing + the one-command fleet update (M8.1)
-  elevation <show|check|install-sudoers>    local elevation policy (on the host)
-  elevation policy <create|list|show|update|delete>
-           the server-side elevation policy store (remote)
-           elevation policy (PRD Decision 3): view the loaded scope, detect
-           sudoers drift, and render/install the sudoers drop-in from it
+  elevation <show|check|install-sudoers|policy>
+           show/check/install-sudoers work on THIS host's policy;
+           "policy" drives the server-side policy store — remote,
+           with verbs: create, list, show, update, delete
   packages <updates|apply|actions> <agent_id>  OS package updates (apt/dnf; dry-run first)
   cve <list|scan> [--agent A] [--min-cvss F] [--json]  package CVE findings (OSV);
                            exit 1 if any finding matches — CI/cron gate
@@ -196,11 +195,7 @@ commands:
 	case "update":
 		c.cmdUpdate(rest)
 	case "elevation":
-		if len(rest) > 0 && rest[0] == "policy" {
-			c.elevationPolicy(rest[1:])
-			return
-		}
-		cmdElevation(rest)
+		cmdElevation(c, rest)
 	case "packages":
 		c.cmdPackages(rest)
 	case "cve":
@@ -257,9 +252,12 @@ func dbBackup(dbPath, out string) error {
 	return st.BackupTo(out)
 }
 
-func cmdElevation(args []string) {
+func cmdElevation(c *ctl, args []string) {
 	usage := func() {
-		fmt.Fprintln(os.Stderr, `usage: partout ctl elevation <show|check|install-sudoers>
+		fmt.Fprintln(os.Stderr, `usage: partout ctl elevation <show|check|install-sudoers|policy>
+
+  policy             the SERVER-SIDE elevation policy store (remote):
+                      create, list, show, update, delete
 
   show                load the policy; print effective rules + source files
   check               re-render the drop-in and diff it against the installed file
@@ -292,6 +290,10 @@ flags:
 		elevationCheck(*policy, *sudoersPath, *user)
 	case "install-sudoers":
 		elevationInstall(*policy, *sudoersPath, *user, *dryRun)
+	case "policy":
+		// The remote, server-side policy store (provisioning ships these
+		// documents to hosts).
+		c.elevationPolicy(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: unknown elevation command %q\n", sub)
 		usage()
