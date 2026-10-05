@@ -35,6 +35,7 @@
   function taskRunBadge(s) { return ({ ok: "ok", changed: "ok", running: "info", rebooting: "info", failed: "bad", skipped: "neutral", denied: "outline-bad", awaiting_approval: "warn" })[s] || "neutral"; }
   function stepBadge(s) { return ({ ok: "ok", changed: "ok", failed: "bad", skipped: "neutral", rebooting: "info" })[s] || "neutral"; }
   function certBadge(c) {
+    if (c.read_error) return { cls: "warn", label: c.read_error.includes("permission") ? "unreadable" : "invalid" };
     if (!c.not_after) return { cls: "neutral", label: "unknown" };
     if (c.days_remaining < 0) return { cls: "bad", label: "expired" };
     if (c.days_remaining < 7) return { cls: "bad", label: c.days_remaining + "d" };
@@ -2017,7 +2018,10 @@
               <thead><tr><th>Subject</th><th>Host</th><th>Expires</th><th>Chain</th><th>Key</th><th>Self-signed</th><th>Used by</th></tr></thead>
               <tbody>
                 <tr v-for="(row,i) in certs" :key="i">
-                  <td><div class="mono small">{{ row.cert.subject || row.cert.path }}</div></td>
+                  <td>
+                    <div class="mono small">{{ row.cert.subject || row.cert.path }}</div>
+                    <div v-if="row.cert.read_error" class="small muted" style="margin-top:2px">{{ row.cert.read_error }}<span v-if="row.cert.read_error.includes('permission')"> — add a <span class="mono">cat</span> grant for this path to the elevation policy (then <span class="mono">sudo /usr/local/bin/partout ctl elevation install-sudoers</span>), or fix the file permissions</span></div>
+                  </td>
                   <td class="mono">{{ hostNameById(row.host_id) }}</td>
                   <td><span class="badge" :class="certBadge(row.cert).cls">{{ certBadge(row.cert).label }}</span></td>
                   <td><span class="badge" :class="!row.cert.chain_checked?'neutral':(row.cert.chain_valid?'ok':'bad')">{{ !row.cert.chain_checked?'unchecked':(row.cert.chain_valid?'valid':'broken') }}</span></td>

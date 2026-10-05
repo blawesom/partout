@@ -245,6 +245,87 @@ func TestDiscoverServiceCertsHAProxyLegacySSLCertificates(t *testing.T) {
 	}
 }
 
+// TestCollectCertsReferencedButUnreadable: a service-referenced file that
+// exists but cannot be parsed surfaces as a read-error fact (path + labels
+// + reason) instead of silently disappearing — the certs page shows the
+// remedy. Walk-discovered files stay silent (not asserted here — /etc/ssl
+// legitimately holds non-certs).
+func TestCollectCertsReferencedButUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	// A file the agent user cannot read (chmod 0), referenced by the
+	// nginx config.
+	certFile := filepath.Join(dir, "site.pem")
+	if err := os.WriteFile(certFile, []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads anything; EACCES path not exercisable")
+	}
+	if err := os.Chmod(certFile, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(certFile, 0o600)
+
+	nginxCfg := filepath.Join(dir, "nginx.conf")
+	conf := "server {\n    listen 443 ssl;\n    ssl_certificate " + certFile + ";\n}\n"
+	if err := os.WriteFile(nginxCfg, []byte(conf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := Collect(&Config{NginxConf: nginxCfg, HaproxyConf: filepath.Join(dir, "nope.cfg"), CaddyConf: filepath.Join(dir, "nope")})
+	if f == nil || f.Certificates == nil {
+		t.Fatal("Collect = nil, want cert facts with the read-error entry")
+	}
+	var found *CertFact
+	for i := range f.Certificates.Items {
+		if f.Certificates.Items[i].Path == certFile {
+			found = &f.Certificates.Items[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no fact for referenced unreadable cert %s: %+v", certFile, f.Certificates.Items)
+	}
+	if found.ReadError == "" {
+		t.Error("ReadError empty, want a reason (permission denied)")
+	}
+	if found.NotAfter != 0 {
+		t.Errorf("NotAfter = %d, want 0 (unknown, never expired)", found.NotAfter)
+	}
+	if len(found.Labels) != 1 || found.Labels[0] != "nginx" {
+		t.Errorf("Labels = %v, want [nginx] (the referencing service)", found.Labels)
+	}
+}
+
+// TestCertReadError: the classifier distinguishes permission failures
+// (actionable: policy grant or chmod) from non-certificates.
+func TestCertReadError(t *testing.T) {
+	dir := t.TempDir()
+
+	// Readable but not a certificate.
+	notCert := filepath.Join(dir, "notcert.pem")
+	if err := os.WriteFile(notCert, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := certReadError(notCert, elevate.None, nil); got != "not a certificate" {
+		t.Errorf("certReadError(readable non-cert) = %q", got)
+	}
+
+	if os.Geteuid() != 0 {
+		// Root-only file without a policy: permission denied.
+		locked := filepath.Join(dir, "locked.pem")
+		if err := os.WriteFile(locked, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(locked, 0o600)
+		if got := certReadError(locked, elevate.None, nil); got != "permission denied (no cat grant)" {
+			t.Errorf("certReadError(root-only, no policy) = %q", got)
+		}
+	}
+}
+
 // TestParseCertPEM: the in-process parser (crypto/x509) used for root-only
 // certs read via elevation. All public fields come from the DER; chain
 // verification is skipped (unchecked, like a host with no trust bundle).

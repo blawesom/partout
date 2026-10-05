@@ -251,4 +251,9 @@ type CertFact struct {
 	OCSPStapling  bool     `json:"ocsp_stapling"`
 	OCSPStatus    string   `json:"ocsp_status"`
 	Labels        []string `json:"labels,omitempty"`
+	// ReadError: set when the file is referenced by a service config but
+	// unmonitorable (root-only without a cat grant, or not a certificate).
+	// All other fields are zero — NotAfter==0 means unknown, never expired;
+	// the certs page shows the reason with the remedy instead of a date.
+	ReadError string `json:"read_error,omitempty"`
 }

@@ -692,6 +692,13 @@ type CertFact struct {
 	OCSPStapling  bool     `json:"ocsp_stapling"`
 	OCSPStatus    string   `json:"ocsp_status"`
 	Labels        []string `json:"labels,omitempty"`
+	// ReadError is set when the file is referenced by a service config but
+	// could not be monitored: "permission denied (no cat grant)" for a
+	// root-only cert the elevation policy does not cover, or "not a
+	// certificate" for a referenced file that parses as something else.
+	// Empty on every successfully parsed cert. All other fields are zero
+	// — consumers must treat NotAfter==0 as unknown, never expired.
+	ReadError string `json:"read_error,omitempty"`
 }
 
 // Cert collection bounds (M5). Scanning /etc/ssl on a distribution with a
@@ -736,6 +743,17 @@ func collectCerts(cfg *Config) *CertFacts {
 		seen[r.Path] = true
 		if cf := parseCert(r.Path, caPath, cfg.Elevate, cfg.Elevation); cf != nil {
 			items = append(items, *cf)
+		} else {
+			// Referenced but unparseable — a service config points at this
+			// file yet the agent cannot monitor it. Surfaced (not silently
+			// dropped) so the certs page can show the remedy: a root-only
+			// service cert needs a `cat` grant in the elevation policy or a
+			// permissions fix (field report: ccc.laplane.net — two haproxy
+			// crt bundles at 0640 haproxy:haproxy, invisible to the agent).
+			// Walk-discovered files do NOT get this treatment: /etc/ssl
+			// legitimately holds non-cert files (keys, configs) and the walk
+			// would drown the page in noise.
+			items = append(items, CertFact{Path: r.Path, ReadError: certReadError(r.Path, cfg.Elevate, cfg.Elevation)})
 		}
 	}
 
@@ -855,6 +873,23 @@ func findCertFilesBounded(dir string, budget int) []string {
 // trust bundle used for chain verification; empty means verification is
 // skipped (ChainValid stays false and ChainChecked false, so the caller can
 // distinguish "not verified" from "verified and broken").
+// certReadError classifies why a service-referenced cert could not be
+// parsed, so the certs page can show an actionable reason instead of a
+// silent gap. Distinguishes "no read permission and no cat grant" (the
+// fix is a policy grant or a chmod) from "the file is not a certificate"
+// (stale or wrong reference in the service config).
+func certReadError(path string, m elevate.Mode, p *elevate.Policy) string {
+	if err := probeReadable(path); err != nil {
+		if _, eerr := elevate.ReadFile(m, p, path); eerr != nil {
+			return "permission denied (no cat grant)"
+		}
+		// Elevated read works but parseCert still failed — the bytes are
+		// reachable yet not a certificate.
+		return "not a certificate"
+	}
+	return "not a certificate"
+}
+
 func parseCert(path, caPath string, m elevate.Mode, p *elevate.Policy) *CertFact {
 	cf := &CertFact{Path: path}
 
