@@ -175,6 +175,10 @@ type HAProxyConfig struct {
 	ConfigFile   string `json:"config_file"`
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
+	// ConfigValidated: nil = older agent (< 0.9.14, use ConfigError);
+	// false = validation blocked (permission, no elevation) — ConfigValid
+	// is not evidence; true = validator ran to a definitive answer.
+	ConfigValidated *bool `json:"config_validated,omitempty"`
 	// ConfigError: haproxy -c output when invalid (bounded by the agent).
 	ConfigError string `json:"config_error,omitempty"`
 	// ConfigReadable: nil = unknown (older agent); false = root-only file,
@@ -191,6 +195,8 @@ type NginxConfig struct {
 	ConfigFile   string `json:"config_file"`
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
+	// ConfigValidated: see HAProxyConfig.ConfigValidated.
+	ConfigValidated *bool `json:"config_validated,omitempty"`
 	// ConfigError: nginx -t output when invalid (bounded by the agent).
 	ConfigError string `json:"config_error,omitempty"`
 	// ConfigReadable: see HAProxyConfig.ConfigReadable.

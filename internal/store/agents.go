@@ -203,6 +203,15 @@ func (s *Store) MarkQueuedOfflineIfQueued(id string) (bool, error) {
 
 // DeleteAgent removes an agent and all cascaded rows (PRD R7).
 func (s *Store) DeleteAgent(id string) error {
+	// Resolve the agent's firing alerts first: the alerts table has no FK
+	// cascade on agent_id, so without this a deleted host leaves firing
+	// alerts orphaned forever (field report: ccc.laplane.net — 6 stale
+	// config_invalid alerts from pre-rejoin agents that no longer existed).
+	// Resolved (not deleted) — the alert history stays for the audit trail.
+	if _, err := s.db.Exec(`UPDATE alerts SET state='resolved', resolved_at=? WHERE agent_id=? AND state='firing'`,
+		now(), id); err != nil {
+		return fmt.Errorf("resolve alerts for deleted agent: %w", err)
+	}
 	_, err := s.db.Exec(`DELETE FROM agents WHERE id=?`, id)
 	return err
 }

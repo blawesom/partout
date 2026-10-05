@@ -394,6 +394,12 @@ type HAProxyConfig struct {
 	ConfigFile   string `json:"config_file"`
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
+	// ConfigValidated distinguishes "the validator ran and said invalid"
+	// from "validation was blocked" (root-only config or includes, no
+	// authorized elevation). nil = older agent (pre-0.9.14); false = blocked
+	// (ConfigValid is NOT evidence — the alert engine must not fire); true =
+	// the validator ran to a definitive answer (ConfigValid is meaningful).
+	ConfigValidated *bool `json:"config_validated,omitempty"`
 	// ConfigError carries the validator's (haproxy -c) output when
 	// ConfigValid is false, so the UI can explain *why* instead of just
 	// showing a red badge. Bounded by capConfigError. Empty when the
@@ -416,6 +422,8 @@ type NginxConfig struct {
 	ConfigFile   string `json:"config_file"`
 	ConfigSHA256 string `json:"config_sha256"`
 	ConfigValid  bool   `json:"config_valid"`
+	// ConfigValidated: see HAProxyConfig.ConfigValidated.
+	ConfigValidated *bool `json:"config_validated,omitempty"`
 	// ConfigError: nginx -t output on failure (see HAProxyConfig).
 	ConfigError string `json:"config_error,omitempty"`
 	// ConfigReadable: see HAProxyConfig.ConfigReadable.
@@ -499,6 +507,14 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 	// collection) — capture the output on failure so the UI can explain
 	// the invalid state.
 	validateArgs := []string{"-c", "-f", cfgPath}
+	// validated starts false (blocked): it flips to true only when the
+	// validator runs to a definitive answer — as the agent user, or via
+	// an authorized elevation. A root-only config (or root-only includes)
+	// without an authorized elevation leaves it false: ConfigValid=false is
+	// then NOT evidence of an invalid config, and the alert engine must not
+	// fire (field report: ccc.laplane.net — 12 false config_invalid alerts).
+	validated := false
+	defer func() { h.ConfigValidated = &validated }()
 	runValidator := func(elevated bool) (string, error) {
 		if !elevated {
 			return runOutput(configExecTimeout, "haproxy", validateArgs...)
@@ -508,10 +524,25 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 	}
 	switch {
 	case readable:
-		if out, err := runValidator(false); err == nil {
-			h.ConfigValid = true
-		} else {
-			h.ConfigError = capConfigError(out)
+		out, err := runValidator(false)
+		switch {
+		case err == nil:
+			h.ConfigValid, validated = true, true
+		case isPermissionFailure(out) && authorizedElevated(cfg, "haproxy", validateArgs):
+			// The agent user couldn't read the config (or an include) —
+			// retry elevated. A permission failure is not evidence of an
+			// invalid config (field report: root-only conf.d includes).
+			if eout, eerr := runValidator(true); eerr == nil {
+				h.ConfigValid, validated = true, true
+			} else {
+				h.ConfigError, validated = capConfigError(eout), true
+			}
+		case isPermissionFailure(out):
+			// Permission failure, no authorized elevation: blocked, not
+			// invalid. ConfigError stays empty — the alert engine treats
+			// an empty error as "never validated" and must not fire.
+		default:
+			h.ConfigError, validated = capConfigError(out), true
 		}
 	case cfg.Elevation != nil && authorizedElevated(cfg, "haproxy", validateArgs):
 		// Not directly readable, but the policy authorizes elevated
@@ -519,9 +550,9 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 		// be proven (in)valid. ConfigReadable stays false — the file
 		// itself is root-only.
 		if out, err := runValidator(true); err == nil {
-			h.ConfigValid = true
+			h.ConfigValid, validated = true, true
 		} else {
-			h.ConfigError = capConfigError(out)
+			h.ConfigError, validated = capConfigError(out), true
 		}
 	default:
 		// Unreadable and not authorized: skip validation entirely and let
@@ -538,6 +569,19 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 	// Topology: lightweight parsing
 	h.Backends, h.Listeners = parseHAProxyTopology(cfgPath, cfg.Elevate, cfg.Elevation)
 	return h
+}
+
+// isPermissionFailure reports whether a validator's combined output
+// indicates a file-access failure (root-only config or includes) rather
+// than a config error. nginx prints `open() "…" failed (13: Permission
+// denied)`; haproxy prints `Could not open configuration file … :
+// Permission denied`. Both use strerror(EACCES) — stable across versions.
+// A permission failure is NOT evidence of an invalid config: the service
+// runs as root at startup and reads those files fine (field report:
+// ccc.laplane.net — nginx -t exits 1 on root-only conf.d includes while
+// nginx itself is active and healthy).
+func isPermissionFailure(out string) bool {
+	return strings.Contains(out, "Permission denied")
 }
 
 // authorizedElevated reports whether the loaded policy authorizes (name,
@@ -569,18 +613,36 @@ func collectNginx(cfg *Config) *NginxConfig {
 	n.ConfigReadable = &readable
 
 	// Validate: nginx -t — capture output on failure (see HAProxyConfig).
+	// validated starts false (blocked) — see collectHAProxy.
+	validated := false
+	defer func() { n.ConfigValidated = &validated }()
 	switch {
 	case readable:
-		if out, err := runOutput(configExecTimeout, "nginx", "-t"); err == nil {
-			n.ConfigValid = true
-		} else {
-			n.ConfigError = capConfigError(out)
+		out, err := runOutput(configExecTimeout, "nginx", "-t")
+		switch {
+		case err == nil:
+			n.ConfigValid, validated = true, true
+		case isPermissionFailure(out) && authorizedElevated(cfg, "nginx", []string{"-t"}):
+			// Root-only includes (the top-level file is readable, but conf.d
+			// entries may be root-only): retry elevated — not evidence of an
+			// invalid config (field report: ccc.laplane.net).
+			if eout, eerr := runOutputElevated(cfg, configExecTimeout, "nginx", "-t"); eerr == nil {
+				n.ConfigValid, validated = true, true
+			} else {
+				n.ConfigError, validated = capConfigError(eout), true
+			}
+		case isPermissionFailure(out):
+			// Permission failure, no authorized elevation: blocked, not
+			// invalid. ConfigError stays empty — the alert engine must not
+			// fire on a validation that never completed.
+		default:
+			n.ConfigError, validated = capConfigError(out), true
 		}
 	case authorizedElevated(cfg, "nginx", []string{"-t"}):
 		if out, err := runOutputElevated(cfg, configExecTimeout, "nginx", "-t"); err == nil {
-			n.ConfigValid = true
+			n.ConfigValid, validated = true, true
 		} else {
-			n.ConfigError = capConfigError(out)
+			n.ConfigError, validated = capConfigError(out), true
 		}
 	default:
 		// Unreadable and not authorized: skip, UI says "not readable".

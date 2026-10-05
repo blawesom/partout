@@ -208,7 +208,8 @@ var ElevationPolicies = []ElevationPolicyDef{
 	{
 		Name: "default-baseline",
 		Description: "Day-1 fleet baseline: package updates and installs (apt + dnf, task steps and packages-apply forms), " +
-			"systemctl on standard fleet units, hostnamectl set-hostname, bare reboot. " +
+			"systemctl on standard fleet units, hostnamectl set-hostname, config validation (nginx -t, haproxy -c — " +
+			"read-only checks the observe layer uses to prove config health on root-only configs), bare reboot. " +
 			"Apply at provisioning (provision new --elevate) or with your config management; " +
 			"edit or clone for tighter scopes.",
 		RulesJSON: `[
@@ -219,6 +220,8 @@ var ElevationPolicies = []ElevationPolicyDef{
   {"allow":"apt-get","args":["-o","Dpkg::Progress-Focus=full","-y","-o","Dpkg::Options::=--force-confdef","-o","Dpkg::Options::=--force-confold","upgrade"]},
   {"allow":"dnf","args":["check-update"]},
   {"allow":"dnf","args":["upgrade","--assumeno"]},
+  {"allow":"nginx","args":["-t"]},
+  {"allow":"haproxy","args":["-c","-f","*"]},
   {"allow":"hostnamectl","args":["set-hostname","*"]},
   {"allow":"systemctl","verbs":["status","show","start","stop","restart","reload","try-restart","enable","disable","is-active","is-enabled"],"units":["partout-*","fail2ban*","sshd*","nginx*","haproxy*","caddy*"]},
   {"allow":"reboot"}

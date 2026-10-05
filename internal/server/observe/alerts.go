@@ -367,6 +367,31 @@ func (c *Controller) evalCertExpiring(r *store.AlertRule, hosts []string, docs m
 
 // --- config_invalid ---
 
+// configInvalidFiring reports whether an observed config warrants a firing
+// config_invalid alert. A blocked validation (root-only config or includes,
+// no authorized elevation) leaves ConfigValid=false with no validator
+// evidence — it must NOT fire (field report: ccc.laplane.net — 6 hosts with
+// healthy nginx/haproxy lit up as "config invalid" because the agent user
+// couldn't read root-only include files).
+//
+// ConfigValidated (nil on agents < 0.9.14) distinguishes:
+//
+//	nil  → older agent: fall back to ConfigError — non-empty means the
+//	       validator ran (pre-0.9.14 agents always set it when the
+//	       validator ran, readable or elevated)
+//	false → blocked (permission, no elevation): never fire
+//	true  → validator ran to a definitive answer: fire iff !ConfigValid
+func configInvalidFiring(present, configValid bool, validated *bool, configError string) bool {
+	if !present || configValid {
+		return false
+	}
+	if validated != nil {
+		return *validated
+	}
+	// Older agent (< 0.9.14): ConfigError non-empty means the validator ran.
+	return configError != ""
+}
+
 func (c *Controller) configConditionKeys(r *store.AlertRule, docs map[string]*Document) map[string]struct{} {
 	out := make(map[string]struct{})
 	for agID, doc := range docs {
@@ -374,10 +399,10 @@ func (c *Controller) configConditionKeys(r *store.AlertRule, docs map[string]*Do
 		if cfg == nil {
 			continue
 		}
-		if cfg.HAProxy != nil && cfg.HAProxy.Present && !cfg.HAProxy.ConfigValid {
+		if h := cfg.HAProxy; h != nil && configInvalidFiring(h.Present, h.ConfigValid, h.ConfigValidated, h.ConfigError) {
 			out[r.ID+"|"+agID+"|haproxy"] = struct{}{}
 		}
-		if cfg.Nginx != nil && cfg.Nginx.Present && !cfg.Nginx.ConfigValid {
+		if n := cfg.Nginx; n != nil && configInvalidFiring(n.Present, n.ConfigValid, n.ConfigValidated, n.ConfigError) {
 			out[r.ID+"|"+agID+"|nginx"] = struct{}{}
 		}
 	}
@@ -398,15 +423,15 @@ func (c *Controller) evalConfigInvalid(r *store.AlertRule, hosts []string, docs 
 		if cfg == nil {
 			continue
 		}
-		if cfg.HAProxy != nil && cfg.HAProxy.Present && !cfg.HAProxy.ConfigValid {
+		if h := cfg.HAProxy; h != nil && configInvalidFiring(h.Present, h.ConfigValid, h.ConfigValidated, h.ConfigError) {
 			if c.fire(r, agID, r.ID+"|"+agID+"|haproxy",
-				"haproxy config invalid ("+cfg.HAProxy.ConfigFile+")") {
+				"haproxy config invalid ("+h.ConfigFile+")") {
 				fired++
 			}
 		}
-		if cfg.Nginx != nil && cfg.Nginx.Present && !cfg.Nginx.ConfigValid {
+		if n := cfg.Nginx; n != nil && configInvalidFiring(n.Present, n.ConfigValid, n.ConfigValidated, n.ConfigError) {
 			if c.fire(r, agID, r.ID+"|"+agID+"|nginx",
-				"nginx config invalid ("+cfg.Nginx.ConfigFile+")") {
+				"nginx config invalid ("+n.ConfigFile+")") {
 				fired++
 			}
 		}
@@ -1053,6 +1078,11 @@ func (c *Controller) resolveByDedupDiff(r *store.AlertRule, hosts []string, curr
 	var stale []string
 	for _, a := range firing {
 		if !hostSet[a.AgentID] {
+			// The agent no longer matches the rule's selector — either it
+			// was deleted (field report: ccc.laplane.net — orphaned firing
+			// alerts on pre-rejoin agents) or it drifted out of the
+			// selector. Either way the rule should not be firing for it.
+			stale = append(stale, a.DedupKey)
 			continue
 		}
 		if _, ok := current[a.DedupKey]; !ok {

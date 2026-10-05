@@ -558,6 +558,65 @@ func TestCollectHAProxyUnreadableConfig(t *testing.T) {
 	if f.ConfigSHA256 != "" || len(f.Backends) != 0 {
 		t.Errorf("sha256/topology should be unavailable on an unreadable config: %q %+v", f.ConfigSHA256, f.Backends)
 	}
+	// Blocked validation: ConfigValidated must be false (not nil, not true)
+	// so the alert engine knows the config was never proven (in)valid.
+	if f.ConfigValidated == nil {
+		t.Fatal("ConfigValidated = nil, want non-nil (0.9.14+ agents always set it)")
+	}
+	if *f.ConfigValidated {
+		t.Error("ConfigValidated = true, want false (validation was blocked)")
+	}
+}
+
+// TestIsPermissionFailure: the string heuristic for validator permission
+// errors (nginx "open() ... failed (13: Permission denied)", haproxy
+// "Could not open configuration file ... : Permission denied").
+func TestIsPermissionFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"nginx include eacces", `nginx: [emerg] open() "/etc/nginx/conf.d/otel-proxy.conf" failed (13: Permission denied) in /etc/nginx/nginx.conf:35`, true},
+		{"haproxy cfg eacces", `[ALERT] (841850) : config : Could not open configuration file /etc/haproxy/haproxy.cfg : Permission denied`, true},
+		{"nginx log alert eacces", `nginx: [alert] could not open error log file: open() "/var/log/nginx/error.log" failed (13: Permission denied)`, true},
+		{"genuinely invalid", `nginx: [emerg] unknown directive "bogus" in /etc/nginx/nginx.conf:5`, false},
+		{"syntax error", `[ALERT] (1) : config : parsing [/etc/haproxy/haproxy.cfg:3] : unknown keyword 'foo'.`, false},
+		{"empty", ``, false},
+	}
+	for _, c := range cases {
+		if got := isPermissionFailure(c.out); got != c.want {
+			t.Errorf("isPermissionFailure(%s) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestCollectHAProxyValidatedFlag: a readable config with a failing
+// validator sets ConfigValidated=true (definitive) only for non-permission
+// failures; a permission failure without elevation stays false (blocked).
+func TestCollectHAProxyValidatedFlag(t *testing.T) {
+	if _, err := exec.LookPath("haproxy"); err != nil {
+		t.Skip("haproxy not installed")
+	}
+	dir := t.TempDir()
+	// Genuinely invalid config (syntax error, readable by all).
+	cfgPath := filepath.Join(dir, "haproxy.cfg")
+	if err := os.WriteFile(cfgPath, []byte("bogus-directive-that-does-not-exist\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := collectHAProxy(&Config{HaproxyConf: cfgPath})
+	if f == nil {
+		t.Fatal("collectHAProxy = nil")
+	}
+	if f.ConfigValidated == nil || !*f.ConfigValidated {
+		t.Errorf("ConfigValidated = %v, want true (validator ran on a readable config)", f.ConfigValidated)
+	}
+	if f.ConfigValid {
+		t.Error("ConfigValid = true, want false (config has a syntax error)")
+	}
+	if f.ConfigError == "" {
+		t.Error("ConfigError empty, want the validator's output")
+	}
 }
 
 func TestParseHAProxyTopology(t *testing.T) {

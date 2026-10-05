@@ -197,6 +197,11 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   `PARTOUT_OBSERVE_FACTS_INTERVAL` (default 300s; individual collectors may differ).
 - **Config fact validity**: `haproxy -c` and `nginx -t` run on each refresh; a failed
   validation fires a `config_invalid` alert and is flagged in the config UI.
+  A *blocked* validation (root-only config or includes, no authorized
+  elevation) does **not** fire — `config_validated: false` in the fact says
+  the validator couldn't complete and the config is not proven invalid.
+  The `default-baseline` elevation policy (0.9.14+) grants `nginx -t` and
+  `haproxy -c -f *` so elevated validation works out of the box.
 - **Config drift**: shipped (R22) as the `config_drift` rule kind — each host's
   `config_sha256` is compared against the fleet majority (lexicographic tie-break)
   and a minority host alerts. `config_drift_tolerance` (default 0) allows that many

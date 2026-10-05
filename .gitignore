@@ -34,3 +34,5 @@ proto/partout/*.pb.go
 
 # Release build artifacts (published via GitHub releases, not the repo)
 /dist/
+field-test-v0911/
+loadgen

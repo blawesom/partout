@@ -231,7 +231,8 @@ func TestCertExpiringBelowThreshold(t *testing.T) {
 // TestConfigInvalidFireResolve: invalid haproxy config fires; fixed resolves.
 func TestConfigInvalidFireResolve(t *testing.T) {
 	c, st := newEngine(t, time.Hour)
-	seedHost(t, st, "ag_1", `{"configs":{"haproxy":{"present":true,"config_valid":false,"config_file":"/etc/haproxy/haproxy.cfg"}}}`)
+	// ConfigValidated=true — the validator ran and definitively said invalid.
+	seedHost(t, st, "ag_1", `{"configs":{"haproxy":{"present":true,"config_valid":false,"config_validated":true,"config_error":"[ALERT] config : bogus","config_file":"/etc/haproxy/haproxy.cfg"}}}`)
 	makeRule(t, st, KindConfigInvalid, "all", `{}`, "critical", true)
 
 	res, _ := c.EvaluateOnce()
@@ -239,10 +240,76 @@ func TestConfigInvalidFireResolve(t *testing.T) {
 		t.Fatalf("invalid config tick: %+v, want 1 fired", res)
 	}
 
-	seedHost(t, st, "ag_1", `{"configs":{"haproxy":{"present":true,"config_valid":true,"config_file":"/etc/haproxy/haproxy.cfg"}}}`)
+	seedHost(t, st, "ag_1", `{"configs":{"haproxy":{"present":true,"config_valid":true,"config_validated":true,"config_file":"/etc/haproxy/haproxy.cfg"}}}`)
 	res, _ = c.EvaluateOnce()
 	if res.Resolved != 1 {
 		t.Fatalf("fixed config tick: %+v, want 1 resolved", res)
+	}
+}
+
+// TestConfigInvalidBlockedDoesNotFire: a blocked validation (root-only
+// config, no authorized elevation — ConfigValidated=false) must NOT fire
+// config_invalid. Field report: ccc.laplane.net — 6 healthy hosts lit up
+// as "config invalid" because haproxy.cfg was root-only and the policy
+// didn't authorize elevated validation.
+func TestConfigInvalidBlockedDoesNotFire(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	// ConfigValidated=false — validation was blocked (permission, no elevation).
+	// ConfigValid defaults to false but is NOT evidence of an invalid config.
+	seedHost(t, st, "ag_1", `{"configs":{"haproxy":{"present":true,"config_valid":false,"config_validated":false,"config_readable":false,"config_file":"/etc/haproxy/haproxy.cfg"}}}`)
+	makeRule(t, st, KindConfigInvalid, "all", `{}`, "critical", true)
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("blocked validation tick: %+v, want 0 fired (blocked is not invalid)", res)
+	}
+}
+
+// TestConfigInvalidOldAgentFallback: an older agent (< 0.9.14, no
+// ConfigValidated) with a non-empty ConfigError fired correctly (the
+// validator ran); with an empty ConfigError (validation skipped) it must
+// not fire.
+func TestConfigInvalidOldAgentFallback(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindConfigInvalid, "all", `{`, "critical", true)
+
+	// Old agent, validator ran (ConfigError set) — fire.
+	seedHost(t, st, "ag_1", `{"configs":{"nginx":{"present":true,"config_valid":false,"config_error":"nginx: [emerg] unknown directive","config_file":"/etc/nginx/nginx.conf"}}}`)
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("old agent + validator ran: %+v, want 1 fired", res)
+	}
+
+	// Old agent, validation skipped (ConfigError empty) — don't fire.
+	seedHost(t, st, "ag_1", `{"configs":{"nginx":{"present":true,"config_valid":false,"config_file":"/etc/nginx/nginx.conf"}}}`)
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("old agent + validation skipped: %+v, want 0 fired", res)
+	}
+}
+
+// TestConfigInvalidDeletedAgentResolves: firing alerts on a deleted agent
+// are resolved by the dedup sweep (field report: ccc.laplane.net — orphaned
+// alerts on pre-rejoin agents).
+func TestConfigInvalidDeletedAgentResolves(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	seedHost(t, st, "ag_1", `{"configs":{"haproxy":{"present":true,"config_valid":false,"config_validated":true,"config_error":"[ALERT] bogus","config_file":"/etc/haproxy/haproxy.cfg"}}}`)
+	makeRule(t, st, KindConfigInvalid, "all", `{}`, "critical", true)
+
+	// Fire on the live agent.
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("live agent tick: %+v, want 1 fired", res)
+	}
+
+	// Delete the agent — the alert must resolve on the next sweep.
+	if err := st.DeleteAgent("ag_1"); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+	// DeleteAgent resolves firing alerts immediately; verify.
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 0 {
+		t.Fatalf("after delete: %d firing alerts remain, want 0 (DeleteAgent resolves them)", len(alerts))
 	}
 }
 

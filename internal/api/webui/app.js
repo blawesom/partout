@@ -4185,6 +4185,10 @@
           if (x.config_valid) return { t: "valid (elevated)", cls: "ok", title: "validated via an authorized elevation; the file itself is root-only" };
           return { t: "not readable", cls: "warn", title: "config file is root-only (the partout user cannot read it) — not necessarily invalid. Add an elevation policy rule (e.g. 'haproxy' + args ['-c','-f',cfg] and a 'cat' grant) then: sudo partout ctl elevation install-sudoers — or grant read access." };
         }
+        // Blocked validation (0.9.14+): the validator couldn't complete —
+        // root-only includes without an authorized elevation. NOT invalid.
+        if (x.config_validated === false && !x.config_valid)
+          return { t: "validation blocked", cls: "warn", title: "the agent user couldn't read the config (or its includes) and no authorized elevation is available — the config is NOT proven invalid. Add an elevation policy rule for the validator (nginx -t / haproxy -c) then: sudo /usr/local/bin/partout ctl elevation install-sudoers" };
         return x.config_valid
           ? { t: "valid", cls: "ok", title: x.config_file || "" }
           : { t: "invalid", cls: "bad", title: this.cfgErr(c) || x.config_file || "" };
