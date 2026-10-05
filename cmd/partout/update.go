@@ -249,7 +249,10 @@ Flags:
 		runArgs := append([]string{sc}, args...)
 		if os.Getuid() != 0 {
 			if _, err := exec.LookPath("sudo"); err == nil {
-				runArgs = append([]string{"sudo", "-n"}, runArgs...)
+				// sudo -n env PATH=$PATH: the -E flag is often stripped by
+				// sudoers (env_reset), so pass PATH explicitly — mock systemctl
+				// on a custom PATH (CI rigs) keeps working under sudo.
+				runArgs = append([]string{"sudo", "-n", "-E", "env", "PATH=" + os.Getenv("PATH")}, runArgs...)
 			}
 		}
 		cmd := exec.Command(runArgs[0], runArgs[1:]...)
