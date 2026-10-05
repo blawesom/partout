@@ -1356,7 +1356,18 @@ func tlsHTTPClient(caFile string) (*http.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read CA %s: %w", caFile, err)
 	}
-	pool := x509.NewCertPool()
+	// APPEND to the system pool, not replace it. The canonical Go recipe
+	// (x509.SystemCertPool + AppendCertsFromPEM) matters for `partout update`:
+	// one client serves both the server API (whose TLS is signed by the
+	// local root CA) and the release source (GitHub's public chain). With a
+	// replaced pool every public-host fetch failed with "certificate signed
+	// by unknown authority" — `partout update --ca-file …` against a TLS
+	// server could never fetch the release from GitHub (field report:
+	// ccc.laplane.net, v0.9.14 rollout).
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
 	if !pool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("no valid certificate in %s", caFile)
 	}
