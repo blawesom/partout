@@ -87,7 +87,7 @@ commands:
   elevation <show|check|install-sudoers|policy>
            show/check/install-sudoers work on THIS host's policy;
            "policy" drives the server-side policy store — remote,
-           with verbs: create, list, show, update, delete
+           with verbs: create, list, show, update, delete, history, restore
   packages <updates|apply|actions> <agent_id>  OS package updates (apt/dnf; dry-run first)
   cve <list|scan> [--agent A] [--min-cvss F] [--json]  package CVE findings (OSV);
                            exit 1 if any finding matches — CI/cron gate
@@ -1957,6 +1957,13 @@ func strOrDash(v any) string {
 	return "-"
 }
 
+func numF(v any) float64 {
+	if f, ok := v.(float64); ok {
+		return f
+	}
+	return 0
+}
+
 func numStr(v any) string {
 	if f, ok := v.(float64); ok {
 		return strconv.FormatInt(int64(f), 10)
@@ -2902,6 +2909,40 @@ func (c *ctl) elevationPolicy(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println("deleted", rest[0])
+	case "history":
+		if len(rest) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: ctl elevation policy history <name|id>")
+			os.Exit(2)
+		}
+		var versions []map[string]any
+		if err := c.do("GET", "/api/v1/elevation/policies/"+url.PathEscape(rest[0])+"/versions", nil, &versions); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%-8s %-16s %-20s %s\n", "VERSION", "SHA256 (short)", "CHANGED BY", "CREATED")
+		for _, v := range versions {
+			sha := strval(v["policy_sha256"])
+			if len(sha) > 12 {
+				sha = sha[:12] + "…"
+			}
+			ts := time.Unix(int64(numF(v["created"])), 0).UTC().Format("2006-01-02 15:04")
+			fmt.Printf("%-8d %-16s %-20s %s\n", int(numF(v["version"])), sha, strval(v["changed_by"]), ts)
+		}
+		if len(versions) == 0 {
+			fmt.Println("(no version history — the policy has not been updated)")
+		}
+	case "restore":
+		if len(rest) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: ctl elevation policy restore <name|id> <version>")
+			os.Exit(2)
+		}
+		var out map[string]any
+		path := "/api/v1/elevation/policies/" + url.PathEscape(rest[0]) + "/versions/" + url.PathEscape(rest[1]) + "/restore"
+		if err := c.do("POST", path, nil, &out); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("restored %q to version %s (sha256 %s…)\n", strval(out["name"]), rest[1], strval(out["policy_sha256"])[:12])
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: elevation policy: unknown subcommand %q\n", sub)
 		os.Exit(2)

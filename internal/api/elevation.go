@@ -17,6 +17,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -31,6 +32,8 @@ func (h *Handler) RegisterElevationPolicies(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/elevation/policies/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.eplGet)))
 	mux.Handle("PUT /api/v1/elevation/policies/{id}", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplUpdate)))
 	mux.Handle("DELETE /api/v1/elevation/policies/{id}", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplDelete)))
+	mux.Handle("GET /api/v1/elevation/policies/{id}/versions", h.requireRole(roleViewer)(http.HandlerFunc(h.eplVersions)))
+	mux.Handle("POST /api/v1/elevation/policies/{id}/versions/{version}/restore", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplVersionRestore)))
 }
 
 type eplBody struct {
@@ -145,6 +148,14 @@ func (h *Handler) eplUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_policy", "invalid elevation policy: "+err.Error(), nil)
 		return
 	}
+	// Version the CURRENT state before overwriting (elevation policy
+	// history: a bad update was previously unrecoverable without the audit
+	// trail).
+	cur, _ := h.st.ElevationPolicy(r.PathValue("id"))
+	if cur != nil {
+		principal, _ := h.actorFor(r)
+		_, _ = h.st.SaveElevationPolicyVersion(cur.ID, cur.RulesJSON, cur.PolicySHA, cur.Description, principal)
+	}
 	p, err := h.st.UpdateElevationPolicy(r.PathValue("id"), body.Description, rulesJSON, hash)
 	if err != nil {
 		h.eplErr(w, err)
@@ -165,6 +176,60 @@ func (h *Handler) eplDelete(w http.ResponseWriter, r *http.Request) {
 	principal, _ := h.actorFor(r)
 	h.audit("elevation.policy.delete", principal, map[string]string{"id": r.PathValue("id")})
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+}
+
+// eplVersions lists the version history for a policy (newest first).
+func (h *Handler) eplVersions(w http.ResponseWriter, r *http.Request) {
+	p, err := h.st.ElevationPolicy(r.PathValue("id"))
+	if err != nil {
+		h.eplErr(w, err)
+		return
+	}
+	versions, err := h.st.ElevationPolicyVersions(p.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+		return
+	}
+	out := make([]map[string]any, 0, len(versions))
+	for _, v := range versions {
+		out = append(out, map[string]any{
+			"version": v.Version, "policy_sha256": v.PolicySHA,
+			"description": v.Description, "changed_by": v.ChangedBy, "created": v.Created,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// eplVersionRestore rolls a policy back to a specific version.
+func (h *Handler) eplVersionRestore(w http.ResponseWriter, r *http.Request) {
+	p, err := h.st.ElevationPolicy(r.PathValue("id"))
+	if err != nil {
+		h.eplErr(w, err)
+		return
+	}
+	version := 0
+	fmt.Sscanf(r.PathValue("version"), "%d", &version)
+	if version <= 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "version must be a positive integer", nil)
+		return
+	}
+	v, err := h.st.GetElevationPolicyVersion(p.ID, version)
+	if err != nil {
+		h.eplErr(w, err)
+		return
+	}
+	// Version the CURRENT state before restoring.
+	principal, _ := h.actorFor(r)
+	_, _ = h.st.SaveElevationPolicyVersion(p.ID, p.RulesJSON, p.PolicySHA, p.Description, principal)
+	restored, err := h.st.UpdateElevationPolicy(p.ID, v.Description, v.RulesJSON, v.PolicySHA)
+	if err != nil {
+		h.eplErr(w, err)
+		return
+	}
+	h.audit("elevation.policy.restore", principal, map[string]string{
+		"policy_id": p.ID, "restored_version": fmt.Sprint(version), "sha256": v.PolicySHA,
+	})
+	writeJSON(w, http.StatusOK, eplJSON(restored))
 }
 
 func (h *Handler) eplErr(w http.ResponseWriter, err error) {

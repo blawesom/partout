@@ -637,6 +637,7 @@ hierarchy viewer < operator < admin.
 | `PARTOUT_MODE` / `--mode` | **embedded** | process role: `embedded` (server + co-located agent), `server`, `agent`, `mcp`. See §3.8 |
 | `PARTOUT_TOKEN` / `--token` | *(first boot only)* | one-time enrollment token |
 | `PARTOUT_TLS_CA` / `--ca-file` | *(empty)* | path to the server root CA (PEM); enables HTTPS enrollment + mTLS stream |
+| `PARTOUT_AGENT_DATA_DIR` | **/var/lib/partout/agent** | set by the provisioned/manual unit; the update guard resolves the boot marker (`update.json`) from it — same value as `PARTOUT_DATA_DIR` in practice, but the guard reads this one before the agent process starts |
 | `PARTOUT_DATA_DIR` / `--data-dir` | **~/.partout/agent** | identity.json (0600), `tls/` (0700), policy |
 | `PARTOUT_FACTS_INTERVAL` / `--facts-interval` | **3600** | basic host facts refresh seconds (floor 30) |
 | `PARTOUT_OBSERVE_FACTS_INTERVAL` / `--observe-facts-interval` | **300** | (M5) structured fact upload interval; individual collector cadences may differ (arch §7.2) |

@@ -93,6 +93,38 @@ cp "$T/dist/SHA-256SUMS" "$T/"
 # shipped without the bundles for exactly this reason).
 ASSETS=("$T"/partout_"${VER}"_linux_*.tar.gz "$T"/partout_install_"${VER}"_linux_*.tar.gz "$T/SHA-256SUMS")
 
+# ---- self-verify: the asset manifest and the checksums must agree -----
+# Expected set: 2 plain binaries + 2 installer bundles + SHA-256SUMS = 5.
+# This catches the v0.9.12 class of bug (built, checksummed, never
+# attached) structurally — the release REFUSES to publish if anything
+# is missing, extra, or the sums don't cover every asset.
+EXPECTED_COUNT=5
+ACTUAL_COUNT=${#ASSETS[@]}
+if [ "$ACTUAL_COUNT" -ne "$EXPECTED_COUNT" ]; then
+  echo "FATAL: expected $EXPECTED_COUNT assets, got $ACTUAL_COUNT:" >&2
+  for a in "${ASSETS[@]}"; do echo "  $a" >&2; done
+  exit 1
+fi
+for GOARCH in amd64 arm64; do
+  for prefix in "partout_" "partout_install_"; do
+    f="$T/${prefix}${VER}_linux_${GOARCH}.tar.gz"
+    [ -f "$f" ] || { echo "FATAL: missing expected asset: $f" >&2; exit 1; }
+  done
+done
+# SHA-256SUMS must list every tarball we attach (no more, no fewer).
+SUMS_LINES=$(wc -l < "$T/SHA-256SUMS")
+TARBALL_COUNT=$((EXPECTED_COUNT - 1))
+if [ "$SUMS_LINES" -ne "$TARBALL_COUNT" ]; then
+  echo "FATAL: SHA-256SUMS has $SUMS_LINES lines, expected $TARBALL_COUNT (one per tarball)" >&2
+  exit 1
+fi
+for a in "${ASSETS[@]}"; do
+  base="$(basename "$a")"
+  [ "$base" = "SHA-256SUMS" ] && continue
+  grep -q "$base" "$T/SHA-256SUMS" || { echo "FATAL: $base not in SHA-256SUMS" >&2; exit 1; }
+done
+echo "  self-verify: $ACTUAL_COUNT assets, SHA-256SUMS covers all"
+
 if [ "${DRY_RUN:-0}" = "1" ]; then
   echo
   echo "DRY RUN — would execute:"

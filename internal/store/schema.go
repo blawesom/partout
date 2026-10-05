@@ -610,10 +610,22 @@ CREATE TABLE IF NOT EXISTS elevation_policies (
   created      INTEGER NOT NULL DEFAULT 0,
   updated      INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS elevation_policy_versions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  policy_id   TEXT NOT NULL,
+  version     INTEGER NOT NULL,
+  rules_json  TEXT NOT NULL,
+  policy_sha256 TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  changed_by  TEXT NOT NULL DEFAULT '',
+  created     INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(policy_id, version)
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 22
+const currentSchemaVersion = 23
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }
