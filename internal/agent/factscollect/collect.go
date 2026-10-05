@@ -734,7 +734,7 @@ func collectCerts(cfg *Config) *CertFacts {
 			continue // referenced but absent (or not a cert file)
 		}
 		seen[r.Path] = true
-		if cf := parseCert(r.Path, caPath); cf != nil {
+		if cf := parseCert(r.Path, caPath, cfg.Elevate, cfg.Elevation); cf != nil {
 			items = append(items, *cf)
 		}
 	}
@@ -750,7 +750,7 @@ func collectCerts(cfg *Config) *CertFacts {
 				continue // same file reachable from two scan roots
 			}
 			seen[f] = true
-			if cf := parseCert(f, caPath); cf != nil {
+			if cf := parseCert(f, caPath, cfg.Elevate, cfg.Elevation); cf != nil {
 				items = append(items, *cf)
 			}
 		}
@@ -855,13 +855,23 @@ func findCertFilesBounded(dir string, budget int) []string {
 // trust bundle used for chain verification; empty means verification is
 // skipped (ChainValid stays false and ChainChecked false, so the caller can
 // distinguish "not verified" from "verified and broken").
-func parseCert(path, caPath string) *CertFact {
+func parseCert(path, caPath string, m elevate.Mode, p *elevate.Policy) *CertFact {
 	cf := &CertFact{Path: path}
 
 	// The certificate must be readable and parseable. Each field call below
 	// fails soft (returning ""), so without this probe an unreadable file
 	// would yield a phantom all-empty cert entry.
 	if _, err := runOutput(certExecTimeout, "openssl", "x509", "-in", path, "-noout", "-subject"); err != nil {
+		// Root-only service certs (haproxy crt bundles at 0640, letsencrypt
+		// live dirs, nginx ssl dirs): the agent user cannot read the file, so
+		// the openssl CLI path is unavailable. Fall back to an elevated read
+		// (when the policy authorizes `cat <path>`) parsed in-process —
+		// the public fields all come from the DER; chain verification is
+		// reported as unchecked (same shape as a host without a trust
+		// bundle).
+		if pemBytes, rerr := elevate.ReadFile(m, p, path); rerr == nil {
+			return parseCertPEM(path, pemBytes)
+		}
 		return nil
 	}
 
@@ -954,9 +964,11 @@ func opensslField(timeout time.Duration, path string, flags ...string) string {
 
 // isSelfSigned reports whether the certificate is signed by its own key.
 //
-// Verified in-process with crypto/x509: CheckSignatureFrom(cert) succeeds iff
-// the certificate's signature validates against its own public key. This is
-// the authoritative test, and it is cheap (no subprocess) and portable.
+// Verified in-process with crypto/x509 by checking the signature directly
+// against the cert's own public key: CheckSignatureFrom is NOT used — it
+// enforces the CA basic constraint on the parent and false-negatives for a
+// self-signed leaf without IsCA. The direct check is authoritative, cheap
+// (no subprocess) and portable.
 func isSelfSigned(path string) bool {
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {
@@ -970,7 +982,7 @@ func isSelfSigned(path string) bool {
 	if err != nil {
 		return false
 	}
-	return cert.CheckSignatureFrom(cert) == nil
+	return cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature) == nil
 }
 
 // runOutput runs a command with a timeout and returns its combined output.

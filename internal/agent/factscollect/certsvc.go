@@ -1,11 +1,21 @@
 package factscollect
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/blawesom/partout/internal/agent/elevate"
 )
 
 // Service-config certificate discovery.
@@ -38,6 +48,15 @@ var (
 	// haproxy 2.4+: `ssl-certificates <path>` per frontend/listener;
 	// 2.0–2.3: `ssl-certificates-file <path>`.
 	reHaproxyCert = regexp.MustCompile(`(?m)^\s*ssl-certificates(?:-file)?\s+([^\s;]+)`)
+	// haproxy `bind ... crt <path> [crt <path2> ...]` — the standard TLS
+	// syntax since 1.x and by far the most common form on real fleets
+	// (field report: ccc.laplane.net — two certs per bind line, zero
+	// discovered by the ssl-certificates-only regex). Each crt entry is a
+	// PEM bundle (cert [+ key]); only the certificate part is parsed.
+	// `crt-list <file>` does NOT match: the hyphen after `crt` breaks the
+	// `crt\s` boundary (and its arg is a list file, not a certificate).
+	reHaproxyBind = regexp.MustCompile(`(?m)^\s*bind\b.*$`)
+	reHaproxyCrt  = regexp.MustCompile(`\bcrt\s+([^\s;]+)`)
 	// nginx `include /etc/nginx/conf.d/*.conf;`
 	reNginxInclude = regexp.MustCompile(`(?m)^\s*include\s+([^\s;]+);`)
 )
@@ -50,6 +69,10 @@ const (
 // discoverServiceCerts parses the service config locations (defaults or
 // operator overrides) and returns the distinct certificate references,
 // service-tagged. Missing files are skipped (service not installed).
+// Root-only configs are read via elevation when the policy authorizes
+// `cat <path>` (field report: ccc.laplane.net — haproxy.cfg 0640
+// root:haproxy meant zero service certs were discovered on a fleet whose
+// entire TLS surface runs through haproxy).
 func discoverServiceCerts(cfg *Config) []svcCertRef {
 	cfg = cfg.Fill()
 	seen := map[string]bool{}
@@ -62,11 +85,15 @@ func discoverServiceCerts(cfg *Config) []svcCertRef {
 		seen[p+svc] = true
 		refs = append(refs, svcCertRef{Path: p, Service: svc})
 	}
+	readCfg := func(path string) ([]byte, bool) {
+		b, err := elevate.ReadFile(cfg.Elevate, cfg.Elevation, path)
+		return b, err == nil
+	}
 
 	nginxCfg := orDefault(cfg.NginxConf, "/etc/nginx/nginx.conf")
-	for _, f := range nginxConfTree(nginxCfg) {
-		data, err := os.ReadFile(f)
-		if err != nil {
+	for _, f := range nginxConfTree(nginxCfg, cfg.Elevate, cfg.Elevation) {
+		data, ok := readCfg(f)
+		if !ok {
 			continue
 		}
 		content := stripNginxComments(string(data))
@@ -75,25 +102,93 @@ func discoverServiceCerts(cfg *Config) []svcCertRef {
 		}
 	}
 
-	if hap, err := os.ReadFile(orDefault(cfg.HaproxyConf, "/etc/haproxy/haproxy.cfg")); err == nil {
+	if hap, ok := readCfg(orDefault(cfg.HaproxyConf, "/etc/haproxy/haproxy.cfg")); ok {
 		for _, m := range reHaproxyCert.FindAllStringSubmatch(string(hap), -1) {
 			add(m[1], "haproxy")
+		}
+		// bind-line crt entries — see reHaproxyBindCrt. Each match is a
+		// full bind line; scan it for every crt token (multiple per line
+		// is normal: one crt per hostname).
+		for _, bind := range reHaproxyBind.FindAllString(string(hap), -1) {
+			for _, m := range reHaproxyCrt.FindAllStringSubmatch(bind, -1) {
+				add(m[1], "haproxy")
+			}
 		}
 	}
 
 	// Caddy: Caddyfile and/or JSON config. The Caddyfile wins when present
 	// (it is the live format; caddy.json is the compiled/alternate form).
 	cfPath, jsonPath := caddyConfPaths(cfg)
-	if data, err := os.ReadFile(cfPath); err == nil {
+	if data, ok := readCfg(cfPath); ok {
 		for _, p := range caddyfileCertPaths(string(data)) {
 			add(p, "caddy")
 		}
-	} else if data, err := os.ReadFile(jsonPath); err == nil {
+	} else if data, ok := readCfg(jsonPath); ok {
 		for _, p := range caddyJSONCertPaths(string(data)) {
 			add(p, "caddy")
 		}
 	}
 	return refs
+}
+
+// parseCertPEM fills a CertFact from raw PEM bytes in-process
+// (crypto/x509), without shelling out to openssl. Used for root-only cert
+// files read via an authorized elevation: the openssl CLI path requires
+// the file to be directly readable by the agent user, which root-only
+// service certs (haproxy crt bundles at 0640 root:service) are not.
+// Chain verification is skipped — `openssl verify` needs a readable file
+// — and reported as unchecked (the same shape as a host with no trust
+// bundle). The certificate's public fields are all extractable from the
+// DER: subject, issuer, serial, dates, SANs, key type, self-signed.
+func parseCertPEM(path string, pemBytes []byte) *CertFact {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil
+	}
+	cf := &CertFact{Path: path}
+	cf.Subject = cert.Subject.String()
+	cf.Issuer = cert.Issuer.String()
+	cf.Serial = cert.SerialNumber.String()
+	cf.NotBefore = cert.NotBefore.Unix()
+	cf.NotAfter = cert.NotAfter.Unix()
+	cf.DaysRemaining = int64(time.Until(cert.NotAfter).Hours() / 24)
+	for _, s := range cert.DNSNames {
+		cf.SANs = append(cf.SANs, s)
+	}
+	for _, ip := range cert.IPAddresses {
+		cf.SANs = append(cf.SANs, ip.String())
+	}
+	cf.KeyType = x509KeyType(cert)
+	cf.ChainLength = bytes.Count(pemBytes, []byte("-----BEGIN CERTIFICATE-----"))
+	// Direct signature verification against the cert's own public key.
+	// NOT CheckSignatureFrom: it enforces the CA basic constraint on the
+	// parent, so a self-signed leaf without IsCA (the common `openssl
+	// req -new -x509` minus CA flag output, and letsencrypt-style leafs) would
+	// false-negative. The signature itself either verifies against the
+	// subject's key or it does not.
+	cf.SelfSigned = cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature) == nil
+	cf.OCSPStatus = "unknown"
+	return cf
+}
+
+// x509KeyType renders the public-key algorithm and size from a parsed
+// certificate, matching the openssl-based parseKeyType output shape
+// ("RSA-4096", "ECDSA-P256").
+func x509KeyType(cert *x509.Certificate) string {
+	switch pub := cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		return "RSA-" + strconv.Itoa(pub.N.BitLen())
+	case *ecdsa.PublicKey:
+		return "ECDSA-P" + strconv.Itoa(pub.Curve.Params().BitSize)
+	case ed25519.PublicKey:
+		return "Ed25519"
+	default:
+		return ""
+	}
 }
 
 func orDefault(v, def string) string {
@@ -128,12 +223,14 @@ func caddyConfPaths(cfg *Config) (string, string) {
 
 // nginxConfTree returns the main conf plus one level of `include` expansion
 // (glob-aware), bounded. Non-existent includes are skipped; the cap guards
-// against pathological include loops via the visited set.
-func nginxConfTree(main string) []string {
+// against pathological include loops via the visited set. The main conf is
+// read via elevation when needed (root-only nginx.conf + readable
+// conf.d includes, and the reverse, both occur on real fleets).
+func nginxConfTree(main string, m elevate.Mode, p *elevate.Policy) []string {
 	if _, err := os.Stat(main); err != nil {
 		return nil
 	}
-	data, err := os.ReadFile(main)
+	data, err := elevate.ReadFile(m, p, main)
 	if err != nil {
 		return []string{main}
 	}

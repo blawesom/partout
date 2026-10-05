@@ -517,7 +517,7 @@ func TestExtractVersion(t *testing.T) {
 }
 
 func TestParseCertMissingFile(t *testing.T) {
-	if cf := parseCert(filepath.Join(t.TempDir(), "nope.pem"), ""); cf != nil {
+	if cf := parseCert(filepath.Join(t.TempDir(), "nope.pem"), "", elevate.None, nil); cf != nil {
 		t.Errorf("parseCert(missing) = %+v, want nil", cf)
 	}
 }
@@ -744,7 +744,7 @@ func TestParseCertRealFile(t *testing.T) {
 	dir := t.TempDir()
 	path := writeSelfSignedCert(t, dir, []string{"app.example.com", "www.example.com"}, 2048)
 
-	cf := parseCert(path, "")
+	cf := parseCert(path, "", elevate.None, nil)
 	if cf == nil {
 		t.Fatal("parseCert returned nil for a valid certificate")
 	}
@@ -854,7 +854,7 @@ func TestParseCertChainedNotSelfSigned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cf := parseCert(leafPath, bundle)
+	cf := parseCert(leafPath, bundle, elevate.None, nil)
 	if cf == nil {
 		t.Fatal("parseCert returned nil")
 	}
@@ -906,7 +906,7 @@ func TestParseCertBrokenChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cf := parseCert(path, bundle)
+	cf := parseCert(path, bundle, elevate.None, nil)
 	if cf == nil {
 		t.Fatal("parseCert returned nil")
 	}
@@ -933,7 +933,7 @@ func TestParseCertMultiCertChainFile(t *testing.T) {
 	if err := os.WriteFile(chain, append(data, data...), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cf := parseCert(chain, "")
+	cf := parseCert(chain, "", elevate.None, nil)
 	if cf == nil {
 		t.Fatal("parseCert returned nil")
 	}

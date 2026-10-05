@@ -208,7 +208,17 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   competing hashes before anything is flagged.
 - **Certificate expiry tracking**: the server computes `days_remaining` from each cert's
   `not_after` epoch. `cert_expiring` fires at or below the rule's `cert_days_remaining`
-  threshold (default 30). `cert_chain_broken` is M6.1+ (A21).
+  threshold (default 30). `cert_chain_broken` is M6.1+ (A21). Discovery covers
+  the standard directories (`/etc/ssl`, `/etc/pki/tls`, `PARTOUT_CERT_PATHS`) **and**
+  the certificates actually referenced by service configs: nginx
+  `ssl_certificate` directives (include tree expanded), haproxy
+  `bind … crt <path>` (the standard TLS syntax, multiple per line) and the
+  2.4+ `ssl-certificates` form, and caddy `tls` directives — each fact labeled
+  with the referencing service ("used by nginx:443"). Root-only configs and
+  certs are read via elevation when the policy grants `cat` on the path
+  (the `default-baseline` policy covers the standard config trees; cert
+  storage in root-only service dirs needs an explicit grant or a
+  permissions fix).
 - **Service health**: `service_failed` fires when a unit is in `failed` state and has
   stayed there for the rule's `service_failed_minutes` (default 5; set 0 for immediate).
   Restart-loop detection (`service_restarting`, M6.1) uses the systemd `NRestarts`
