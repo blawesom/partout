@@ -687,6 +687,49 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.13 — the full field-verification pass (round 3).** Everything
+  since the v0.9.12 tag, all validated on a real 2-host Rocky 10 fleet:
+
+  - **`partout update` one-command flow** (first real-world run): resolve
+    → verify (sha256 + version stamp) → supervised server swap (selftest →
+    proven backup → swap → postcheck) → release store → canary→wave fleet
+    rollout → one status line; the `--check` re-run is idempotent. One
+    fix: the supervised swap now runs through `sudo -n -E` when the
+    operator is not root.
+  - **M8.1 agent layout fix** (field-caught on the first rollout): the
+    binary lives in agent-writable `/var/lib/partout/bin` with a
+    `/usr/local/bin` symlink; the boot guard is embedded in the server
+    binary and installed by the provisioner; the post-swap restart goes
+    through `sudo -n`. Provisioned agents can now self-update.
+  - **`provision rejoin`** — a join-mode fan-out to every host a selector
+    matches, using each agent's own provisioning history. The v0.9.12 →
+    v0.9.13 migration path: server update → rejoin → rollout (CI-proven
+    in the Rocky leg: old layout → rejoin → new layout asserted).
+  - **Governance surfaces field-verified**: mTLS leaf rotation (incl.
+    mid-dispatch), reinstalled-host key re-confirm, approvals TTL
+    expiry, OAuth2 PKCE (register → authorize → exchange → bearer →
+    single-use code rejected on replay).
+  - **Adversarial policy probes**: `rm -r -f /`, `--no-preserve-root`,
+    `bash -c` wrapping, `dd of=/dev/sda`, auth-file tampering — all
+    denied by the preset rules; `//` and `/./` pass the regex but GNU
+    rm's own failsafe catches them (defense-in-depth).
+  - **Playbooks** field-verified (create + fan-out on 2 hosts).
+  - **Browser pass** (7/7 on the field server's chromium: login, fleet,
+    execute, elevation, alerts, keyboard nav, sessions).
+  - **Assistant** field-verified against a qwen endpoint (capabilities
+    probe: tools supported; chat with governed tool calls: list_hosts →
+    get_host → markdown answer with correct fleet data; egress
+    disclosure).
+  - **Phase 6 gaps**: release self-verify (asset manifest + checksums
+    asserted bidirectionally); `install-agent.sh` (the manual-install
+    counterpart with the M8.1 layout, field-verified); elevation policy
+    history (version + restore); loadgen skeleton; `PARTOUT_AGENT_DATA_DIR`
+    documented.
+  - **Known gap**: task→secret references are unwired (the executor has
+    the lookup function but never calls it; the agent-side E2E cache
+    exists but nothing triggers materialization during task dispatch).
+    Filed for the next cycle.
+
 - **v0.9.12 — bootstrap hardening + onboarding polish (all field-caught on
   the v0.9.11 deployment, FIELD-REPORT-v0.9.11).** Everything since the
   v0.9.11 tag:

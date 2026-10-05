@@ -1,9 +1,9 @@
 # Partout
 
-> **Status: beta (v0.9.12 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
-> before the 1.0 GA flip; v0.9.11 shipped elevation onboarding, v0.9.12 hardens its
-> bootstrap (field-caught fixes), adds the no-toolchain installer bundle, the Elevation
-> UI page + MCP tools, and a real-Rocky CI install leg)** — the full feature set (observe,
+> **Status: beta (v0.9.13 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
+> before the 1.0 GA flip; v0.9.13 completes the field-verification pass: the one-command
+> `partout update` end to end, the M8.1 agent layout fix, elevation policy history,
+> `install-agent.sh`, release self-verification, and the rejoin migration path)** — the full feature set (observe,
 > execute, patch, update rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your
 > `partout.db` regularly.
