@@ -314,6 +314,52 @@ echo "$JFINAL"
 check_grep "join: run connected (no phantom wait-enroll)" "$JFINAL" "\[connected\]"
 check_grep "join: linked to the EXISTING agent" "$("$CTL" provision get "$JRID" 2>/dev/null)" "agent: *$AGENT_ID"
 
+# --- 8c. rejoin fan-out + old-layout migration ---------------------------------
+step "rejoin fan-out (v0.9.12-layout migration path)"
+# Degrade to the OLD layout first (root-owned /usr/local/bin binary, no
+# guard, direct ExecStart) — exactly what a v0.9.12-provisioned host has —
+# then rejoin via the new command and assert the layout was migrated.
+sudo install -m 0755 -o root -g root /var/lib/partout/bin/partout /usr/local/bin/partout.real
+sudo rm -f /usr/local/bin/partout
+sudo mv /usr/local/bin/partout.real /usr/local/bin/partout
+sudo tee /etc/systemd/system/partout-agent.service >/dev/null <<'UNITEOF'
+[Unit]
+Description=Partout host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partout
+EnvironmentFile=/etc/partout/agent.env
+ExecStart=/usr/local/bin/partout
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+sudo systemctl daemon-reload
+sudo systemctl restart partout-agent
+check "old layout: agent still runs from /usr/local/bin" test -f /usr/local/bin/partout -a ! -L /usr/local/bin/partout
+
+REJOIN=$("$CTL" provision rejoin --selector all --elevate --service-labels sshd 2>&1) || true
+echo "$REJOIN" | sed 's/^/    | /'
+check_grep "rejoin: run(s) started" "$REJOIN" "started"
+sleep 40
+RSTATE=$("$CTL" provision list 2>/dev/null | awk '/prv_/{print $4; exit}')
+# Wait for the latest run's terminal state.
+for i in $(seq 1 45); do
+  RSTATE=$("$CTL" provision list 2>/dev/null | awk '/prv_/{print $4; exit}')
+  [ "$RSTATE" = "connected" ] || [ "$RSTATE" = "failed" ] && break
+  sleep 2
+done
+check_grep "rejoin: run connected (layout migrated)" "state=$RSTATE" "state=connected"
+check "migrated: /usr/local/bin/partout is a symlink again" test -L /usr/local/bin/partout
+check "migrated: guard installed" test -x /usr/local/sbin/partout-update-guard
+check "migrated: unit runs the guard" grep -q "partout-update-guard" /etc/systemd/system/partout-agent.service
+check "agent is running after migration" systemctl is-active partout-agent
+
 # --- 9. fact hash matches the store (B1 chain + drift anchor) -------------------
 step "elevation fact hash == store policy sha"
 AGENT_ID=$("$CTL" hosts | awk '/ag_/{print $1; exit}')

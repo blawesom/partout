@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/blawesom/partout/internal/server/provision"
@@ -15,6 +16,7 @@ import (
 // When the provisioner is not yet set, handlers return 503.
 func (h *Handler) RegisterProvision(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/provision-runs", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleCreateRun)))
+	mux.Handle("POST /api/v1/provision-runs/rejoin", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleRejoin)))
 	mux.Handle("GET /api/v1/provision-runs", h.requireRole(roleViewer)(http.HandlerFunc(h.handleListRuns)))
 	mux.Handle("GET /api/v1/provision-runs/{id}", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetRun)))
 	mux.Handle("POST /api/v1/provision-runs/{id}/key", h.requireRole(roleAdmin)(http.HandlerFunc(h.handleConfirmKey)))
@@ -24,6 +26,109 @@ func (h *Handler) RegisterProvision(mux *http.ServeMux) {
 }
 
 // ---- admin: create provisioning run ----------------------------------------
+
+type rejoinRequest struct {
+	Selector string `json:"selector"`
+	// Same options as a create (elevation bootstrap, labels): they apply to
+	// every rejoined host.
+	Elevate           bool               `json:"elevate"`
+	ElevationPolicies []elevationRefSpec `json:"elevation_policies"`
+	ServiceLabels     string             `json:"service_labels"`
+	CertPaths         string             `json:"cert_paths"`
+}
+
+// handleRejoin fans a JOIN-mode re-provision out to every host a selector
+// matches, using each agent's own last successful provisioning target (the
+// fleet's history knows where its agents live). The migration path for
+// layout changes (e.g. v0.9.12's root-owned agent layout → v0.9.13): update
+// the server, rejoin the fleet, then rollouts work.
+func (h *Handler) handleRejoin(w http.ResponseWriter, r *http.Request) {
+	if !h.provIsReady() {
+		writeError(w, http.StatusServiceUnavailable, "provisioner_unavailable",
+			"provisioner not yet configured", nil)
+		return
+	}
+	var req rejoinRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body", nil)
+		return
+	}
+	selector := req.Selector
+	if selector == "" {
+		selector = "all"
+	}
+	res, err := store.NewResolver(h.st).ResolveSelector(selector)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "selector: "+err.Error(), nil)
+		return
+	}
+
+	// Same elevation resolution as create.
+	var policies []provision.ElevationPolicySpec
+	for _, ref := range req.ElevationPolicies {
+		if len(ref.Rules) > 0 {
+			policies = append(policies, provision.ElevationPolicySpec{
+				Name: ref.Name, RulesJSON: string(ref.Rules),
+			})
+			continue
+		}
+		pol, err := h.st.ElevationPolicy(ref.Name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "unknown elevation policy: "+ref.Name, nil)
+			return
+		}
+		policies = append(policies, provision.ElevationPolicySpec{
+			Name: pol.Name, RulesJSON: pol.RulesJSON, SHA: pol.PolicySHA,
+		})
+	}
+	if req.Elevate && len(policies) == 0 {
+		p, err := h.st.ElevationPolicy("default-baseline")
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				"--elevate needs policies or a seeded default-baseline (partout ctl preset apply)", nil)
+			return
+		}
+		policies = append(policies, provision.ElevationPolicySpec{
+			Name: p.Name, RulesJSON: p.RulesJSON, SHA: p.PolicySHA,
+		})
+	}
+
+	type rejoinOut struct {
+		AgentID string `json:"agent_id"`
+		RunID   string `json:"run_id"`
+		Host    string `json:"host"`
+		Error   string `json:"error,omitempty"`
+	}
+	out := make([]rejoinOut, 0, len(res))
+	started, skipped := 0, 0
+	for _, a := range res {
+		host, err := h.st.ProvisionTargetForAgent(a.ID)
+		if err != nil {
+			out = append(out, rejoinOut{AgentID: a.ID, Error: err.Error()})
+			continue
+		}
+		if host == "" {
+			skipped++
+			out = append(out, rejoinOut{AgentID: a.ID, Error: "no provisioning history for this agent (provision it first)"})
+			continue
+		}
+		run, err := h.prov.Start(host, "join", provision.StartOptions{
+			Elevate: req.Elevate, ElevationPolicies: policies,
+			ServiceLabels: req.ServiceLabels, CertPaths: req.CertPaths,
+		})
+		if err != nil {
+			out = append(out, rejoinOut{AgentID: a.ID, Host: host, Error: err.Error()})
+			continue
+		}
+		started++
+		out = append(out, rejoinOut{AgentID: a.ID, RunID: run.ID, Host: host})
+	}
+	principal, _ := h.actorFor(r)
+	h.audit("provision.rejoin", principal, map[string]string{
+		"selector": selector, "started": fmt.Sprint(started), "skipped": fmt.Sprint(skipped),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"started": started, "skipped": skipped, "hosts": out})
+}
 
 type createRunRequest struct {
 	Host string `json:"host"`

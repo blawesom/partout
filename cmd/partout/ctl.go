@@ -62,7 +62,10 @@ commands:
                            apply is idempotent — creates only what is missing
   approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
   alerts <list|rules>                         view alerts + alert rules (M6)
-  provision <new|list|get|key|cancel>        host provisioning over fleet SSH (admin)
+  provision <new|list|get|key|cancel|rejoin>  host provisioning over fleet SSH (admin)
+           rejoin --selector all [--elevate ...] — join-mode fan-out to every
+           matched host using its own provisioning history (the migration
+           path for layout changes: server update → rejoin → rollout)
            new --host u@h [--mode fresh|join] [--elevate
              [--elevation-policy NAME|FILE]...] [--service-labels a,b]
              [--cert-paths /dir]   D1: elevation bootstrap + env extras
@@ -1414,6 +1417,8 @@ func (c *ctl) cmdProvision(args []string) {
 			os.Exit(2)
 		}
 		c.provisionCancel(rest[0])
+	case "rejoin":
+		c.provisionRejoin(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: unknown provision command %q\n", sub)
 		os.Exit(2)
@@ -2901,4 +2906,56 @@ func (c *ctl) elevationPolicy(args []string) {
 		fmt.Fprintf(os.Stderr, "ctl: elevation policy: unknown subcommand %q\n", sub)
 		os.Exit(2)
 	}
+}
+
+// provisionRejoin drives POST /api/v1/provision-runs/rejoin: a join-mode
+// fan-out to every host a selector matches, each using its own last
+// successful provisioning target.
+func (c *ctl) provisionRejoin(args []string) {
+	args = reorderFlags(args)
+	fs := flag.NewFlagSet("provision rejoin", flag.ExitOnError)
+	selector := fs.String("selector", "all", "host selector (which agents to rejoin)")
+	elevate := fs.Bool("elevate", false, "re-arm the elevation bootstrap on each host")
+	var policies []string
+	fs.Func("elevation-policy", "elevation policy (repeatable): store name or local file", func(v string) error {
+		policies = append(policies, v)
+		return nil
+	})
+	serviceLabels := fs.String("service-labels", "", "PARTOUT_SERVICE_LABELS for the agents")
+	certPaths := fs.String("cert-paths", "", "PARTOUT_CERT_PATHS for the agents")
+	fs.Parse(args)
+	var polRefs []map[string]any
+	for _, ref := range policies {
+		if b, err := os.ReadFile(ref); err == nil {
+			polRefs = append(polRefs, map[string]any{"rules": json.RawMessage(b)})
+			continue
+		}
+		polRefs = append(polRefs, map[string]any{"name": ref})
+	}
+	body := map[string]any{
+		"selector": *selector, "elevate": *elevate, "elevation_policies": polRefs,
+		"service_labels": *serviceLabels, "cert_paths": *certPaths,
+	}
+	var res struct {
+		Started int `json:"started"`
+		Skipped int `json:"skipped"`
+		Hosts   []struct {
+			AgentID string `json:"agent_id"`
+			RunID   string `json:"run_id"`
+			Host    string `json:"host"`
+			Error   string `json:"error"`
+		} `json:"hosts"`
+	}
+	if err := c.do("POST", "/api/v1/provision-runs/rejoin", body, &res); err != nil {
+		fatal(err)
+	}
+	fmt.Printf("rejoin: %d started, %d skipped\n", res.Started, res.Skipped)
+	for _, h := range res.Hosts {
+		if h.Error != "" {
+			fmt.Printf("  %-20s SKIP: %s\n", h.AgentID, h.Error)
+			continue
+		}
+		fmt.Printf("  %-20s %s  run %s\n", h.AgentID, h.Host, h.RunID)
+	}
+	fmt.Println("watch with:  partout ctl provision list")
 }
