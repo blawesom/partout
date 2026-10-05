@@ -129,7 +129,7 @@ func elevationCheck(policy, sudoersPath, user string) {
 	}
 	installed, err := os.ReadFile(sudoersPath)
 	if err != nil {
-		fmt.Printf("no drop-in installed at %s — run: sudo partout ctl elevation install-sudoers\n", sudoersPath)
+		fmt.Printf("no drop-in installed at %s — run: sudo /usr/local/bin/partout ctl elevation install-sudoers\n", sudoersPath)
 		os.Exit(2)
 	}
 	if strings.TrimSpace(string(installed)) == strings.TrimSpace(rendered) {
@@ -163,7 +163,7 @@ func elevationInstall(policy, sudoersPath, user string, dryRun bool) {
 		return
 	}
 	if os.Geteuid() != 0 {
-		fatal(fmt.Errorf("installing %s needs root: sudo partout ctl elevation install-sudoers", sudoersPath))
+		fatal(fmt.Errorf("installing %s needs root: sudo /usr/local/bin/partout ctl elevation install-sudoers", sudoersPath))
 	}
 	// visudo-check the rendered file BEFORE it touches the live system.
 	tmp, err := os.CreateTemp("", "partout-sudoers-*.new")
