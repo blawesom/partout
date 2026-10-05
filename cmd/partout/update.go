@@ -242,7 +242,17 @@ Flags:
 		} else {
 			args = append(args, "--signature", srvSig, "--key", releaseKeyOrFatal())
 		}
-		cmd := exec.Command(sc, args...)
+		// The update script drives systemctl (stop/start the service) —
+		// that needs root. Run it through sudo when we are not root
+		// (field-caught: `partout update` from an operator shell failed at
+		// "Interactive authentication required" on the systemctl stop).
+		runArgs := append([]string{sc}, args...)
+		if os.Getuid() != 0 {
+			if _, err := exec.LookPath("sudo"); err == nil {
+				runArgs = append([]string{"sudo", "-n"}, runArgs...)
+			}
+		}
+		cmd := exec.Command(runArgs[0], runArgs[1:]...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
