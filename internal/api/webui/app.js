@@ -3045,8 +3045,9 @@
       async loadHostDetail() {
         // Overview comes from GET /hosts/{id} (state/uuid/version/timestamps);
         // GET /hosts/{id}/facts only returns {host_id, ts, facts}.
-        this.host = null; this.hostFacts = null; this.hostEol = null;
-        if (!this.p1) return; // id-less route: nothing to load (never GET /hosts/)
+        if (!this.p1) { this.host = null; this.hostFacts = null; this.hostEol = null; return; }
+        // Fetch-then-assign (not null-then-fetch): the old values stay
+        // rendered during the fetch — no flash-of-empty-content.
         try { this.host = await this.api("/hosts/" + encodeURIComponent(this.p1)); } catch (e) { this.host = null; }
         this.labelDraft = {
           name: (this.host && this.host.tags && this.host.tags.name) || "",
@@ -3057,8 +3058,8 @@
       },
       async loadExecutions() { try { const d = await this.api("/executions"); this.executions = d.items || []; } catch (e) { this.executions = []; } },
       async loadExecDetail() {
-        this.execDetail = null; this.execOutput = [];
-        if (!this.p1) return; // id-less route: never GET /executions/
+        if (!this.p1) { this.execDetail = null; this.execOutput = []; return; } // id-less route
+        // Fetch-then-assign: no flash-of-empty during SSE-triggered re-loads.
         try { this.execDetail = await this.api("/executions/" + encodeURIComponent(this.p1)); } catch (e) { this.execDetail = null; return; }
         try { this.execOutput = (await this.api("/executions/" + encodeURIComponent(this.p1) + "/output")) || []; } catch (e) { this.execOutput = []; }
       },
@@ -3136,10 +3137,8 @@
       },
       async loadSessions() { try { const d = await this.api("/sessions"); this.sessions = d.sessions || d.items || []; } catch (e) { this.sessions = []; } },
       async loadSessionReplay() {
-        this.sessionReplay = null;
-        this.sessionLive = null;
-        this._destroyTerm();
-        if (!this.p1) return; // id-less route: never GET /sessions//replay
+        if (!this.p1) { this.sessionReplay = null; this.sessionLive = null; this._destroyTerm(); return; }
+        // Fetch-then-assign (no flash-of-empty during SSE re-loads).
         // Live session → xterm.js terminal; otherwise the recorded replay.
         try {
           const s = await this.api("/sessions/" + encodeURIComponent(this.p1));
@@ -3268,8 +3267,11 @@
       // agent's partout.elevation fact — warn BEFORE the apply fails with a
       // raw permission error, with the enable remedy inline.
       async loadUpdElevation() {
-        this.updElevation = null;
-        if (!this.updHost) return;
+        // Do NOT null-out before fetching: a v-if on this data destroys and
+        // recreates the warn-box on every load, making it blink and become
+        // impossible to select/copy (field report: "blinking very fast").
+        // The old value stays rendered until the fetch replaces it.
+        if (!this.updHost) { this.updElevation = null; return; }
         try { this.updElevation = await this.api("/hosts/" + encodeURIComponent(this.updHost) + "/elevation", { silent: true, toast: false }); } catch (e) { /* posture unknown — the banner stays off */ }
       },
       // --- Security (M5.1 periodic CVE scan) ---
