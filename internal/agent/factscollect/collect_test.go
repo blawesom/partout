@@ -572,6 +572,11 @@ func TestCollectHAProxyUnreadableConfig(t *testing.T) {
 // errors (nginx "open() ... failed (13: Permission denied)", haproxy
 // "Could not open configuration file ... : Permission denied").
 func TestIsPermissionFailure(t *testing.T) {
+	// A file that exists — the "cannot open" + exists = permission case.
+	existingPEM := filepath.Join(t.TempDir(), "cert.pem")
+	if err := os.WriteFile(existingPEM, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name string
 		out  string
@@ -583,6 +588,12 @@ func TestIsPermissionFailure(t *testing.T) {
 		{"genuinely invalid", `nginx: [emerg] unknown directive "bogus" in /etc/nginx/nginx.conf:5`, false},
 		{"syntax error", `[ALERT] (1) : config : parsing [/etc/haproxy/haproxy.cfg:3] : unknown keyword 'foo'.`, false},
 		{"empty", ``, false},
+		// haproxy "cannot open the file" — existing file (root-only cert
+		// bundle): access problem, not a config error (field report: dev
+		// host's bind crt at 0640). Distinguished from a missing file by
+		// stat — the fixture file must exist for this case.
+		{"haproxy cannot open existing file", "[ALERT] : config : parsing [/etc/haproxy/haproxy.cfg:24] : 'bind *:443' in section 'frontend' : cannot open the file '" + existingPEM + "'.", true},
+		{"haproxy cannot open missing file", "[ALERT] : config : parsing [/etc/haproxy/haproxy.cfg:24] : 'bind *:443' in section 'frontend' : cannot open the file '/nope/missing.pem'.", false},
 	}
 	for _, c := range cases {
 		if got := isPermissionFailure(c.out); got != c.want {

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -580,9 +581,29 @@ func collectHAProxy(cfg *Config) *HAProxyConfig {
 // runs as root at startup and reads those files fine (field report:
 // ccc.laplane.net — nginx -t exits 1 on root-only conf.d includes while
 // nginx itself is active and healthy).
+//
+// haproxy additionally reports `cannot open the file '/x.pem'` for a
+// referenced file it cannot open — covering BOTH a genuinely missing file
+// (a config error) and an unreadable one (root-only cert bundle — not a
+// config error; field report: the dev host's bind crt at 0640 failed
+// `haproxy -c` as "cannot open" and lit a false config_invalid). The two
+// are distinguished by stat: a file that exists but will not open is an
+// access problem, a path that does not resolve is a real config error.
 func isPermissionFailure(out string) bool {
-	return strings.Contains(out, "Permission denied")
+	if strings.Contains(out, "Permission denied") {
+		return true
+	}
+	for _, m := range reCannotOpenFile.FindAllStringSubmatch(out, -1) {
+		if _, err := os.Stat(m[1]); err == nil {
+			return true // exists but unopenable as this user: access, not config
+		}
+	}
+	return false
 }
+
+// reCannotOpenFile matches haproxy's `cannot open the file '/x.pem'
+// (errno: N)` reference in validator output.
+var reCannotOpenFile = regexp.MustCompile(`cannot open the file '([^']+)'`)
 
 // authorizedElevated reports whether the loaded policy authorizes (name,
 // args) to run elevated in Sudo mode. A nil policy is never authorized
