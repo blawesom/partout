@@ -40,7 +40,7 @@ const (
 	KindUpdateRun         = "update_run"       // M8.1: rollout stuck (server-level, no host scope)
 	KindUpdateDrift       = "update_drift"     // M8.1.1: agents behind the store's latest release
 	KindSecurityUpdates   = "security_updates" // M5.1: unpatched CVEs on a host (security scan)
-	KindElevationDrift    = "elevation_drift"   // host's installed elevation scope matches no stored policy
+	KindElevationDrift    = "elevation_drift"  // host's installed elevation scope matches no stored policy
 )
 
 // Controller evaluates alert rules on a tick.

@@ -860,6 +860,182 @@ func agentEnvExtras(opts StartOptions) string {
 	return b.String()
 }
 
+// JoinScriptInput is everything the one-line join script (E1) needs.
+// The script it renders is a curl prelude that materializes the exact
+// /tmp files the field-proven installer expects, followed by that
+// installer verbatim — the join path and the SSH-provisioning path share
+// one install body, so they cannot drift.
+type JoinScriptInput struct {
+	// BaseURL is scheme://host:port the target host can reach (it fetched
+	// the loader from there, so by construction it can reach it again).
+	BaseURL string
+	// Token is the one-time enrollment token (embedded in download URLs).
+	Token string
+	// Arch is the target arch (amd64|arm64) — the arch-specific script is
+	// rendered per request.
+	Arch string
+	// BinSHA / BinVersion fingerprint the binary the prelude downloads.
+	BinSHA     string
+	BinVersion string
+	// CAPEM is the root CA (TLS servers); empty = plaintext server.
+	CAPEM string
+	// Policies are the elevation documents to install (nil = no
+	// elevation).
+	Policies []ElevationPolicySpec
+	// ServiceLabels / CertPaths are agent.env extras (same as StartOptions).
+	ServiceLabels string
+	CertPaths     string
+}
+
+// BuildJoinScript renders the arch-specific one-line join installer.
+// Everything except the binary is staged inline as base64 (policy JSON,
+// the CA, the update guard); the binary is fetched from the control plane
+// and verified by the installer's sha256 gate like any provision transfer.
+// Base64 (not heredocs) because the transferred bytes must match their
+// sha256 EXACTLY — a heredoc always appends a trailing newline, which
+// would break the CA/policy verification the install body performs.
+func BuildJoinScript(in JoinScriptInput) (string, error) {
+	if in.BaseURL == "" || in.Token == "" || in.Arch == "" || in.BinSHA == "" || len(in.BinSHA) < 12 {
+		return "", fmt.Errorf("provision: join script requires base URL, token, arch, and binary sha")
+	}
+	var b strings.Builder
+	b.WriteString("# partout join — one-line bootstrap (E1). Generated for arch " + in.Arch)
+	if in.BinVersion != "" {
+		b.WriteString(" (binary " + in.BinVersion + ")")
+	}
+	b.WriteString(".\n")
+	b.WriteString("# Runs as root (curl … | sudo bash). Idempotent; safe to re-run.\n")
+	b.WriteString("# The install body below is the SAME script SSH provisioning runs —\n")
+	b.WriteString("# only the fetch prelude differs (curl from the control plane vs scp).\n")
+	b.WriteString("set -eu\n")
+	fmt.Fprintf(&b, "ARCH=%s\n", in.Arch)
+	fmt.Fprintf(&b, "BIN=/tmp/partout-%s\n", in.BinSHA[:12])
+	fmt.Fprintf(&b, "curl -fsSL -o \"$BIN\" %s/api/v1/join/%s/binary?arch=%s || { echo \"join: no agent binary for arch %s on this server (upload a release for it on the Updates page, or install from GitHub releases)\" >&2; exit 1; }\n",
+		shellQuote(in.BaseURL), in.Token, in.Arch, in.Arch)
+	caSHA := ""
+	if in.CAPEM != "" {
+		caSHA = sha256Hex(in.CAPEM)
+		fmt.Fprintf(&b, "CA=/tmp/partout-ca-%s\n", caSHA[:12])
+		fmt.Fprintf(&b, "printf '%%s' %s | base64 -d > \"$CA\"\n", shellQuote(base64.StdEncoding.EncodeToString([]byte(in.CAPEM))))
+	}
+	for _, ep := range in.Policies {
+		fmt.Fprintf(&b, "ELEV=/tmp/partout-elev-%s\n", ep.SHA[:12])
+		fmt.Fprintf(&b, "printf '%%s' %s | base64 -d > \"$ELEV\"\n",
+			shellQuote(base64.StdEncoding.EncodeToString([]byte(`{"rules":`+ep.RulesJSON+`}`))))
+	}
+	// The update guard: same embedded copy the provisioner ships.
+	b.WriteString("GUARD=/tmp/partout-update-guard\n")
+	fmt.Fprintf(&b, "printf '%%s' %s | base64 -d > \"$GUARD\"\n",
+		shellQuote(base64.StdEncoding.EncodeToString([]byte(embedded.UpdateGuard))))
+
+	// The install body: byte-identical to the SSH-provisioning install.
+	b.WriteString(buildInstallScript(installSpec{
+		binSHA12:   in.BinSHA[:12],
+		binSHA:     in.BinSHA,
+		caSHA:      caSHA,
+		serverHost: hostOf(in.BaseURL),
+		token:      in.Token,
+		elevation:  elevationScript(StartOptions{Elevate: len(in.Policies) > 0, ElevationPolicies: in.Policies}),
+		envExtras:  agentEnvExtras(StartOptions{Elevate: len(in.Policies) > 0, ServiceLabels: in.ServiceLabels, CertPaths: in.CertPaths}),
+	}))
+	return b.String(), nil
+}
+
+// BuildJoinLoader renders the arch-detecting first-stage script: fetch the
+// arch-specific installer from the control plane and run it. The elevate
+// and labels values are server-validated before they are embedded (the
+// caller guarantees: policy name resolved from the store, labels matching
+// ^[A-Za-z0-9,_.-]*$).
+func BuildJoinLoader(baseURL, token, elevate, labels string) string {
+	var b strings.Builder
+	b.WriteString("# partout join — stage 1/2: detect the arch, fetch the arch-specific installer.\n")
+	b.WriteString("# Stage 2 carries the sha256-verified install (same body as SSH provisioning).\n")
+	b.WriteString("set -eu\n")
+	b.WriteString("ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')\n")
+	fmt.Fprintf(&b, "URL=%s\n", shellQuote(baseURL+"/api/v1/join/"+token+"?arch=")+"\"$ARCH\"")
+	if elevate != "" {
+		fmt.Fprintf(&b, "URL=\"$URL\"%s\n", shellQuote("&elevate="+elevate))
+	}
+	if labels != "" {
+		fmt.Fprintf(&b, "URL=\"$URL\"%s\n", shellQuote("&labels="+labels))
+	}
+	b.WriteString("SCRIPT=$(mktemp /tmp/partout-join.XXXXXX)\n")
+	b.WriteString("trap 'rm -f \"$SCRIPT\"' EXIT\n")
+	b.WriteString("curl -fsSL -o \"$SCRIPT\" \"$URL\"\n")
+	b.WriteString("sh \"$SCRIPT\"\n")
+	return b.String()
+}
+
+// hostOf strips the scheme from a base URL (https://h: p → h: p).
+func hostOf(baseURL string) string {
+	s := strings.TrimPrefix(baseURL, "https://")
+	return strings.TrimPrefix(s, "http://")
+}
+
+// ElevationBootstrapInput is the one-line elevation enablement for an
+// already-enrolled host (P1): the operator pastes ONE root command on the
+// host instead of the six-step manual dance (policy file, install-sudoers
+// with the secure_path full-path trap, agent.env, NoNewPrivileges,
+// daemon-reload, restart).
+type ElevationBootstrapInput struct {
+	// Hostname is the agent's reported hostname (the paste guard); empty
+	// skips the guard (pre-reporting agents).
+	Hostname string
+	// PolicyName / RulesJSON / SHA are the canonical stored policy.
+	PolicyName string
+	RulesJSON  string
+	SHA        string
+}
+
+// BuildElevationBootstrapScript renders the root script the host runs. It
+// is deliberately boring: stage the policy, render + visudo-check the
+// sudoers drop-in via the binary ALREADY on the host, wire the env, drop
+// NoNewPrivileges, restart, verify. Fail-closed throughout (set -eu).
+func BuildElevationBootstrapScript(in ElevationBootstrapInput) (string, error) {
+	if in.RulesJSON == "" || in.PolicyName == "" {
+		return "", fmt.Errorf("provision: elevation bootstrap requires a policy")
+	}
+	var b strings.Builder
+	b.WriteString("# partout elevation bootstrap — generated for host " + in.Hostname)
+	b.WriteString(" (policy " + in.PolicyName + ").\n")
+	b.WriteString("# Runs as root ON the host (curl … | sudo bash). One command instead of the\n")
+	b.WriteString("# six-step manual dance; the sudoers wall itself is rendered from the\n")
+	b.WriteString("# policy ON the host (visudo-checked before anything is touched).\n")
+	b.WriteString("set -eu\n")
+	if in.Hostname != "" {
+		b.WriteString("# Paste guard: this bootstrap was minted for one specific host.\n")
+		fmt.Fprintf(&b, "EXPECT_HOST=%s\n", shellQuote(strings.ToLower(strings.SplitN(in.Hostname, ".", 2)[0])))
+		b.WriteString("ACTUAL_HOST=$(hostname 2>/dev/null || true); ACTUAL_HOST=${ACTUAL_HOST%%.*}; ACTUAL_HOST=$(printf '%s' \"$ACTUAL_HOST\" | tr '[:upper:]' '[:lower:]')\n")
+		b.WriteString("[ \"$ACTUAL_HOST\" = \"$EXPECT_HOST\" ] || { echo \"wrong host: this elevation bootstrap was minted for \"$EXPECT_HOST\" but this is \"$ACTUAL_HOST\"\" >&2; exit 1; }\n")
+	}
+	b.WriteString("BIN=/usr/local/bin/partout\n")
+	b.WriteString("[ -x \"$BIN\" ] || { echo \"partout binary not found at $BIN — is this host enrolled with the M8.1 layout?\" >&2; exit 1; }\n")
+	b.WriteString("command -v visudo >/dev/null 2>&1 || { echo \"visudo not found — install the sudo package first\" >&2; exit 1; }\n")
+	b.WriteString("install -d -m 0755 /etc/partout/elevation.d\n")
+	fmt.Fprintf(&b, "ELEV=/etc/partout/elevation.d/10-%s.json\n", slugPolicyName(in.PolicyName))
+	fmt.Fprintf(&b, "printf '%%s' %s | base64 -d > \"$ELEV\"\n", shellQuote(base64.StdEncoding.EncodeToString([]byte(`{"rules":`+in.RulesJSON+`}`))))
+	b.WriteString("chmod 0644 \"$ELEV\"\n")
+	b.WriteString("# Render + install the sudoers drop-in FROM the policy (single source of\n")
+	b.WriteString("# truth; visudo-checked before anything is touched).\n")
+	b.WriteString("PARTOUT_ELEVATION_POLICY=/etc/partout/elevation.d \"$BIN\" ctl elevation install-sudoers\n")
+	b.WriteString("# Wire the agent env (idempotent: replace the two elevation keys).\n")
+	b.WriteString("ENVF=/etc/partout/agent.env\n")
+	b.WriteString("[ -f \"$ENVF\" ] || { echo \"agent.env missing at $ENVF\" >&2; exit 1; }\n")
+	b.WriteString("sed -i '/^PARTOUT_ELEVATE=/d; /^PARTOUT_ELEVATION_POLICY=/d' \"$ENVF\"\n")
+	b.WriteString("printf 'PARTOUT_ELEVATE=sudo\\nPARTOUT_ELEVATION_POLICY=/etc/partout/elevation.d\\n' >> \"$ENVF\"\n")
+	b.WriteString("# sudo needs setuid: drop a NoNewPrivileges line from the unit if present.\n")
+	b.WriteString("UNIT=/etc/systemd/system/partout-agent.service\n")
+	b.WriteString("if [ -f \"$UNIT\" ] && grep -q '^NoNewPrivileges' \"$UNIT\"; then\n")
+	b.WriteString("  sed -i '/^NoNewPrivileges/d' \"$UNIT\"\n")
+	b.WriteString("  systemctl daemon-reload\n")
+	b.WriteString("fi\n")
+	b.WriteString("systemctl restart partout-agent\n")
+	b.WriteString("sleep 1\n")
+	b.WriteString("\"$BIN\" ctl elevation check || true\n")
+	b.WriteString("echo ELEVATION_OK — the agent restarted with elevation enabled; posture shows in the UI within a facts cycle (~5 min).\n")
+	return b.String(), nil
+}
+
 func buildInstallScript(s installSpec) string {
 	// CA install + env line only when TLS is on: verify the transferred CA
 	// against its expected sha256, then place it where the agent expects it

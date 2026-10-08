@@ -174,3 +174,47 @@ func (s *Store) GetElevationPolicyVersion(policyID string, version int) (*Elevat
 	}
 	return v, err
 }
+
+// ---- Elevation bootstrap tokens (P1) -----------------------------------------
+
+// CreateElevationToken stores a one-time elevation-bootstrap token for an
+// agent + policy (sha256 of the plaintext token, never the token itself).
+func (s *Store) CreateElevationToken(tokenHash, agentID, policyName string, ttlS int) error {
+	_, err := s.db.Exec(`
+		INSERT INTO elevation_tokens(token_hash, agent_id, policy_name, created, expires)
+		VALUES(?,?,?,?,?)
+	`, tokenHash, agentID, policyName, now(), now()+int64(ttlS))
+	return err
+}
+
+// ConsumeElevationToken atomically marks a token used and returns what it
+// was minted for. Unknown/expired/already-used tokens are refused — the
+// bootstrap script must never be re-servable from a stale token.
+func (s *Store) ConsumeElevationToken(tokenHash string) (agentID, policyName string, ok bool, err error) {
+	var (
+		used    int
+		expires int64
+		ag      string
+		pol     string
+	)
+	err = s.db.QueryRow(`
+		SELECT used, expires, agent_id, policy_name FROM elevation_tokens WHERE token_hash = ?
+	`, tokenHash).Scan(&used, &expires, &ag, &pol)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if used != 0 || time.Now().Unix() > expires {
+		return "", "", false, nil
+	}
+	res, err := s.db.Exec(`UPDATE elevation_tokens SET used=1, used_at=? WHERE token_hash=? AND used=0`, now(), tokenHash)
+	if err != nil {
+		return "", "", false, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return "", "", false, nil
+	}
+	return ag, pol, true, nil
+}

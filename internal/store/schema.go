@@ -624,10 +624,24 @@ CREATE TABLE IF NOT EXISTS elevation_policy_versions (
   created     INTEGER NOT NULL DEFAULT 0,
   UNIQUE(policy_id, version)
 );
+
+-- One-time elevation-bootstrap tokens (P1): minted by an admin for a
+-- specific host + stored policy, redeemed by the bootstrap script the
+-- operator pastes ON the host (the one privileged action that cannot be
+-- pushed from the unprivileged agent — PRD Decision 3's fail-closed model).
+CREATE TABLE IF NOT EXISTS elevation_tokens (
+  token_hash  TEXT PRIMARY KEY,
+  agent_id    TEXT NOT NULL,
+  policy_name TEXT NOT NULL DEFAULT '',
+  created     INTEGER NOT NULL,
+  expires     INTEGER NOT NULL,
+  used        INTEGER NOT NULL DEFAULT 0,
+  used_at     INTEGER
+);
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 24
+const currentSchemaVersion = 25
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

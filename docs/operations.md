@@ -302,7 +302,26 @@ kernel's wall can be kept, and checked, in sync. Example
   sha256-verified in transfer, installed to `/etc/partout/elevation.d/`,
   and the sudoers drop-in is rendered **on the host** (visudo-checked)
   before the agent starts with `PARTOUT_ELEVATE=sudo`.
-- **Enable — by hand (fallback, or hosts provisioned before this)**:
+- **Enable — one command on an already-enrolled host (recommended)**: the
+  host page's posture checklist (or the Elevation page's fleet-posture
+  table, or the Updates pre-apply banner) offers **Enable…** — an admin
+  mints a one-time (15 min, single-serve, hostname-guarded) bootstrap
+  token and the host runs:
+  ```
+  curl -fsSL 'https://srv:8443/api/v1/elevate/<token>' | sudo bash
+  ```
+  The served script installs the chosen stored policy to
+  `/etc/partout/elevation.d/`, renders + visudo-checks the sudoers
+  drop-in **on the host** via the already-installed binary (full path —
+  dodging sudo's secure_path trap), sets `PARTOUT_ELEVATE=sudo` in
+  `agent.env`, drops `NoNewPrivileges` from the unit, and restarts the
+  agent. This replaces the six-step manual dance below with the one
+  privileged paste the fail-closed model requires (the unprivileged
+  agent must never be able to install its own sudoers wall — PRD
+  Decision 3). REST: `POST /api/v1/hosts/{id}/elevation/bootstrap`
+  (admin) → `{token, url}`; the script route is `GET /api/v1/elevate/{token}`
+  (token-gated). Both are audited (`elevation.bootstrap.*`).
+- **Enable — by hand (fallback of last resort; the one-command bootstrap above replaces it)**:
   1. Install the policy: `sudo install -m 0644 -o root -g root
      elevation-web.json.example /etc/partout/elevation.d/10-web.json` (edit to
      the fleet's actual scope first).

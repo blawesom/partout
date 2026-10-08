@@ -103,6 +103,39 @@
       <button class="toast-x" @click="dismissToast(t.id)" aria-label="dismiss">×</button>
     </div>
   </div>
+  <!-- ============ ELEVATION BOOTSTRAP DIALOG (P1: one-command enablement) ============ -->
+  <div class="overlay" v-if="elevBoot.open && loggedIn" @click.self="closeElevBoot()">
+    <div class="dialog card">
+      <div class="head">
+        <h2>Enable elevation</h2>
+        <p class="cap">{{ hostNameById(elevBoot.agentId) || elevBoot.agentId }}</p>
+        <div class="spacer"></div>
+        <button class="btn sm" @click="closeElevBoot()" aria-label="close">✕</button>
+      </div>
+      <p class="cap">One command on the host, as root — instead of the six-step manual dance. The
+        bootstrap installs the selected policy, renders + visudo-checks the sudoers drop-in <b>from it on
+        the host</b>, wires <span class="mono">PARTOUT_ELEVATE=sudo</span>, drops
+        <span class="mono">NoNewPrivileges</span> from the unit, and restarts the agent. One-time token:
+        15 min, single serve, hostname-guarded.</p>
+      <div class="toolbar" style="margin:10px 0">
+        <label class="fld" style="max-width:280px"><span>Policy</span>
+          <select v-model="elevBoot.policy" class="mono" @focus="ahLoadPolicies()">
+            <option v-for="p in provWiz.elevationPolicies" :key="p.id" :value="p.name">{{ p.name }}</option>
+          </select>
+        </label>
+        <button class="btn primary sm" :disabled="!elevBoot.policy || elevBoot.busy" @click="elevBootMint()">
+          <span v-if="elevBoot.busy" class="spin"></span>{{ elevBoot.token ? 'Re-mint' : 'Mint bootstrap' }}</button>
+      </div>
+      <template v-if="elevBoot.token">
+        <p class="cap"><b>Paste on the host, as root</b> <span class="muted small">— the one privileged action; the UI shows the new posture within a facts cycle (~5 min)</span></p>
+        <div class="console" style="white-space:pre-wrap;word-break:break-all">curl -fsSL '{{ elevBoot.url }}' | sudo bash</div>
+        <div class="toolbar" style="margin-top:8px">
+          <button class="btn primary sm" @click="copyElevBoot">Copy command</button>
+          <a class="btn sm" :href="elevBoot.url" target="_blank" rel="noopener">View the script first</a>
+        </div>
+      </template>
+    </div>
+  </div>
   <!-- ============ ADD HOST DIALOG (Fleet) ============ -->
   <div class="overlay" v-if="addHostOpen && loggedIn" @click.self="closeAddHost()">
     <div class="dialog card">
@@ -126,14 +159,34 @@
           <span v-if="!isOperator" class="muted small" style="margin-left:8px">requires operator role</span>
         </div>
         <div v-else>
-          <p class="cap"><b>1 · Get the binary onto the host</b></p>
+          <!-- One-line install (E1): TLS servers only — a plaintext fetch of a
+               root-running script is a mid-flight-tampering surface. -->
+          <template v-if="locProtocol==='https:'">
+            <p class="cap"><b>1 · One-line install</b> <span class="muted small">— persistent systemd service, sha256-verified, runs as root (inspect it first if you like)</span></p>
+            <div class="toolbar" style="margin-bottom:6px">
+              <label class="lbl" style="margin:0"><input type="checkbox" v-model="ahElevate" @change="ahLoadPolicies()" /> enable elevation</label>
+              <select v-if="ahElevate" v-model="ahElevationPolicy" class="mono" style="max-width:260px">
+                <option v-for="p in provWiz.elevationPolicies" :key="p.id" :value="p.name">{{ p.name }}</option>
+              </select>
+              <span v-if="ahElevate" class="muted small">policy installed + sudoers rendered on the host; PARTOUT_ELEVATE=sudo wired</span>
+            </div>
+            <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahOneLiner }}</div>
+            <div class="toolbar" style="margin-top:6px">
+              <button class="btn primary sm" @click="copyAhOneLiner">Copy one-liner</button>
+              <a class="btn sm" :href="ahScriptURL" target="_blank" rel="noopener">View the script first</a>
+              <span class="muted small">on the host, as root — the dialog flips to ✓ when it connects</span>
+            </div>
+          </template>
+          <p v-else class="warn-box"><b>This server is not serving TLS.</b> The one-line installer is only offered over HTTPS (a plaintext <span class="mono">curl | sudo bash</span> can be tampered with mid-flight). Use the manual steps below, or turn on <span class="mono">PARTOUT_TLS=on</span>.</p>
+
+          <p class="cap" style="margin-top:12px"><b>{{ locProtocol==='https:' ? '2 · Manual:' : '1 ·' }} Get the binary onto the host</b> <span class="muted small">— advanced: only if you can't pipe the one-liner</span></p>
           <div v-if="ahDownloadCmd" class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahDownloadCmd }}</div>
           <p v-else class="muted small">Download the static linux build from the
             <a :href="'https://github.com/blawesom/partout/releases'" target="_blank" rel="noopener">releases page</a>
             (amd64 / arm64) and copy it to the host.</p>
 
           <template v-if="locProtocol==='https:'">
-            <p class="cap" style="margin-top:10px"><b>2 · Trust the server CA</b> <span class="muted small">— the agent verifies the server before enrolling</span></p>
+            <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '3' : '2' }} · Trust the server CA</b> <span class="muted small">— the agent verifies the server before enrolling</span></p>
             <div v-if="ahCaBusy" class="muted small">fetching the server root CA…</div>
             <div v-else-if="ahCa" class="toolbar">
               <button class="btn sm" @click="downloadAhCa">Download ca.crt</button>
@@ -142,7 +195,7 @@
             <p v-else-if="ahCaErr" class="muted small">CA not fetched: {{ ahCaErr }} — ship it to the host as <span class="mono">ca.crt</span> next to the command.</p>
           </template>
 
-          <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '3' : '2' }} · Run the agent</b> <span class="muted small">— one-time, expires in {{ ahTtlLeft }} s</span></p>
+          <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '4' : '3' }} · Run the agent</b> <span class="muted small">— one-time, expires in {{ ahTtlLeft }} s; foreground only — the one-liner above installs the persistent service</span></p>
           <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahCmd }}</div>
           <div class="toolbar" style="margin-top:8px">
             <button class="btn sm" @click="copyAhCmd">Copy command</button>
@@ -762,6 +815,7 @@
                   <b>{{ it.head }}</b>
                   <p class="cap" style="margin:4px 0 0">{{ it.body }}</p>
                 </div>
+                <button v-if="it.act==='elevBoot' && isAdmin" class="btn primary sm" @click="openElevBoot(p1)">Enable…</button>
                 <button v-if="it.goto" class="btn sm" @click="go(it.goto)">Open {{ it.goto }}</button>
                 <button class="btn sm" @click="dismissPosture(it.key)" title="Dismiss this item for this host">✕</button>
               </div>
@@ -1277,7 +1331,7 @@
           </div>
           <template v-if="updTab==='packages'">
           <p class="page-sub">Package updates for the selected host. Apply is policy-gated (pkg.apply) and can park on approvals; the agent always runs a dry-run first.</p>
-          <div v-if="updHost && updElevation && updElevation.mode !== 'sudo'" class="warn-box" style="margin-bottom:12px"><b>Elevation is off on this host</b> — package applies run as the unprivileged agent user and will fail with permission errors (dry runs still work<template v-if="updElevation.reported === false">; this agent predates elevation reporting — upgrade it</template>). Enable on the host: install the sudoers scope (<span class="mono">deploy/sudoers/partout-agent</span> or an elevation policy via <span class="mono">partout ctl elevation install-sudoers</span>), set <span class="mono">PARTOUT_ELEVATE=sudo</span> in <span class="mono">/etc/partout/agent.env</span>, then restart the agent.</div>
+          <div v-if="updHost && updElevation && updElevation.mode !== 'sudo'" class="warn-box" style="margin-bottom:12px"><b>Elevation is off on this host</b> — package applies run as the unprivileged agent user and will fail with permission errors (dry runs still work<template v-if="updElevation.reported === false">; this agent predates elevation reporting — upgrade it</template>). <template v-if="isAdmin">Enable it with one command on the host: <button class="btn sm" @click="openElevBoot(updHost)">Enable elevation…</button> (mint a one-time bootstrap; the policy + sudoers + <span class="mono">PARTOUT_ELEVATE=sudo</span> are wired by the script).</template><template v-else>Ask an admin to enable it (Elevation page → Enable…; it sets <span class="mono">PARTOUT_ELEVATE=sudo</span>).</template></div>
           <div class="toolbar">
             <select :value="updHost" style="max-width:260px" @change="updHost=$event.target.value; loadUpdates()">
               <option v-for="h in hosts" :key="h.id" :value="h.id">{{ hostOption(h) }}</option>
@@ -1537,7 +1591,7 @@
               <button class="btn sm" @click="loadElevation">Refresh</button>
             </div>
             <table class="tbl" style="margin-top:8px">
-              <thead><tr><th>Host</th><th>Mode</th><th>Rules</th><th>Policy (hash match)</th><th>SHA-256</th></tr></thead>
+              <thead><tr><th>Host</th><th>Mode</th><th>Rules</th><th>Policy (hash match)</th><th>SHA-256</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="f in elev.fleet" :key="f.id" class="click" @click="go('host/'+f.id)">
                   <td>{{ f.name }}</td>
@@ -1549,8 +1603,11 @@
                     <span v-else class="muted small">not reported (pre-0.9.9 agent)</span>
                   </td>
                   <td class="mono small">{{ (f.hash||'').slice(0,12) }}…</td>
+                  <td @click.stop>
+                    <button v-if="isAdmin && f.mode !== 'sudo' && f.reported" class="btn sm" @click="openElevBoot(f.id)">Enable…</button>
+                  </td>
                 </tr>
-                <tr v-if="!elev.fleet.length && !pageLoading"><td colspan="5"><div class="empty">No connected hosts.</div></td></tr>
+                <tr v-if="!elev.fleet.length && !pageLoading"><td colspan="6"><div class="empty">No connected hosts.</div></td></tr>
               </tbody>
             </table>
           </div>
@@ -2316,6 +2373,8 @@
         addHostOpen: false, addHostTab: "manual",
         ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
         ahCa: "", ahCaErr: "", ahCaBusy: false, // server root CA for TLS-mode recipes
+        ahElevate: false, ahElevationPolicy: "", // one-line join: elevation wiring
+        elevBoot: { open: false, agentId: "", policy: "", token: "", url: "", busy: false }, // P1 one-command elevation enablement
         ahKnownIds: null, ahWatchStarted: 0, ahConnect: "idle", ahHostId: "", // connection watch
         provRuns: [],
         batchText: "", batchMode: "fresh", batchBusy: false, batchMsg: "",
@@ -2461,6 +2520,20 @@
         // enroll connection; the recipe ships it as ca.crt next to the command.
         const ca = this.locProtocol === "https:" ? " PARTOUT_TLS_CA=ca.crt" : "";
         return "PARTOUT_SERVER=" + this.locationHost + ca + " PARTOUT_TOKEN=" + this.ahToken + " partout --mode=agent";
+      },
+      // The one-line join URL (E1): the loader detects the arch server-side
+      // and fetches the arch-specific installer. Elevation policy rides as a
+      // query param; the server resolves + canonicalizes it before embedding.
+      ahJoinURL() {
+        if (!this.ahToken) return "";
+        let q = "";
+        if (this.ahElevate && this.ahElevationPolicy) q += "&elevate=" + encodeURIComponent(this.ahElevationPolicy);
+        return "https://" + this.locationHost + "/api/v1/join/" + this.ahToken + (q ? "?" + q.slice(1) : "");
+      },
+      ahScriptURL() { return this.ahJoinURL; },
+      ahOneLiner() {
+        if (!this.ahJoinURL || this.locProtocol !== "https:") return "";
+        return "curl -fsSL '" + this.ahJoinURL + "' | sudo bash";
       },
       // A release build knows its exact assets (partout_<ver>_linux_<arch>.tar.gz);
       // a dev build ("dev" or unstamped) falls back to the releases-page link.
@@ -3099,8 +3172,8 @@
               goto: "updates" });
           } else if (!e || e.mode !== "sudo") {
             out.push({ key: "elevation-off", cls: "warn", head: "Elevation is off on this host",
-              body: "Package applies, service control and reboots run as the unprivileged agent user and fail with permission errors. Enable elevation (Elevation page → Enable on host, or operations.md §3.6): install a policy + the sudoers drop-in, set PARTOUT_ELEVATE=sudo, restart the agent.",
-              goto: "elevation" });
+              body: "Package applies, service control and reboots run as the unprivileged agent user and fail with permission errors. Enable with one command on the host (mint a bootstrap below) — the policy is installed, the sudoers drop-in rendered from it, and PARTOUT_ELEVATE=sudo wired.",
+              act: "elevBoot" });
           }
           // Observe: no custom units reported (OS-managed units are
           // deliberately out of fleet health — PRD Decision 13).
@@ -4532,6 +4605,43 @@
       },
       async copyAhCmd() {
         try { await navigator.clipboard.writeText(this.ahCmd); this.notify("ok", "copied to clipboard"); }
+        catch (e) { this.notify("err", "copy failed — select the text manually"); }
+      },
+      async copyAhOneLiner() {
+        try { await navigator.clipboard.writeText(this.ahOneLiner); this.notify("ok", "one-liner copied — paste it on the host as root"); }
+        catch (e) { this.notify("err", "copy failed — select the text manually"); }
+      },
+      // Elevation policies for the one-liner's picker (same store the SSH
+      // wizard uses; loaded on demand).
+      async ahLoadPolicies() {
+        if (!this.ahElevate || this.provWiz.elevationPolicies.length) return;
+        await this.provWizLoadElevationPolicies();
+        if (!this.ahElevationPolicy) this.ahElevationPolicy = this.provWiz.elevationPolicy || "";
+      },
+      // ---- P1: one-command elevation bootstrap ----
+      async openElevBoot(agentId) {
+        this.elevBoot = { open: true, agentId, policy: this.elevBoot.policy || "default-baseline", token: "", url: "", busy: false };
+        await this.provWizLoadElevationPolicies();
+        if (!this.provWiz.elevationPolicies.find(p => p.name === this.elevBoot.policy)) {
+          this.elevBoot.policy = this.provWiz.elevationPolicy || (this.provWiz.elevationPolicies[0] || {}).name || "";
+        }
+      },
+      closeElevBoot() { this.elevBoot.open = false; },
+      async elevBootMint() {
+        if (!this.elevBoot.agentId || !this.elevBoot.policy || this.elevBoot.busy) return;
+        this.elevBoot.busy = true;
+        try {
+          const d = await this.api("/hosts/" + encodeURIComponent(this.elevBoot.agentId) + "/elevation/bootstrap", {
+            method: "POST", body: { policy: this.elevBoot.policy },
+          });
+          this.elevBoot.token = d.token; this.elevBoot.url = d.url;
+          this.notify("ok", "bootstrap minted — single serve, 15 min");
+        } catch (e) {
+          this.notify("err", "mint failed: " + e.message);
+        } finally { this.elevBoot.busy = false; }
+      },
+      async copyElevBoot() {
+        try { await navigator.clipboard.writeText("curl -fsSL '" + this.elevBoot.url + "' | sudo bash"); this.notify("ok", "copied — paste it on the host as root"); }
         catch (e) { this.notify("err", "copy failed — select the text manually"); }
       },
       // Group create (ux Q7): a small dialog form replaces the last two

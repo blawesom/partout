@@ -258,6 +258,33 @@ func (s *Store) CreateEnrollmentToken(tokenHash, tokenMask string, ttlS int) err
 	return err
 }
 
+// ValidateEnrollmentToken reports whether a token is known, unused, and
+// unexpired WITHOUT consuming it. Used by the one-line join flow (E1):
+// the join script and binary downloads may be fetched (and retried)
+// within the token's TTL; only the agent's actual enrollment consumes it.
+func (s *Store) ValidateEnrollmentToken(tokenHash string) error {
+	var (
+		used    int
+		expires int64
+	)
+	err := s.db.QueryRow(`
+		SELECT used, expires FROM enrollment_tokens WHERE token_hash = ?
+	`, tokenHash).Scan(&used, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if used != 0 {
+		return fmt.Errorf("store: enrollment token already used")
+	}
+	if time.Now().Unix() > expires {
+		return fmt.Errorf("store: enrollment token expired")
+	}
+	return nil
+}
+
 // ConsumeEnrollmentToken marks a token as used and returns true if it was
 // valid and unused. Returns an error if the token is unknown or expired.
 func (s *Store) ConsumeEnrollmentToken(tokenHash string) (bool, error) {

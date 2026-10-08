@@ -64,15 +64,13 @@ If you did not set a password, sign in as `admin` with the one from that file.
 
 Open the UI (**Fleet → + Add host**) — two paths, pick by how you reach the host:
 
-**A · Run on the host** (you can shell into it): mint a one-time token and follow the
-three-step recipe the dialog builds for you —
-1. download the binary onto the host (exact `curl`+`tar` for the release asset),
-2. *(TLS servers)* download `ca.crt` and place it next to the command,
-3. run the agent one-liner (`PARTOUT_SERVER=… PARTOUT_TLS_CA=ca.crt PARTOUT_TOKEN=par_enr_… partout --mode=agent`).
+**A · Run on the host** (you can shell into it): mint a one-time token and paste **one command** —
 
-The dialog watches for the host and flips to **✓ Connected** when it appears; if
-nothing connects within 90 s it tells you what to check (token validity,
-host→server reachability, the CA, agent logs).
+```bash
+curl -fsSL 'https://<server>/api/v1/join/<one-time-token>' | sudo bash
+```
+
+The server-served script detects the arch, fetches the agent binary **from the control plane** (newest release in the M8.1 store, else the server's own executable on a matching arch — no GitHub round-trip, works on dev builds), verifies its sha256, and runs the same field-proven installer SSH provisioning uses: M8.1 layout, update guard, persistent systemd service, TLS CA inline — and, if you tick *enable elevation*, the chosen elevation policy + sudoers + `PARTOUT_ELEVATE=sudo` wired. Inspect the script first if you like (the dialog links it). The one-liner is offered **only over HTTPS** — a plaintext server shows the manual steps instead (download the release tarball, place `ca.crt`, run the foreground agent one-liner; use `scripts/install-agent.sh` for a persistent manual install). The dialog watches for the host and flips to **✓ Connected**; if nothing connects within 90 s it tells you what to check (token validity, host→server reachability, the CA, agent logs).
 
 **B · Onboard over SSH** (admin; the server's own `~/.ssh` reaches the host): the
 guided wizard walks target → plan (with a live SSH-key readiness check) → the five

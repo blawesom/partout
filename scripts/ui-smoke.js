@@ -202,7 +202,7 @@ async function main() {
     check("add-host: CA step on https", d.body.textContent.includes("Trust the server CA"), "CA step missing on https");
     const httpsCmd = (d.querySelector(".overlay .console:last-of-type") || {}).textContent || d.body.textContent;
     check("add-host: command carries PARTOUT_TLS_CA on https", (w.__partout.ahCmd || "").includes("PARTOUT_TLS_CA=ca.crt"), "cmd=" + (w.__partout.ahCmd || ""));
-    check("add-host: step numbering shifts on https", /3 · Run the agent/.test(d.body.textContent), "numbering did not shift");
+    check("add-host: step numbering shifts on https", /4 · Run the agent/.test(d.body.textContent), "numbering did not shift");
     w.__partout.locProtocol = savedProto; await sleep(200);
     // Connection watch: the dialog must report when a NEW host joins. The
     // smoke has one host (the embedded agent); empty the mint-time snapshot

@@ -3,6 +3,7 @@ package provision
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1272,5 +1274,105 @@ esac
 			_ = st.MarkSeen("ag_joinme")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestBuildJoinScriptStagingContract(t *testing.T) {
+	policy := ElevationPolicySpec{
+		Name: "default-baseline",
+		// Canonical rules JSON (compact, as the store keeps it).
+		RulesJSON: `[{"allow":"reboot"},{"allow":"nginx","args":["-t"]}]`,
+		SHA:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	caPEM := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+	script, err := BuildJoinScript(JoinScriptInput{
+		BaseURL: "https://ctrl.example:8443", Token: "par_enr_deadbeef",
+		Arch: "amd64", BinSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		BinVersion: "v0.9.14", CAPEM: caPEM, Policies: []ElevationPolicySpec{policy},
+	})
+	if err != nil {
+		t.Fatalf("BuildJoinScript: %v", err)
+	}
+	// The binary fetch hits the join route for the right arch.
+	if !strings.Contains(script, "/api/v1/join/par_enr_deadbeef/binary?arch=amd64") {
+		t.Errorf("script does not fetch the amd64 binary from the control plane")
+	}
+	// The CA is staged bytewise-exact: decode the base64 line and confirm
+	// the sha256 the install body verifies against is the sha of those
+	// bytes (a trailing-newline heredoc would break this contract).
+	if !verifyStagedBytes(t, script, "/tmp/partout-ca-", caPEM) {
+		t.Errorf("CA staging does not round-trip byte-exact")
+	}
+	// The policy is staged as the full {"rules":…} document whose sha256
+	// must equal the policy SHA the install body's gate checks.
+	if !verifyStagedBytes(t, script, "/tmp/partout-elev-", `{"rules":`+policy.RulesJSON+`}`) {
+		t.Errorf("policy staging does not round-trip byte-exact")
+	}
+	// The install body: same invariants as the SSH-provisioning path.
+	for _, want := range []string{
+		"/var/lib/partout/bin/partout", "partout-update-guard",
+		"PARTOUT_SERVER=ctrl.example:8443", "PARTOUT_TOKEN=par_enr_deadbeef",
+		"PARTOUT_ELEVATE=sudo", "ctl elevation install-sudoers", "INSTALL_OK",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("join script missing %q", want)
+		}
+	}
+	// No elevation requested → no sudoers wiring.
+	plain, err := BuildJoinScript(JoinScriptInput{
+		BaseURL: "https://c", Token: "t", Arch: "amd64",
+		BinSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	})
+	if err != nil {
+		t.Fatalf("BuildJoinScript (plain): %v", err)
+	}
+	if strings.Contains(plain, "PARTOUT_ELEVATE=sudo") || strings.Contains(plain, "/etc/partout/elevation.d/") {
+		t.Errorf("plain join script wires elevation")
+	}
+}
+
+// verifyStagedBytes finds the base64 staging line for a /tmp/<prefix> path,
+// decodes it, and reports whether the bytes equal want.
+func verifyStagedBytes(t *testing.T, script, prefix, want string) bool {
+	t.Helper()
+	re := regexp.MustCompile(`printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > "\$[A-Z]+"`)
+	for _, m := range re.FindAllStringSubmatch(script, -1) {
+		// The staging line for this prefix is the one whose variable is
+		// assigned just above it; simpler: decode every staged payload and
+		// match against want — each payload is unique (CA, policies, guard).
+		dec, err := base64.StdEncoding.DecodeString(m[1])
+		if err != nil {
+			continue
+		}
+		if string(dec) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildElevationBootstrapScript(t *testing.T) {
+	script, err := BuildElevationBootstrapScript(ElevationBootstrapInput{
+		Hostname: "Web01.Example.COM", PolicyName: "default-baseline",
+		RulesJSON: `[{"allow":"reboot"}]`, SHA: "cccc",
+	})
+	if err != nil {
+		t.Fatalf("BuildElevationBootstrapScript: %v", err)
+	}
+	// Hostname guard compares case-insensitively on the short name.
+	if !strings.Contains(script, `EXPECT_HOST='web01'`) {
+		t.Errorf("hostname guard missing or not normalized:\n%s", script)
+	}
+	for _, want := range []string{
+		"ctl elevation install-sudoers",
+		"/etc/partout/elevation.d/10-default-baseline.json",
+		"PARTOUT_ELEVATE=sudo",
+		"NoNewPrivileges",
+		"systemctl restart partout-agent",
+		"ELEVATION_OK",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("bootstrap missing %q", want)
+		}
 	}
 }

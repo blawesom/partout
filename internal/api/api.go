@@ -121,6 +121,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// Enrollment (PRD R2).
 	handler.RegisterEnrollment(mux)
+	handler.RegisterJoin(mux)
 
 	// Host provisioning (PRD R17, arch §3.5) — admin-gated routes are
 	// registered lazily once a provisioner is installed (see SetProvisioner).
