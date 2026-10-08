@@ -750,6 +750,22 @@
             <div class="tab" :class="{active: p2==='facts'}" tabindex="0" role="tab" :aria-selected="p2==='facts'" @click="go('host/'+p1+'/facts')" @keydown.enter.prevent="go('host/'+p1+'/facts')">Facts</div>
           </div>
           <template v-if="p2!=='facts'">
+            <div class="card" v-if="hostPosture.length" style="border-left:3px solid var(--warning,#d97706)">
+              <div class="head">
+                <h2 style="margin:0">Posture — first-boot checklist</h2>
+                <div class="spacer"></div>
+                <span class="muted small">the known day-1 gotchas, with their fix</span>
+              </div>
+              <div v-for="it in hostPosture" :key="it.key" class="toolbar" style="align-items:flex-start;margin:8px 0">
+                <span class="badge" :class="it.cls">{{ it.cls === 'warn' ? '⚠' : 'ℹ' }}</span>
+                <div style="flex:1">
+                  <b>{{ it.head }}</b>
+                  <p class="cap" style="margin:4px 0 0">{{ it.body }}</p>
+                </div>
+                <button v-if="it.goto" class="btn sm" @click="go(it.goto)">Open {{ it.goto }}</button>
+                <button class="btn sm" @click="dismissPosture(it.key)" title="Dismiss this item for this host">✕</button>
+              </div>
+            </div>
             <div class="grid cols-2">
               <div class="card">
                 <div class="head" style="margin-bottom:6px">
@@ -871,12 +887,16 @@
             </div>
             <p v-if="execDetail.state==='interrupted'" class="muted small" style="margin:4px 0 10px">A host stream dropped mid-run — the outcome is not yet known. The agent replays its spooled result on reconnect and the execution re-finalizes; runs interrupted longer than the spool window resolve as <span class="mono">not_delivered</span>.</p>
             <table class="tbl">
-              <thead><tr><th>Host</th><th>State</th><th>Exit</th><th>Duration</th><th>Output</th></tr></thead>
+              <thead><tr><th>Host</th><th>State</th><th>Exit</th><th>Elevation</th><th>Duration</th><th>Output</th></tr></thead>
               <tbody>
                 <tr v-for="r in (execDetail.runs||[])" :key="r.run_id">
                   <td class="mono">{{ hostNameById(r.agent_id) }}</td>
                   <td><span class="badge" :class="runBadge(r.state)">{{ r.state }}</span></td>
                   <td class="mono">{{ r.state==='succeeded' ? (r.exit_code||0) : '—' }}</td>
+                  <td>
+                    <span v-if="r.elevation_note" class="badge" :class="r.elevated ? 'ok' : 'warn'" :title="r.elevation_note">{{ r.elevated ? '⤴ elevated' : 'unprivileged' }}</span>
+                    <span v-else class="muted small" title="This agent predates elevation reporting">—</span>
+                  </td>
                   <td class="mono">{{ r.duration_ms ? (r.duration_ms/1000).toFixed(2)+'s' : '—' }}</td>
                   <td>
                     <div class="console" style="max-width:520px;max-height:180px">
@@ -2168,6 +2188,7 @@
                       <option value="update_run">update_run — rollout stuck: paused/failed (server-level)</option>
                       <option value="update_drift">update_drift — agents behind the store's latest release (server-level)</option>
                       <option value="security_updates">security_updates — unpatched CVEs on a host (security scan)</option>
+                      <option value="elevation_drift">elevation_drift — installed elevation scope matches no stored policy</option>
                     </select>
                   </label>
                   <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
@@ -2199,6 +2220,7 @@
                 <label class="fld" v-if="ruleForm.kind==='security_updates'" style="max-width:240px"><span>Fire when ≥ N packages</span>
                   <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
                 <p class="cap" v-if="ruleForm.kind==='security_updates'" style="margin:8px 0 0">Host-scoped: one alert per host with ≥ N packages carrying a CVE at or above the severity floor (from the periodic security scan). Resolves when the host is patched below the floor.</p>
+                <p class="cap" v-if="ruleForm.kind==='elevation_drift'" style="margin:8px 0 0">Host-scoped, no threshold: one alert per host whose installed elevation policy hash matches no stored policy (a stored policy changed after provisioning, or the local policy was changed out-of-band). Resolves when the host reports a matching scope again.</p>
                 <label class="fld" style="max-width:420px"><span>Webhook URL <span class="muted">(optional external channel)</span></span>
                   <input v-model="ruleForm.webhook" class="mono" placeholder="https://hooks.example.com/alerts" /></label>
                 <p class="cap" style="margin:0">On firing AND resolved, the alert is POSTed as JSON to this URL (10 s timeout, no retry — failures land in the audit log as <span class="mono">alert.webhook</span>). Empty = in-app only.</p>
@@ -2271,7 +2293,7 @@
         confirmBox: { open: false, title: "", body: "", mono: "", confirmLabel: "Confirm", variant: "danger", requireText: "", value: "", inputLabel: "", inputPlaceholder: "", inputType: "text", input: "", _resolve: null, _isInput: false },
         navCollapsed: {}, navBadges: { approvals: 0, alerts: 0 },
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
-        hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, serverVersion: "",
+        hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, hostElevation: null, serverVersion: "",
         labelDraft: { name: "", service: "" }, roleDraft: "", labelBusy: false,
         exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
         preview: null, previewLoading: false, executions: [],
@@ -3049,7 +3071,7 @@
       async loadHostDetail() {
         // Overview comes from GET /hosts/{id} (state/uuid/version/timestamps);
         // GET /hosts/{id}/facts only returns {host_id, ts, facts}.
-        if (!this.p1) { this.host = null; this.hostFacts = null; this.hostEol = null; return; }
+        if (!this.p1) { this.host = null; this.hostFacts = null; this.hostEol = null; this.hostElevation = null; return; }
         // Fetch-then-assign (not null-then-fetch): the old values stay
         // rendered during the fetch — no flash-of-empty-content.
         try { this.host = await this.api("/hosts/" + encodeURIComponent(this.p1)); } catch (e) { this.host = null; }
@@ -3059,6 +3081,49 @@
         };
         try { this.hostFacts = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/facts"); } catch (e) { this.hostFacts = null; }
         try { this.hostEol = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/eol"); } catch (e) { this.hostEol = null; }
+        // Posture (E3): the first-boot checklist needs the elevation
+        // posture; a 404-grade failure just leaves it unknown.
+        try { this.hostElevation = await this.api("/hosts/" + encodeURIComponent(this.p1) + "/elevation"); } catch (e) { this.hostElevation = null; }
+      },
+      // hostPosture builds the day-1 checklist items for this host (E3:
+      // surface the three known gotchas where the operator is looking,
+      // with their fix — not a docs link). Items the operator dismissed
+      // stay dismissed (per host, per item).
+      hostPosture() {
+        const out = [];
+        if (this.host && this.host.state !== "revoked") {
+          const e = this.hostElevation;
+          if (e && e.reported === false) {
+            out.push({ key: "elev-reported", cls: "warn", head: "This agent predates elevation reporting",
+              body: "Its elevation posture can't be seen from here. Upgrade the agent (Updates page) to get posture, drift detection and the elevation reason on every run.",
+              goto: "updates" });
+          } else if (!e || e.mode !== "sudo") {
+            out.push({ key: "elevation-off", cls: "warn", head: "Elevation is off on this host",
+              body: "Package applies, service control and reboots run as the unprivileged agent user and fail with permission errors. Enable elevation (Elevation page → Enable on host, or operations.md §3.6): install a policy + the sudoers drop-in, set PARTOUT_ELEVATE=sudo, restart the agent.",
+              goto: "elevation" });
+          }
+          // Observe: no custom units reported (OS-managed units are
+          // deliberately out of fleet health — PRD Decision 13).
+          const f = (this.hostFacts && this.hostFacts.facts) || {};
+          const svc = f["services_detailed"];
+          const units = (svc && Array.isArray(svc.units) && svc.units.length) || 0;
+          if (!svc || units === 0) {
+            out.push({ key: "no-services", cls: "info", head: "No custom service units observed",
+              body: "Fleet health only covers operator-labelled units and units under /etc/systemd/system. To watch distro services (e.g. sshd, fail2ban), add PARTOUT_SERVICE_LABELS=sshd,fail2ban to /etc/partout/agent.env and restart the agent.",
+              goto: "obs-services" });
+          }
+        }
+        const dismissed = this.postureDismissed(this.p1);
+        return out.filter((it) => !dismissed[it.key]);
+      },
+      postureDismissKey(id) { return "partout_posture_dismissed_" + (id || ""); },
+      postureDismissed(id) {
+        try { return JSON.parse(localStorage.getItem(this.postureDismissKey(id)) || "{}"); } catch (e) { return {}; }
+      },
+      dismissPosture(key) {
+        const d = this.postureDismissed(this.p1);
+        d[key] = true;
+        localStorage.setItem(this.postureDismissKey(this.p1), JSON.stringify(d));
       },
       async loadExecutions() { try { const d = await this.api("/executions"); this.executions = d.items || []; } catch (e) { this.executions = []; } },
       async loadExecDetail() {

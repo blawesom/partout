@@ -1131,11 +1131,18 @@ func describeElevation(p *elevate.Policy) string {
 // the agent-side authority: a matching command runs elevated, a non-matching
 // one runs UNPRIVILEGED (the log says so; the command still runs — sudoers
 // remains the kernel-enforced wall). The agent log records the elevated form
-// (PRD: privileged commands are recorded in full).
-func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []string, cwd string, env map[string]string, timeoutS int32, onChunk exec.Callback) (*exec.Result, error) {
+// (PRD: privileged commands are recorded in full), and the elevation decision
+// (elevated + why) travels on the CommandResult so the run row answers
+// "why didn't it elevate?" at a glance.
+func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []string, cwd string, env map[string]string, timeoutS int32, onChunk exec.Callback) (*exec.Result, bool, string, error) {
+	// Record the decision before running: the explain is authoritative even
+	// when the process fails to start (the run row still says why it ran
+	// unprivileged / elevated).
+	elev, note := a.runnerElevationExplain(cmdName, args)
 	if a.elevate == elevate.Sudo && a.elevation != nil && a.elevation.Check(cmdName, args) == elevate.Denied {
 		a.log.Printf("agent: run %s (%s) NOT in elevation scope — running unprivileged; add a policy rule to elevate it", runID, strings.Join(append([]string{cmdName}, args...), " "))
-		return exec.Run(ctx, cmdName, args, cwd, env, timeoutS, onChunk)
+		res, err := exec.Run(ctx, cmdName, args, cwd, env, timeoutS, onChunk)
+		return res, false, note, err
 	}
 	n, a2 := a.elevate.Run(cmdName, args...)
 	if a.elevate == elevate.Sudo {
@@ -1143,7 +1150,22 @@ func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []s
 		// again doubled it in the log (field feedback F16).
 		a.log.Printf("agent: run %s (ELEVATED: %s)", runID, strings.Join(append([]string{n}, a2...), " "))
 	}
-	return exec.Run(ctx, n, a2, cwd, env, timeoutS, onChunk)
+	res, err := exec.Run(ctx, n, a2, cwd, env, timeoutS, onChunk)
+	return res, elev, note, err
+}
+
+// runnerElevationExplain asks the shared runner for the (elevated, note)
+// decision on (name, args) — the same decision runElevated acts on, kept in
+// one place so the note and the behavior can never diverge.
+func (a *Agent) runnerElevationExplain(cmdName string, args []string) (bool, string) {
+	if pr, ok := a.runner.(elevate.PolicyRunner); ok {
+		return pr.Explain(cmdName, args...)
+	}
+	// Any other Runner implementation: report the bare mode.
+	if a.elevate == elevate.Sudo {
+		return true, "elevated via sudo"
+	}
+	return false, "elevation off"
 }
 
 // execCommand runs a command, streaming output chunks, then the result.
@@ -1203,7 +1225,7 @@ func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
 		})
 	}
 
-	res, err := a.runElevated(ctx, cmd.RunId, cmd.Cmd, cmd.Args, cmd.Cwd, cmd.Env, cmd.TimeoutS, onChunk)
+	res, elevated, elevNote, err := a.runElevated(ctx, cmd.RunId, cmd.Cmd, cmd.Args, cmd.Cwd, cmd.Env, cmd.TimeoutS, onChunk)
 	if err != nil {
 		res = &exec.Result{State: "failed", ExitCode: -1}
 	}
@@ -1217,6 +1239,7 @@ func (a *Agent) execCommand(ctx context.Context, cmd *pb.Command) {
 		Kind: pb.EnvelopeKind_COMMAND_RESULT,
 		Payload: &pb.Envelope_Result{Result: &pb.CommandResult{
 			RunId: cmd.RunId, ExitCode: res.ExitCode, State: res.State, DurationMs: res.DurationMS,
+			Elevated: elevated, ElevationNote: elevNote,
 		}},
 	})
 

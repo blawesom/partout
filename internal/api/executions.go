@@ -246,13 +246,21 @@ func execDetail(h *Handler, e *store.Execution) (map[string]any, error) {
 	}
 	runList := make([]map[string]any, 0, len(runs))
 	for _, run := range runs {
-		runList = append(runList, map[string]any{
+		r := map[string]any{
 			"run_id":      run.ID,
 			"agent_id":    run.AgentID,
 			"state":       run.State,
 			"exit_code":   run.ExitCode.Int32,
 			"duration_ms": run.DurationMS.Int64,
-		})
+		}
+		// The agent's elevation decision (absent for runs whose agent
+		// predates the field — null, not false, so the UI can say
+		// "unknown" rather than "not elevated").
+		if run.Elevated.Valid {
+			r["elevated"] = run.Elevated.Bool
+			r["elevation_note"] = run.ElevationNote
+		}
+		runList = append(runList, r)
 	}
 	d["runs"] = runList
 	return d, nil

@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS execution_runs (
   state         TEXT NOT NULL DEFAULT 'queued',
   exit_code     INTEGER,
   duration_ms   INTEGER,
+  elevated      INTEGER,          -- agent's elevation decision (NULL = not reported)
+  elevation_note TEXT NOT NULL DEFAULT '',
   created       INTEGER NOT NULL,
   updated       INTEGER NOT NULL
 );
@@ -625,7 +627,7 @@ CREATE TABLE IF NOT EXISTS elevation_policy_versions (
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 23
+const currentSchemaVersion = 24
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

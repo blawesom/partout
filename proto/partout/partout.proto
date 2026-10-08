@@ -179,6 +179,12 @@ message CommandResult {
   int32 exit_code = 2;
   string state = 3;          // succeeded|failed|timed_out|cancelled|interrupted
   int64 duration_ms = 4;
+  // Elevation decision for this run (the agent records why a command ran
+  // elevated or unprivileged — surfaced on the run row so "why didn't it
+  // elevate?" is a one-glance answer, not an agent-log dive).
+  bool elevated = 5;         // the command ran with elevation (sudo)
+  string elevation_note = 6;  // human-readable reason: policy rule, no match,
+                             // elevation off, or legacy sudoers
 }
 
 // SessionData is one PTY output chunk from a session (PRD §5.2.2).

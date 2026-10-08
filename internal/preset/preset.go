@@ -108,6 +108,8 @@ var Alerts = []DefaultAlert{
 		Thresholds: `{"min_drifted":1}`, Severity: "warning"},
 	{Name: "default-security-updates", Kind: observe.KindSecurityUpdates, Selector: "all",
 		Thresholds: `{"min_severity":"high","min_count":1}`, Severity: "warning"},
+	{Name: "default-elevation-drift", Kind: observe.KindElevationDrift, Selector: "all",
+		Thresholds: `{}`, Severity: "warning"},
 }
 
 // slug turns a default name into a deterministic row id

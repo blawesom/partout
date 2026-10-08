@@ -464,6 +464,14 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		if err := h.st.UpdateRunState(r.RunId, r.State, r.ExitCode, r.DurationMs); err != nil {
 			h.log.Printf("stream: update run %s: %v", r.RunId, err)
 		}
+		// The elevation decision travels on the same result (including spool
+		// replays) — record it on the run row so Execute/Audit can answer
+		// "why did this run (not) elevate?" at a glance.
+		if r.ElevationNote != "" || r.Elevated {
+			if err := h.st.SetRunElevation(r.RunId, r.Elevated, r.ElevationNote); err != nil {
+				h.log.Printf("stream: set run %s elevation: %v", r.RunId, err)
+			}
+		}
 		// Look up the execution and notify the control plane to finalize it.
 		if h.ResultHook != nil {
 			if execID, err := h.st.ExecutionIDForRun(r.RunId); err == nil {

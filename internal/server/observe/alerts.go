@@ -40,6 +40,7 @@ const (
 	KindUpdateRun         = "update_run"       // M8.1: rollout stuck (server-level, no host scope)
 	KindUpdateDrift       = "update_drift"     // M8.1.1: agents behind the store's latest release
 	KindSecurityUpdates   = "security_updates" // M5.1: unpatched CVEs on a host (security scan)
+	KindElevationDrift    = "elevation_drift"   // host's installed elevation scope matches no stored policy
 )
 
 // Controller evaluates alert rules on a tick.
@@ -214,6 +215,10 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 		case KindSecurityUpdates:
 			res.Fired += c.evalSecurityUpdates(r, hosts)
 			res.Resolved += c.resolveByDedupDiff(r, hosts, c.securityConditionKeys(r, hosts))
+		case KindElevationDrift:
+			drifts := c.elevationDrifts(r, hosts, docs)
+			res.Fired += c.fireElevationDrift(r, drifts)
+			res.Resolved += c.resolveByDedupDiff(r, hosts, c.elevationDriftKeys(r, drifts))
 		default:
 			if c.log != nil {
 				c.log.Printf("observe/alerts: rule %s: unsupported kind %q (skipped)", r.ID, r.Kind)
@@ -1225,4 +1230,91 @@ func lastIndexByte(s string, b byte) int {
 		}
 	}
 	return -1
+}
+
+// --- elevation_drift ---
+
+// elevDriftHit is one host whose installed elevation scope matches no
+// stored policy.
+type elevDriftHit struct {
+	agentID string
+	hash    string
+	sources []string
+}
+
+// elevFact is the agent's partout.elevation fact (a JSON string inside the
+// flat facts map).
+type elevFact struct {
+	Mode    string   `json:"mode"`
+	Hash    string   `json:"hash"`
+	Rules   int      `json:"rules"`
+	Sources []string `json:"sources"`
+	Error   string   `json:"error"`
+}
+
+// elevationDrifts returns the rule's hosts whose reported elevation policy
+// hash matches no CURRENT stored policy: either a stored policy changed
+// after the host was provisioned (the host still runs the old scope), or
+// the host's local policy was hand-edited / installed out-of-band. Hosts
+// with elevation off, legacy mode (no policy file), or pre-elevation-
+// reporting agents are not drift — there is no scope to compare.
+func (c *Controller) elevationDrifts(r *store.AlertRule, hosts []string, docs map[string]*Document) []elevDriftHit {
+	pols, err := c.st.ElevationPolicies()
+	if err != nil {
+		if c.log != nil {
+			c.log.Printf("observe/alerts: elevation_drift: %v", err)
+		}
+		return nil
+	}
+	known := make(map[string]struct{}, len(pols))
+	for _, p := range pols {
+		known[p.PolicySHA] = struct{}{}
+	}
+	hostSet := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		hostSet[h] = true
+	}
+	var out []elevDriftHit
+	for agID, d := range docs {
+		if !hostSet[agID] {
+			continue
+		}
+		raw := d.Flat["partout.elevation"]
+		if raw == "" {
+			continue // pre-elevation-reporting agent: nothing to compare
+		}
+		var f elevFact
+		if err := json.Unmarshal([]byte(raw), &f); err != nil {
+			continue
+		}
+		if f.Mode != "sudo" || f.Hash == "" {
+			continue // elevation off, or legacy sudoers (no policy file)
+		}
+		if _, ok := known[f.Hash]; ok {
+			continue
+		}
+		out = append(out, elevDriftHit{agentID: agID, hash: f.Hash, sources: f.Sources})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].agentID < out[j].agentID })
+	return out
+}
+
+func (c *Controller) fireElevationDrift(r *store.AlertRule, hits []elevDriftHit) int {
+	fired := 0
+	for _, h := range hits {
+		msg := fmt.Sprintf("elevation policy drift: this host's installed elevation scope (%s) matches no stored policy — a stored policy changed after it was provisioned, or the local policy was changed out-of-band. Sync on the host (`partout ctl elevation check` + `install-sudoers`) or re-provision in join mode.",
+			shortHash(h.hash))
+		if c.fire(r, h.agentID, r.ID+"|"+h.agentID+"|elevdrift", msg) {
+			fired++
+		}
+	}
+	return fired
+}
+
+func (c *Controller) elevationDriftKeys(r *store.AlertRule, hits []elevDriftHit) map[string]struct{} {
+	out := make(map[string]struct{}, len(hits))
+	for _, h := range hits {
+		out[r.ID+"|"+h.agentID+"|elevdrift"] = struct{}{}
+	}
+	return out
 }

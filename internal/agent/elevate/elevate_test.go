@@ -8,6 +8,51 @@ import (
 	"testing"
 )
 
+func TestExplain(t *testing.T) {
+	pol, err := LoadPolicyJSON([]byte(`{"rules":[
+		{"allow":"systemctl","verbs":["restart"],"units":["nginx*"]},
+		{"allow":"reboot"}
+	]}`))
+	if err != nil {
+		t.Fatalf("LoadPolicyJSON: %v", err)
+	}
+	cases := []struct {
+		name     string
+		runner   *PolicyRunner
+		cmd      string
+		args     []string
+		elevated bool
+		noteHas  string
+	}{
+		// elevation off
+		{"off", NewPolicyRunner(None, nil, nil), "systemctl", []string{"restart", "nginx"}, false, "elevation off"},
+		// legacy: sudo, no policy
+		{"legacy", NewPolicyRunner(Sudo, nil, nil), "anything", nil, true, "legacy mode"},
+		// policy match (verbs+units rule)
+		{"match", NewPolicyRunner(Sudo, pol, nil), "systemctl", []string{"restart", "nginx.service"}, true, "policy rule matched"},
+		{"match-bare", NewPolicyRunner(Sudo, pol, nil), "reboot", nil, true, "policy rule matched"},
+		// no rule matches — unprivileged, with the remedy in the note
+		{"nomatch", NewPolicyRunner(Sudo, pol, nil), "dnf", []string{"upgrade"}, false, "no elevation rule matches"},
+		// nil-policy runner via a bare Mode still reports (defensive)
+		{"nil-rule", NewPolicyRunner(Sudo, pol, nil), "cat", []string{"/etc/shadow"}, false, "no elevation rule matches"},
+	}
+	for _, c := range cases {
+		elevated, note := c.runner.Explain(c.cmd, c.args...)
+		if elevated != c.elevated {
+			t.Errorf("%s: Explain elevated = %v, want %v", c.name, elevated, c.elevated)
+		}
+		if !strings.Contains(note, c.noteHas) {
+			t.Errorf("%s: note %q does not contain %q", c.name, note, c.noteHas)
+		}
+	}
+	// The matched-rule note names the rule's scope so it can be traced
+	// back to the policy document.
+	_, note := NewPolicyRunner(Sudo, pol, nil).Explain("systemctl", "restart", "nginx.service")
+	if !strings.Contains(note, "systemctl") || !strings.Contains(note, "units=nginx*") {
+		t.Errorf("match note lacks rule detail: %q", note)
+	}
+}
+
 func TestParse(t *testing.T) {
 	cases := []struct {
 		in   string

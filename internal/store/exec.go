@@ -28,8 +28,13 @@ type ExecutionRun struct {
 	State       string // queued|queued_offline|delivered|running|succeeded|failed|timed_out|cancelled|interrupted|expired|not_delivered|denied|awaiting_approval
 	ExitCode    sql.NullInt32
 	DurationMS  sql.NullInt64
-	Created     int64
-	Updated     int64
+	// Elevated + ElevationNote record the agent's elevation decision for
+	// this run ("elevated: policy rule matched" / "no rule matched — ran
+	// unprivileged"). Empty note = not reported (agent predates the field).
+	Elevated      sql.NullBool
+	ElevationNote string
+	Created       int64
+	Updated       int64
 }
 
 // OutputChunk is a streamed stdout/stderr chunk for a run.
@@ -139,17 +144,34 @@ func (s *Store) CreateExecutionRun(r ExecutionRun) error {
 // GetExecutionRun returns one run by ID (nil when absent).
 func (s *Store) GetExecutionRun(id string) (*ExecutionRun, error) {
 	row := s.db.QueryRow(`
-		SELECT id, execution_id, agent_id, state, exit_code, duration_ms, created, updated
+		SELECT id, execution_id, agent_id, state, exit_code, duration_ms, elevated, elevation_note, created, updated
 		FROM execution_runs WHERE id=?`, id)
 	var r ExecutionRun
 	if err := row.Scan(&r.ID, &r.ExecutionID, &r.AgentID, &r.State,
-		&r.ExitCode, &r.DurationMS, &r.Created, &r.Updated); err != nil {
+		&r.ExitCode, &r.DurationMS, &r.Elevated, &r.ElevationNote, &r.Created, &r.Updated); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("store: get execution run: %w", err)
 	}
 	return &r, nil
+}
+
+// SetRunElevation records the agent's elevation decision on a run row
+// (elevated + the human-readable why). Idempotent, called when a
+// CommandResult arrives — before, alongside, or after the state update —
+// including on spool replay. An empty note means "not reported" (the
+// agent predates the field); the pair is never un-set once written.
+func (s *Store) SetRunElevation(id string, elevated bool, note string) error {
+	if id == "" {
+		return errors.New("store: run id required")
+	}
+	_, err := s.db.Exec(`
+		UPDATE execution_runs
+		SET elevated=?, elevation_note=CASE WHEN elevation_note='' THEN ? ELSE elevation_note END, updated=?
+		WHERE id=? AND elevated IS NULL
+	`, elevated, note, now(), id)
+	return err
 }
 
 // UpdateRunState sets a run's state, exit code, and duration.
@@ -277,7 +299,7 @@ func (s *Store) ExecutionIDForRun(runID string) (string, error) {
 // ListRunsForExecution returns all runs for an execution, ordered by agent_id.
 func (s *Store) ListRunsForExecution(executionID string) ([]*ExecutionRun, error) {
 	rows, err := s.db.Query(`
-		SELECT id, execution_id, agent_id, state, exit_code, duration_ms, created, updated
+		SELECT id, execution_id, agent_id, state, exit_code, duration_ms, elevated, elevation_note, created, updated
 		FROM execution_runs WHERE execution_id = ? ORDER BY agent_id
 	`, executionID)
 	if err != nil {
@@ -288,7 +310,7 @@ func (s *Store) ListRunsForExecution(executionID string) ([]*ExecutionRun, error
 	for rows.Next() {
 		r := &ExecutionRun{}
 		if err := rows.Scan(&r.ID, &r.ExecutionID, &r.AgentID, &r.State,
-			&r.ExitCode, &r.DurationMS, &r.Created, &r.Updated); err != nil {
+			&r.ExitCode, &r.DurationMS, &r.Elevated, &r.ElevationNote, &r.Created, &r.Updated); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -1010,3 +1010,65 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestElevationDriftFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindElevationDrift, "all", `{}`, "warning", true)
+
+	// One stored policy (hash "aaa…").
+	if err := st.CreateElevationPolicy(&store.ElevationPolicy{
+		ID: "epl_1", Name: "default-baseline", RulesJSON: "[]", PolicySHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}); err != nil {
+		t.Fatalf("CreateElevationPolicy: %v", err)
+	}
+
+	// Three hosts: matching scope, drifted scope, and elevation off.
+	seedHost(t, st, "ag_ok", `{"partout.elevation":"{\"mode\":\"sudo\",\"hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"rules\":5}"}`)
+	seedHost(t, st, "ag_drift", `{"partout.elevation":"{\"mode\":\"sudo\",\"hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"rules\":5}"}`)
+	seedHost(t, st, "ag_off", `{"partout.elevation":"{\"mode\":\"none\"}"}`)
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("tick 1: %+v, want exactly 1 fired (ag_drift only)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 || alerts[0].AgentID != "ag_drift" {
+		t.Fatalf("firing = %+v, want ag_drift only", alerts)
+	}
+	if !contains(alerts[0].Message, "elevation policy drift") {
+		t.Errorf("message %q should name the drift", alerts[0].Message)
+	}
+
+	// Still drifted: dedup.
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("tick 2: %+v, want 0 fired (dedup)", res)
+	}
+
+	// The host syncs back to the stored policy: resolves.
+	seedHost(t, st, "ag_drift", `{"partout.elevation":"{\"mode\":\"sudo\",\"hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"rules\":5}"}`)
+	res, _ = c.EvaluateOnce()
+	if res.Resolved != 1 {
+		t.Fatalf("tick 3: %+v, want 1 resolved", res)
+	}
+}
+
+func TestElevationDriftIgnoresLegacyAndUnreported(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	makeRule(t, st, KindElevationDrift, "all", `{}`, "warning", true)
+	// No stored policies at all: legacy sudo hosts (no policy file → no
+	// hash) and pre-reporting agents must not fire — there is no scope to
+	// compare, only a hash-carrying host is comparable.
+	seedHost(t, st, "ag_legacy", `{"partout.elevation":"{\"mode\":\"sudo\",\"sudo\":true,\"rules\":0}"}`)
+	seedHost(t, st, "ag_old", `{}`)
+	seedHost(t, st, "ag_hash", `{"partout.elevation":"{\"mode\":\"sudo\",\"hash\":\"cccc\",\"rules\":3}"}`)
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("tick 1: %+v, want 1 fired (ag_hash only)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 || alerts[0].AgentID != "ag_hash" {
+		t.Fatalf("firing = %+v, want ag_hash only", alerts)
+	}
+}

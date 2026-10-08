@@ -167,3 +167,68 @@ func TestMigration_UpgradeAddsResolvedHost(t *testing.T) {
 		t.Fatalf("resolved host not persisted: %+v err=%v", r, err)
 	}
 }
+
+func TestMigration_UpgradeAddsElevationColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/old.db"
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v0.9.13-era execution_runs (no elevated / elevation_note).
+	stmts := []string{
+		`CREATE TABLE schema_version (version INTEGER NOT NULL)`,
+		`INSERT INTO schema_version(version) VALUES (23)`,
+		`CREATE TABLE agents (id TEXT PRIMARY KEY, uuid TEXT NOT NULL,
+			ed25519_pub TEXT NOT NULL DEFAULT '', x25519_pub TEXT NOT NULL DEFAULT '',
+			connected INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE executions (id TEXT PRIMARY KEY, selector TEXT NOT NULL,
+			cmd TEXT NOT NULL, args_json TEXT NOT NULL DEFAULT '[]',
+			created INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL DEFAULT 'pending')`,
+		`CREATE TABLE execution_runs (
+			id TEXT PRIMARY KEY, execution_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued',
+			exit_code INTEGER, duration_ms INTEGER,
+			created INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO executions(id, selector, cmd, created, state) VALUES ('exec_old', 'all', 'uptime', 1, 'succeeded')`,
+		`INSERT INTO execution_runs(id, execution_id, agent_id, state, exit_code, created, updated)
+		 VALUES ('run_old', 'exec_old', 'ag_old', 'succeeded', 0, 1, 2)`,
+	}
+	for _, s := range stmts {
+		if _, err := raw.Exec(s); err != nil {
+			raw.Close()
+			t.Fatalf("seed old db: %v", err)
+		}
+	}
+	raw.Close()
+
+	st, err := New("sqlite:" + path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	defer st.Close()
+
+	if !hasColumn(t, st.db, "execution_runs", "elevated") {
+		t.Fatal("execution_runs.elevated missing after migration")
+	}
+	if !hasColumn(t, st.db, "execution_runs", "elevation_note") {
+		t.Fatal("execution_runs.elevation_note missing after migration")
+	}
+	// Pre-existing rows read back with the not-reported default, and the
+	// elevation setter works on the migrated table.
+	r, err := st.GetExecutionRun("run_old")
+	if err != nil || r == nil {
+		t.Fatalf("GetExecutionRun: %v %v", r, err)
+	}
+	if r.Elevated.Valid {
+		t.Errorf("pre-existing run reports an elevation decision; want not-reported (NULL)")
+	}
+	if err := st.SetRunElevation("run_old", true, "policy rule matched: reboot"); err != nil {
+		t.Fatalf("SetRunElevation after migration: %v", err)
+	}
+	r, _ = st.GetExecutionRun("run_old")
+	if !r.Elevated.Valid || !r.Elevated.Bool {
+		t.Errorf("SetRunElevation did not stick after migration: %+v", r.Elevated)
+	}
+}

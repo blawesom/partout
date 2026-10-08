@@ -1389,11 +1389,16 @@ func (x *CommandOutput) GetData() []byte {
 }
 
 type CommandResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ExitCode      int32                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	State         string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"` // succeeded|failed|timed_out|cancelled|interrupted
-	DurationMs    int64                  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	RunId      string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ExitCode   int32                  `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	State      string                 `protobuf:"bytes,3,opt,name=state,proto3" json:"state,omitempty"` // succeeded|failed|timed_out|cancelled|interrupted
+	DurationMs int64                  `protobuf:"varint,4,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	// Elevation decision for this run (the agent records why a command ran
+	// elevated or unprivileged — surfaced on the run row so "why didn't it
+	// elevate?" is a one-glance answer, not an agent-log dive).
+	Elevated      bool   `protobuf:"varint,5,opt,name=elevated,proto3" json:"elevated,omitempty"`                               // the command ran with elevation (sudo)
+	ElevationNote string `protobuf:"bytes,6,opt,name=elevation_note,json=elevationNote,proto3" json:"elevation_note,omitempty"` // human-readable reason: policy rule, no match,
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1454,6 +1459,20 @@ func (x *CommandResult) GetDurationMs() int64 {
 		return x.DurationMs
 	}
 	return 0
+}
+
+func (x *CommandResult) GetElevated() bool {
+	if x != nil {
+		return x.Elevated
+	}
+	return false
+}
+
+func (x *CommandResult) GetElevationNote() string {
+	if x != nil {
+		return x.ElevationNote
+	}
+	return ""
 }
 
 // SessionData is one PTY output chunk from a session (PRD §5.2.2).
@@ -4355,13 +4374,15 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tchunk_seq\x18\x02 \x01(\x04R\bchunkSeq\x120\n" +
 	"\x06stream\x18\x03 \x01(\x0e2\x18.partout.v1.OutputStreamR\x06stream\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"z\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\xbd\x01\n" +
 	"\rCommandResult\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1f\n" +
 	"\vduration_ms\x18\x04 \x01(\x03R\n" +
-	"durationMs\"R\n" +
+	"durationMs\x12\x1a\n" +
+	"\belevated\x18\x05 \x01(\bR\belevated\x12%\n" +
+	"\x0eelevation_note\x18\x06 \x01(\tR\relevationNote\"R\n" +
 	"\vSessionData\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x10\n" +

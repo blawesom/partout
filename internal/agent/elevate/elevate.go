@@ -205,3 +205,51 @@ func (r PolicyRunner) RunCmd(ctx context.Context, name string, args ...string) *
 	n, a := r.Wrap(name, args...)
 	return exec.CommandContext(ctx, n, a...)
 }
+
+// Explain reports the elevation decision for (name, args) with a
+// human-readable reason: which policy rule matched, that none matched
+// (the command runs unprivileged), that elevation is off, or that the
+// legacy no-policy path pushed the command through sudo. It is recorded on
+// every run row so "why didn't my command elevate?" is a one-glance
+// answer instead of an agent-log dive.
+func (r PolicyRunner) Explain(name string, args ...string) (elevated bool, note string) {
+	switch {
+	case r.Mode != Sudo:
+		return false, "elevation off (PARTOUT_ELEVATE=" + string(r.Mode) + ")"
+	case r.Policy == nil:
+		// Legacy: everything is pushed through sudo -n and the
+		// hand-installed sudoers drop-in decides.
+		return true, "legacy mode: no elevation policy loaded — pushed through sudo, the host sudoers drop-in decides"
+	case r.Policy.Check(name, args) == Elevated:
+		return true, "policy rule matched: " + describeRule(r.Policy.RuleFor(name, args))
+	default:
+		return false, "no elevation rule matches this command — ran unprivileged (add a rule to the elevation policy to elevate it)"
+	}
+}
+
+// describeRule renders a compact, human-readable summary of a matched rule
+// (nil-safe). It mirrors the rule's own matcher vocabulary so the note can
+// be traced straight back to the policy document.
+func describeRule(r *Rule) string {
+	if r == nil {
+		return "<unknown rule>"
+	}
+	var parts []string
+	parts = append(parts, r.Allow)
+	switch {
+	case len(r.Verbs) > 0 || len(r.Units) > 0:
+		if len(r.Verbs) > 0 {
+			parts = append(parts, "verbs="+strings.Join(r.Verbs, ","))
+		}
+		if len(r.Units) > 0 {
+			parts = append(parts, "units="+strings.Join(r.Units, ","))
+		}
+	case len(r.Args) > 0:
+		parts = append(parts, "args="+strings.Join(r.Args, " "))
+	case len(r.Files) > 0:
+		parts = append(parts, "files="+strings.Join(r.Files, ","))
+	default:
+		parts = append(parts, "(bare command, no arguments)")
+	}
+	return strings.Join(parts, " ")
+}

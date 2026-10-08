@@ -278,3 +278,44 @@ func TestMarkQueuedOfflineIfQueued(t *testing.T) {
 		t.Fatalf("state = %q, want delivered (not regressed)", runs[0].State)
 	}
 }
+
+func TestSetRunElevation(t *testing.T) {
+	db, _ := setupTestDB(t)
+	defer db.Close()
+	setupExecFixture(t, db, "succeeded")
+
+	if err := db.SetRunElevation("run_sp", false, "no elevation rule matches this command — ran unprivileged"); err != nil {
+		t.Fatalf("SetRunElevation: %v", err)
+	}
+	r, err := db.GetExecutionRun("run_sp")
+	if err != nil || r == nil {
+		t.Fatalf("GetExecutionRun: %v %v", r, err)
+	}
+	if r.Elevated.Valid && r.Elevated.Bool {
+		t.Errorf("elevated = true, want false")
+	}
+	if r.ElevationNote == "" {
+		t.Errorf("elevation note not recorded")
+	}
+
+	// Write-once: a replayed result must not flip the decision.
+	if err := db.SetRunElevation("run_sp", true, "replayed"); err != nil {
+		t.Fatalf("SetRunElevation replay: %v", err)
+	}
+	r, _ = db.GetExecutionRun("run_sp")
+	if !r.Elevated.Valid || r.Elevated.Bool {
+		t.Errorf("replay overwrote the elevation decision: %+v", r.Elevated)
+	}
+	if r.ElevationNote == "replayed" {
+		t.Errorf("replay overwrote the elevation note")
+	}
+
+	// The list path carries the fields through.
+	runs, err := db.ListRunsForExecution("exec_sp")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRunsForExecution: %v %d", err, len(runs))
+	}
+	if runs[0].ElevationNote == "" {
+		t.Errorf("list path lost the elevation note")
+	}
+}
