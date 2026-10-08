@@ -1630,12 +1630,28 @@
                   <td class="mono small">{{ (p.policy_sha256||'').slice(0,12) }}…</td>
                   <td>
                     <button class="btn sm" v-if="isAdmin" @click="elevFormEdit(p)">Edit</button>
+                    <button class="btn sm" v-if="isAdmin" @click="elevPushStart(p)" title="Push this policy to the fleet — signed, gated per host, applied on each host through its own sudoers self-grant">Push…</button>
                     <button class="btn danger sm" v-if="isAdmin" @click="elevDelete(p)">Delete</button>
                   </td>
                 </tr>
                 <tr v-if="!elev.policies.length && !pageLoading"><td colspan="5"><div class="empty">No elevation policies — apply the preset (<span class="mono">partout ctl preset apply</span>) to seed default-baseline.</div></td></tr>
               </tbody>
             </table>
+            <div v-if="elev.push" class="toolbar" style="margin-top:10px;background:var(--brand-subtle);padding:10px;border-radius:8px;align-items:flex-end">
+              <div style="flex:1">
+                <b>Push policy <span class="mono">{{ elev.push.policy }}</span> to the fleet</b>
+                <p class="cap" style="margin:4px 0 0">Signed by the server identity, gated per host by the policy engine (<span class="mono">elevation.push</span>), applied on each host through its own sudoers self-grant — the host re-verifies the signature as root. Offline hosts are refused (never queued); hosts provisioned without the self-grant cannot accept pushes (the posture shows their hash until re-bootstrapped).</p>
+              </div>
+              <label class="fld" style="max-width:200px"><span>Selector</span>
+                <input v-model="elev.push.selector" class="mono" placeholder="all | role:web | tag:env=prod" /></label>
+              <button class="btn primary sm" :disabled="elev.push.busy" @click="elevPushGo()"><span v-if="elev.push.busy" class="spin"></span>Push to fleet</button>
+              <button class="btn sm" @click="elev.push = null">Cancel</button>
+            </div>
+            <div v-if="elev.push && elev.push.result" class="toolbar" style="margin-top:8px">
+              <span class="badge ok" v-if="elev.push.result.pushed.length">{{ elev.push.result.pushed.length }} pushed</span>
+              <span class="badge neutral" v-if="elev.push.result.skipped.length">{{ elev.push.result.skipped.length }} skipped</span>
+              <div v-for="r in elev.push.result.skipped" :key="r.agent_id" class="muted small">{{ hostNameById(r.agent_id) || r.agent_id }}: {{ r.state }} — {{ r.detail }}</div>
+            </div>
           </div>
 
           <!-- create/edit form -->
@@ -2381,7 +2397,7 @@
         provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "",
            elevate: false, elevationPolicies: [], elevationPolicy: "", serviceLabels: "", certPaths: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
-        elev: { policies: [], fleet: [], busy: false, open: null, form: null, msg: "" },
+        elev: { policies: [], fleet: [], busy: false, open: null, form: null, msg: "", push: null },
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
         taskFormOpen: false, taskCreateBusy: false, taskForm: { name: "", description: "", steps: [] },
@@ -3082,6 +3098,18 @@
           this.notify("ok", "elevation policy saved");
           await this.loadElevation();
         } catch (e) { this.elev.msg = e.message; } finally { this.elev.busy = false; }
+      },
+      elevPushStart(p) { this.elev.push = { policy: p.name, selector: "all", busy: false, result: null }; },
+      async elevPushGo() {
+        if (!this.elev.push || this.elev.push.busy) return;
+        this.elev.push.busy = true; this.elev.push.result = null;
+        try {
+          const d = await this.api("/elevation/push", { method: "POST", body: { policy: this.elev.push.policy, selector: this.elev.push.selector } });
+          this.elev.push.result = d;
+          this.notify("ok", "pushed " + (d.pushed || []).length + " host(s), " + (d.skipped || []).length + " skipped — results land in the audit log as elevation.push.result", 8000);
+        } catch (e) {
+          this.notify("err", "push failed: " + e.message);
+        } finally { if (this.elev.push) this.elev.push.busy = false; }
       },
       async elevDelete(p) {
         if (!confirm("Delete elevation policy " + p.name + "? Hosts already provisioned with it keep running their installed copy.")) return;

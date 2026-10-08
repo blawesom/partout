@@ -1,10 +1,17 @@
 # Proposal — Setup & privilege-management UX (for review; nothing implemented)
 
-> **Status: DRAFT for review.** Address the two loudest beta complaints: *first-node
-> enrollment is tedious* and *privilege (elevation) management is hard to set up
-> correctly*. Each item states the problem, the proposal, why it stays inside the
-> security model (PRD Decisions 3/12 — fail-closed elevation, no silent trust), effort
-> (S/M/L), and open questions for the reviewer.
+> **Status: IMPLEMENTED (phases 1–3, v0.9.14 cycle).** Phase 1 (P3.1 run-row
+> elevation reason, E3 posture card, P4 elevation_drift alert), phase 2
+> (E1 one-line join, E2 control-plane binaries, P1 one-command elevation
+> bootstrap), and phase 3's P2 (signed policy propagation) + P3.2
+> (`elevation explain`) are in. **Remaining from phase 3:** P3.3 (structured
+> policy editor) and P3.4 (fleet-aware policy generator) — UI work, next
+> cycle. The text below is the reviewed proposal, kept as the design record.
+>
+> Design rationale lives in [architecture.md](architecture.md); day-2 operations in
+> [operations.md](operations.md); deployment topologies in [deployment.md](deployment.md).
+> The [README](../README.md) is a short overview (objectives, problem, architecture, deploy,
+> UI, CLI).
 
 ---
 

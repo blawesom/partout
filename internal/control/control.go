@@ -55,6 +55,17 @@ func New(st *store.Store, h *stream.Handler, sse *sse.Broker, lg *log.Logger) *C
 	return c
 }
 
+// ServerPubB64 returns the server identity's public half (base64) — the
+// key that signs policy Decisions AND elevation pushes; installers pin it
+// on hosts (/etc/partout/server-policy.pub) so the root-context apply can
+// verify pushed policies.
+func (c *Control) ServerPubB64() string {
+	if c.ident == nil {
+		return ""
+	}
+	return c.ident.PubB64()
+}
+
 // SetIdentity installs the server's Ed25519 signing key. Decisions attached
 // to Command envelopes are signed with it so agents can verify them
 // (architecture §5.3). Must be called before dispatching.

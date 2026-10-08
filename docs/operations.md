@@ -339,9 +339,31 @@ kernel's wall can be kept, and checked, in sync. Example
   agents report their effective policy hash as the `partout.elevation`
   fact, so a host's installed scope can be matched against the store
   fleet-wide. Updating a stored policy does NOT touch already-provisioned
-  hosts (the wall is host-owned): re-provision with `--mode join` or ship
-  it with your config management — `partout ctl elevation check` on the
-  host detects drift either way.
+  hosts (the wall is host-owned): re-provision with `--mode join`, ship
+  it with your config management, or **push it** (below) — `partout ctl
+  elevation check` on the host detects drift either way.
+- **Push policy to fleet (signed, governed).** A host whose policy
+  carries the self-grant (`{"allow":"/usr/local/bin/partout","args":
+  ["ctl","elevation","apply","-"]}` — in the seeded `default-baseline`)
+  accepts server-signed policy pushes: the Elevation page's **Push…**
+  button (or `POST /api/v1/elevation/push`) signs the stored policy with
+  the server identity key (the same key that signs policy Decisions) and
+  dispatches it per selected host, gated by the deny-list policy engine
+  (action class `elevation.push`; offline hosts are refused, never
+  queued). On the host, the agent runs `sudo partout ctl elevation apply
+  -` — the ROOT context re-verifies the signature against the
+  root-owned pinned key `/etc/partout/server-policy.pub` (written at
+  provision/join/bootstrap time) before installing the policy + sudoers
+  — and the agent reloads its scope without a restart. The unprivileged
+  `partout` user can neither forge a signature nor swap the pinned key,
+  so the wall stays host-owned: nothing widens that the host's current
+  sudoers does not already allow. Hosts provisioned before the
+  self-grant need one re-bootstrap (Enable… on the host page) to
+  receive pushes.
+- **Authoring loop: `elevation explain`.** `partout ctl elevation explain
+  -- <command> [args…]` answers "would this command elevate?" against the
+  loaded policy — the same matcher the agent uses, plus the exact note
+  the run row will carry.
 - **Semantics.** With a policy loaded and `PARTOUT_ELEVATE=sudo`, the policy is
   the agent-side authority: a matching command runs elevated; a non-matching
   one runs **unprivileged** (the agent log says so) instead of being pushed

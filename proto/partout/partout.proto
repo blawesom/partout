@@ -67,6 +67,10 @@ enum EnvelopeKind {
   UPDATE_DIRECTIVE = 30;    // down: signed update directive (metadata + download grant)
   UPDATE_RESULT = 31;       // up: update outcome (failed | swapped | verified)
 
+  // P2: server-signed elevation policy propagation
+  ELEVATION_PUSH = 32;       // down: signed elevation policy update
+  ELEVATION_PUSH_RESULT = 33; // up: apply outcome
+
   // Handshake (per stream)
   CHALLENGE = 40;   // down: server issues
   AUTH_PROOF = 41;  // up: agent replies
@@ -99,6 +103,9 @@ message Envelope {
     // M8.1 updates
     UpdateDirective update_directive = 47; // down: signed update directive
     UpdateResult update_result = 48;       // up: update outcome
+    // P2: elevation policy propagation
+    ElevationPush elevation_push = 49;         // down: signed policy update
+    ElevationPushResult elevation_push_result = 54; // up: apply outcome
     // Up: observe facts
     ObserveFacts observe_facts = 46; // up: structured facts (services, configs, certs)
     // Down
@@ -422,6 +429,30 @@ message UpdateResult {
   string phase = 2;        // failed | swapped | verified
   string error = 3;        // failure reason (empty on success)
   string version = 4;      // version running (phase=verified: after restart)
+}
+
+// ElevationPush is a server-signed elevation policy update (P2). The
+// signature is Ed25519 by the SERVER IDENTITY key (the same key that signs
+// policy Decisions — the agent already pins its public half from the policy
+// bundle), over the canonical push payload (see policy.SignElevationPush).
+// The wall stays host-owned: the agent applies the update only through its
+// own sudoers self-grant (`partout ctl elevation apply`), which re-verifies
+// the signature as root against the root-owned pinned key — an attacker
+// holding only the unprivileged partout user can neither forge a policy nor
+// tamper with the pinned key.
+message ElevationPush {
+  string push_id = 1;      // unique per push (audit + dedup)
+  string policy_name = 2;  // stored policy name (drop-in file naming)
+  string rules_json = 3;   // canonical rules array
+  string policy_sha = 4;   // sha256 of the {"rules":…} document
+  string signature = 5;    // base64 Ed25519 over the push payload
+}
+
+// ElevationPushResult is the agent's report for a policy push (up).
+message ElevationPushResult {
+  string push_id = 1;
+  bool ok = 2;
+  string detail = 3;       // applied scope summary or the failure reason
 }
 
 // ---- Observe layer (M5, R18–R20) ---------------------------------------------

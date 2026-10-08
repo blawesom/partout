@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // Mode is the agent's host-level elevation policy.
@@ -161,9 +162,16 @@ func (m Mode) Elevates(name string, args ...string) bool {
 
 // PolicyRunner couples the elevation mode with a loaded policy: the
 // agent-side authority on what may run elevated (PRD Decision 3, full).
+// The policy is swappable at runtime (SetPolicy) — the server-signed
+// policy push (P2) replaces the loaded scope in place so every surface
+// holding the runner (exec, sessions, tasks, packages) sees the new scope
+// without a restart.
 type PolicyRunner struct {
-	Mode   Mode
-	Policy *Policy
+	Mode Mode
+	// policy is guarded by mu: a runtime swap (SetPolicy) must not race an
+	// in-flight Wrap/Elevates/Explain on another goroutine.
+	mu     sync.RWMutex
+	policy *Policy
 	// OutOfScope, when set, is called with the full command line whenever
 	// a command runs unprivileged because no policy rule matches it (the
 	// agent logs it as a first-class event).
@@ -173,14 +181,29 @@ type PolicyRunner struct {
 // NewPolicyRunner builds the policy-aware runner. A nil policy degenerates
 // to the legacy Mode behavior.
 func NewPolicyRunner(m Mode, p *Policy, outOfScope func(string)) *PolicyRunner {
-	return &PolicyRunner{Mode: m, Policy: p, OutOfScope: outOfScope}
+	return &PolicyRunner{Mode: m, policy: p, OutOfScope: outOfScope}
+}
+
+// SetPolicy atomically replaces the loaded policy (nil = legacy mode).
+func (r *PolicyRunner) SetPolicy(p *Policy) {
+	r.mu.Lock()
+	r.policy = p
+	r.mu.Unlock()
+}
+
+func (r *PolicyRunner) current() *Policy {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.policy
 }
 
 // Wrap implements Runner: a policy match elevates; a non-match runs
 // UNPRIVILEGED (and is reported through OutOfScope) instead of being
-// pushed through sudo on faith.
-func (r PolicyRunner) Wrap(name string, args ...string) (string, []string) {
-	if r.Mode == Sudo && r.Policy != nil && r.Policy.Check(name, args) == Denied {
+// pushed through sudo on faith. A nil policy is LEGACY: everything is
+// pushed through sudo (the hand-installed drop-in decides) — Check on a
+// nil policy returns Denied, so the nil case must be handled explicitly.
+func (r *PolicyRunner) Wrap(name string, args ...string) (string, []string) {
+	if p := r.current(); p != nil && r.Mode == Sudo && p.Check(name, args) == Denied {
 		if r.OutOfScope != nil {
 			r.OutOfScope(strings.Join(append([]string{name}, args...), " "))
 		}
@@ -190,18 +213,19 @@ func (r PolicyRunner) Wrap(name string, args ...string) (string, []string) {
 }
 
 // Elevates implements Runner.
-func (r PolicyRunner) Elevates(name string, args ...string) bool {
+func (r *PolicyRunner) Elevates(name string, args ...string) bool {
 	if r.Mode != Sudo {
 		return false
 	}
-	if r.Policy == nil {
+	if p := r.current(); p == nil {
 		return true // legacy: everything is pushed through sudo
+	} else {
+		return p.Check(name, args) == Elevated
 	}
-	return r.Policy.Check(name, args) == Elevated
 }
 
 // RunCmd implements Runner.
-func (r PolicyRunner) RunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+func (r *PolicyRunner) RunCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 	n, a := r.Wrap(name, args...)
 	return exec.CommandContext(ctx, n, a...)
 }
@@ -212,16 +236,16 @@ func (r PolicyRunner) RunCmd(ctx context.Context, name string, args ...string) *
 // legacy no-policy path pushed the command through sudo. It is recorded on
 // every run row so "why didn't my command elevate?" is a one-glance
 // answer instead of an agent-log dive.
-func (r PolicyRunner) Explain(name string, args ...string) (elevated bool, note string) {
+func (r *PolicyRunner) Explain(name string, args ...string) (elevated bool, note string) {
 	switch {
 	case r.Mode != Sudo:
 		return false, "elevation off (PARTOUT_ELEVATE=" + string(r.Mode) + ")"
-	case r.Policy == nil:
+	case r.current() == nil:
 		// Legacy: everything is pushed through sudo -n and the
 		// hand-installed sudoers drop-in decides.
 		return true, "legacy mode: no elevation policy loaded — pushed through sudo, the host sudoers drop-in decides"
-	case r.Policy.Check(name, args) == Elevated:
-		return true, "policy rule matched: " + describeRule(r.Policy.RuleFor(name, args))
+	case r.current().Check(name, args) == Elevated:
+		return true, "policy rule matched: " + describeRule(r.current().RuleFor(name, args))
 	default:
 		return false, "no elevation rule matches this command — ran unprivileged (add a rule to the elevation policy to elevate it)"
 	}

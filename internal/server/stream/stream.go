@@ -523,6 +523,21 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 				"agent_id": sess.AgentID, "release_id": ur.ReleaseId, "phase": ur.Phase,
 			})
 		}
+	case msg.GetElevationPushResult() != nil:
+		// P2: elevation policy push outcome. Audit + SSE; the Elevation
+		// page's posture table converges as the hosts report their new
+		// scope hash (the partout.elevation fact).
+		er := msg.GetElevationPushResult()
+		h.log.Printf("stream: elevation push result %s (ok=%t, %s)", er.PushId, er.Ok, er.Detail)
+		_ = h.st.AppendAudit(store.AuditEvent{
+			TS: time.Now().Unix(), Kind: "elevation.push.result", Actor: "agent", AgentID: sess.AgentID,
+			Payload: fmt.Sprintf(`{"push_id":%q,"ok":%t,"detail":%q}`, er.PushId, er.Ok, er.Detail),
+		})
+		if h.sse != nil {
+			h.sse.Emit("elevation.push.result", map[string]string{
+				"agent_id": sess.AgentID, "push_id": er.PushId, "ok": fmt.Sprintf("%t", er.Ok),
+			})
+		}
 	case msg.GetFileOpResult() != nil:
 		fr := msg.GetFileOpResult()
 		h.fileMu.Lock()
@@ -612,6 +627,24 @@ func (h *Handler) SendCommand(agentID string, cmd *pb.Command) error {
 		return ErrAgentOffline
 	}
 	return sess.send(env)
+}
+
+// SendElevationPush delivers a server-signed elevation policy update. A
+// push is NEVER queued for an offline agent (unlike commands): a
+// privilege-document push that silently waits out the offline TTL could
+// land long after the operator's intent changed — the caller reports the
+// refusal and the operator re-pushes when the host is connected.
+func (h *Handler) SendElevationPush(agentID string, push *pb.ElevationPush) error {
+	h.mu.Lock()
+	sess, ok := h.sessions[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return ErrAgentOffline
+	}
+	return sess.send(&pb.Envelope{
+		Kind:    pb.EnvelopeKind_ELEVATION_PUSH,
+		Payload: &pb.Envelope_ElevationPush{ElevationPush: push},
+	})
 }
 
 // queueOffline enqueues a down envelope for an offline agent (bounded).

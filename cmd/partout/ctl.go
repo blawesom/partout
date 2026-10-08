@@ -84,7 +84,7 @@ commands:
   secrets <list|create|rotate|revoke|delete>   managed secrets (values write-only)
   update <keygen|sign|verify|upload|list|run|runs|show|retry|skip|abort>
            release signing + the one-command fleet update (M8.1)
-  elevation <show|check|install-sudoers|policy>
+  elevation <show|check|explain|apply|install-sudoers|policy>
            show/check/install-sudoers work on THIS host's policy;
            "policy" drives the server-side policy store — remote,
            with verbs: create, list, show, update, delete, history, restore
@@ -257,13 +257,18 @@ func dbBackup(dbPath, out string) error {
 
 func cmdElevation(c *ctl, args []string) {
 	usage := func() {
-		fmt.Fprintln(os.Stderr, `usage: partout ctl elevation <show|check|install-sudoers|policy>
+		fmt.Fprintln(os.Stderr, `usage: partout ctl elevation <show|check|explain|apply|install-sudoers|policy>
 
   policy             the SERVER-SIDE elevation policy store (remote):
                       create, list, show, update, delete
 
   show                load the policy; print effective rules + source files
   check               re-render the drop-in and diff it against the installed file
+  explain             would this command elevate? test a command line against
+                      the policy (the same matcher the agent uses)
+  apply               apply a server-SIGNED policy push bundle (root; the
+                      agent invokes this via the sudoers self-grant; "-" reads
+                      the bundle from stdin)
   install-sudoers     render + visudo-check + install the drop-in (needs root;
                       'sudo partout ctl elevation install-sudoers')
 
@@ -284,6 +289,7 @@ flags:
 	sudoersPath := fs.String("sudoers-path", "/etc/sudoers.d/partout-agent", "target sudoers drop-in")
 	user := fs.String("user", "partout", "service user for the grants")
 	dryRun := fs.Bool("dry-run", false, "install-sudoers: print instead of installing")
+	keyPath := fs.String("key", serverPolicyKeyPath, "apply: pinned server policy-signing public key")
 	fs.Parse(rest)
 
 	switch sub {
@@ -291,6 +297,20 @@ flags:
 		elevationShow(*policy)
 	case "check":
 		elevationCheck(*policy, *sudoersPath, *user)
+	case "explain":
+		// The command line to test follows a -- separator (flags before).
+		rest := fs.Args()
+		if len(rest) > 0 && rest[0] == "--" {
+			rest = rest[1:]
+		}
+		elevationExplain(*policy, rest)
+	case "apply":
+		// P2: apply a server-signed policy push bundle (agent-invoked, root).
+		rest := fs.Args()
+		if len(rest) < 1 {
+			fatal(fmt.Errorf("usage: partout ctl elevation apply [--policy P] <bundle.json>"))
+		}
+		elevationApply(rest[0], *policy, *sudoersPath, *user, *keyPath)
 	case "install-sudoers":
 		elevationInstall(*policy, *sudoersPath, *user, *dryRun)
 	case "policy":

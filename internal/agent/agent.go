@@ -4,8 +4,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -38,6 +41,7 @@ import (
 	agentupdate "github.com/blawesom/partout/internal/agent/update"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/identity"
+	policypkg "github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/spool"
 	"github.com/blawesom/partout/internal/version"
 
@@ -156,6 +160,18 @@ type Agent struct {
 	// runner is the policy-aware elevation decision shared by every action
 	// surface (exec dispatch, PTY sessions, task steps, package ops, reboot).
 	runner elevate.Runner
+
+	// policyRunner is runner's concrete type when a policy-aware runner is
+	// in use — kept for the runtime policy swap (P2: the server-signed push
+	// replaces the loaded scope without a restart).
+	policyRunner *elevate.PolicyRunner
+
+	// elevMu guards the elevation pointer/error swap (refreshElevation)
+	// against hot-path readers (runElevated, the observe collectors).
+	elevMu sync.RWMutex
+	// staticMu guards staticFacts against the facts send loop (a push-time
+	// posture refresh writes from the push goroutine).
+	staticMu sync.Mutex
 }
 
 // New builds an Agent. The identity must already be enrolled (server-side row
@@ -278,6 +294,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	a.runner = elevate.NewPolicyRunner(a.elevate, a.elevation, func(cmdline string) {
 		lg.Printf("agent: command (%s) NOT in elevation scope — running unprivileged; add a policy rule to elevate it", cmdline)
 	})
+	a.policyRunner, _ = a.runner.(*elevate.PolicyRunner)
 	if es, err := json.Marshal(elevSummary); err == nil {
 		a.staticFacts["partout.elevation"] = string(es)
 	}
@@ -543,10 +560,14 @@ func (a *Agent) sendFacts(ctx context.Context, full bool) error {
 	m := facts.Collector(a.id, a.cfg.FactsInterval)
 	// Agent-level facts (file root state) survive re-collection: without
 	// this the file-root fact vanished on the first facts batch and the
-	// server showed every 0.9.5+ agent as a "legacy agent".
+	// server showed every 0.9.5+ agent as a "legacy agent". The copy is
+	// guarded: a push-time posture refresh writes staticFacts from another
+	// goroutine (P2).
+	a.staticMu.Lock()
 	for k, v := range a.staticFacts {
 		m[k] = v
 	}
+	a.staticMu.Unlock()
 	a.factset = m
 	return a.streamC.Send(ctx, &pb.Envelope{
 		Kind: pb.EnvelopeKind_FACTS_BATCH,
@@ -623,7 +644,7 @@ func (a *Agent) sendObserveFacts(ctx context.Context) {
 		CaddyConf:            a.cfg.CaddyConf,
 		ObserveFactsInterval: a.cfg.ObserveFactsInterval,
 		Elevate:              a.elevate,
-		Elevation:            a.elevation,
+		Elevation:            a.currentElevation(),
 	}
 	ch := make(chan *factscollect.Facts, 1)
 	go func() { ch <- factscollect.Collect(cfg) }()
@@ -866,6 +887,14 @@ func (a *Agent) handleDown(ctx context.Context, env *pb.Envelope) error {
 			return nil
 		}
 		go a.execUpdate(dir)
+
+	case env.GetElevationPush() != nil:
+		push := env.GetElevationPush()
+		// ACK delivery; the apply runs off the envelope loop (the elevated
+		// apply is slow and its outcome is reported via the result envelope).
+		_ = a.streamC.Send(ctx, &pb.Envelope{Kind: pb.EnvelopeKind_ACK,
+			Payload: &pb.Envelope_Ack{Ack: &pb.Ack{EnvelopeId: env.Id, Status: pb.AckStatus_ACK_OK, Detail: push.PushId}}})
+		go a.applyElevationPush(push)
 
 	default:
 		return nil
@@ -1139,7 +1168,7 @@ func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []s
 	// when the process fails to start (the run row still says why it ran
 	// unprivileged / elevated).
 	elev, note := a.runnerElevationExplain(cmdName, args)
-	if a.elevate == elevate.Sudo && a.elevation != nil && a.elevation.Check(cmdName, args) == elevate.Denied {
+	if a.elevate == elevate.Sudo && a.currentElevation().Check(cmdName, args) == elevate.Denied {
 		a.log.Printf("agent: run %s (%s) NOT in elevation scope — running unprivileged; add a policy rule to elevate it", runID, strings.Join(append([]string{cmdName}, args...), " "))
 		res, err := exec.Run(ctx, cmdName, args, cwd, env, timeoutS, onChunk)
 		return res, false, note, err
@@ -1158,7 +1187,7 @@ func (a *Agent) runElevated(ctx context.Context, runID, cmdName string, args []s
 // decision on (name, args) — the same decision runElevated acts on, kept in
 // one place so the note and the behavior can never diverge.
 func (a *Agent) runnerElevationExplain(cmdName string, args []string) (bool, string) {
-	if pr, ok := a.runner.(elevate.PolicyRunner); ok {
+	if pr, ok := a.runner.(*elevate.PolicyRunner); ok {
 		return pr.Explain(cmdName, args...)
 	}
 	// Any other Runner implementation: report the bare mode.
@@ -1166,6 +1195,155 @@ func (a *Agent) runnerElevationExplain(cmdName string, args []string) (bool, str
 		return true, "elevated via sudo"
 	}
 	return false, "elevation off"
+}
+
+// currentElevation returns the loaded elevation policy (nil = legacy
+// mode), race-free against the push-time swap.
+func (a *Agent) currentElevation() *elevate.Policy {
+	a.elevMu.RLock()
+	defer a.elevMu.RUnlock()
+	return a.elevation
+}
+
+// refreshElevation reloads the elevation policy from disk and swaps it
+// into the shared runner + the posture fact — used after a server-signed
+// policy push applied on the host (P2), so every action surface sees the
+// new scope without an agent restart. Fail-closed semantics are preserved:
+// the sudoers wall was already updated (by the root-context apply) before
+// the agent's belief swaps; a load failure degrades to legacy mode exactly
+// like a bad policy at startup (reported, never fatal).
+func (a *Agent) refreshElevation() {
+	pol, perr := elevate.Load(a.cfg.ElevationPolicy)
+	a.elevMu.Lock()
+	if perr != nil {
+		a.elevationErr = fmt.Errorf("elevation policy: %w", perr)
+	} else {
+		a.elevationErr = nil
+	}
+	a.elevation = pol
+	a.elevMu.Unlock()
+	if a.policyRunner != nil {
+		a.policyRunner.SetPolicy(pol)
+	}
+	// Rebuild the posture fact (same shape as startup); it rides the next
+	// facts cycle up to the server.
+	summary := map[string]any{"mode": string(a.elevate), "sudo": a.elevate == elevate.Sudo}
+	if pol != nil {
+		summary["hash"] = pol.PolicyHash()
+		summary["rules"] = len(pol.Rules)
+		summary["sources"] = pol.Source()
+	}
+	if perr != nil {
+		summary["error"] = fmt.Errorf("elevation policy: %w", perr).Error()
+	}
+	if es, err := json.Marshal(summary); err == nil {
+		a.staticMu.Lock()
+		a.staticFacts["partout.elevation"] = string(es)
+		a.staticMu.Unlock()
+	}
+	if pol != nil {
+		a.log.Printf("agent: elevation policy reloaded (%d rules from %s) — %s", len(pol.Rules), strings.Join(pol.Source(), ", "), describeElevation(pol))
+	} else {
+		a.log.Printf("agent: elevation policy reloaded: none (legacy mode): %v", perr)
+	}
+}
+
+// applyElevationPush applies a server-signed elevation policy update
+// (P2): verify the signature against the pinned server key, stage the
+// bundle for the ROOT-context apply, run it through the policy self-grant
+// (`sudo partout ctl elevation apply <bundle>` — which re-verifies against
+// the root-owned pinned key), then swap the in-process belief.
+func (a *Agent) applyElevationPush(push *pb.ElevationPush) {
+	fail := func(format string, args ...any) {
+		detail := fmt.Sprintf(format, args...)
+		a.log.Printf("agent: elevation push %s FAILED: %s", push.PushId, detail)
+		a.sendUpEnvelopeNoSpool(&pb.Envelope{
+			Kind: pb.EnvelopeKind_ELEVATION_PUSH_RESULT,
+			Payload: &pb.Envelope_ElevationPushResult{ElevationPushResult: &pb.ElevationPushResult{
+				PushId: push.PushId, Ok: false, Detail: detail,
+			}},
+		})
+	}
+
+	// 1. Agent-side verification (the root context re-verifies — defense
+	//    in depth: the unprivileged partout user can stage any file it
+	//    likes, but only the server key's signature gets through).
+	sig, err := base64.StdEncoding.DecodeString(push.Signature)
+	if err != nil {
+		fail("signature is not base64: %v", err)
+		return
+	}
+	pubB64 := a.guard.ServerPubB64()
+	if pubB64 == "" {
+		fail("no server public key pinned (agent predates push support)")
+		return
+	}
+	pub, err := base64.StdEncoding.DecodeString(pubB64)
+	if err != nil {
+		fail("pinned server key is not base64: %v", err)
+		return
+	}
+	if !policypkg.VerifyElevationPush(ed25519.PublicKey(pub), push.PushId, push.PolicyName, push.PolicySha, sig) {
+		fail("signature verification failed (stale or forged push)")
+		return
+	}
+
+	// 2. The policy must parse and hash to its claim — no root work on a
+	//    malformed document.
+	pol, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + push.RulesJson + `}`))
+	if err != nil {
+		fail("policy does not parse: %v", err)
+		return
+	}
+	if pol.PolicyHash() != push.PolicySha {
+		fail("policy sha mismatch: %s != %s", pol.PolicyHash(), push.PolicySha)
+		return
+	}
+
+	// 3. Stage the bundle (agent-writable data dir; the ROOT apply
+	//    re-verifies the signature before trusting it).
+	bundle := map[string]string{
+		"push_id": push.PushId, "policy_name": push.PolicyName,
+		"rules_json": push.RulesJson, "policy_sha256": push.PolicySha,
+		"signature": push.Signature,
+	}
+	bundleJSON, _ := json.Marshal(bundle)
+
+	// 4. Apply through the self-grant. The command path is the M8.1
+	//    operator path — the same literal the self-grant rule names (a
+	//    symlink to the agent-writable binary; sudo matches argv, not the
+	//    symlink's target).
+	applyBin := "/usr/local/bin/partout"
+	if _, err := os.Stat(applyBin); err != nil {
+		if exe, err2 := os.Executable(); err2 == nil {
+			applyBin = exe
+		}
+	}
+	ctx, cancel := context.WithTimeout(a.rootCtx, 2*time.Minute)
+	defer cancel()
+	// The bundle rides STDIN with the exact-args form `apply -`: the
+	// self-grant needs NO wildcard (a path argument could not be globbed —
+	// path.Match's * never crosses "/"), so the sudoers grant is the exact
+	// argv `ctl elevation apply -` and nothing else.
+	cmd := a.runner.RunCmd(ctx, applyBin, "ctl", "elevation", "apply", "-")
+	cmd.Stdin = bytes.NewReader(bundleJSON)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		fail("apply failed (exit %v): %s", err, strings.TrimSpace(string(out)))
+		return
+	}
+
+	// 5. Swap the in-process belief; the posture fact rides the next facts
+	//    cycle, and the result envelope reports success immediately.
+	a.refreshElevation()
+	a.log.Printf("agent: elevation push %s applied (policy %s) — %s", push.PushId, push.PolicyName, strings.TrimSpace(string(out)))
+	a.sendUpEnvelopeNoSpool(&pb.Envelope{
+		Kind: pb.EnvelopeKind_ELEVATION_PUSH_RESULT,
+		Payload: &pb.Envelope_ElevationPushResult{ElevationPushResult: &pb.ElevationPushResult{
+			PushId: push.PushId, Ok: true,
+			Detail: fmt.Sprintf("policy %s applied (sha %s); scope reloaded without restart", push.PolicyName, push.PolicySha[:12]),
+		}},
+	})
 }
 
 // execCommand runs a command, streaming output chunks, then the result.

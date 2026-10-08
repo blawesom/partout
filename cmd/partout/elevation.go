@@ -9,7 +9,11 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +21,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/blawesom/partout/internal/agent/elevate"
+	policypkg "github.com/blawesom/partout/internal/policy"
 )
 
 func elevationLoad(policy string) *elevate.Policy {
@@ -194,4 +199,172 @@ func elevationInstall(policy, sudoersPath, user string, dryRun bool) {
 	}
 	fmt.Printf("installed %s (policy sha256 %s…; user %s)\n", sudoersPath, pol.PolicyHash()[:12], user)
 	fmt.Println("verify with:  partout ctl elevation check")
+}
+
+// elevationExplain answers "would this command line elevate?" against the
+// loaded policy — the same matcher the agent uses, so what you see here is
+// what the host will do. It is the authoring loop for policy edits: change
+// the rule, re-run the explain, see the verdict.
+func elevationExplain(policy string, cmdline []string) {
+	if len(cmdline) < 1 {
+		fatal(fmt.Errorf("usage: partout ctl elevation explain [--policy P] -- <command> [args…]"))
+	}
+	pol := elevationLoad(policy)
+	name, args := cmdline[0], cmdline[1:]
+	dec := pol.Check(name, args)
+	fmt.Printf("command:  %s\n", strings.Join(cmdline, " "))
+	fmt.Printf("policy:   %s (%d rules, %s)\n", policy, len(pol.Rules), pol.Source())
+	switch dec {
+	case elevate.Elevated:
+		rule := pol.RuleFor(name, args)
+		fmt.Printf("verdict:  ELEVATED — rule %d matches: allow %s %s\n",
+			ruleIndex(pol, rule), rule.Allow, elevationRuleDesc(*rule))
+	default:
+		fmt.Printf("verdict:  UNPRIVILEGED — no rule matches (the command still runs, without sudo;\n")
+		fmt.Printf("          the agent log records it as out-of-scope). Add a rule to elevate it.\n")
+	}
+	// The runner-level view (what the run row will show): mode is a host
+	// fact, but the policy decision is printable from here.
+	if pr := elevate.NewPolicyRunner(elevate.Sudo, pol, nil); pr != nil {
+		_, note := pr.Explain(name, args...)
+		fmt.Printf("run row:  %s\n", note)
+	}
+}
+
+// ruleIndex finds a rule's position (for the explain verdict).
+func ruleIndex(pol *elevate.Policy, r *elevate.Rule) int {
+	for i := range pol.Rules {
+		if &pol.Rules[i] == r {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// elevationBundle is the staged wire format for a server-signed policy
+// push (the agent writes it to its data dir; this command runs as root
+// via the sudoers self-grant and re-verifies everything).
+type elevationBundle struct {
+	PushID     string `json:"push_id"`
+	PolicyName string `json:"policy_name"`
+	RulesJSON  string `json:"rules_json"`
+	PolicySHA  string `json:"policy_sha256"`
+	Signature  string `json:"signature"`
+}
+
+// serverPolicyKeyPath is the root-owned pinned server identity key
+// (written at provision/join/bootstrap time). Root-readable only in
+// practice: the unprivileged partout user must not be able to swap it.
+const serverPolicyKeyPath = "/etc/partout/server-policy.pub"
+
+// elevationApply applies a server-signed elevation policy push (P2). Runs
+// as ROOT (the agent invokes it through the sudoers self-grant); every
+// input is re-verified here — the signature against the root-owned pinned
+// key (the unprivileged caller can stage any bundle it likes; only the
+// server key's signature gets through) and the policy's shape + hash.
+func elevationApply(bundlePath, policyDir, sudoersPath, user, keyPath string) {
+	if os.Geteuid() != 0 {
+		fatal(fmt.Errorf("elevation apply needs root (the agent invokes it via the sudoers self-grant)"))
+	}
+	// "-" reads the bundle from STDIN (the agent's form: the self-grant is
+	// an exact-argv match with no path argument).
+	var raw []byte
+	var err error
+	if bundlePath == "-" {
+		raw, err = io.ReadAll(os.Stdin)
+	} else {
+		raw, err = os.ReadFile(bundlePath)
+	}
+	if err != nil {
+		fatal(fmt.Errorf("read bundle: %w", err))
+	}
+	bundle, _, err := parseAndVerifyElevationBundle(raw, keyPath)
+	if err != nil {
+		fatal(err)
+	}
+
+	// 3. Install the drop-in policy document (0644 root:root — the agent
+	//    re-reads it unprivileged after the swap).
+	if err := os.MkdirAll(policyDir, 0o755); err != nil {
+		fatal(err)
+	}
+	dest := filepath.Join(policyDir, "10-"+slugPolicyFileName(bundle.PolicyName)+".json")
+	doc := `{"rules":` + bundle.RulesJSON + `}`
+	if err := os.WriteFile(dest, []byte(doc), 0o644); err != nil {
+		fatal(err)
+	}
+	if err := os.Chown(dest, 0, 0); err != nil {
+		fatal(err)
+	}
+
+	// 4. Render + visudo-check + install the sudoers drop-in from the
+	//    (now merged) policy dir — the same path install-sudoers uses.
+	elevationInstall(policyDir, sudoersPath, user, false)
+	fmt.Printf("applied push %s (policy %s, sha %s…) → %s\n", bundle.PushID, bundle.PolicyName, bundle.PolicySHA[:12], dest)
+}
+
+// slugPolicyFileName makes a policy name filesystem-safe for its drop-in.
+func slugPolicyFileName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "policy"
+	}
+	return out
+}
+
+// parseAndVerifyElevationBundle does everything short of touching the
+// system: parse the staged bundle, verify the signature against the pinned
+// server key, and validate the policy's shape + hash claim. Split out of
+// elevationApply so tests can pin the verification contract without root.
+func parseAndVerifyElevationBundle(raw []byte, keyPath string) (elevationBundle, *elevate.Policy, error) {
+	var bundle elevationBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		return bundle, nil, fmt.Errorf("parse bundle: %w", err)
+	}
+	if bundle.PushID == "" || bundle.PolicyName == "" || bundle.RulesJSON == "" || bundle.PolicySHA == "" {
+		return bundle, nil, fmt.Errorf("bundle is missing fields (push_id, policy_name, rules_json, policy_sha256)")
+	}
+	// 1. Signature against the root-owned pinned key.
+	pubB64, err := os.ReadFile(keyPath)
+	if err != nil {
+		return bundle, nil, fmt.Errorf("read pinned server key %s (provisioned at install; see operations.md §3.6): %w", keyPath, err)
+	}
+	pub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(pubB64)))
+	if err != nil {
+		return bundle, nil, fmt.Errorf("pinned server key is not base64: %w", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(bundle.Signature)
+	if err != nil {
+		return bundle, nil, fmt.Errorf("bundle signature is not base64: %w", err)
+	}
+	if !policypkg.VerifyElevationPush(ed25519.PublicKey(pub), bundle.PushID, bundle.PolicyName, bundle.PolicySHA, sig) {
+		return bundle, nil, fmt.Errorf("signature verification FAILED — refusing to apply (forged or stale bundle)")
+	}
+	// 2. The policy must parse and hash to its claim.
+	pol, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + bundle.RulesJSON + `}`))
+	if err != nil {
+		return bundle, nil, fmt.Errorf("policy does not parse: %w", err)
+	}
+	if pol.PolicyHash() != bundle.PolicySHA {
+		return bundle, nil, fmt.Errorf("policy sha mismatch: %s != %s", pol.PolicyHash(), bundle.PolicySHA)
+	}
+	return bundle, pol, nil
+}
+
+// policyHashOf computes the canonical policy hash for a rules array.
+func policyHashOf(rulesJSON string) string {
+	pol, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + rulesJSON + `}`))
+	if err != nil {
+		return ""
+	}
+	return pol.PolicyHash()
 }

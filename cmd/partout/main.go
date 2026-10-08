@@ -668,6 +668,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		BinaryPath: binPath,
 		Emitter:    sseB,
 		Logger:     lg,
+		// The server identity's public half — pinned on provisioned hosts so
+		// the root-context `ctl elevation apply` can verify pushed policies.
+		ServerPubKeyB64: ident.PubB64(),
 	})
 	// Fail runs stranded by a previous process (the state machine is
 	// in-memory, so a mid-run restart leaves them stuck forever).

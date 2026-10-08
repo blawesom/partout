@@ -68,6 +68,7 @@ type Provisioner struct {
 	serverHost   string // address the new agent connects to (PARTOUT_SERVER)
 	bindAddr     string // server listener bind ("" = all interfaces); diagnostics only
 	caPath       string // server root CA to distribute ("" = TLS off, plaintext h2c)
+	serverPubB64 string // server identity pub (b64) — pinned on hosts for push verification
 	binaryPath   string // path to the partout binary on the server
 	localVersion string // the server's own version (for the version-diff check)
 	tokenTTL     int    // enrollment token TTL seconds (short, arch §3.5)
@@ -95,6 +96,10 @@ type Options struct {
 	BinaryPath string
 	Emitter    Emitter
 	Logger     *log.Logger
+	// ServerPubKeyB64 (optional) is the server identity's Ed25519 public
+	// half — pinned on the host as /etc/partout/server-policy.pub so the
+	// root-context `ctl elevation apply` can verify pushed policies (P2).
+	ServerPubKeyB64 string
 }
 
 // New builds a Provisioner from opts.
@@ -112,6 +117,7 @@ func New(opts Options) *Provisioner {
 		bindAddr:     opts.BindAddr,
 		caPath:       opts.CAPath,
 		binaryPath:   opts.BinaryPath,
+		serverPubB64: opts.ServerPubKeyB64,
 		localVersion: agentfacts.Version,
 		tokenTTL:     300, // 5 min — short TTL for the one-time token
 		runs:         make(map[string]*activeRun),
@@ -705,13 +711,14 @@ func (p *Provisioner) stepInstall(ctx context.Context, run *store.ProvisionRun, 
 	fullSHA := hex.EncodeToString(sha[:])
 
 	spec := installSpec{
-		binSHA12:   sha12,
-		binSHA:     fullSHA,
-		wipe:       wipeScript(run.Mode),
-		serverHost: p.serverHost,
-		token:      token,
-		elevation:  elevationScript(opts),
-		envExtras:  agentEnvExtras(opts),
+		binSHA12:     sha12,
+		binSHA:       fullSHA,
+		wipe:         wipeScript(run.Mode),
+		serverHost:   p.serverHost,
+		token:        token,
+		serverPubB64: p.serverPubB64,
+		elevation:    elevationScript(opts),
+		envExtras:    agentEnvExtras(opts),
 	}
 	// The CA fingerprint is part of the install contract when TLS is on:
 	// the script verifies it before trusting /etc/partout/ca.crt.
@@ -784,6 +791,10 @@ type installSpec struct {
 	caSHA12, caSHA    string // root-CA fingerprint; both empty = TLS off
 	wipe              string // mode-specific prelude ("" for join)
 	serverHost, token string
+	// serverPubB64 (optional) pins the server's policy-signing public key
+	// on the host (/etc/partout/server-policy.pub) so the root-context
+	// `ctl elevation apply` can verify pushed policies (P2).
+	serverPubB64 string
 	// elevation is the D1 bootstrap block ("" = no elevation): installs
 	// the transferred policies to /etc/partout/elevation.d/, renders +
 	// visudo-checks + installs the sudoers drop-in (as root, on the
@@ -885,6 +896,8 @@ type JoinScriptInput struct {
 	// ServiceLabels / CertPaths are agent.env extras (same as StartOptions).
 	ServiceLabels string
 	CertPaths     string
+	// ServerPubB64 pins the server's policy-signing key on the host (P2).
+	ServerPubB64 string
 }
 
 // BuildJoinScript renders the arch-specific one-line join installer.
@@ -927,6 +940,14 @@ func BuildJoinScript(in JoinScriptInput) (string, error) {
 	b.WriteString("GUARD=/tmp/partout-update-guard\n")
 	fmt.Fprintf(&b, "printf '%%s' %s | base64 -d > \"$GUARD\"\n",
 		shellQuote(base64.StdEncoding.EncodeToString([]byte(embedded.UpdateGuard))))
+	// Pin the server's policy-signing public key (root-owned): the
+	// root-context `ctl elevation apply` verifies pushed policies against
+	// it (P2). The unprivileged partout user can read but never swap it.
+	if in.ServerPubB64 != "" {
+		fmt.Fprintf(&b, "printf '%%s' %s > /etc/partout/server-policy.pub\n", shellQuote(in.ServerPubB64))
+		b.WriteString("chown root:root /etc/partout/server-policy.pub\n")
+		b.WriteString("chmod 0644 /etc/partout/server-policy.pub\n")
+	}
 
 	// The install body: byte-identical to the SSH-provisioning install.
 	b.WriteString(buildInstallScript(installSpec{
@@ -985,6 +1006,9 @@ type ElevationBootstrapInput struct {
 	PolicyName string
 	RulesJSON  string
 	SHA        string
+	// ServerPubB64 pins the server's policy-signing key (P2) — a host
+	// bootstrapped with this script can receive pushed policies.
+	ServerPubB64 string
 }
 
 // BuildElevationBootstrapScript renders the root script the host runs. It
@@ -1030,6 +1054,11 @@ func BuildElevationBootstrapScript(in ElevationBootstrapInput) (string, error) {
 	b.WriteString("  systemctl daemon-reload\n")
 	b.WriteString("fi\n")
 	b.WriteString("systemctl restart partout-agent\n")
+	if in.ServerPubB64 != "" {
+		b.WriteString("printf '%s' " + shellQuote(in.ServerPubB64) + " > /etc/partout/server-policy.pub\n")
+		b.WriteString("chown root:root /etc/partout/server-policy.pub\n")
+		b.WriteString("chmod 0644 /etc/partout/server-policy.pub\n")
+	}
 	b.WriteString("sleep 1\n")
 	b.WriteString("\"$BIN\" ctl elevation check || true\n")
 	b.WriteString("echo ELEVATION_OK — the agent restarted with elevation enabled; posture shows in the UI within a facts cycle (~5 min).\n")

@@ -211,7 +211,9 @@ var ElevationPolicies = []ElevationPolicyDef{
 		Name: "default-baseline",
 		Description: "Day-1 fleet baseline: package updates and installs (apt + dnf, task steps and packages-apply forms), " +
 			"systemctl on standard fleet units, hostnamectl set-hostname, config validation (nginx -t, haproxy -c — " +
-			"read-only checks the observe layer uses to prove config health on root-only configs), bare reboot. " +
+			"read-only checks the observe layer uses to prove config health on root-only configs), bare reboot, " +
+			"and the elevation self-grant (`partout ctl elevation apply -` — lets the host accept server-SIGNED policy " +
+			"pushes; the signature, not the path, is the gate). " +
 			"Apply at provisioning (provision new --elevate) or with your config management; " +
 			"edit or clone for tighter scopes.",
 		RulesJSON: `[

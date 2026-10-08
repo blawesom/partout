@@ -49,6 +49,9 @@ const (
 
 	// M8.1 fleet update rollout (a run of signed agent self-updates).
 	ActionUpdateApply = "update.apply"
+
+	// P2: server-signed elevation policy propagation (fleet push).
+	ActionElevationPush = "elevation.push"
 )
 
 // Priority ordering for precedence: lower number = higher priority.
@@ -353,4 +356,31 @@ func uint64Bytes(v uint64) []byte {
 	b[6] = byte(v >> 8)
 	b[7] = byte(v)
 	return b
+}
+
+// ---- Elevation policy push signatures (P2) -----------------------------------
+//
+// A server-signed elevation policy update is verified by TWO contexts: the
+// agent (unprivileged, against the server pubkey pinned in its policy
+// bundle) and the root-context `partout ctl elevation apply` (against the
+// root-owned pinned key). The payload is domain-separated so a signature
+// can never be confused with a Decision or a release manifest.
+
+// ElevationPushPayload is the canonical byte string signed for a push.
+func ElevationPushPayload(pushID, policyName, policySHA string) []byte {
+	return []byte("partout.elevation.push.v1\x00" + pushID + "\x00" + policyName + "\x00" + policySHA)
+}
+
+// SignElevationPush signs a push with the server identity key (the same key
+// that signs Decisions).
+func SignElevationPush(priv ed25519.PrivateKey, pushID, policyName, policySHA string) []byte {
+	return ed25519.Sign(priv, ElevationPushPayload(pushID, policyName, policySHA))
+}
+
+// VerifyElevationPush checks a push signature against the pinned server key.
+func VerifyElevationPush(pub ed25519.PublicKey, pushID, policyName, policySHA string, sig []byte) bool {
+	if len(pub) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return ed25519.Verify(pub, ElevationPushPayload(pushID, policyName, policySHA), sig)
 }

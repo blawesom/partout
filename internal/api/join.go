@@ -155,6 +155,7 @@ func (h *Handler) handleJoinScript(w http.ResponseWriter, r *http.Request) {
 		BinSHA: binSHA, BinVersion: binVersion,
 		CAPEM: caPEM, Policies: policies,
 		ServiceLabels: labels,
+		ServerPubB64:  h.ctrl.ServerPubB64(),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to render join script", nil)
@@ -353,6 +354,7 @@ func (h *Handler) handleElevateScript(w http.ResponseWriter, r *http.Request) {
 	}
 	script, err := provision.BuildElevationBootstrapScript(provision.ElevationBootstrapInput{
 		Hostname: hostname, PolicyName: ep.Name, RulesJSON: ep.RulesJSON, SHA: ep.SHA,
+		ServerPubB64: h.ctrl.ServerPubB64(),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to render bootstrap script", nil)

@@ -34,6 +34,8 @@ func (h *Handler) RegisterElevationPolicies(mux *http.ServeMux) {
 	mux.Handle("DELETE /api/v1/elevation/policies/{id}", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplDelete)))
 	mux.Handle("GET /api/v1/elevation/policies/{id}/versions", h.requireRole(roleViewer)(http.HandlerFunc(h.eplVersions)))
 	mux.Handle("POST /api/v1/elevation/policies/{id}/versions/{version}/restore", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplVersionRestore)))
+	// P2: push a stored policy to the fleet (governed, signed, audited).
+	mux.Handle("POST /api/v1/elevation/push", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplPush)))
 }
 
 type eplBody struct {
@@ -246,4 +248,40 @@ func eplJSON(p *store.ElevationPolicy) map[string]any {
 		"rules": json.RawMessage(p.RulesJSON), "policy_sha256": p.PolicySHA,
 		"created": p.Created, "updated": p.Updated,
 	}
+}
+
+// eplPushBody is the push request: a stored policy name + selector.
+type eplPushBody struct {
+	Policy   string `json:"policy"`
+	Selector string `json:"selector"`
+}
+
+// eplPush pushes a stored elevation policy to the fleet (P2). The control
+// plane signs the policy with the server identity key and dispatches it;
+// each host applies it through its own sudoers self-grant (which re-verifies
+// the signature as root). Per-host policy gating + audit happen in the
+// control layer; offline hosts are refused (never queued).
+func (h *Handler) eplPush(w http.ResponseWriter, r *http.Request) {
+	var body eplPushBody
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body", nil)
+		return
+	}
+	if body.Policy == "" {
+		body.Policy = "default-baseline"
+	}
+	if body.Selector == "" {
+		body.Selector = "all"
+	}
+	principal, _ := h.actorFor(r)
+	pushed, skipped, err := h.ctrl.PushElevationPolicy(body.Policy, body.Selector, principal, h.roleFor(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"policy": body.Policy, "selector": body.Selector,
+		"pushed": pushed, "skipped": skipped,
+		"note": "connected hosts apply the signed policy through their sudoers self-grant and report the new scope; the posture table converges within a facts cycle",
+	})
 }
