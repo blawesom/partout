@@ -1,6 +1,6 @@
 # Proposal — Setup & privilege-management UX (for review; nothing implemented)
 
-> **Status: IMPLEMENTED (phases 1–3, v0.9.14 cycle).** Phase 1 (P3.1 run-row
+> **Status: IMPLEMENTED (phases 1–3, the v0.9.15 release).** Phase 1 (P3.1 run-row
 > elevation reason, E3 posture card, P4 elevation_drift alert), phase 2
 > (E1 one-line join, E2 control-plane binaries, P1 one-command elevation
 > bootstrap), and phase 3's P2 (signed policy propagation) + P3.2
@@ -263,5 +263,5 @@ the Elevation page. Effort: S.
 | 2 (the onboarding fix) | E1 + E2, P1 | First node = one pasted command, persistent, elevation-able |
 | 3 (structural) | P2, P3.2–3.4 | Central policy that actually propagates; legible authoring |
 
-Estimated total: roughly one minor-version cycle (a "v0.9.14: setup & privilege UX"
-field-verification pass), with phase 1 shippable independently and early.
+Estimated total: roughly one minor-version cycle (the "v0.9.15: setup & privilege UX"
+release), with phase 1 shippable independently and early.

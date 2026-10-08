@@ -1,9 +1,10 @@
 # Partout
 
-> **Status: beta (v0.9.13 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
-> before the 1.0 GA flip; v0.9.13 completes the field-verification pass: the one-command
-> `partout update` end to end, the M8.1 agent layout fix, elevation policy history,
-> `install-agent.sh`, release self-verification, and the rejoin migration path)** — the full feature set (observe,
+> **Status: beta (v0.9.15 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
+> before the 1.0 GA flip; v0.9.15 is the setup & privilege UX release: the one-line join
+> (`curl … | sudo bash`, binary served by the control plane), the one-command elevation
+> enablement for enrolled hosts, signed push-policy-to-fleet, and the elevation reason
+> on every run row)** — the full feature set (observe,
 > execute, patch, update rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your
 > `partout.db` regularly.

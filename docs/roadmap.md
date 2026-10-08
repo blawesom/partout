@@ -687,6 +687,61 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.15 — setup & privilege UX (the onboarding release).** Everything
+  since the v0.9.14 tag, answering the two loudest beta complaints: *first-node
+  enrollment is tedious* and *privilege management is hard to set up
+  correctly*. Design record: `docs/proposal-setup-elevation-ux.md` (reviewed,
+  then implemented in three phases).
+
+  - **One-line join (E1 + E2)**: `curl -fsSL 'https://srv/api/v1/join/<token>' |
+    sudo bash` — the server serves a token-gated bootstrap script that detects
+    the arch, fetches the agent binary **from the control plane** (newest
+    release-store artifact, else the server's own executable on a matching
+    arch — no GitHub round-trip, works on dev builds), verifies its sha256,
+    and runs the SSH-provisioning install body **verbatim** (M8.1 layout,
+    update guard, persistent systemd unit, CA inline, elevation wiring
+    optional at join time). The Add-host dialog leads with the one-liner over
+    HTTPS; plaintext servers keep the manual recipe (mid-flight tampering
+    surface). The install body is shared with provisioning, so the two paths
+    cannot drift.
+  - **One-command elevation enablement (P1)**: an admin mints a one-time
+    (15 min, single-serve, hostname-guarded) bootstrap and the host runs one
+    pasted command — the policy installs, the sudoers drop-in is rendered +
+    visudo-checked ON the host, `PARTOUT_ELEVATE=sudo` is wired,
+    `NoNewPrivileges` dropped, the agent restarted. Replaces the six-step
+    manual dance (which stays documented as the fallback). Offered from the
+    host posture card, the Elevation fleet table, and the Updates pre-apply
+    banner.
+  - **Signed policy propagation (P2)**: "push policy to fleet" — stored
+    policies are signed with the server identity key (the same key that
+    signs Decisions; agents already pin its public half) and dispatched as a
+    governed `elevation.push` action (deny-list gated, `require_approval`
+    refuses loudly, offline hosts are never queued). On the host the agent
+    applies the push through a sudoers **self-grant** in `default-baseline`
+    (`partout ctl elevation apply -` — exact-argv, bundle via stdin; no
+    wildcard, since `path.Match`'s `*` never crosses `/`); the ROOT context
+    re-verifies the signature against the root-owned pinned key
+    `/etc/partout/server-policy.pub` (written at provision/join/bootstrap
+    time). The wall stays host-owned — the unprivileged partout user can
+    neither forge a signature nor swap the pinned key — and the agent
+    hot-swaps its scope without a restart. Hosts provisioned before the
+    self-grant need one re-bootstrap to receive pushes.
+  - **Elevation legibility (P3.1 + P3.2 + P4)**: every dispatched run carries
+    the agent's elevation decision (elevated + *why*: matched rule / no match
+    / elevation off / legacy) on its run row — "why didn't it elevate?" is a
+    one-glance answer, not an agent-log dive; `partout ctl elevation explain
+    -- <command>` answers it ahead of time with the same matcher; a new
+    `elevation_drift` alert (seeded `default-elevation-drift`) pages when a
+    host's installed scope hash matches no stored policy; the host overview
+    gains a dismissible first-boot posture checklist (elevation off, no
+    custom service units) with fixes inline.
+  - **Observe fixes riding along**: haproxy "cannot open the file" on an
+    existing file reads as permission (not invalid); `ctl update` appends
+    the CA to the system root pool instead of replacing it.
+  - Schema v24/v25 (run-row elevation columns; elevation bootstrap tokens).
+    Known follow-ups (next cycle): the structured policy editor and the
+    fleet-aware policy generator (proposal P3.3/P3.4), and a live E2E rig
+    for the push path.
 - **v0.9.13 — the full field-verification pass (round 3).** Everything
   since the v0.9.12 tag, all validated on a real 2-host Rocky 10 fleet:
 
