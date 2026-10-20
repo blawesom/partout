@@ -385,7 +385,9 @@ tell the operator whether anything executed at all.
 ## 10. State, liveness, and reconciliation
 
 - **One SSE subscription**, `GET /api/v1/events`, established after login, authenticated
-  with the session token as `?token=<jwt>` (EventSource cannot set headers). Pages filter
+  with a short-lived SSE-scoped token as `?token=` (minted via `POST /auth/sse-token`;
+  EventSource cannot set headers — the session token itself never goes in the URL,
+  which reverse proxies log). Pages filter
   event kinds; they never open their own stream. No polling, ever — including
   the onboarding wizard's live phase (event-driven over `provision.*`, §21).
 - **Session expiry is explained, not silent.** Any API 401 goes through

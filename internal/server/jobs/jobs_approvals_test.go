@@ -104,6 +104,17 @@ func newJobBufconn(t *testing.T) (*store.Store, *jobs.Controller, *stream.Handle
 		}
 	}()
 
+	// Wait for the session to register (the AUTH_PROOF round-trip is
+	// async; a RunNow that outruns registration fails with "no active
+	// session" — seen only under full-suite parallel load).
+	deadline := time.Now().Add(5 * time.Second)
+	for h.AgentSession("ag_job") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("agent session not registered within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	cleanup := func() {
 		cancel()
 		_ = conn.Close()

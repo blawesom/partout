@@ -14,7 +14,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+
+	"github.com/blawesom/partout/internal/server/oauth"
 )
 
 // RegisterOAuth wires the OAuth2 + MCP client routes.
@@ -31,20 +34,21 @@ func (h *Handler) oauthCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name  string `json:"name"`
-		Scope string `json:"scope"`
+		Name        string `json:"name"`
+		Scope       string `json:"scope"`
+		RedirectURI string `json:"redirect_uri"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
-	c, err := h.oauthC.CreateClient(body.Name, body.Scope)
+	c, err := h.oauthC.CreateClient(body.Name, body.Scope, body.RedirectURI)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"id": c.ID, "name": c.Name, "scope": c.Scope,
+		"id": c.ID, "name": c.Name, "scope": c.Scope, "redirect_uri": c.RedirectURI,
 	})
 }
 
@@ -61,10 +65,9 @@ func (h *Handler) oauthListClients(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0, len(clients))
 	for _, c := range clients {
 		out = append(out, map[string]any{
-			"id": c.ID, "name": c.Name, "scope": c.Scope, "created": c.Created,
+			"id": c.ID, "name": c.Name, "scope": c.Scope, "redirect_uri": c.RedirectURI, "created": c.Created,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"clients": out})
 }
 
 func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +77,7 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		ClientID            string `json:"client_id"`
-		RedirectURI         string `json:"redirect_uri"` // accepted for compatibility; not enforced in v1 (no browser redirect)
+		RedirectURI         string `json:"redirect_uri"` // must equal the client's registered redirect_uri (empty matches empty)
 		CodeChallenge       string `json:"code_challenge"`
 		CodeChallengeMethod string `json:"code_challenge_method"`
 		Scope               string `json:"scope"`
@@ -86,8 +89,12 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	// The resource owner is the authenticated caller (their existing bearer
 	// credential) — this codebase has no browser login.
 	principal, role := h.actorFor(r)
-	code, ttl, err := h.oauthC.Authorize(r.Context(), body.ClientID, principal, role, body.Scope, body.CodeChallenge, body.CodeChallengeMethod)
+	code, ttl, err := h.oauthC.Authorize(r.Context(), body.ClientID, principal, role, body.Scope, body.CodeChallenge, body.CodeChallengeMethod, body.RedirectURI)
 	if err != nil {
+		if errors.Is(err, oauth.ErrRedirectURI) {
+			writeError(w, http.StatusBadRequest, "invalid_redirect_uri", err.Error(), nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}

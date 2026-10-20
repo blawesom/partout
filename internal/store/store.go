@@ -175,6 +175,9 @@ func (s *Store) applySchema() error {
 		{table: "provision_runs", column: "extras_json", def: "TEXT NOT NULL DEFAULT ''"},
 		{table: "execution_runs", column: "elevated", def: "INTEGER"},
 		{table: "execution_runs", column: "elevation_note", def: "TEXT NOT NULL DEFAULT ''"},
+		{table: "audit_events", column: "prev_hash", def: "TEXT NOT NULL DEFAULT ''"},
+		{table: "audit_events", column: "hash", def: "TEXT NOT NULL DEFAULT ''"},
+		{table: "mcp_clients", column: "redirect_uri", def: "TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return fmt.Errorf("store: ensure columns: %w", err)
 	}
@@ -187,8 +190,12 @@ func (s *Store) applySchema() error {
 	return tx.Commit()
 }
 
+// NowFunc is the store's clock (epoch seconds). Tests may pin it so agent
+// rows (last_seen) land on a controlled timeline (host_offline evaluation).
+var NowFunc = func() int64 { return time.Now().Unix() }
+
 // now returns current epoch seconds.
-func now() int64 { return time.Now().Unix() }
+func now() int64 { return NowFunc() }
 
 // columnSpec names a column that must exist on a table (forward migration on
 // pre-existing databases).

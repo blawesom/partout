@@ -17,6 +17,8 @@ import (
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/approvals"
+	"github.com/blawesom/partout/internal/server/packages"
+	"github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -31,6 +33,14 @@ type Controller struct {
 	ident *certutil.ServerIdentity
 	// approvals is the M4 approvals engine (require_approval parking).
 	approvals *approvals.Controller
+	// secrets materializes task-declared secrets to the target host
+	// before dispatch (the v0.9.13 known gap: task→secret references
+	// were unwired; nil = feature off, declaring runs fail fast).
+	secrets secrets.Materializer
+	// eol resolves a host's OS end-of-support state for policy matching
+	// (PRD §5.6; the seeded default gates ended hosts' upgrades). Nil →
+	// HostEOL stays "" and EOL-scoped rules never match.
+	eol packages.EOLProvider
 	// opTimeout bounds one task run over the stream.
 	opTimeout time.Duration
 }
@@ -40,14 +50,24 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	if lg == nil {
 		lg = log.Default()
 	}
-	return &Controller{st: st, h: h, sse: sseB, log: lg, opTimeout: 10 * time.Minute}
+	return &Controller{st: st, h: h, sse: sseB, log: lg, approvals: nil, secrets: nil, opTimeout: 10 * time.Minute}
 }
+
+// SetSecrets installs the secrets materializer used to warm the agent's
+// secret cache before a run with secret refs is dispatched (nil = feature
+// disabled; a run declaring secrets then fails fast server-side).
+func (c *Controller) SetSecrets(m secrets.Materializer) { c.secrets = m }
 
 // SetIdentity installs the server's Ed25519 signing key (signs Decisions).
 func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
 
 // SetApprovals installs the M4 approvals engine (require_approval parking).
 func (c *Controller) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
+
+// SetEOLProvider installs the host EOL state resolver for policy matching
+// (PRD §5.6 EOL→policy gating; upgrade steps on an ended host park for
+// approval).
+func (c *Controller) SetEOLProvider(p packages.EOLProvider) { c.eol = p }
 
 // ApprovalRequiredError is returned when a task run is parked on an approval
 // request (M4). The API layer maps it to 202 with the request id.
@@ -101,6 +121,9 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 				act.HostRoles = roles
 			}
 		}
+		if c.eol != nil {
+			act.HostEOL = c.eol(agentID)
+		}
 		rules, _ := c.st.GetPolicyRules()
 		// Step-level gating (F13): command-like steps are evaluated as
 		// exec-class actions too, so cmd-regex rules (e.g. the preset
@@ -131,6 +154,7 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 				MatchedRules: decision.MatchedRules,
 				Payload: map[string]any{
 					"task_id": taskID, "task_version": version,
+					"reason": packages.EOLReason(act.HostEOL),
 				},
 			})
 			if err != nil {
@@ -150,6 +174,7 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 				MatchedRules:  decision.MatchedRules,
 				Sig:           sig,
 				ActorRole:     actor.Role,
+				EolState:      act.HostEOL,
 			}
 		}
 	}
@@ -168,6 +193,18 @@ func (c *Controller) dispatchRun(ctx context.Context, runID, taskID string, vers
 		TaskVersion: int32(version),
 		Steps:       steps,
 		Decision:    pbDecision,
+	}
+	// Warm the agent's secret cache before the envelope goes out: the
+	// task's steps declare `secret:NAME` refs, and the step fails closed
+	// on the host ("secret unavailable") if the value is not already
+	// materialized. Unbound/disabled refs fail the dispatch here — a
+	// clear server-side error instead of a runtime step failure.
+	if refs := secrets.StepSecretRefs(steps); len(refs) > 0 {
+		if err := secrets.MaterializeForRun(c.secrets, agentID, runID, refs); err != nil {
+			_ = c.st.FinalizeTaskRun(runID, "failed", "secrets: "+err.Error(), 0)
+			c.audit(agentID, runID, actor, "error", 0, err.Error())
+			return nil, err
+		}
 	}
 	if err := c.h.SendTaskRun(agentID, pbRun); err != nil {
 		_ = c.st.FinalizeTaskRun(runID, "failed", "dispatch: "+err.Error(), 0)
@@ -419,15 +456,25 @@ func stepCommandLine(s *pb.TaskStep) (string, bool) {
 }
 
 // StepActions builds one exec-class policy action per command-like step,
-// from the same host/actor context as the task.run-class action.
+// from the same host/actor context as the task.run-class action. Package
+// and upgrade steps are mutation surfaces too (they run apt-get/dnf as
+// root via the elevation runner), so they evaluate as pkg.apply-class
+// actions — an EOL-scoped rule (e.g. the seeded
+// default-require-approval-eol-upgrade) gates task upgrades the same as a
+// dispatched packages apply.
 func StepActions(base policy.Action, steps []*pb.TaskStep) []policy.Action {
 	var out []policy.Action
 	for _, s := range steps {
+		a := base
+		switch s.GetKind() {
+		case "package", "upgrade":
+			a.ActionClass = policy.ActionPkgApply
+			out = append(out, a)
+		}
 		cl, ok := stepCommandLine(s)
 		if !ok {
 			continue
 		}
-		a := base
 		a.ActionClass = policy.ActionExec
 		a.CommandLine = cl
 		fields := strings.Fields(cl)

@@ -28,7 +28,7 @@ func newOAuth(t *testing.T) (*store.Store, *oauth.Manager, string) {
 		t.Fatalf("store: %v", err)
 	}
 	m := oauth.New(st)
-	c, err := m.CreateClient("claude-code", "")
+	c, err := m.CreateClient("claude-code", "", "")
 	if err != nil {
 		t.Fatalf("CreateClient: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestOAuthPKCEFlow(t *testing.T) {
 	ctx := context.Background()
 	verifier, challenge := pkce()
 
-	code, ttl, err := m.Authorize(ctx, clientID, "alice", "admin", "", challenge, "S256")
+	code, ttl, err := m.Authorize(ctx, clientID, "alice", "admin", "", challenge, "S256", "")
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
@@ -85,18 +85,18 @@ func TestOAuthPKCEFailures(t *testing.T) {
 	ctx := context.Background()
 	verifier, challenge := pkce()
 
-	if _, _, err := m.Authorize(ctx, clientID, "alice", "admin", "", challenge, "plain"); err == nil {
+	if _, _, err := m.Authorize(ctx, clientID, "alice", "admin", "", challenge, "plain", ""); err == nil {
 		t.Fatal("plain challenge method must be rejected")
 	}
-	if _, _, err := m.Authorize(ctx, "mcpcl_nope", "alice", "admin", "", challenge, "S256"); err == nil {
+	if _, _, err := m.Authorize(ctx, "mcpcl_nope", "alice", "admin", "", challenge, "S256", ""); err == nil {
 		t.Fatal("unknown client must be rejected")
 	}
-	code, _, err := m.Authorize(ctx, clientID, "alice", "admin", "", challenge, "S256")
+	code, _, err := m.Authorize(ctx, clientID, "alice", "admin", "", challenge, "S256", "")
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
 	// A second client cannot redeem another client's code.
-	c2, err := m.CreateClient("other", "")
+	c2, err := m.CreateClient("other", "", "")
 	if err != nil {
 		t.Fatalf("CreateClient 2: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestOAuthTokenExpiry(t *testing.T) {
 	st, m, clientID := newOAuth(t)
 	ctx := context.Background()
 	verifier, challenge := pkce()
-	code, _, err := m.Authorize(ctx, clientID, "bob", "operator", "", challenge, "S256")
+	code, _, err := m.Authorize(ctx, clientID, "bob", "operator", "", challenge, "S256", "")
 	if err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
@@ -129,5 +129,43 @@ func TestOAuthTokenExpiry(t *testing.T) {
 	}
 	if _, _, ok := m.Lookup(token); ok {
 		t.Fatal("expired token must not resolve")
+	}
+}
+
+// TestOAuthRedirectURIEquality: the request's redirect_uri must EQUAL the
+// client's registered one (empty↔empty allowed); a client registered WITH a
+// redirect_uri must not be authorized with a different (or empty) value.
+func TestOAuthRedirectURIEquality(t *testing.T) {
+	_, m, _ := newOAuth(t)
+	ctx := context.Background()
+	_, challenge := pkce()
+
+	// Client registered with a redirect_uri.
+	c, err := m.CreateClient("web-app", "", "https://cli.example/callback")
+	if err != nil {
+		t.Fatalf("CreateClient: %v", err)
+	}
+	// Matching value passes.
+	if _, _, err := m.Authorize(ctx, c.ID, "alice", "admin", "", challenge, "S256", "https://cli.example/callback"); err != nil {
+		t.Fatalf("matching redirect_uri must pass: %v", err)
+	}
+	// Mismatched value fails.
+	if _, _, err := m.Authorize(ctx, c.ID, "alice", "admin", "", challenge, "S256", "https://evil.example/callback"); err == nil {
+		t.Fatal("mismatched redirect_uri must be rejected")
+	}
+	// Empty request against a registered value fails too.
+	if _, _, err := m.Authorize(ctx, c.ID, "alice", "admin", "", challenge, "S256", ""); err == nil {
+		t.Fatal("empty redirect_uri against a registered one must be rejected")
+	}
+	// Registered value with an empty request fails the other way as well.
+	c2, err := m.CreateClient("no-redirect", "", "")
+	if err != nil {
+		t.Fatalf("CreateClient 2: %v", err)
+	}
+	if _, _, err := m.Authorize(ctx, c2.ID, "alice", "admin", "", challenge, "S256", "https://cli.example/callback"); err == nil {
+		t.Fatal("redirect_uri against an unregistered (empty) one must be rejected")
+	}
+	if _, _, err := m.Authorize(ctx, c2.ID, "alice", "admin", "", challenge, "S256", ""); err != nil {
+		t.Fatalf("empty↔empty must pass: %v", err)
 	}
 }

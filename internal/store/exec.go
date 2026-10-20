@@ -49,11 +49,13 @@ type OutputChunk struct {
 
 // AuditEvent is an append-only log entry.
 type AuditEvent struct {
-	TS      int64
-	Kind    string
-	Actor   string
-	AgentID string
-	Payload string // JSON
+	TS       int64
+	Kind     string
+	Actor    string
+	AgentID  string
+	Payload  string // JSON
+	PrevHash string // hash of the preceding row ('' for the first row)
+	Hash     string // this row's chain hash (sha256; see auditchain.go)
 }
 
 // ---- Execution CRUD -------------------------------------------------------
@@ -355,13 +357,10 @@ func (s *Store) ListOutput(runID string) ([]*OutputChunk, error) {
 
 // ---- Audit ----------------------------------------------------------------
 
-// AppendAudit appends an audit event (append-only, never updated).
+// AppendAudit appends an audit event (append-only, never updated) with its
+// hash-chain fields.
 func (s *Store) AppendAudit(a AuditEvent) error {
-	_, err := s.db.Exec(`
-		INSERT INTO audit_events(ts, kind, actor, agent_id, payload)
-		VALUES(?,?,?,?,?)
-	`, a.TS, a.Kind, a.Actor, a.AgentID, a.Payload)
-	return err
+	return s.AppendAuditChained(a)
 }
 
 // ListAudit returns audit events, optionally filtered by kind.
@@ -370,12 +369,12 @@ func (s *Store) ListAudit(kind string, limit int) ([]*AuditEvent, error) {
 	var err error
 	if kind == "" {
 		rows, err = s.db.Query(`
-			SELECT ts, kind, actor, agent_id, payload
+			SELECT ts, kind, actor, agent_id, payload, prev_hash, hash
 			FROM audit_events ORDER BY ts DESC LIMIT ?
 		`, limit)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT ts, kind, actor, agent_id, payload
+			SELECT ts, kind, actor, agent_id, payload, prev_hash, hash
 			FROM audit_events WHERE kind=? ORDER BY ts DESC LIMIT ?
 		`, kind, limit)
 	}
@@ -386,7 +385,7 @@ func (s *Store) ListAudit(kind string, limit int) ([]*AuditEvent, error) {
 	var out []*AuditEvent
 	for rows.Next() {
 		a := &AuditEvent{}
-		if err := rows.Scan(&a.TS, &a.Kind, &a.Actor, &a.AgentID, &a.Payload); err != nil {
+		if err := rows.Scan(&a.TS, &a.Kind, &a.Actor, &a.AgentID, &a.Payload, &a.PrevHash, &a.Hash); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -400,12 +399,12 @@ func (s *Store) ListAuditSince(kind string, since int64, limit int) ([]*AuditEve
 	var err error
 	if kind == "" {
 		rows, err = s.db.Query(`
-			SELECT ts, kind, actor, agent_id, payload
+			SELECT ts, kind, actor, agent_id, payload, prev_hash, hash
 			FROM audit_events WHERE ts > ? ORDER BY ts DESC LIMIT ?
 		`, since, limit)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT ts, kind, actor, agent_id, payload
+			SELECT ts, kind, actor, agent_id, payload, prev_hash, hash
 			FROM audit_events WHERE kind=? AND ts > ? ORDER BY ts DESC LIMIT ?
 		`, kind, since, limit)
 	}
@@ -416,7 +415,7 @@ func (s *Store) ListAuditSince(kind string, since int64, limit int) ([]*AuditEve
 	var out []*AuditEvent
 	for rows.Next() {
 		a := &AuditEvent{}
-		if err := rows.Scan(&a.TS, &a.Kind, &a.Actor, &a.AgentID, &a.Payload); err != nil {
+		if err := rows.Scan(&a.TS, &a.Kind, &a.Actor, &a.AgentID, &a.Payload, &a.PrevHash, &a.Hash); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

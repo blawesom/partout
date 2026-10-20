@@ -517,6 +517,8 @@ message Decision {
   bytes sig = 5;             // server Ed25519 signature (agent verifies)
   string actor_role = 6;     // requester RBAC role (for agent re-eval)
   string approval_id = 7;    // non-empty when a human approval authorized this (M4)
+  string eol_state = 8;      // host OS end-of-support state the server evaluated under
+                             // ("supported|ending_soon|ended"; "" = unknown/not gated)
 }
 
 message Command {
@@ -540,6 +542,7 @@ message PolicyBundle {
   map<string, string> host_tags = 5;  // this agent's tags (for local re-eval)
   repeated string host_roles = 6;     // this agent's roles (for local re-eval)
   string agent_id = 7;                 // server-assigned agent ID (for host:<id> predicates)
+  string host_eol = 8;                  // host's OS end-of-support state: supported|ending_soon|ended ("" = unknown)
 }
 
 message Revoke {

@@ -42,8 +42,10 @@ func New(st *store.Store) *Manager { return &Manager{st: st} }
 
 // --- client registry (admin-managed) ---
 
-// CreateClient registers one MCP client.
-func (m *Manager) CreateClient(name, scope string) (*store.MCPClient, error) {
+// CreateClient registers one MCP client. redirectURI is the optional
+// registered redirect target; when non-empty, /oauth2/authorize must pass
+// exactly that value (RFC 6749 §3.1.2.3 exact-match rule).
+func (m *Manager) CreateClient(name, scope, redirectURI string) (*store.MCPClient, error) {
 	if name == "" {
 		return nil, errors.New("oauth: client name required")
 	}
@@ -51,7 +53,7 @@ func (m *Manager) CreateClient(name, scope string) (*store.MCPClient, error) {
 		scope = "fleet"
 	}
 	c := &store.MCPClient{
-		ID: id.New("mcpcl"), Name: name, Scope: scope,
+		ID: id.New("mcpcl"), Name: name, Scope: scope, RedirectURI: redirectURI,
 		Created: time.Now().Unix(),
 	}
 	if err := m.st.CreateMCPClient(c); err != nil {
@@ -66,10 +68,15 @@ func (m *Manager) ListClients() ([]*store.MCPClient, error) {
 
 // --- authorization ---
 
+// ErrRedirectURI is returned when the request's redirect_uri does not equal
+// the client's registered one (empty↔empty allowed).
+var ErrRedirectURI = errors.New("oauth: redirect_uri does not match the client's registered redirect_uri")
+
 // Authorize issues a one-time authorization code for (client, principal)
 // bound to the PKCE challenge. principal/role come from the authenticated
-// caller (their existing bearer credential).
-func (m *Manager) Authorize(ctx context.Context, clientID, principal, role, scope, challenge, method string) (string, int64, error) {
+// caller (their existing bearer credential). redirectURI must EQUAL the
+// client's registered redirect_uri (empty matches empty).
+func (m *Manager) Authorize(ctx context.Context, clientID, principal, role, scope, challenge, method, redirectURI string) (string, int64, error) {
 	if method != MethodS256 {
 		return "", 0, fmt.Errorf("oauth: code_challenge_method must be %s (got %q)", MethodS256, method)
 	}
@@ -82,6 +89,9 @@ func (m *Manager) Authorize(ctx context.Context, clientID, principal, role, scop
 	}
 	if client == nil {
 		return "", 0, fmt.Errorf("oauth: unknown client %q", clientID)
+	}
+	if redirectURI != client.RedirectURI {
+		return "", 0, ErrRedirectURI
 	}
 	if scope == "" {
 		scope = client.Scope

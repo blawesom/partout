@@ -185,6 +185,13 @@ func (e *Executor) Step(ctx context.Context, idx int, step *pb.TaskStep) StepRes
 			return srWith(sr, StateSkipped, "when guard false")
 		}
 	}
+	// 1b. Resolve `secret:NAME` refs in the step's value fields against
+	// the E2E cache (materialized by the server just before dispatch).
+	// Unavailable refs fail closed — never run a step with a bare ref.
+	step, err := e.renderSecrets(step)
+	if err != nil {
+		return srWith(sr, StateFailed, err.Error())
+	}
 
 	// 2. Execute the step.
 	state, detail := e.doStep(ctx, step)
@@ -503,4 +510,121 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// renderSecrets resolves `secret:NAME` values in a step's referenceable
+// string fields (command args, env values, file content, template vars —
+// not paths/names, which are server-controlled identifiers) to the
+// materialized plaintext, so a step that declares a secret runs with the
+// value injected (PRD §5.7: the value exists in step context only). A
+// step whose ref is not in the agent's E2E cache fails closed
+// ("secret unavailable") — the server materializes bound refs just
+// before dispatching the run, so an unknown ref means unbound or the
+// feature being off.
+func (e *Executor) renderSecrets(step *pb.TaskStep) (*pb.TaskStep, error) {
+	if e.secrets == nil {
+		return step, nil
+	}
+	need := false
+	isRef := func(v string) bool { return strings.HasPrefix(v, "secret:") }
+	if isRef(step.GetCommand()) || isRef(step.GetContent()) || isRef(step.GetTemplate()) {
+		need = true
+	}
+	for _, a := range step.GetArgs() {
+		if isRef(a) {
+			need = true
+		}
+	}
+	for _, v := range step.GetEnv() {
+		if isRef(v) {
+			need = true
+		}
+	}
+	for _, v := range step.GetVars() {
+		if isRef(v) {
+			need = true
+		}
+	}
+	if !need {
+		return step, nil
+	}
+	// Copy the step so the dispatched definition is never mutated.
+	out := cloneStep(step)
+	resolve := func(v string) string {
+		if !isRef(v) {
+			return v
+		}
+		name := strings.TrimPrefix(v, "secret:")
+		if name == "" {
+			return v
+		}
+		val, err := e.secrets(name, 0)
+		if err != nil {
+			// Keep the ref: the failure below names the ref.
+			return v
+		}
+		return val
+	}
+	// failed names the first ref that stayed unresolved (lookup error);
+	// check inspects the RENDERED value so it also sees refs left intact.
+	var failed string
+	check := func(rendered string) {
+		if failed == "" && isRef(rendered) && strings.TrimPrefix(rendered, "secret:") != "" {
+			failed = strings.TrimPrefix(rendered, "secret:")
+		}
+	}
+	if args := out.GetArgs(); len(args) > 0 {
+		for i, a := range args {
+			out.Args[i] = resolve(a)
+			check(out.Args[i])
+		}
+	}
+	if env := out.GetEnv(); len(env) > 0 {
+		for k, v := range env {
+			env[k] = resolve(v)
+			check(env[k])
+		}
+	}
+	if vars := out.GetVars(); len(vars) > 0 {
+		for k, v := range vars {
+			vars[k] = resolve(v)
+			check(vars[k])
+		}
+	}
+	out.Content = resolve(out.GetContent())
+	check(out.GetContent())
+	out.Template = resolve(out.GetTemplate())
+	check(out.GetTemplate())
+	out.Command = resolve(out.GetCommand())
+	check(out.GetCommand())
+	if failed != "" {
+		return nil, fmt.Errorf("secret %q unavailable", failed)
+	}
+	return out, nil
+}
+
+// cloneStep copies a step shallowly, duplicating the map/slice fields so
+// the dispatched definition is never mutated during secret rendering.
+func cloneStep(s *pb.TaskStep) *pb.TaskStep {
+	out := &pb.TaskStep{
+		Kind: s.GetKind(), Name: s.GetName(), When: s.GetWhen(),
+		Command: s.GetCommand(), Args: append([]string(nil), s.GetArgs()...),
+		Path: s.GetPath(), Content: s.GetContent(), Template: s.GetTemplate(),
+		Mode: s.GetMode(), Package: s.GetPackage(), State: s.GetState(),
+		Service: s.GetService(), User: s.GetUser(), Group: s.GetGroup(),
+		Expr: s.GetExpr(),
+	}
+	if env := s.GetEnv(); len(env) > 0 {
+		out.Env = make(map[string]string, len(env))
+		for k, v := range env {
+			out.Env[k] = v
+		}
+	}
+	if vars := s.GetVars(); len(vars) > 0 {
+		out.Vars = make(map[string]string, len(vars))
+		for k, v := range vars {
+			out.Vars[k] = v
+		}
+	}
+	return out
 }

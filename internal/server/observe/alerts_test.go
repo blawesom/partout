@@ -1072,3 +1072,84 @@ func TestElevationDriftIgnoresLegacyAndUnreported(t *testing.T) {
 		t.Fatalf("firing = %+v, want ag_hash only", alerts)
 	}
 }
+
+// seedAgentSeen upserts an agent with a fixed last_seen (no facts needed:
+// host_offline reads the agents table, not fact documents).
+func seedAgentSeen(t *testing.T, st *store.Store, agentID string, lastSeen int64) {
+	t.Helper()
+	// UpsertAgent stamps last_seen with the store clock, ignoring the
+	// struct field — pin the clock to the wanted instant for the upsert.
+	prev := store.NowFunc
+	store.NowFunc = func() int64 { return lastSeen }
+	defer func() { store.NowFunc = prev }()
+	if err := st.UpsertAgent(store.Agent{ID: agentID, UUID: "u-" + agentID}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+}
+
+// TestHostOfflineFireResolve: a host past the offline window fires; a fresh
+// last_seen (reconnect) resolves it on the next tick.
+func TestHostOfflineFireResolve(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	t0 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	c.startedAt = t0.Add(-1 * time.Hour)               // engine started before the test clock
+	store.NowFunc = func() int64 { return now.Unix() } // agent rows stamp last_seen with the store clock
+	t.Cleanup(func() { store.NowFunc = func() int64 { return time.Now().Unix() } })
+	makeRule(t, st, KindHostOffline, "all", `{"offline_minutes":30}`, "critical", true)
+
+	seedAgentSeen(t, st, "ag_fresh", t0.Add(-5*time.Minute).Unix())
+	seedAgentSeen(t, st, "ag_stale", t0.Add(-45*time.Minute).Unix())
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("tick 1: %+v, want exactly 1 fired (ag_stale only)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 || alerts[0].AgentID != "ag_stale" {
+		t.Fatalf("firing = %+v, want ag_stale only", alerts)
+	}
+	if !contains(alerts[0].Message, "ag_stale") || !contains(alerts[0].Message, "host offline") {
+		t.Errorf("message %q should name the host and the condition", alerts[0].Message)
+	}
+
+	// Still stale: dedup.
+	res, _ = c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("tick 2: %+v, want 0 fired (dedup)", res)
+	}
+
+	// The host heartbeats again: resolves.
+	seedAgentSeen(t, st, "ag_stale", now.Add(-1*time.Minute).Unix())
+	res, _ = c.EvaluateOnce()
+	if res.Resolved != 1 {
+		t.Fatalf("tick 3: %+v, want 1 resolved", res)
+	}
+}
+
+// TestHostOfflineServerRestartGuard: hosts whose last_seen predates the
+// engine start (the server itself was down) must not page on the first tick.
+func TestHostOfflineServerRestartGuard(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+	t0 := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	now := t0
+	c.now = func() time.Time { return now }
+	store.NowFunc = func() int64 { return now.Unix() }
+	t.Cleanup(func() { store.NowFunc = func() int64 { return time.Now().Unix() } })
+	makeRule(t, st, KindHostOffline, "all", `{"offline_minutes":30}`, "critical", true)
+
+	// Both stale past the window, but both were last seen BEFORE the engine
+	// started (server was down — last_seen ages for everyone).
+	seedAgentSeen(t, st, "ag_old", c.startedAt.Add(-2*time.Hour).Unix())
+	seedAgentSeen(t, st, "ag_older", 0) // never seen
+
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 0 {
+		t.Fatalf("tick 1: %+v, want 0 fired (server-restart guard)", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 0 {
+		t.Fatalf("firing = %+v, want none", alerts)
+	}
+}

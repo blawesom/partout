@@ -41,6 +41,7 @@ const (
 	KindUpdateDrift       = "update_drift"     // M8.1.1: agents behind the store's latest release
 	KindSecurityUpdates   = "security_updates" // M5.1: unpatched CVEs on a host (security scan)
 	KindElevationDrift    = "elevation_drift"  // host's installed elevation scope matches no stored policy
+	KindHostOffline       = "host_offline"     // deadman switch: host stopped heartbeating
 )
 
 // Controller evaluates alert rules on a tick.
@@ -56,6 +57,7 @@ type Controller struct {
 	mu          sync.Mutex
 	firstFailed map[string]time.Time   // "agentID|unit" -> first time observed failed
 	restartSamp map[string]restartSamp // "agentID|unit" -> last (count, time, rate) sample
+	startedAt   time.Time              // engine start (host_offline restart guard)
 	now         func() time.Time       // injectable clock (tests)
 }
 
@@ -81,6 +83,7 @@ func New(st *store.Store, sseB *sse.Broker, lg *log.Logger, tick time.Duration) 
 		stop:        make(chan struct{}),
 		firstFailed: make(map[string]time.Time),
 		restartSamp: make(map[string]restartSamp),
+		startedAt:   time.Now(),
 		now:         time.Now,
 	}
 }
@@ -219,6 +222,9 @@ func (c *Controller) EvaluateOnce() (EvalResult, error) {
 			drifts := c.elevationDrifts(r, hosts, docs)
 			res.Fired += c.fireElevationDrift(r, drifts)
 			res.Resolved += c.resolveByDedupDiff(r, hosts, c.elevationDriftKeys(r, drifts))
+		case KindHostOffline:
+			res.Fired += c.fireHostOffline(r, hosts, now)
+			res.Resolved += c.resolveByDedupDiff(r, hosts, c.hostOfflineKeys(r, hosts, now))
 		default:
 			if c.log != nil {
 				c.log.Printf("observe/alerts: rule %s: unsupported kind %q (skipped)", r.ID, r.Kind)
@@ -1250,6 +1256,7 @@ type elevFact struct {
 	Rules   int      `json:"rules"`
 	Sources []string `json:"sources"`
 	Error   string   `json:"error"`
+	Tier    string   `json:"tier"`
 }
 
 // elevationDrifts returns the rule's hosts whose reported elevation policy
@@ -1290,6 +1297,12 @@ func (c *Controller) elevationDrifts(r *store.AlertRule, hosts []string, docs ma
 		if f.Mode != "sudo" || f.Hash == "" {
 			continue // elevation off, or legacy sudoers (no policy file)
 		}
+		if f.Tier == "full" {
+			// The full tier's hash-match is meaningless as a drift
+			// signal (one NOPASSWD: ALL grant; the tier IS the
+			// posture). Never drift-alert a full-tier host.
+			continue
+		}
 		if _, ok := known[f.Hash]; ok {
 			continue
 		}
@@ -1315,6 +1328,80 @@ func (c *Controller) elevationDriftKeys(r *store.AlertRule, hits []elevDriftHit)
 	out := make(map[string]struct{}, len(hits))
 	for _, h := range hits {
 		out[r.ID+"|"+h.agentID+"|elevdrift"] = struct{}{}
+	}
+	return out
+}
+
+// --- host_offline ---
+
+// hostOfflineMinutes is the deadman window: a host whose last_seen is older
+// than this many minutes is considered offline.
+func hostOfflineMinutes(r *store.AlertRule) int {
+	return int(thresholdInt(r, "offline_minutes", 30))
+}
+
+// hostOfflineHits returns the rule's hosts currently past the offline window.
+// It also holds the dedup-key helper set for resolveByDedupDiff.
+//
+// Server-restart guard: the engine runs on the server, and the store's
+// MarkAllDisconnected/heartbeat bookkeeping ages last_seen for everyone while
+// the server itself is down. If the server was down, its own start time is
+// newer than every host's last_seen, and a deadman page for "all hosts" would
+// be a false alarm about the server, not the hosts. The simplest correct
+// approach: only consider hosts last seen AFTER the controller was created
+// (engine start) for firing; everything older is treated as unknown, not
+// offline, and any still-firing alert from before the restart resolves on
+// the next tick (its dedup key leaves the condition set).
+func (c *Controller) hostOfflineHits(r *store.AlertRule, hosts []string, now time.Time) map[string]time.Duration {
+	mins := hostOfflineMinutes(r)
+	cutoff := now.Add(-time.Duration(mins) * time.Minute)
+	engineStart := c.startedAt
+	hostSet := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		hostSet[h] = true
+	}
+	agents, err := c.st.Agents()
+	if err != nil {
+		if c.log != nil {
+			c.log.Printf("observe/alerts: host_offline: %v", err)
+		}
+		return nil
+	}
+	out := make(map[string]time.Duration)
+	for _, a := range agents {
+		if !hostSet[a.ID] || a.LastSeen == 0 {
+			continue
+		}
+		last := time.Unix(a.LastSeen, 0)
+		// Restart guard: a host last seen before the engine started was
+		// offline during a server outage — not a deadman event.
+		if last.Before(engineStart) {
+			continue
+		}
+		if last.Before(cutoff) {
+			out[a.ID] = now.Sub(last)
+		}
+	}
+	return out
+}
+
+func (c *Controller) fireHostOffline(r *store.AlertRule, hosts []string, now time.Time) int {
+	fired := 0
+	for agID, since := range c.hostOfflineHits(r, hosts, now) {
+		msg := fmt.Sprintf("host offline: %s has not been seen for %s (threshold %d min). Check the host and network; the agent reconnects automatically once reachable.",
+			agID, since.Round(time.Minute), hostOfflineMinutes(r))
+		if c.fire(r, agID, r.ID+"|"+agID+"|offline", msg) {
+			fired++
+		}
+	}
+	return fired
+}
+
+func (c *Controller) hostOfflineKeys(r *store.AlertRule, hosts []string, now time.Time) map[string]struct{} {
+	hits := c.hostOfflineHits(r, hosts, now)
+	out := make(map[string]struct{}, len(hits))
+	for agID := range hits {
+		out[r.ID+"|"+agID+"|offline"] = struct{}{}
 	}
 	return out
 }

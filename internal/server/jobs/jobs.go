@@ -28,6 +28,8 @@ import (
 	pb "github.com/blawesom/partout/internal/proto"
 	sel "github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/server/approvals"
+	"github.com/blawesom/partout/internal/server/packages"
+	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/sse"
@@ -44,6 +46,13 @@ type Controller struct {
 	// approvals is the M4 approvals engine (require_approval parking on
 	// manual RunNow; scheduled fires stay fail-closed on the agent side).
 	approvals *approvals.Controller
+	// secrets materializes task-declared secrets to the target host
+	// before a manual run is dispatched (nil = feature off; a task with
+	// secret refs then fails fast at RunNow).
+	secrets serversecrets.Materializer
+	// eol resolves a host's OS end-of-support state for policy matching
+	// (PRD §5.6). Nil → HostEOL stays "" and EOL-scoped rules never match.
+	eol packages.EOLProvider
 }
 
 // New builds a Controller.
@@ -54,12 +63,19 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	return &Controller{st: st, h: h, sse: sseB, log: lg}
 }
 
+// SetSecrets installs the secrets materializer for RunNow dispatches.
+func (c *Controller) SetSecrets(m serversecrets.Materializer) { c.secrets = m }
+
 // SetIdentity installs the server's Ed25519 signing key (signs job
 // Decisions, like tasks/packages/files/sessions).
 func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident }
 
 // SetApprovals installs the M4 approvals engine (require_approval parking).
 func (c *Controller) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
+
+// SetEOLProvider installs the host EOL state resolver for policy matching
+// (PRD §5.6 EOL→policy gating).
+func (c *Controller) SetEOLProvider(p packages.EOLProvider) { c.eol = p }
 
 // ApprovalRequiredError is returned when a manual job run is parked on an
 // approval request (M4). The API layer maps it to 202 with the request id.
@@ -396,6 +412,9 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string, steps []*pb.T
 				act.HostRoles = roles
 			}
 		}
+		if c.eol != nil {
+			act.HostEOL = c.eol(a.ID)
+		}
 		decision, effect, reason := c.signTaskRunDecision(jobID, actorRole, act, steps)
 		if decision == nil {
 			if effect == policy.EffectRequireApproval {
@@ -443,6 +462,7 @@ func (c *Controller) signTaskRunDecision(runID, actorRole string, act policy.Act
 		MatchedRules:  decision.MatchedRules,
 		Sig:           sig,
 		ActorRole:     actorRole,
+		EolState:      act.HostEOL,
 	}, decision.Effect, ""
 }
 
@@ -614,6 +634,9 @@ func (c *Controller) hostTaskRunDecision(jobID, hostID string) (*pb.Decision, st
 			act.HostRoles = roles
 		}
 	}
+	if c.eol != nil {
+		act.HostEOL = c.eol(hostID)
+	}
 	decision, _, reason := c.signTaskRunDecision(jobID, "system", act, pbSteps)
 	return decision, reason
 }
@@ -665,6 +688,9 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 		if roles, _ := c.st.Roles(agentID); len(roles) > 0 {
 			act.HostRoles = roles
 		}
+	}
+	if c.eol != nil {
+		act.HostEOL = c.eol(agentID)
 	}
 	decision, effect, _ := c.signTaskRunDecision(runID, actor.Role, act, toPBSteps(steps))
 	if decision == nil {
@@ -721,6 +747,17 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 		ScheduledAt: time.Now().Unix(), Trigger: "manual", State: "running",
 	}
 	_ = c.st.CreateJobRun(run)
+	// Warm the agent's secret cache before the task envelope goes out
+	// (task steps declare `secret:NAME` refs; the agent fails a step
+	// closed when the value was not materialized). Unbound/disabled refs
+	// fail the run here, server-side, with the ref named.
+	if refs := serversecrets.StepSecretRefs(toPBSteps(steps)); len(refs) > 0 {
+		if err := serversecrets.MaterializeForRun(c.secrets, agentID, runID, refs); err != nil {
+			_ = c.st.FinalizeJobRun(runID, "failed", "secrets: "+err.Error())
+			c.audit("run-error", jobID, agentID, 0, actor.Principal)
+			return err
+		}
+	}
 	if err := c.h.SendTaskRun(agentID, &pb.TaskRun{
 		RunId:       runID,
 		TaskId:      job.TaskID,
@@ -801,11 +838,20 @@ func (c *Controller) DispatchApprovedJobRun(req *store.ApprovalRequest, dec *pb.
 	if err != nil {
 		return fmt.Errorf("jobs: approval %s: decode steps: %w", req.ID, err)
 	}
+	// Same as RunNow: warm the agent's secret cache before dispatch.
+	pbSteps := toPBSteps(steps)
+	if refs := serversecrets.StepSecretRefs(pbSteps); len(refs) > 0 {
+		if err := serversecrets.MaterializeForRun(c.secrets, req.AgentID, req.RunID, refs); err != nil {
+			_ = c.st.FinalizeJobRun(req.RunID, "failed", "secrets: "+err.Error())
+			c.audit("run-error", run.JobID, req.AgentID, 0, "approvals")
+			return fmt.Errorf("jobs: secrets: %w", err)
+		}
+	}
 	if err := c.h.SendTaskRun(req.AgentID, &pb.TaskRun{
 		RunId:       req.RunID,
 		TaskId:      job.TaskID,
 		TaskVersion: int32(job.TaskVersion),
-		Steps:       toPBSteps(steps),
+		Steps:       pbSteps,
 		Decision:    dec,
 	}); err != nil {
 		_ = c.st.FinalizeJobRun(req.RunID, "failed", "dispatch: "+err.Error())

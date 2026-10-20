@@ -1,12 +1,13 @@
 # Proposal — Setup & privilege-management UX (for review; nothing implemented)
 
-> **Status: IMPLEMENTED (phases 1–3, the v0.9.15 release).** Phase 1 (P3.1 run-row
-> elevation reason, E3 posture card, P4 elevation_drift alert), phase 2
-> (E1 one-line join, E2 control-plane binaries, P1 one-command elevation
-> bootstrap), and phase 3's P2 (signed policy propagation) + P3.2
-> (`elevation explain`) are in. **Remaining from phase 3:** P3.3 (structured
-> policy editor) and P3.4 (fleet-aware policy generator) — UI work, next
-> cycle. The text below is the reviewed proposal, kept as the design record.
+> **Status: IMPLEMENTED IN FULL.** Phase 1 (P3.1 run-row elevation reason,
+> E3 posture card, P4 elevation_drift alert), phase 2 (E1 one-line join,
+> E2 control-plane binaries, P1 one-command elevation bootstrap), and
+> phase 3 (P2 signed policy propagation; P3.2 `elevation explain`;
+> P3.3 structured policy editor; P3.4 fleet-aware policy generator)
+> are all in — P3.3/P3.4 shipped with the elevation-tier work that
+> followed (broad default + strict/full tiers). The text below is the
+> reviewed proposal, kept as the design record.
 >
 > Design rationale lives in [architecture.md](architecture.md); day-2 operations in
 > [operations.md](operations.md); deployment topologies in [deployment.md](deployment.md).

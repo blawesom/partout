@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	serverauth "github.com/blawesom/partout/internal/server/auth"
+	"github.com/blawesom/partout/internal/server/ssetoken"
 	"github.com/blawesom/partout/internal/store"
 )
 
@@ -27,6 +28,7 @@ func (h *Handler) RegisterAuth(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/auth/me", h.requireRole(roleViewer)(http.HandlerFunc(h.authMe)))
 	mux.Handle("POST /api/v1/auth/logout", h.requireRole(roleViewer)(http.HandlerFunc(h.authLogout)))
 	mux.Handle("POST /api/v1/auth/password", h.requireRole(roleViewer)(http.HandlerFunc(h.authChangePassword)))
+	mux.Handle("POST /api/v1/auth/sse-token", h.requireRole(roleViewer)(http.HandlerFunc(h.authSSEToken)))
 
 	mux.Handle("GET /api/v1/users", h.requireRole(roleAdmin)(http.HandlerFunc(h.userList)))
 	mux.Handle("POST /api/v1/users", h.requireRole(roleAdmin)(http.HandlerFunc(h.userCreate)))
@@ -98,6 +100,32 @@ func (h *Handler) authMe(w http.ResponseWriter, r *http.Request) {
 		"username":     sess.Username,
 		"role":         sess.Role,
 		"expires_unix": sess.ExpiresUnix,
+	})
+}
+
+// authSSEToken mints a short-lived SSE-scoped token for the caller
+// (EventSource cannot set headers, so the UI passes ?token=<sse-token> on
+// GET /api/v1/events). The token carries the caller's role, is accepted
+// only on that route, and expires quickly — a URL-embedded credential
+// must not outlive its leak surface (reverse-proxy access logs).
+func (h *Handler) authSSEToken(w http.ResponseWriter, r *http.Request) {
+	if h.sseTokC == nil {
+		writeError(w, http.StatusServiceUnavailable, "sse_tokens_disabled",
+			"SSE token minting not initialized", nil)
+		return
+	}
+	principal, role := h.actorFor(r)
+	tok, expires, err := h.sseTokC.Mint(principal, role)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "error", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token":            tok,
+		"expires_unix":     expires,
+		"principal":        principal,
+		"role":             role,
+		"authorized_route": "/api/v1/events",
 	})
 }
 
@@ -269,3 +297,7 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"deleted": name})
 }
+
+// SetSSETokens installs the SSE-scoped token controller. Until it is called,
+// ?token= SSE credentials are rejected (mint first via this route).
+func (h *Handler) SetSSETokens(c *ssetoken.Controller) { h.sseTokC = c }

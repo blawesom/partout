@@ -245,7 +245,7 @@ EOF
 chmod +x "$CTL"
 
 # --- 6. provision with --elevate (the D1 flow, over real ssh) ------------------
-say "provision new --elevate (default-baseline policy, labels)"
+say "provision new --elevate (default-broad tier policy, labels)"
 PROVOUT=$("$CTL" provision new --host deploy@localhost --elevate --service-labels sshd 2>&1) || true
 echo "$PROVOUT" | sed 's/^/    | /'
 check_grep "provision: run started with the elevation bootstrap" "$PROVOUT" "elevation: bootstrap included"
@@ -285,7 +285,7 @@ step "elevation bootstrap artifacts on the target"
 check "elevation.d exists" test -d /etc/partout/elevation.d
 MODE=$(stat -c %a /etc/partout/elevation.d)
 check "elevation.d is 0755, not 0700 (B2: umask)" test "$MODE" = "755"
-check "policy drop-in installed" test -f /etc/partout/elevation.d/10-default-baseline.json
+check "policy drop-in installed" test -f /etc/partout/elevation.d/10-default-broad.json
 check "PARTOUT_ELEVATE wired in agent.env" grep -q "^PARTOUT_ELEVATE=sudo" /etc/partout/agent.env
 check "service labels wired" grep -q "^PARTOUT_SERVICE_LABELS=sshd" /etc/partout/agent.env
 check "agent is running" systemctl is-active partout-agent.service
@@ -364,7 +364,7 @@ check "agent is running after migration" systemctl is-active partout-agent
 step "elevation fact hash == store policy sha"
 AGENT_ID=$("$CTL" hosts | awk '/ag_/{print $1; exit}')
 HASH=$(curl -sk -H "Authorization: Bearer $ADMIN_TOKEN" "https://localhost:$PORT/api/v1/hosts/$AGENT_ID/facts" | python3 -c 'import json,sys; f=json.load(sys.stdin); f=f.get("facts") or f; import json as j; print(j.loads(f["partout.elevation"]).get("hash",""))' 2>/dev/null || echo "")
-STORE_SHA=$(curl -sk -H "Authorization: Bearer $ADMIN_TOKEN" "https://localhost:$PORT/api/v1/elevation/policies/default-baseline" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("policy_sha256",""))' 2>/dev/null || echo "")
+STORE_SHA=$(curl -sk -H "Authorization: Bearer $ADMIN_TOKEN" "https://localhost:$PORT/api/v1/elevation/policies/default-broad" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("policy_sha256",""))' 2>/dev/null || echo "")
 check "agent hash matches the store" test -n "$HASH" -a "$HASH" = "$STORE_SHA"
 
 # --- 10. dispatch: elevated in-policy, unprivileged out-of-policy ----------------

@@ -108,6 +108,86 @@ func TestListExecutions(t *testing.T) {
 	}
 }
 
+// TestListExecutionsElevatedFilter verifies GET /api/v1/executions?elevated=
+// filters server-side on the runs' elevation decision: an execution with an
+// elevated run matches elevated=true, one with an unprivileged run matches
+// elevated=false, and runs whose agent never reported (elevated IS NULL)
+// match neither. Absent/invalid values show all.
+func TestListExecutionsElevatedFilter(t *testing.T) {
+	apiH, _, srv := startAPITest(t)
+
+	// Two executions on the fixture host; the agent reports elevation for
+	// the first run only (the second stays NULL = not reported).
+	d1 := dispatchAndWait(t, srv, `{"selector":"host:ag_api","cmd":"whoami"}`)
+	d2 := dispatchAndWait(t, srv, `{"selector":"host:ag_api","cmd":"id"}`)
+	exec1, _ := d1["execution_id"].(string)
+	exec2, _ := d2["execution_id"].(string)
+	if exec1 == "" || exec2 == "" {
+		t.Fatalf("dispatch ids = %q, %q", exec1, exec2)
+	}
+	var run1, run2 string
+	for _, d := range []struct {
+		exec string
+		run  *string
+	}{{exec1, &run1}, {exec2, &run2}} {
+		resp, err := http.Get(srv.URL + "/api/v1/executions/" + d.exec)
+		if err != nil {
+			t.Fatalf("GET execution: %v", err)
+		}
+		var detail struct {
+			Runs []struct {
+				RunID string `json:"run_id"`
+			} `json:"runs"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+			t.Fatalf("decode detail: %v", err)
+		}
+		resp.Body.Close()
+		if len(detail.Runs) != 1 {
+			t.Fatalf("execution %s: runs = %d, want 1", d.exec, len(detail.Runs))
+		}
+		*d.run = detail.Runs[0].RunID
+	}
+	if err := apiH.Store().SetRunElevation(run1, true, "policy rule matched"); err != nil {
+		t.Fatalf("SetRunElevation: %v", err)
+	}
+
+	get := func(q string) []string {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/api/v1/executions" + q)
+		if err != nil {
+			t.Fatalf("GET /executions%s: %v", q, err)
+		}
+		defer resp.Body.Close()
+		var page struct {
+			Items []struct {
+				ID string `json:"id"`
+			} `json:"items"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+			t.Fatalf("decode %s: %v", q, err)
+		}
+		ids := make([]string, 0, len(page.Items))
+		for _, it := range page.Items {
+			ids = append(ids, it.ID)
+		}
+		return ids
+	}
+
+	if got := get("?elevated=true"); len(got) != 1 || got[0] != exec1 {
+		t.Errorf("elevated=true = %v, want [%s]", got, exec1)
+	}
+	if got := get("?elevated=false"); len(got) != 0 {
+		t.Errorf("elevated=false = %v, want [] (run2 never reported, run1 is elevated)", got)
+	}
+	if got := get(""); len(got) < 2 {
+		t.Errorf("no filter = %v, want both executions", got)
+	}
+	if got := get("?elevated=bogus"); len(got) < 2 {
+		t.Errorf("invalid filter = %v, want all (treated as absent)", got)
+	}
+}
+
 // dispatchAndWait dispatches a command and waits for a terminal state.
 func dispatchAndWait(t *testing.T, srv *httptest.Server, body string) map[string]any {
 	t.Helper()

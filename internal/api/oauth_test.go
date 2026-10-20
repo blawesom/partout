@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/blawesom/partout/internal/server/oauth"
@@ -107,6 +108,88 @@ func TestOAuthPKCE_EndToEnd(t *testing.T) {
 		})
 	if code != http.StatusBadRequest {
 		t.Fatalf("code reuse = %d (%s), want 400", code, b)
+	}
+}
+
+// TestOAuthRedirectURIMismatch: /oauth2/authorize requires the request's
+// redirect_uri to EQUAL the client's registered one — matching passes,
+// mismatched is rejected with 400 invalid_redirect_uri, and a client
+// registered without one cannot be authorized with a redirect_uri set.
+func TestOAuthRedirectURIMismatch(t *testing.T) {
+	apiH, _, srv := startAPITest(t)
+	apiH.SetOAuth(oauth.New(apiH.Store()))
+	_, challenge := pkcePair(t)
+
+	// Register a client WITH a redirect_uri.
+	var client struct {
+		ID string `json:"id"`
+	}
+	code, b := doJSON(t, "POST", srv.URL+"/api/v1/mcp/clients", "",
+		map[string]any{"name": "cli", "redirect_uri": "http://127.0.0.1:8917/callback"})
+	if code != http.StatusCreated {
+		t.Fatalf("create client = %d (%s)", code, b)
+	}
+	mustJSON(t, b, &client)
+
+	authz := func(redirect string) int {
+		c, _ := doJSON(t, "POST", srv.URL+"/oauth2/authorize", "",
+			map[string]any{
+				"client_id":             client.ID,
+				"redirect_uri":          redirect,
+				"code_challenge":        challenge,
+				"code_challenge_method": "S256",
+			})
+		return c
+	}
+
+	// Matching redirect_uri passes.
+	if c := authz("http://127.0.0.1:8917/callback"); c != http.StatusOK {
+		t.Fatalf("authorize with matching redirect_uri = %d, want 200", c)
+	}
+	// Mismatched redirect_uri is rejected with invalid_redirect_uri.
+	c, b := doJSON(t, "POST", srv.URL+"/oauth2/authorize", "",
+		map[string]any{
+			"client_id":             client.ID,
+			"redirect_uri":          "http://evil.example/callback",
+			"code_challenge":        challenge,
+			"code_challenge_method": "S256",
+		})
+	if c != http.StatusBadRequest {
+		t.Fatalf("authorize with mismatched redirect_uri = %d (%s), want 400", c, b)
+	}
+	if !strings.Contains(string(b), "invalid_redirect_uri") {
+		t.Fatalf("error code = %s, want invalid_redirect_uri", b)
+	}
+
+	// A client registered WITHOUT a redirect_uri cannot send one.
+	code, b = doJSON(t, "POST", srv.URL+"/api/v1/mcp/clients", "",
+		map[string]any{"name": "no-redirect"})
+	if code != http.StatusCreated {
+		t.Fatalf("create client 2 = %d (%s)", code, b)
+	}
+	mustJSON(t, b, &client)
+	c, b = doJSON(t, "POST", srv.URL+"/oauth2/authorize", "",
+		map[string]any{
+			"client_id":             client.ID,
+			"redirect_uri":          "http://127.0.0.1:8917/callback",
+			"code_challenge":        challenge,
+			"code_challenge_method": "S256",
+		})
+	if c != http.StatusBadRequest {
+		t.Fatalf("authorize with redirect_uri on an unregistered client = %d (%s), want 400", c, b)
+	}
+	if !strings.Contains(string(b), "invalid_redirect_uri") {
+		t.Fatalf("error code = %s, want invalid_redirect_uri", b)
+	}
+	// …but empty↔empty still works.
+	c, b = doJSON(t, "POST", srv.URL+"/oauth2/authorize", "",
+		map[string]any{
+			"client_id":             client.ID,
+			"code_challenge":        challenge,
+			"code_challenge_method": "S256",
+		})
+	if c != http.StatusOK {
+		t.Fatalf("authorize empty↔empty = %d (%s), want 200", c, b)
 	}
 }
 

@@ -116,6 +116,12 @@ type Config struct {
 	// so the run is stranded and resolves to a terminal state (1.0 gate,
 	// roadmap item 20). 0 disables the resolution sweep.
 	InterruptedTTL int
+	// SSETTL (PARTOUT_SSE_TOKEN_TTL_S, default 60): lifetime of an
+	// SSE-scoped token minted by POST /api/v1/auth/sse-token. EventSource
+	// cannot set headers, so the web UI passes ?token=<sse-token> on
+	// GET /api/v1/events — the query string leaks into reverse-proxy
+	// access logs, hence a short-lived, single-route token.
+	SSETTL int
 	// SecurityScanS (M5.1, PARTOUT_SECURITY_SCAN_S, default 21600 = 6 h):
 	// cadence of the periodic security scan — per-host update list + OSV CVE
 	// correlation, persisted for the security_updates alert kind. 0 disables
@@ -204,7 +210,7 @@ func Load() (*Config, error) {
 		AutoDraftRollouts:     envBoolDefaultTrue("PARTOUT_AUTO_DRAFT_ROLLOUTS"),
 		SecurityScanS:         envInt("PARTOUT_SECURITY_SCAN_S", 21600),
 		InterruptedTTL:        envInt("PARTOUT_INTERRUPTED_TTL_S", 86400),
-		UpdateHealthS:         envInt("PARTOUT_UPDATE_HEALTH_S", 60),
+		SSETTL:                envInt("PARTOUT_SSE_TOKEN_TTL_S", 60),
 		UpdateRestartCmd:      envOrStr("PARTOUT_UPDATE_RESTART_CMD", "systemctl restart partout-agent"),
 		CleanupOnRevoke:       envBool("PARTOUT_AGENT_CLEANUP_ON_REVOKE"),
 		FileRoot:              os.Getenv("PARTOUT_FILE_ROOT"),

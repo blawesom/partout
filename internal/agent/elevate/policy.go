@@ -64,8 +64,12 @@ func (d Decision) String() string {
 //	        as `path ""` (the empty-args specifier), not a bare command
 //	        (which would match any arguments).
 //
-// Env lists the variables allowed to pass through elevation for this
-// grant (rendered as sudoers SETENV).
+// Full: the full-privilege tier grant (P0 elevation tiers). A rule with
+// Full=true and no allow/matchers matches EVERY command and renders as
+// `NOPASSWD: ALL` — root-equivalent by design, the explicit escape hatch
+// above the seeded "broad" default. It must be the loud, visible option:
+// the posture fact reports tier=full, and the renderer refuses to mix it
+// with other rules (validate enforces one grant per policy document).
 type Rule struct {
 	Allow string   `json:"allow"` // binary name(s), `|`-separated
 	Args  []string `json:"args,omitempty"`
@@ -73,15 +77,40 @@ type Rule struct {
 	Units []string `json:"units,omitempty"`
 	Files []string `json:"files,omitempty"`
 	Env   []string `json:"env,omitempty"`
+	Full  bool     `json:"full,omitempty"`
+	// ArgsPrefix (the "broad" tier's shape): matches when argv begins
+	// with exactly these elements — any remainder matches. It renders to
+	// a sudoers line ending in `*` (which, in sudoers, matches the rest
+	// of the argument string including spaces), so multi-argument forms
+	// like `apt-get -y install vim fail2ban btop` elevate on both sides
+	// of the wall. The fixed-length `args` matcher cannot express that;
+	// prefix grants are inherently WIDE — the tier classifier reads them
+	// as broad.
+	ArgsPrefix []string `json:"args_prefix,omitempty"`
 }
 
 // matches reports whether (name, args) is covered by this rule.
 func (r Rule) matches(name string, args []string) bool {
+	if r.Full {
+		return true // the full tier: everything elevates
+	}
+
 	for _, alt := range r.allowAlts() {
 		if alt != name {
 			continue
 		}
 		switch {
+		case len(r.ArgsPrefix) > 0:
+			if len(args) < len(r.ArgsPrefix) {
+				return false
+			}
+			for i, want := range r.ArgsPrefix {
+				ok, err := path.Match(want, args[i])
+				if err != nil || !ok {
+					return false
+				}
+			}
+			return true
 		case len(r.Args) > 0:
 			if len(args) != len(r.Args) {
 				return false
@@ -136,10 +165,23 @@ func (r Rule) allowAlts() []string {
 
 // validate fails closed on ambiguous or empty rules.
 func (r Rule) validate(i int) error {
+	if r.Full {
+		// The full tier is a standalone grant: it cannot be scoped (a
+		// scoped "full" would be a normal rule wearing a louder name),
+		// and it cannot carry env (SETENV on NOPASSWD: ALL is not a
+		// thing the renderer will emit).
+		if len(r.allowAlts()) > 0 || len(r.ArgsPrefix) > 0 || len(r.Args) > 0 || len(r.Verbs) > 0 || len(r.Units) > 0 || len(r.Files) > 0 || len(r.Env) > 0 {
+			return fmt.Errorf("rule %d: a full:true grant is standalone — no allow/args/args_prefix/verbs/units/files/env with it", i)
+		}
+		return nil
+	}
 	if len(r.allowAlts()) == 0 {
 		return fmt.Errorf("rule %d: empty \"allow\"", i)
 	}
 	matchers := 0
+	if len(r.ArgsPrefix) > 0 {
+		matchers++
+	}
 	if len(r.Args) > 0 {
 		matchers++
 	}
@@ -150,12 +192,12 @@ func (r Rule) validate(i int) error {
 		matchers++
 	}
 	if matchers > 1 {
-		return fmt.Errorf("rule %d (%s): set at most one of args / verbs+units / files", i, r.Allow)
+		return fmt.Errorf("rule %d (%s): set at most one of args_prefix / args / verbs+units / files", i, r.Allow)
 	}
 	if len(r.Verbs) > 0 && len(r.Units) == 0 {
 		return fmt.Errorf("rule %d (%s): verbs require units (the scope)", i, r.Allow)
 	}
-	for _, a := range r.Args {
+	for _, a := range append(append([]string{}, r.ArgsPrefix...), r.Args...) {
 		if _, err := path.Match(a, "x"); err != nil {
 			return fmt.Errorf("rule %d (%s): bad glob %q", i, r.Allow, a)
 		}
@@ -166,6 +208,39 @@ func (r Rule) validate(i int) error {
 		}
 	}
 	return nil
+}
+
+// Tier reports the policy's privilege tier: "full" when it contains a
+// full:true grant, "broad" when its rules include any wildcard-scoped
+// grant (the seeded default-broad shape), else "strict" (exact-argv
+// grants only). The posture fact carries this so the fleet's tier is
+// visible at a glance — the whole point of tiers is that the blast
+// radius is readable without reading rules.
+func (p *Policy) Tier() string {
+	if p == nil {
+		return ""
+	}
+	for _, r := range p.Rules {
+		if r.Full {
+			return "full"
+		}
+	}
+	for _, r := range p.Rules {
+		if len(r.ArgsPrefix) > 0 {
+			return "broad" // a prefix grant is wide by construction
+		}
+		if len(r.Args) > 0 {
+			for _, a := range r.Args {
+				if strings.ContainsAny(a, "*?") {
+					return "broad"
+				}
+			}
+		}
+		if len(r.Units) > 0 || len(r.Files) > 0 {
+			return "broad"
+		}
+	}
+	return "strict"
 }
 
 // Policy is a loaded elevation policy (merged drop-ins).
@@ -214,11 +289,18 @@ func LoadPolicyJSON(b []byte) (*Policy, error) {
 		return nil, err
 	}
 	pol := &Policy{}
+	full := 0
 	for i, r := range part.Rules {
 		if err := r.validate(i); err != nil {
 			return nil, err
 		}
+		if r.Full {
+			full++
+		}
 		pol.Rules = append(pol.Rules, r)
+	}
+	if full > 0 && len(pol.Rules) > 1 {
+		return nil, fmt.Errorf("a full:true grant must be the policy's only rule — split the document (mixing full with scoped rules would misrepresent the tier)")
 	}
 	return pol, nil
 }

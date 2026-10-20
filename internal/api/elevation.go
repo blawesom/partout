@@ -36,6 +36,9 @@ func (h *Handler) RegisterElevationPolicies(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/elevation/policies/{id}/versions/{version}/restore", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplVersionRestore)))
 	// P2: push a stored policy to the fleet (governed, signed, audited).
 	mux.Handle("POST /api/v1/elevation/push", h.requireRole(roleAdmin)(http.HandlerFunc(h.eplPush)))
+	// P3.3/P3.4: legibility — validate/explain draft rules, generate a
+	// fleet-aware proposal (viewer+; nothing here writes or pushes).
+	h.registerElevationExplain(mux)
 }
 
 type eplBody struct {
@@ -268,7 +271,7 @@ func (h *Handler) eplPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Policy == "" {
-		body.Policy = "default-baseline"
+		body.Policy = "default-broad"
 	}
 	if body.Selector == "" {
 		body.Selector = "all"

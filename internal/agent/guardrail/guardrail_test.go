@@ -313,3 +313,138 @@ func TestRecheckApprovedDecisionWrongEffect(t *testing.T) {
 		t.Fatal("deny-effect decision must not pass")
 	}
 }
+
+// --- EOL predicate (PRD §5.6 EOL→policy gating) ---
+
+// bundleWithEOL is bundleWith plus the host's EOL state (rides in the
+// PolicyBundle like tags/roles).
+func bundleWithEOL(rules []policy.Rule, serverPub []byte, hostEOL string) *pb.PolicyBundle {
+	b := bundleWith(rules, serverPub)
+	b.HostEol = hostEOL
+	return b
+}
+
+// TestRecheckPkgEOLEndedHostFailsClosed: the bundle carries the seeded
+// EOL require-approval rule and the host's ended state; a server-signed
+// allow for a pkg apply is rejected locally (the server must park it for
+// approval instead).
+func TestRecheckPkgEOLEndedHostFailsClosed(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "default-require-approval-eol-upgrade", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{Actions: []string{policy.ActionPkgApply}, EOL: policy.EOLEnded},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWithEOL(rules, pub, policy.EOLEnded))
+
+	// Server signed allow (pretending the rule did not match).
+	sig := policy.SignDecision(priv, "op1", 7, policy.EffectAllow, nil, "admin", "")
+	op := &pb.PkgOp{OpId: "op1", Kind: pb.PkgOpKind_PKG_APPLY}
+	op.Decision = &pb.Decision{
+		RunId: "op1", BundleVersion: 7, Effect: policy.EffectAllow,
+		ActorRole: "admin", Sig: sig,
+	}
+	ok, reason := g.RecheckPkg(op)
+	if ok {
+		t.Fatal("ended-host pkg.apply must fail the local re-check")
+	}
+	if reason == "" {
+		t.Fatal("expected a reason")
+	}
+}
+
+// TestRecheckPkgEOLSupportedHostAllowed: same rule, supported state → the
+// signed allow passes the re-check.
+func TestRecheckPkgEOLSupportedHostAllowed(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "default-require-approval-eol-upgrade", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{Actions: []string{policy.ActionPkgApply}, EOL: policy.EOLEnded},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWithEOL(rules, pub, policy.EOLSupported))
+
+	sig := policy.SignDecision(priv, "op1", 7, policy.EffectAllow, nil, "admin", "")
+	op := &pb.PkgOp{OpId: "op1", Kind: pb.PkgOpKind_PKG_APPLY}
+	op.Decision = &pb.Decision{
+		RunId: "op1", BundleVersion: 7, Effect: policy.EffectAllow,
+		ActorRole: "admin", Sig: sig,
+	}
+	if ok, reason := g.RecheckPkg(op); !ok {
+		t.Fatalf("supported-host pkg.apply should pass; reason: %s", reason)
+	}
+}
+
+// TestRecheckPkgDecisionEOLStateWins: when the signed Decision carries the
+// EOL state (dispatch-time context), it is authoritative for the re-check —
+// even over a stale bundle snapshot.
+func TestRecheckPkgDecisionEOLStateWins(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "default-require-approval-eol-upgrade", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{Actions: []string{policy.ActionPkgApply}, EOL: policy.EOLEnded},
+	}}
+	// Bundle says supported (stale); the decision says ended.
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWithEOL(rules, pub, policy.EOLSupported))
+
+	sig := policy.SignDecision(priv, "op1", 7, policy.EffectAllow, nil, "admin", "")
+	op := &pb.PkgOp{OpId: "op1", Kind: pb.PkgOpKind_PKG_APPLY}
+	op.Decision = &pb.Decision{
+		RunId: "op1", BundleVersion: 7, Effect: policy.EffectAllow,
+		ActorRole: "admin", Sig: sig, EolState: policy.EOLEnded,
+	}
+	if ok, _ := g.RecheckPkg(op); ok {
+		t.Fatal("decision's ended state must drive the re-check (rule must match)")
+	}
+}
+
+// TestRecheckTaskPackageStepEOL: a task run with a package/upgrade step is
+// re-checked as a pkg.apply-class action — the EOL rule gates task upgrades
+// agent-side too.
+func TestRecheckTaskPackageStepEOL(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "default-require-approval-eol-upgrade", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{Actions: []string{policy.ActionPkgApply}, EOL: policy.EOLEnded},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWithEOL(rules, pub, policy.EOLEnded))
+
+	sig := policy.SignDecision(priv, "run1", 7, policy.EffectAllow, nil, "admin", "")
+	run := &pb.TaskRun{RunId: "run1", Steps: []*pb.TaskStep{
+		{Kind: "upgrade", Name: "daily upgrade"},
+	}}
+	run.Decision = &pb.Decision{
+		RunId: "run1", BundleVersion: 7, Effect: policy.EffectAllow,
+		ActorRole: "admin", Sig: sig,
+	}
+	if ok, _ := g.RecheckTask(run); ok {
+		t.Fatal("ended-host task upgrade step must fail the local re-check")
+	}
+}
+
+// TestRecheckApprovedEOLPkgApply: after a human approves, the signed
+// approval decision passes even though the bundle still carries the EOL
+// require-approval rule.
+func TestRecheckApprovedEOLPkgApply(t *testing.T) {
+	pub, priv := testServerKey(t)
+	rules := []policy.Rule{{
+		ID: "default-require-approval-eol-upgrade", Effect: policy.EffectRequireApproval, Priority: 1,
+		Match: policy.Match{Actions: []string{policy.ActionPkgApply}, EOL: policy.EOLEnded},
+	}}
+	g := NewGuard("ag_test", t.TempDir())
+	g.OnBundle(bundleWithEOL(rules, pub, policy.EOLEnded))
+
+	sig := policy.SignDecision(priv, "op1", 7, policy.EffectAllow,
+		[]string{"default-require-approval-eol-upgrade"}, "operator", "apr_9")
+	op := &pb.PkgOp{OpId: "op1", Kind: pb.PkgOpKind_PKG_APPLY}
+	op.Decision = &pb.Decision{
+		RunId: "op1", BundleVersion: 7, Effect: policy.EffectAllow,
+		MatchedRules: []string{"default-require-approval-eol-upgrade"},
+		ActorRole:    "operator", ApprovalId: "apr_9", Sig: sig,
+	}
+	if ok, reason := g.RecheckPkg(op); !ok {
+		t.Fatalf("approved ended-host pkg.apply should pass; reason: %s", reason)
+	}
+}

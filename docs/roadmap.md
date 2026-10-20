@@ -739,9 +739,14 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     existing file reads as permission (not invalid); `ctl update` appends
     the CA to the system root pool instead of replacing it.
   - Schema v24/v25 (run-row elevation columns; elevation bootstrap tokens).
-    Known follow-ups (next cycle): the structured policy editor and the
-    fleet-aware policy generator (proposal P3.3/P3.4), and a live E2E rig
-    for the push path.
+    Known follow-ups (next cycle): ~~the structured policy editor and the
+    fleet-aware policy generator (proposal P3.3/P3.4)~~ ✅ shipped with the
+    elevation-tier release (broad/strict/full): server-validated rule
+    builder + `elevation explain` test box (`POST /api/v1/elevation/validate`
+    + `/explain`), the fleet-aware generator (`POST /elevation/generate`,
+    notes explain every inclusion/exclusion, proposal loads into the editor
+    — never auto-applied), and seeded `profile-web`/`profile-database`/
+    `profile-minimal`. Still open: a live E2E rig for the push path.
 - **v0.9.13 — the full field-verification pass (round 3).** Everything
   since the v0.9.12 tag, all validated on a real 2-host Rocky 10 fleet:
 
@@ -780,10 +785,18 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     counterpart with the M8.1 layout, field-verified); elevation policy
     history (version + restore); loadgen skeleton; `PARTOUT_AGENT_DATA_DIR`
     documented.
-  - **Known gap**: task→secret references are unwired (the executor has
-    the lookup function but never calls it; the agent-side E2E cache
-    exists but nothing triggers materialization during task dispatch).
-    Filed for the next cycle.
+  - ~~**Known gap**: task→secret references are unwired~~ ✅ Closed in
+    v0.9.15: task steps declare `secret:NAME` refs (step env values,
+    args, file/template content, template vars); every dispatch path
+    (manual task run, playbook fan-out, job RunNow + approval re-dispatch)
+    scans the steps, resolves each secret's selector binding for the
+    target host, and materializes it (E2E-encrypted SecretMaterialize)
+    BEFORE the task envelope — the agent cache is warm when the step
+    runs. Unbound refs (or the feature being off) fail the dispatch
+    server-side with the ref named, instead of a runtime "secret
+    unavailable" on the host; offline agents are skipped (the run fails
+    closed per the PRD §5.7 offline rule). Audit: one `secret.materialized`
+    row per materialization, bound to the run id.
 
 - **v0.9.12 — bootstrap hardening + onboarding polish (all field-caught on
   the v0.9.11 deployment, FIELD-REPORT-v0.9.11).** Everything since the

@@ -38,8 +38,9 @@ type Handler struct {
 	st           *store.Store
 	sse          Emitter
 	log          *log.Logger
-	serverPubB64 string       // server Ed25519 public key (b64) for policy bundles
-	ca           *certutil.CA // root CA for mTLS leaf rotation (nil = plaintext)
+	serverPubB64 string                      // server Ed25519 public key (b64) for policy bundles
+	hostEOL      func(agentID string) string // host EOL state resolver for bundles (nil = off)
+	ca           *certutil.CA                // root CA for mTLS leaf rotation (nil = plaintext)
 
 	mu       sync.Mutex
 	sessions map[string]*Session // agent_id -> active session
@@ -148,6 +149,11 @@ func (h *Handler) SetOfflineTTL(d time.Duration) {
 // SetServerPubKey installs the server's Ed25519 public key (b64) which is
 // included in every policy bundle so agents can verify decision signatures.
 func (h *Handler) SetServerPubKey(b64 string) { h.serverPubB64 = b64 }
+
+// SetHostEOLProvider installs the resolver for a host's OS end-of-support
+// state (PRD §5.6); the state rides in every policy bundle so the agent-side
+// guardrail can re-evaluate EOL-scoped rules. Nil disables (state = "").
+func (h *Handler) SetHostEOLProvider(p func(agentID string) string) { h.hostEOL = p }
 
 // SetCA installs the root CA used to re-sign agent mTLS leaves on rotation.
 // nil = plaintext mode (rotation disabled).
@@ -274,6 +280,12 @@ func (h *Handler) pushPolicyBundle(sess *Session) {
 		HostTags:     tags,
 		HostRoles:    roles,
 		AgentId:      sess.AgentID,
+	}
+	if h.hostEOL != nil {
+		// The host's current end-of-support state, so the agent-side
+		// guardrail can re-evaluate EOL-scoped rules (PRD §5.6). The
+		// signed Decision remains the authoritative per-dispatch context.
+		bundle.HostEol = h.hostEOL(sess.AgentID)
 	}
 	sess.send(&pb.Envelope{
 		Kind:    pb.EnvelopeKind_POLICY_BUNDLE,

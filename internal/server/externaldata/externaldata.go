@@ -223,6 +223,22 @@ func (r *Refresher) EOLStateFor(distro, cycle string) EOLState {
 	return st
 }
 
+// EOLForHost computes the host's OS end-of-support state for policy
+// evaluation (PRD §5.6 EOL→policy gating): "supported" | "ending_soon" |
+// "ended", or "" when unknown (no facts, unknown distro, or an empty/stale
+// cache). An unknown state never trips an EOL-scoped policy rule.
+func (r *Refresher) EOLForHost(agentID string) string {
+	facts, err := r.st.LatestFacts(agentID)
+	if err != nil {
+		return ""
+	}
+	st := r.EOLStateFor(facts.Data["host.distro"], facts.Data["host.distro_version"])
+	if st.State == "unknown" {
+		return ""
+	}
+	return st.State
+}
+
 // Correlate returns vulnerabilities for (pkg, ecosystem, version) via
 // OSV.dev, TTL-cached in vuln_cache (VulnTTL). When the cache is fresh, no
 // network call is made. Air-gapped → (nil, nil) so the caller falls back

@@ -1,0 +1,38 @@
+# Partout server — minimal compose rig. See deploy/docker/README.md.
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: partout:local
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    environment:
+      PARTOUT_ADMIN_PASSWORD: ${PARTOUT_ADMIN_PASSWORD:?set PARTOUT_ADMIN_PASSWORD in the environment or a .env file}
+      PARTOUT_TLS: "on"
+      PARTOUT_DB_PATH: /var/lib/partout/partout.db
+    volumes:
+      - partout-data:/var/lib/partout
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --no-check-certificate https://127.0.0.1:8443/healthz || exit 1"]
+      start_period: 10s
+
+  # The agent is OUTBOUND-ONLY: it dials the server. Hosts the server manages
+  # must be able to reach this compose service's published port. Agents run on
+  # the hosts themselves (bare binary + systemd, docs/deployment.md §3.2), not
+  # next to the server. An agent-in-a-container would look like:
+  #
+  # agent:
+  #   image: partout:local
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   command: ["--mode=agent", "--server=partout.example.com:8443", "--token=par_enr_..."]
+  #   volumes:
+  #     - agent-state:/var/lib/partout
+  #
+  # (uncomment and adapt; agent installs on real hosts normally use
+  # scripts/install-agent.sh instead)
+
+volumes:
+  partout-data:

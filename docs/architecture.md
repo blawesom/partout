@@ -64,10 +64,9 @@ partout/
 │   ├── cryptoutil/         # ed25519 sign/verify, x25519, hkdf, aead helpers
 │   └── config/             # env parsing (R15), defaults, validation
 ├── docs/                   # this directory
-├── deploy/                 # systemd units, docker, compose, cloud-init, helm chart
-└── test/
-    ├── e2e/                # compose rig: server + 2 container agents
-    └── fixtures/
+├── deploy/                 # systemd units + server Dockerfile/compose (deploy/docker/);
+│                           # agent-in-docker, cloud-init, helm chart still sketches
+└── cmd/loadgen/            # load generator: fake agents against a real server
 ```
 
 Rules:
@@ -1134,6 +1133,7 @@ error bodies `{code, message, details}`.
 | POST   | `/api/v1/auth/login` | — | Local-user login → session bearer token (PRD Decision 6) |
 | GET    | `/api/v1/auth/me` | any | Current session identity (username, role, expiry) |
 | POST   | `/api/v1/auth/logout` | any | Invalidate this session token |
+| POST   | `/api/v1/auth/sse-token` | any | Mint a short-lived SSE-scoped token (default 60 s, `PARTOUT_SSE_TOKEN_TTL_S`) for `?token=` auth on `/api/v1/events` — valid ONLY there |
 | POST   | `/api/v1/auth/password` | any | Change own password (re-issues a token) |
 | GET    | `/api/v1/users` | admin | List local users (no password material) |
 | POST   | `/api/v1/users` | admin | Create a user (username, password, role) |
@@ -1200,7 +1200,7 @@ error bodies `{code, message, details}`.
 | GET    | `/api/v1/sessions/:id/replay` | viewer | Recorded PTY chunks (M2) |
 | GET    | `/healthz` | — | Liveness |
 | GET    | `/readyz` | — | Readiness (DB ping) |
-| GET    | `/api/v1/events` | viewer | SSE event stream. Auth-gated like the read surface it mirrors; accepts `?token=<jwt>` in addition to the `Authorization` header (EventSource cannot set headers) |
+| GET    | `/api/v1/events` | viewer | SSE event stream. Auth-gated like the read surface it mirrors; the header bearer works as everywhere else, and `?token=` (EventSource cannot set headers) accepts ONLY a short-lived SSE-scoped token from `POST /api/v1/auth/sse-token` — never a session/static bearer (tokens in URLs leak into reverse-proxy access logs) |
 
 #### Planned additions (not implemented)
 
@@ -1469,12 +1469,17 @@ the operator's cluster manager owns availability, and the design keeps the serve
   principal; denied action never produces a `CommandEnvelope`; privileged audit row always
   full-fidelity; provisioning run unreachable by non-admins (RBAC admin-only), and an
   unknown host key blocks the run until confirmation.
-- **E2E** (`test/e2e`, docker compose): server + 2 container agents on real distros;
-  scenarios: enroll → facts <10 s → exec fan-out → cancel/timeout → task with `when` skip →
-  job survives server restart → apply-updates dry-run journal → revoke cascade. Runs on CI for
-  amd64; arm64 smoke.
-- **Load**: scripted 500 fake agents (heartbeat + facts + periodic exec) against the compose
-  server; asserts §13 targets.
+- **E2E**: shell-script rigs in `scripts/`, run in CI (`ci.yml`) and gated by
+  `scripts/beta-gate.sh`: `systemd-e2e.sh` (real-systemd agent self-update:
+  live swap + crashloop rollback), `update-e2e.sh` (one-command update),
+  `backup-restore-e2e.sh` (disaster drill), `offline-dispatch-e2e.sh`,
+  `tls-rotation-e2e.sh`, `rocky-e2e.sh` (real Rocky 10 install as root:
+  useradd/visudo/dnf, provisioning, elevation), plus `pty-e2e.py`,
+  `writes-e2e.py` and `ui-smoke` for the web UI. `fleet-provision-e2e.sh`
+  is opt-in (needs two real SSH hosts). A separate leg runs real installs
+  via `install-server.sh` / `update-server.sh` scenarios.
+- **Load**: `cmd/loadgen` — scripted fake agents (heartbeat + facts + periodic
+  exec) against a real server; asserts §13 targets.
 
 ---
 
@@ -1503,5 +1508,5 @@ Everything else in this document follows PRD-locked decisions. These are new:
 | A17 | Preflight checks | os-release, arch, systemd, `sudo -n true`, disk, host→server `/healthz`, existing install; remediation text on failure | §3.5 |
 | A18 | Install/update layout | `/usr/local/bin/partout`, `partout` user, `/etc/partout/agent.env` 0640, unit per deployment §3.2; agent state (`identity.json`, `tls/`, `spool/`) untouched unless `fresh` | §3.5 |
 | A19 | Manual handoff triggers | unreachable, non-systemd init, Docker-host, air-gapped; prints binary + one-line install with one-time token | §3.5 |
-| A20 | MCP auth (R11) | **Implemented (M4)**: stdio + Streamable HTTP. Credentials: the caller's bearer token (static env token, a local-user session token from `ctl auth login`, or an **OAuth2 (PKCE) access token**) — all forwarded to the same REST router, so RBAC/policy/audit are the control plane's. OAuth2 (PKCE) v1 model (`internal/server/oauth`, schema v12 `mcp_clients`/`oauth_codes`/`oauth_tokens`): admin-registered clients; `POST /oauth2/authorize` (authenticated by the owner's existing bearer) → 5-min one-time code bound to an S256 challenge; `POST /oauth2/token` verifies `S256(code_verifier)` → 1-h access token, stored only as a SHA-256 hash, single-use codes. Deviations: no browser login grant (bearer-token codebase), no refresh tokens — post-v1. | §10.3 |
+| A20 | MCP auth (R11) | **Implemented (M4)**: stdio + Streamable HTTP. Credentials: the caller's bearer token (static env token, a local-user session token from `ctl auth login`, or an **OAuth2 (PKCE) access token**) — all forwarded to the same REST router, so RBAC/policy/audit are the control plane's. OAuth2 (PKCE) v1 model (`internal/server/oauth`, schema v12 `mcp_clients`/`oauth_codes`/`oauth_tokens`): admin-registered clients (optional `redirect_uri`; `/oauth2/authorize` requires the request's `redirect_uri` to EQUAL the registered one — empty matches empty — rejecting mismatches with `invalid_redirect_uri`); `POST /oauth2/authorize` (authenticated by the owner's existing bearer) → 5-min one-time code bound to an S256 challenge; `POST /oauth2/token` verifies `S256(code_verifier)` → 1-h access token, stored only as a SHA-256 hash, single-use codes. Deviations: no browser login grant (bearer-token codebase), no refresh tokens — post-v1. | §10.3 |
 | A21 | Alert engine v1 scope (R23/R25) | **Implemented (M6/M6.1)** with the shipped kind set: `service_failed`, `service_restarting` (over the `NRestarts` counter fact), `cert_expiring`, `config_invalid`, `config_drift` (R22). Deferred: `service_absent`, `cert_chain_broken`, `endpoint_down` (needs a probe channel). The 2-minute design tick became 30 s (`PARTOUT_ALERT_TICK_S`). | §7.5 |

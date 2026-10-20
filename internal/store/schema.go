@@ -99,10 +99,22 @@ CREATE TABLE IF NOT EXISTS audit_events (
   kind          TEXT NOT NULL,
   actor         TEXT,
   agent_id      TEXT,
-  payload       TEXT NOT NULL
+  payload       TEXT NOT NULL,
+  prev_hash     TEXT NOT NULL DEFAULT '',
+  hash          TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit_events(kind);
+
+-- Audit hash-chain head (PRD Decision 5, 1.0 gate): a single row tracking
+-- the last chained audit row so appends need one SELECT, not a MAX() scan.
+-- The chain itself lives in audit_events.prev_hash/hash; this table is the
+-- fast pointer to its tip under the single-writer model.
+CREATE TABLE IF NOT EXISTS audit_chain_state (
+  id        INTEGER PRIMARY KEY CHECK (id = 1),
+  last_id   INTEGER NOT NULL,
+  last_hash TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS policies (
   id           TEXT PRIMARY KEY,
@@ -410,10 +422,11 @@ CREATE TABLE IF NOT EXISTS principals (
 -- mcp_clients: registered MCP clients (admin-managed). Codes and tokens are
 -- stored hashed (SHA-256 hex); the plaintext exists only in transit.
 CREATE TABLE IF NOT EXISTS mcp_clients (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL,
-  scope      TEXT NOT NULL DEFAULT 'fleet',
-  created    INTEGER NOT NULL
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  scope        TEXT NOT NULL DEFAULT 'fleet',
+  redirect_uri TEXT NOT NULL DEFAULT '',  -- exact-match rule on /oauth2/authorize
+  created      INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS oauth_codes (
@@ -435,6 +448,18 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   principal   TEXT NOT NULL,
   role        TEXT NOT NULL,
   scope       TEXT NOT NULL,
+  created     INTEGER NOT NULL,
+  expires     INTEGER NOT NULL
+);
+
+-- Short-lived SSE-scoped tokens (PRD R10): EventSource cannot set headers,
+-- so the web UI opens /api/v1/events with ?token=<sse-token>. The token
+-- carries the caller's role, is valid ONLY on that route (never a general
+-- bearer), and is stored hashed like every other credential.
+CREATE TABLE IF NOT EXISTS sse_tokens (
+  token_hash  TEXT PRIMARY KEY,
+  principal   TEXT NOT NULL DEFAULT '',
+  role        TEXT NOT NULL,
   created     INTEGER NOT NULL,
   expires     INTEGER NOT NULL
 );
@@ -641,7 +666,7 @@ CREATE TABLE IF NOT EXISTS elevation_tokens (
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 25
+const currentSchemaVersion = 27
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

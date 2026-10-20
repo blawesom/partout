@@ -18,14 +18,21 @@ func (h *Handler) RegisterExecutions(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/executions/{id}/cancel", h.requireRole(roleOperator)(http.HandlerFunc(h.handleCancelExecution)))
 	mux.Handle("GET /api/v1/executions/{id}/output", h.requireRole(roleViewer)(http.HandlerFunc(h.handleGetOutput)))
 	mux.Handle("GET /api/v1/audit", h.requireRole(roleViewer)(http.HandlerFunc(h.handleAudit)))
+	mux.Handle("GET /api/v1/audit/verify", h.requireRole(roleViewer)(http.HandlerFunc(h.handleAuditVerify)))
 }
 
 // ---- /api/v1/executions ----------------------------------------------------
 
 func (h *Handler) handleListExecutions(w http.ResponseWriter, r *http.Request) {
 	limit, cursor := pageParams(r, 50)
+	// elevated=true|false filters server-side on the runs' elevation
+	// decision (anything else, including absent, = all executions).
+	elevated := r.URL.Query().Get("elevated")
+	if elevated != "true" && elevated != "false" {
+		elevated = ""
+	}
 
-	execs, err := h.st.ExecutionsPage(limit, cursor)
+	execs, err := h.st.ExecutionsPage(limit, cursor, elevated)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to list executions", nil)
 		return
@@ -203,11 +210,13 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 	entries := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		entries = append(entries, map[string]any{
-			"ts":       ev.TS,
-			"kind":     ev.Kind,
-			"actor":    ev.Actor,
-			"agent_id": ev.AgentID,
-			"payload":  ev.Payload,
+			"ts":        ev.TS,
+			"kind":      ev.Kind,
+			"actor":     ev.Actor,
+			"agent_id":  ev.AgentID,
+			"payload":   ev.Payload,
+			"prev_hash": ev.PrevHash,
+			"hash":      ev.Hash,
 		})
 	}
 	var next string
@@ -216,6 +225,25 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 		next = strconv.FormatInt(events[len(events)-1].TS, 10)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": entries, "next_cursor": next})
+}
+
+// handleAuditVerify walks the audit hash chain and reports whether the log
+// is intact (PRD Decision 5). Read-only; viewer+ role like the audit list.
+func (h *Handler) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
+	res, err := h.st.VerifyAuditChain()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "failed to verify audit chain", nil)
+		return
+	}
+	out := map[string]any{
+		"ok":           res.OK,
+		"rows_checked": res.RowsChecked,
+	}
+	if !res.OK {
+		out["broken_row_id"] = res.BrokenRowID
+		out["reason"] = res.Reason
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ---- helpers -----------------------------------------------------------------

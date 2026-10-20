@@ -19,6 +19,7 @@ import (
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
 	"github.com/blawesom/partout/internal/server/approvals"
+	"github.com/blawesom/partout/internal/server/packages"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -35,6 +36,10 @@ type Control struct {
 	// approvals is the M4 approvals engine; nil → require_approval fails
 	// closed (deny) rather than silently allowing.
 	approvals *approvals.Controller
+
+	// eol resolves a host's OS end-of-support state for policy matching
+	// (PRD §5.6). Nil → HostEOL stays "" and EOL-scoped rules never match.
+	eol packages.EOLProvider
 
 	// finMu serializes execution-aggregate finalization. The result hook and
 	// the disconnect hook can both finalize the same execution concurrently
@@ -75,6 +80,10 @@ func (c *Control) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ident 
 // matches park the run as awaiting_approval and create a request; approval
 // re-dispatches via DispatchApprovedCommand.
 func (c *Control) SetApprovals(ac *approvals.Controller) { c.approvals = ac }
+
+// SetEOLProvider installs the host EOL state resolver for policy matching
+// (PRD §5.6 EOL→policy gating).
+func (c *Control) SetEOLProvider(p packages.EOLProvider) { c.eol = p }
 
 // BroadcastPolicyBundle pushes the current policy bundle to every connected
 // agent.  Called by the policy API after a rule is created or deleted.
@@ -165,6 +174,9 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			Args:        req.Args,
 			CommandLine: commandLine(req.Cmd, req.Args),
 		}
+		if c.eol != nil {
+			action.HostEOL = c.eol(host.ID)
+		}
 		decision := policy.Evaluate(rules, action)
 
 		runID := id.New("run")
@@ -224,7 +236,7 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 				Actor:        req.CreatedBy,
 				ActorRole:    req.ActorRole,
 				MatchedRules: decision.MatchedRules,
-				Payload:      map[string]any{"cmd": req.Cmd, "args": req.Args, "env": req.Env, "timeout_s": req.TimeoutS},
+				Payload:      map[string]any{"cmd": req.Cmd, "args": req.Args, "env": req.Env, "timeout_s": req.TimeoutS, "reason": packages.EOLReason(action.HostEOL)},
 			})
 			if err != nil {
 				// Request creation failed: fail closed, never dispatch.
@@ -257,7 +269,7 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			Args:        req.Args,
 			Env:         req.Env,
 			TimeoutS:    req.TimeoutS,
-			Decision:    c.signDecision(runID, bundleVersion, decision, req.ActorRole),
+			Decision:    c.signDecision(runID, bundleVersion, decision, req.ActorRole, action.HostEOL),
 		}
 		// Dispatch down the stream.
 		if err := c.h.SendCommand(host.ID, cmd); err != nil {
@@ -609,14 +621,17 @@ func commandLine(cmd string, args []string) string {
 
 // signDecision builds the signed Decision attached to a Command envelope.
 // When the server has no identity (e.g. in tests), the decision is unsigned
-// and the effect is still enforced server-side.
-func (c *Control) signDecision(runID string, bundleVersion uint64, d policy.Decision, actorRole string) *pb.Decision {
+// and the effect is still enforced server-side. eolState is the host's
+// end-of-support state the evaluation ran under ("" = unknown) so the agent
+// guardrail re-checks EOL-scoped rules against the same context.
+func (c *Control) signDecision(runID string, bundleVersion uint64, d policy.Decision, actorRole, eolState string) *pb.Decision {
 	dm := &pb.Decision{
 		RunId:         runID,
 		BundleVersion: bundleVersion,
 		Effect:        d.Effect,
 		MatchedRules:  d.MatchedRules,
 		ActorRole:     actorRole,
+		EolState:      eolState,
 	}
 	if c.ident != nil {
 		dm.Sig = policy.SignDecision(c.ident.Priv, runID, bundleVersion, d.Effect, d.MatchedRules, actorRole, "")

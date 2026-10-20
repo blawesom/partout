@@ -57,6 +57,7 @@ commands:
   exec EXEC_ID             show execution detail + output
   exec cancel EXEC_ID      cancel a running execution
   audit [--kind K] [--actor A] [--limit N]   show audit log
+  audit verify                                 verify the audit hash chain
   policy <list|create|delete>                manage policy deny rules
   preset <show|status|apply> first-boot fleet defaults (safety-net policies + alerts);
                            apply is idempotent — creates only what is missing
@@ -1119,6 +1120,10 @@ func (c *ctl) cmdAudit(args []string) {
 	actor := fs.String("actor", "", "filter by actor")
 	limit := fs.Int("limit", 50, "max events")
 	fs.Parse(args)
+	if fs.NArg() > 0 && fs.Arg(0) == "verify" {
+		c.cmdAuditVerify(fs.Args()[1:])
+		return
+	}
 
 	q := fmt.Sprintf("/api/v1/audit?limit=%d", *limit)
 	if *kind != "" {
@@ -1141,6 +1146,25 @@ func (c *ctl) cmdAudit(args []string) {
 	}
 	w.Flush()
 	fmt.Printf("\n%d event(s)\n", len(items))
+}
+
+// cmdAuditVerify checks the audit log hash chain.
+func (c *ctl) cmdAuditVerify(args []string) {
+	var res struct {
+		OK          bool   `json:"ok"`
+		RowsChecked int64  `json:"rows_checked"`
+		BrokenRowID int64  `json:"broken_row_id"`
+		Reason      string `json:"reason"`
+	}
+	if err := c.do("GET", "/api/v1/audit/verify", nil, &res); err != nil {
+		fatal(err)
+	}
+	if res.OK {
+		fmt.Printf("OK: audit chain intact (%d row(s) verified)\n", res.RowsChecked)
+		return
+	}
+	fmt.Printf("FAIL: audit chain broken at row id %d (%s), %d row(s) verified before the break\n", res.BrokenRowID, res.Reason, res.RowsChecked)
+	os.Exit(1)
 }
 
 // ---- policy ----------------------------------------------------------------
@@ -1451,7 +1475,7 @@ func (c *ctl) provisionNew(args []string) {
 	host := fs.String("host", "", "target host (ssh user@host)")
 	mode := fs.String("mode", "fresh", "fresh | join")
 	// D1 onboarding: the elevation bootstrap + agent.env extras.
-	elevate := fs.Bool("elevate", false, "enable elevation on the target (installs the elevation policies, renders + installs the sudoers drop-in, sets PARTOUT_ELEVATE=sudo); defaults to the seeded default-baseline policy when no --elevation-policy is given")
+	elevate := fs.Bool("elevate", false, "enable elevation on the target (installs the elevation policies, renders + installs the sudoers drop-in, sets PARTOUT_ELEVATE=sudo); defaults to the seeded default-broad (broad tier) policy when no --elevation-policy is given")
 	var policies []string
 	fs.Func("elevation-policy", "elevation policy to install (repeatable): a server-store name or a local .json file", func(v string) error {
 		policies = append(policies, v)
@@ -2875,7 +2899,7 @@ func (c *ctl) elevationPolicy(args []string) {
 			fmt.Printf("%-24s %-16s %-5d %s…\n", strval(p["name"]), strval(p["id"]), len(n), strval(p["policy_sha256"])[:12])
 		}
 		if len(list) == 0 {
-			fmt.Println("(no elevation policies — `partout ctl preset apply` seeds default-baseline)")
+			fmt.Println("(no elevation policies — `partout ctl preset apply` seeds default-broad / default-strict / default-full)")
 		}
 	case "create", "update":
 		usage := "usage: ctl elevation policy " + sub + " <name> <policy.json> [description]"

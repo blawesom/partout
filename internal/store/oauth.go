@@ -9,10 +9,11 @@ import (
 
 // MCPClient is one registered MCP client (admin-managed).
 type MCPClient struct {
-	ID      string
-	Name    string
-	Scope   string
-	Created int64
+	ID          string
+	Name        string
+	Scope       string
+	RedirectURI string
+	Created     int64
 }
 
 // OAuthCode is a one-time authorization code (PKCE-bound).
@@ -43,8 +44,8 @@ type OAuthToken struct {
 // --- MCP clients ---
 
 func (s *Store) CreateMCPClient(c *MCPClient) error {
-	_, err := s.db.Exec(`INSERT INTO mcp_clients (id, name, scope, created) VALUES (?,?,?,?)`,
-		c.ID, c.Name, c.Scope, c.Created)
+	_, err := s.db.Exec(`INSERT INTO mcp_clients (id, name, scope, redirect_uri, created) VALUES(?,?,?,?,?)`,
+		c.ID, c.Name, c.Scope, c.RedirectURI, c.Created)
 	if err != nil {
 		return fmt.Errorf("store: create mcp client: %w", err)
 	}
@@ -52,9 +53,9 @@ func (s *Store) CreateMCPClient(c *MCPClient) error {
 }
 
 func (s *Store) GetMCPClient(id string) (*MCPClient, error) {
-	row := s.db.QueryRow(`SELECT id, name, scope, created FROM mcp_clients WHERE id=?`, id)
+	row := s.db.QueryRow(`SELECT id, name, scope, redirect_uri, created FROM mcp_clients WHERE id=?`, id)
 	c := &MCPClient{}
-	if err := row.Scan(&c.ID, &c.Name, &c.Scope, &c.Created); err != nil {
+	if err := row.Scan(&c.ID, &c.Name, &c.Scope, &c.RedirectURI, &c.Created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -64,7 +65,7 @@ func (s *Store) GetMCPClient(id string) (*MCPClient, error) {
 }
 
 func (s *Store) ListMCPClients() ([]*MCPClient, error) {
-	rows, err := s.db.Query(`SELECT id, name, scope, created FROM mcp_clients ORDER BY created`)
+	rows, err := s.db.Query(`SELECT id, name, scope, redirect_uri, created FROM mcp_clients ORDER BY created`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list mcp clients: %w", err)
 	}
@@ -72,7 +73,7 @@ func (s *Store) ListMCPClients() ([]*MCPClient, error) {
 	var out []*MCPClient
 	for rows.Next() {
 		c := &MCPClient{}
-		if err := rows.Scan(&c.ID, &c.Name, &c.Scope, &c.Created); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Scope, &c.RedirectURI, &c.Created); err != nil {
 			return nil, fmt.Errorf("store: scan mcp client: %w", err)
 		}
 		out = append(out, c)

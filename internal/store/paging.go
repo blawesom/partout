@@ -43,17 +43,34 @@ func (s *Store) HostsPage(limit int, cursor string) ([]*Agent, error) {
 	return out, rows.Err()
 }
 
-// ExecutionsPage is a page of executions.
-func (s *Store) ExecutionsPage(limit int, cursor string) ([]*Execution, error) {
+// ExecutionsPage is a page of executions. elevated filters to executions
+// with at least one run the agent ran elevated ("true") or unprivileged
+// ("false"); "" shows all. Runs whose agent never reported an elevation
+// decision (elevated IS NULL) match neither value — they are not evidence
+// of privilege either way.
+func (s *Store) ExecutionsPage(limit int, cursor string, elevated string) ([]*Execution, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	q := `SELECT id, selector, cmd, args_json, created, created_by, state
-	       FROM executions`
-	args := []any{}
+	      FROM executions`
+	var conds []string
+	var args []any
+	if elevated == "true" || elevated == "false" {
+		conds = append(conds, `EXISTS (SELECT 1 FROM execution_runs r
+			WHERE r.execution_id = executions.id AND r.elevated = ?)`)
+		if elevated == "true" {
+			args = append(args, 1)
+		} else {
+			args = append(args, 0)
+		}
+	}
 	if cursor != "" {
-		q += ` WHERE id < ?`
+		conds = append(conds, `id < ?`)
 		args = append(args, cursor)
+	}
+	if len(conds) > 0 {
+		q += ` WHERE ` + strings.Join(conds, " AND ")
 	}
 	q += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
@@ -96,7 +113,7 @@ func (s *Store) AuditPage(kind, actor string, since int64, limit int, cursor int
 		conds = append(conds, "id < ?")
 		args = append(args, cursor)
 	}
-	q := `SELECT id, ts, kind, actor, agent_id, payload FROM audit_events`
+	q := `SELECT id, ts, kind, actor, agent_id, payload, prev_hash, hash FROM audit_events`
 	if len(conds) > 0 {
 		q += ` WHERE ` + strings.Join(conds, " AND ")
 	}
@@ -112,7 +129,7 @@ func (s *Store) AuditPage(kind, actor string, since int64, limit int, cursor int
 		a := &AuditEvent{}
 		var id int64
 		var agent sql.NullString
-		if err := rows.Scan(&id, &a.TS, &a.Kind, &a.Actor, &agent, &a.Payload); err != nil {
+		if err := rows.Scan(&id, &a.TS, &a.Kind, &a.Actor, &agent, &a.Payload, &a.PrevHash, &a.Hash); err != nil {
 			return nil, err
 		}
 		a.AgentID = agent.String

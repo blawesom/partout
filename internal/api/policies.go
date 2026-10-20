@@ -59,6 +59,11 @@ func (h *Handler) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !policy.ValidEOL(req.Match.EOL) {
+		writeError(w, http.StatusBadRequest, "bad_request",
+			"eol must be supported|ending_soon|ended (or omitted)", nil)
+		return
+	}
 	ruleID := id.New("pol")
 	if err := h.st.CreatePolicy(ruleID, req.Name, req.Match, req.Effect, req.Priority); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "create policy", err)

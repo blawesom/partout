@@ -160,6 +160,65 @@ func TestEOLStateFor(t *testing.T) {
 	}
 }
 
+// TestEOLForHost: the policy-facing resolver maps a host's os-release
+// facts to its end-of-support state, with "" (never "unknown") when the
+// state cannot be computed — EOL-scoped rules must not trip on a guess.
+func TestEOLForHost(t *testing.T) {
+	st, err := store.New("sqlite::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	rows := []store.EOLRow{
+		{Distro: "ubuntu", Cycle: "20.04", EOLDate: now.AddDate(0, -3, 0).Format("2006-01-02"), FetchedAt: now.Unix()}, // ended
+		{Distro: "ubuntu", Cycle: "24.04", EOLDate: now.AddDate(2, 0, 0).Format("2006-01-02"), FetchedAt: now.Unix()},  // supported
+	}
+	if err := st.ReplaceEOLCache(rows); err != nil {
+		t.Fatal(err)
+	}
+	r := New(st, log.New(io.Discard, "", 0))
+
+	seed := func(agentID, cycle string) {
+		t.Helper()
+		if err := st.UpsertAgent(store.Agent{ID: agentID, UUID: "u-" + agentID, ED25519Pub: "e", X25519Pub: "x"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.UpsertFacts(store.Facts{AgentID: agentID, Data: map[string]string{
+			"host.distro": "ubuntu", "host.distro_version": cycle,
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Ended host.
+	seed("ag_ended", "20.04")
+	if s := r.EOLForHost("ag_ended"); s != "ended" {
+		t.Fatalf("EOLForHost(ended) = %q, want ended", s)
+	}
+	// Supported host.
+	seed("ag_ok", "24.04")
+	if s := r.EOLForHost("ag_ok"); s != "supported" {
+		t.Fatalf("EOLForHost(supported) = %q, want supported", s)
+	}
+	// No facts → "".
+	if s := r.EOLForHost("ag_none"); s != "" {
+		t.Fatalf("EOLForHost(no facts) = %q, want \"\"", s)
+	}
+	// Unknown distro → "" (not "unknown").
+	if err := st.UpsertAgent(store.Agent{ID: "ag_odd", UUID: "u-odd", ED25519Pub: "e", X25519Pub: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertFacts(store.Facts{AgentID: "ag_odd", Data: map[string]string{
+		"host.distro": "gentoo", "host.distro_version": "rolling",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if s := r.EOLForHost("ag_odd"); s != "" {
+		t.Fatalf("EOLForHost(unknown distro) = %q, want \"\"", s)
+	}
+}
+
 // TestCorrelateOSV uses a fake OSV server.
 func TestCorrelateOSV(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -425,19 +425,24 @@ the leaf SANs (`PARTOUT_TLS_SERVER_NAMES`) — `doctor` warns when it is not.
 > operations.md §3.6). Docker-host, air-gapped and non-systemd manual paths
 > follow the same env + flags (§4).
 
-### 3.3 Docker — server *(maybe future — no artifacts in repo, not on the roadmap)*
+### 3.3 Docker — server *(implemented — `deploy/docker/`)*
+
+`deploy/docker/` holds a minimal, boring artifact: a multi-stage `Dockerfile`
+(pure-Go build, `debian:stable-slim` runtime, non-root user, `/var/lib/partout`
+volume, port 8443) plus a `docker-compose.yml` and a README. There is **no
+published image** — building locally is the path:
 
 ```
-docker run -d --name partout-server \
-  -p 127.0.0.1:8443:8443 \
-  -v partout-data:/var/lib/partout \
-  -e PARTOUT_TLS=on \
-  --restart unless-stopped \
-  <image> --mode=server --db=/var/lib/partout/partout.db
+docker build -f deploy/docker/Dockerfile -t partout:local .
+docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
-`partout-data` holds the DB and `tls/` CA material — this volume **is** the server's
-state (back it up; ops doc §4.1).
+`partout-data` holds the DB, `secret.key` and `tls/` CA material — this volume
+**is** the server's state (back it up; ops doc §4.1). Agents still run on the
+managed hosts (§3.2) — they dial the server, so they must reach the published
+port. One honest limitation: there is no systemd inside the container, so the
+one-command `partout update` supervised swap (systemd-driven, §5.3) does not
+apply — update by rebuilding the image. See `deploy/docker/README.md`.
 
 ### 3.4 Docker — agent *(maybe future — no artifacts in repo, not on the roadmap)*
 
@@ -454,10 +459,11 @@ docker run -d --name partout-agent \
 > agent is for environments where a container is already the standard host-management
 > vehicle. For hosts that will need elevation, prefer the bare-binary agent (§3.2).
 
-### 3.5 Compose *(maybe future — no artifacts in repo, not on the roadmap)*
+### 3.5 Compose *(partially implemented — server only, `deploy/docker/docker-compose.yml`)*
 
-`deploy/compose/local.yaml` would hold server + same-host agent (the "one box" lab).
-nginx single-port routing (if not using Caddy):
+The compose rig in `deploy/docker/` covers the **server** only (plus a commented
+agent example); a full server + same-host agent "one box" lab is still future.
+Reverse-proxy routing (nginx single-port, if not using the server's own TLS):
 
 ```nginx
 server {
@@ -625,6 +631,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | `PARTOUT_SSH_DIR` | **~/.ssh** | (v0.3) SSH dir for fleet-SSH provisioning: `config`, `known_hosts`, identity files; the operator's existing key material is the bootstrap channel (R17, Decision 11) — no credentials created or persisted by Partout. Passed to `ssh`/`scp`/`ssh-keygen` **explicitly** (`-F <dir>/config`, `UserKnownHostsFile`, `IdentityFile`), because OpenSSH resolves `~/.ssh` from the passwd database and ignores `$HOME`. Note: a non-default dir *replaces* the per-user config (`ssh -F` semantics), so the isolated dir's `config` must carry any `Host`/`ProxyJump`/`IdentityFile` rules. **ssh-config aliases work as provision hosts**: the run resolves them via `ssh -G` against that same config before keyscan, and the key-confirm screen shows the resolved target. The wizard's *SSH access* line and `partout doctor` report host-specific `IdentityFile` entries too (keys a conventional-name scan misses) |
 | `PARTOUT_SERVER_HOST` | **\<hostname\>** | (v0.3) server address written into the new agent's `agent.env` `PARTOUT_SERVER` during provisioning — on cloud hosts the default hostname is an internal DNS name remote targets may not resolve; set it to the public IP/FQDN in `/etc/partout/server.env` before provisioning (the listen address `:8443` is not usable by remote agents). The hostname default only works when every target can resolve it — on routed LANs without DNS, or when `/etc/hosts` maps the hostname to `127.0.1.1`, set an explicit IP/FQDN (the server warns at boot and `doctor` checks it) |
 | `PARTOUT_REQUIRE_FILE_ROOT` | **false** | (file root, docs/spec-file-root.md) when true, file ops are refused to agents that report no `partout.file_root` fact (legacy/pre file-root agents). For mixed-fleet cutovers: flip on once every agent is upgraded; default off during beta |
+| `PARTOUT_SSE_TOKEN_TTL_S` | **60** | lifetime of the short-lived SSE-scoped token minted by `POST /api/v1/auth/sse-token` (any authenticated role). The web UI fetches one and passes it as `?token=` on `GET /api/v1/events` (EventSource cannot set headers); the token works ONLY on that route — full session/static bearer tokens are no longer accepted in the URL (they leak into reverse-proxy access logs). Reconnects mint a fresh token automatically |
 
 RBAC: when no token is set the server runs in **single-user local mode** (no auth);
 hierarchy viewer < operator < admin.
@@ -677,7 +684,7 @@ the subcommand.
 [--mode fresh|join] [--elevate [--elevation-policy NAME|FILE]…]
 [--service-labels a,b] [--cert-paths /dir]` starts a run — `--elevate`
 bootstraps elevation through the run's root install (policy + sudoers +
-`PARTOUT_ELEVATE=sudo`; defaults to the seeded `default-baseline` policy),
+`PARTOUT_ELEVATE=sudo`; defaults to the seeded `default-broad` policy — the broad tier),
 `--service-labels`/`--cert-paths` set the agent-env knobs that need root
 post-provision; `get RUN_ID` shows state + per-step output; when a
 host key is new to `known_hosts` the run pauses at `key_confirm` until `key RUN_ID
@@ -783,7 +790,7 @@ Subcommand: `ctl` (§4.3). Flags override env; env overrides defaults.
 3. Mint an enrollment token: `partout ctl enroll-token --server … --token $ADMIN`.
 4. On the first host: provision it — `partout ctl provision new --host
    user@host --elevate` (ships the binary + CA + the seeded
-   `default-baseline` elevation policy, renders the sudoers drop-in and
+   `default-broad` elevation policy, renders the sudoers drop-in and
    starts the agent elevated) — or install the agent by hand (§3.2) with
    that token → `GET /api/v1/hosts` shows it `connected` with facts
    within ~10 s. The seeded `default-daily-package-updates` job (paused)

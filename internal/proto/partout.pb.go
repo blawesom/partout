@@ -3605,6 +3605,7 @@ type Decision struct {
 	Sig           []byte                 `protobuf:"bytes,5,opt,name=sig,proto3" json:"sig,omitempty"`                                 // server Ed25519 signature (agent verifies)
 	ActorRole     string                 `protobuf:"bytes,6,opt,name=actor_role,json=actorRole,proto3" json:"actor_role,omitempty"`    // requester RBAC role (for agent re-eval)
 	ApprovalId    string                 `protobuf:"bytes,7,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"` // non-empty when a human approval authorized this (M4)
+	EolState      string                 `protobuf:"bytes,8,opt,name=eol_state,json=eolState,proto3" json:"eol_state,omitempty"`       // host OS end-of-support state the server evaluated under
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3684,6 +3685,13 @@ func (x *Decision) GetActorRole() string {
 func (x *Decision) GetApprovalId() string {
 	if x != nil {
 		return x.ApprovalId
+	}
+	return ""
+}
+
+func (x *Decision) GetEolState() string {
+	if x != nil {
+		return x.EolState
 	}
 	return ""
 }
@@ -3813,6 +3821,7 @@ type PolicyBundle struct {
 	HostTags      map[string]string      `protobuf:"bytes,5,rep,name=host_tags,json=hostTags,proto3" json:"host_tags,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // this agent's tags (for local re-eval)
 	HostRoles     []string               `protobuf:"bytes,6,rep,name=host_roles,json=hostRoles,proto3" json:"host_roles,omitempty"`                                                                        // this agent's roles (for local re-eval)
 	AgentId       string                 `protobuf:"bytes,7,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`                                                                              // server-assigned agent ID (for host:<id> predicates)
+	HostEol       string                 `protobuf:"bytes,8,opt,name=host_eol,json=hostEol,proto3" json:"host_eol,omitempty"`                                                                              // host's OS end-of-support state: supported|ending_soon|ended ("" = unknown)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3892,6 +3901,13 @@ func (x *PolicyBundle) GetHostRoles() []string {
 func (x *PolicyBundle) GetAgentId() string {
 	if x != nil {
 		return x.AgentId
+	}
+	return ""
+}
+
+func (x *PolicyBundle) GetHostEol() string {
+	if x != nil {
+		return x.HostEol
 	}
 	return ""
 }
@@ -4775,7 +4791,7 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\x04size\x18\x04 \x01(\x03R\x04size\x12\x1d\n" +
 	"\n" +
 	"mtime_unix\x18\x05 \x01(\x03R\tmtimeUnix\x12\x12\n" +
-	"\x04mode\x18\x06 \x01(\tR\x04mode\"\xd7\x01\n" +
+	"\x04mode\x18\x06 \x01(\tR\x04mode\"\xf4\x01\n" +
 	"\bDecision\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12%\n" +
 	"\x0ebundle_version\x18\x02 \x01(\x04R\rbundleVersion\x12\x16\n" +
@@ -4785,7 +4801,8 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\n" +
 	"actor_role\x18\x06 \x01(\tR\tactorRole\x12\x1f\n" +
 	"\vapproval_id\x18\a \x01(\tR\n" +
-	"approvalId\"\xe4\x02\n" +
+	"approvalId\x12\x1b\n" +
+	"\teol_state\x18\b \x01(\tR\beolState\"\xe4\x02\n" +
 	"\aCommand\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x10\n" +
@@ -4800,7 +4817,7 @@ const file_partout_partout_proto_rawDesc = "" +
 	" \x01(\v2\x14.partout.v1.DecisionR\bdecision\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcb\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe6\x02\n" +
 	"\fPolicyBundle\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x04R\aversion\x12!\n" +
 	"\fcontent_hash\x18\x02 \x01(\tR\vcontentHash\x12\x1d\n" +
@@ -4810,7 +4827,8 @@ const file_partout_partout_proto_rawDesc = "" +
 	"\thost_tags\x18\x05 \x03(\v2&.partout.v1.PolicyBundle.HostTagsEntryR\bhostTags\x12\x1d\n" +
 	"\n" +
 	"host_roles\x18\x06 \x03(\tR\thostRoles\x12\x19\n" +
-	"\bagent_id\x18\a \x01(\tR\aagentId\x1a;\n" +
+	"\bagent_id\x18\a \x01(\tR\aagentId\x12\x19\n" +
+	"\bhost_eol\x18\b \x01(\tR\ahostEol\x1a;\n" +
 	"\rHostTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\" \n" +

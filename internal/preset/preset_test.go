@@ -5,6 +5,8 @@ import (
 
 	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/agent/task"
+	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/server/tasks"
 
 	"github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/store"
@@ -184,6 +186,177 @@ func TestSeededElevationPoliciesValid(t *testing.T) {
 	}
 }
 
+// TestSeededTiers pins the tier contract: the preset seeds the three
+// tiers, the broad tier covers every command shape the agent itself
+// invokes (the entire point of broad-as-default — no field-discovered
+// incantations for day-2 work) and elevates no shell, and the full tier
+// is the standalone NOPASSWD: ALL grant. default-strict seeds the old
+// field-validated baseline document: narrower than broad but
+// wildcard-shaped, so Tier() reports it honestly (the description says
+// the same in plain words).
+func TestSeededTiers(t *testing.T) {
+	seeded := map[string]*elevate.Policy{}
+	for _, ep := range ElevationPolicies {
+		pol, err := elevate.LoadPolicyJSON([]byte(`{"rules":` + ep.RulesJSON + `}`))
+		if err != nil {
+			t.Fatalf("preset elevation policy %s: %v", ep.Name, err)
+		}
+		seeded[ep.Name] = pol
+	}
+	if seeded["default-broad"].Tier() != "broad" {
+		t.Errorf("default-broad: Tier() = %q, want broad", seeded["default-broad"].Tier())
+	}
+	if seeded["default-full"].Tier() != "full" {
+		t.Errorf("default-full: Tier() = %q, want full", seeded["default-full"].Tier())
+	}
+	// The seeded strict document is narrower than broad (standard units
+	// only) but not wildcard-free; its classifier verdict is broad and
+	// its description says so. What must hold: it grants strictly less
+	// than default-broad.
+	strict, broadLocal := seeded["default-strict"], seeded["default-broad"]
+	for _, argv := range [][]string{
+		{"systemctl", "restart", "my-own-unit"},
+		{"useradd", "--system", "--no-create-home", "myapp"},
+		{"groupadd", "docker"},
+		{"systemctl", "daemon-reload"},
+	} {
+		if strict.Check(argv[0], argv[1:]) == elevate.Elevated {
+			t.Errorf("default-strict elevates %v — it must be narrower than default-broad", argv)
+		}
+		if broadLocal.Check(argv[0], argv[1:]) != elevate.Elevated {
+			t.Errorf("default-broad does NOT elevate the agent-invoked shape: %v", argv)
+		}
+	}
+	for _, name := range []string{"default-broad", "default-strict", "default-full"} {
+		if seeded[name] == nil {
+			t.Errorf("preset does not seed %s", name)
+		}
+	}
+	// Role-shaped profiles (P3.3): tier classification + scope contracts.
+	if seeded["profile-web"].Tier() != "broad" {
+		t.Errorf("profile-web: Tier() = %q, want broad (prefix + unit-scoped grants)", seeded["profile-web"].Tier())
+	}
+	if seeded["profile-database"].Tier() != "broad" {
+		t.Errorf("profile-database: Tier() = %q, want broad (wildcard units)", seeded["profile-database"].Tier())
+	}
+	if seeded["profile-minimal"].Tier() != "strict" {
+		t.Errorf("profile-minimal: Tier() = %q, want strict (exact-argv only)", seeded["profile-minimal"].Tier())
+	}
+	for _, name := range []string{"profile-web", "profile-database", "profile-minimal"} {
+		if seeded[name] == nil {
+			t.Errorf("preset does not seed %s", name)
+		}
+	}
+	// profile-web: web fleet verbs elevate, non-web scope does not.
+	web := seeded["profile-web"]
+	for _, argv := range [][]string{
+		{"nginx", "-t"},
+		{"haproxy", "-c", "-f", "/etc/haproxy/haproxy.cfg"},
+		{"caddy", "validate", "--config", "Caddyfile"},
+		{"systemctl", "restart", "nginx"},
+		{"cat", "/etc/nginx/nginx.conf"},
+		{"apt-get", "-y", "upgrade"},
+		{"reboot"},
+	} {
+		if web.Check(argv[0], argv[1:]) != elevate.Elevated {
+			t.Errorf("profile-web does NOT elevate the web shape: %v", argv)
+		}
+	}
+	for _, argv := range [][]string{
+		{"useradd", "--system", "myapp"},
+		{"systemctl", "restart", "postgresql"},
+		{"bash"},
+	} {
+		if web.Check(argv[0], argv[1:]) == elevate.Elevated {
+			t.Errorf("profile-web elevates out-of-profile scope: %v", argv)
+		}
+	}
+	// profile-database: DB unit verbs + package updates elevate; no
+	// reboot, no config reads, no non-DB units.
+	db := seeded["profile-database"]
+	for _, argv := range [][]string{
+		{"systemctl", "status", "postgresql"},
+		{"systemctl", "restart", "mysqld"},
+		{"apt-get", "-y", "upgrade"},
+	} {
+		if db.Check(argv[0], argv[1:]) != elevate.Elevated {
+			t.Errorf("profile-database does NOT elevate the DB shape: %v", argv)
+		}
+	}
+	for _, argv := range [][]string{
+		{"reboot"},
+		{"cat", "/etc/postgresql/postgresql.conf"},
+		{"systemctl", "restart", "nginx"},
+		{"useradd", "foo"},
+	} {
+		if db.Check(argv[0], argv[1:]) == elevate.Elevated {
+			t.Errorf("profile-database elevates out-of-profile scope: %v", argv)
+		}
+	}
+	// profile-minimal: upgrades + self-grant only.
+	minimal := seeded["profile-minimal"]
+	for _, argv := range [][]string{
+		{"apt-get", "-y", "upgrade"},
+		{"dnf", "-y", "upgrade"},
+		{"/usr/local/bin/partout", "ctl", "elevation", "apply", "-"},
+	} {
+		if minimal.Check(argv[0], argv[1:]) != elevate.Elevated {
+			t.Errorf("profile-minimal does NOT elevate the minimal shape: %v", argv)
+		}
+	}
+	for _, argv := range [][]string{
+		{"reboot"},
+		{"systemctl", "restart", "nginx"},
+		{"nginx", "-t"},
+		{"cat", "/etc/nginx/nginx.conf"},
+	} {
+		if minimal.Check(argv[0], argv[1:]) == elevate.Elevated {
+			t.Errorf("profile-minimal elevates out-of-profile scope: %v", argv)
+		}
+	}
+	broadPol := seeded["default-broad"]
+	// The exact command shapes the agent invokes (internal/agent pkg +
+	// task executor): every one must elevate under broad.
+	shapes := [][]string{
+		{"apt-get", "-qq", "update"},
+		{"apt-get", "-o", "Dpkg::Progress-Focus=full", "-s", "upgrade"},
+		{"apt-get", "-o", "Dpkg::Progress-Focus=full", "-y", "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold", "upgrade"},
+		{"apt-get", "-y", "install", "vim", "fail2ban", "btop"},
+		{"apt-get", "-y", "remove", "cowsay"},
+		{"dnf", "-q", "makecache"},
+		{"dnf", "-y", "upgrade"},
+		{"dnf", "check-update"},
+		{"dnf", "upgrade", "--assumeno"},
+		{"dnf", "-y", "install", "htop"},
+		{"systemctl", "restart", "partout-agent"},
+		{"systemctl", "start", "myapp"},
+		{"systemctl", "enable", "nginx"},
+		{"systemctl", "is-active", "sshd"},
+		{"systemctl", "daemon-reload"},
+		{"systemctl", "reboot"},
+		{"useradd", "--system", "--no-create-home", "myapp"},
+		{"groupadd", "docker"},
+		{"hostnamectl", "set-hostname", "web05"},
+		{"nginx", "-t"},
+		{"haproxy", "-c", "-f", "/etc/haproxy/haproxy.cfg"},
+		{"cat", "/etc/haproxy/haproxy.cfg"},
+		{"shutdown", "-r", "now"},
+		{"reboot"},
+		{"/usr/local/bin/partout", "ctl", "elevation", "apply", "-"},
+	}
+	for _, argv := range shapes {
+		if broadPol.Check(argv[0], argv[1:]) != elevate.Elevated {
+			t.Errorf("broad tier does NOT elevate the agent-invoked shape: %v", argv)
+		}
+	}
+	// And it must NOT elevate a shell (the point of broad over full).
+	for _, argv := range [][]string{{"bash"}, {"sh", "-c", "id"}, {"/bin/sh"}, {"sudo", "bash"}} {
+		if broadPol.Check(argv[0], argv[1:]) == elevate.Elevated {
+			t.Errorf("broad tier elevates a shell: %v", argv)
+		}
+	}
+}
+
 // TestSeededTasksDecode: the seeded task steps must decode (the jobs
 // controller loads them on reconcile) — and every `when` guard must parse
 // against the live evaluator (a broken guard skips the step silently).
@@ -207,5 +380,56 @@ func TestSeededTasksDecode(t *testing.T) {
 				t.Fatalf("preset task %s: step %q guard %q: %v", td.Name, st.Name, st.When, err)
 			}
 		}
+	}
+}
+
+// TestSeededEOLUpgradeRule: default-require-approval-eol-upgrade gates
+// package applies on ended hosts (pkg.apply + eol=ended →
+// require_approval) and leaves supported hosts alone. Task upgrade steps
+// evaluate under the same class server-side (tasks.StepActions).
+func TestSeededEOLUpgradeRule(t *testing.T) {
+	var rule *policy.Rule
+	for _, p := range Policies {
+		if p.Name == "default-require-approval-eol-upgrade" {
+			m := p.Match
+			r := policy.Rule{Name: p.Name, Match: m, Effect: p.Effect}
+			rule = &r
+			break
+		}
+	}
+	if rule == nil {
+		t.Fatal("preset EOL upgrade rule missing")
+	}
+	// Ended host + pkg.apply → require_approval.
+	d := policy.Evaluate([]policy.Rule{*rule}, policy.Action{
+		ActionClass: policy.ActionPkgApply, HostEOL: policy.EOLEnded,
+		CommandLine: "apt-get -y upgrade",
+	})
+	if d.Effect != policy.EffectRequireApproval {
+		t.Fatalf("ended host pkg.apply: effect = %s, want require_approval", d.Effect)
+	}
+	// Supported host + pkg.apply → allow.
+	d = policy.Evaluate([]policy.Rule{*rule}, policy.Action{
+		ActionClass: policy.ActionPkgApply, HostEOL: policy.EOLSupported,
+		CommandLine: "apt-get -y upgrade",
+	})
+	if d.Effect != policy.EffectAllow {
+		t.Fatalf("supported host pkg.apply: effect = %s, want allow", d.Effect)
+	}
+	// A task upgrade step on an ended host evaluates the same (server-side
+	// step gating maps package/upgrade steps to the pkg.apply class).
+	steps := []*pb.TaskStep{{Kind: "upgrade", Name: "daily upgrade"}}
+	sd := tasks.EvaluateRunSteps([]policy.Rule{*rule}, policy.Action{
+		ActionClass: policy.ActionTaskRun, HostEOL: policy.EOLEnded, ActorRole: "admin",
+	}, steps)
+	if sd.Effect != policy.EffectRequireApproval {
+		t.Fatalf("ended host task upgrade: effect = %s, want require_approval", sd.Effect)
+	}
+	// The same step on a supported host is fine.
+	sd = tasks.EvaluateRunSteps([]policy.Rule{*rule}, policy.Action{
+		ActionClass: policy.ActionTaskRun, HostEOL: policy.EOLSupported, ActorRole: "admin",
+	}, steps)
+	if sd.Effect != policy.EffectAllow {
+		t.Fatalf("supported host task upgrade: effect = %s, want allow", sd.Effect)
 	}
 }

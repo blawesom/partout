@@ -280,13 +280,16 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		// computes the same value, so a host's effective scope can be
 		// matched against the operator's canonical documents fleet-wide.
 		elevSummary["hash"] = a.elevation.PolicyHash()
+		// The privilege tier (strict / broad / full): the blast radius
+		// readable at a glance, without reading rules.
+		elevSummary["tier"] = a.elevation.Tier()
 	}
 	if a.elevation != nil {
 		elevSummary["rules"] = len(a.elevation.Rules)
 		elevSummary["sources"] = a.elevation.Source()
 	}
-	if a.elevationErr != nil {
-		elevSummary["error"] = a.elevationErr.Error()
+	if a.elevate == elevate.Sudo && a.elevation == nil {
+		elevSummary["tier"] = "legacy" // sudo on, no policy: everything through sudo
 	}
 	// The shared elevation runner: with a policy loaded, a matching command
 	// elevates and a non-matching one runs unprivileged; without, legacy
@@ -1232,6 +1235,13 @@ func (a *Agent) refreshElevation() {
 		summary["hash"] = pol.PolicyHash()
 		summary["rules"] = len(pol.Rules)
 		summary["sources"] = pol.Source()
+		// The privilege tier (strict / broad / full): the blast radius
+		// readable at a glance, without reading rules. "legacy" when
+		// sudo mode is on with no policy (everything through sudo).
+		summary["tier"] = pol.Tier()
+	}
+	if a.elevate == elevate.Sudo && pol == nil {
+		summary["tier"] = "legacy"
 	}
 	if perr != nil {
 		summary["error"] = fmt.Errorf("elevation policy: %w", perr).Error()

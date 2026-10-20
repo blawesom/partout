@@ -3,6 +3,8 @@ package policy
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -226,5 +228,75 @@ func TestSignVerifyEmptyRuleList(t *testing.T) {
 	sig2 := SignDecision(priv, "r", 1, EffectAllow, []string{}, "", "")
 	if string(sig1) != string(sig2) {
 		t.Fatal("nil vs empty []string produce different sigs")
+	}
+}
+
+// --- EOL predicate (PRD §5.6 EOL→policy gating) ---
+
+func TestEvaluateEOLMatch(t *testing.T) {
+	rule := Rule{ID: "r1", Match: Match{EOL: EOLEnded, Actions: []string{ActionPkgApply}}, Effect: EffectRequireApproval}
+	// ended host + pkg.apply → require_approval.
+	d := Evaluate([]Rule{rule}, Action{ActionClass: ActionPkgApply, HostEOL: EOLEnded, CommandLine: "apt-get -y upgrade"})
+	if d.Effect != EffectRequireApproval {
+		t.Fatalf("ended host pkg.apply: effect = %q, want require_approval", d.Effect)
+	}
+	if len(d.MatchedRules) != 1 || d.MatchedRules[0] != "r1" {
+		t.Errorf("matched = %v", d.MatchedRules)
+	}
+	// supported host + same action → allowed (rule does not match).
+	d = Evaluate([]Rule{rule}, Action{ActionClass: ActionPkgApply, HostEOL: EOLSupported, CommandLine: "apt-get -y upgrade"})
+	if d.Effect != EffectAllow {
+		t.Fatalf("supported host pkg.apply: effect = %q, want allow", d.Effect)
+	}
+	// ending_soon host + same action → allowed.
+	d = Evaluate([]Rule{rule}, Action{ActionClass: ActionPkgApply, HostEOL: EOLEndingSoon, CommandLine: "apt-get -y upgrade"})
+	if d.Effect != EffectAllow {
+		t.Fatalf("ending_soon host pkg.apply: effect = %q, want allow", d.Effect)
+	}
+	// ended host but a different action class → allowed.
+	d = Evaluate([]Rule{rule}, Action{ActionClass: ActionExec, HostEOL: EOLEnded, CommandLine: "ls"})
+	if d.Effect != EffectAllow {
+		t.Fatalf("ended host exec: effect = %q, want allow", d.Effect)
+	}
+}
+
+func TestEvaluateEOLUnknownNeverMatches(t *testing.T) {
+	// A host whose state cannot be computed must never trip an
+	// EOL-scoped rule — certainty, not a guess.
+	for _, unknown := range []string{"", "unknown"} {
+		rule := Rule{ID: "r1", Match: Match{EOL: EOLEnded}, Effect: EffectDeny}
+		d := Evaluate([]Rule{rule}, Action{HostEOL: unknown, CommandLine: "apt-get -y upgrade"})
+		if d.Effect != EffectAllow {
+			t.Fatalf("HostEOL %q: effect = %q, want allow", unknown, d.Effect)
+		}
+	}
+}
+
+func TestEvaluateEOLJSONRoundTrip(t *testing.T) {
+	// The match field serializes as "eol" and survives the bundle wire.
+	rules := []Rule{{ID: "r1", Match: Match{EOL: EOLEnded}, Effect: EffectRequireApproval}}
+	_, _, j := BuildBundle(rules)
+	if !strings.Contains(j, `"eol":"ended"`) {
+		t.Fatalf("bundle JSON missing eol field: %s", j)
+	}
+	var back []Rule
+	if err := json.Unmarshal([]byte(j), &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back[0].Match.EOL != EOLEnded {
+		t.Fatalf("round trip lost EOL: %+v", back[0].Match)
+	}
+}
+
+func TestValidEOL(t *testing.T) {
+	for _, ok := range []string{"", EOLSupported, EOLEndingSoon, EOLEnded} {
+		if !ValidEOL(ok) {
+			t.Errorf("ValidEOL(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"Ended", "eol", "past", "unknown"} {
+		if ValidEOL(bad) {
+			t.Errorf("ValidEOL(%q) = true, want false", bad)
+		}
 	}
 }

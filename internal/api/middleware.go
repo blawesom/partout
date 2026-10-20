@@ -97,6 +97,21 @@ func (h *Handler) roleFromToken(tok string) role {
 	return h.auth.roleFor(tok)
 }
 
+// sseRoleFromToken maps a ?token= query credential to its role for the SSE
+// stream ONLY. The token must have been minted by POST /api/v1/auth/sse-token
+// (short-lived, SSE-scoped); session, static, and OAuth bearer tokens are
+// deliberately NOT accepted in a URL — the query string leaks into
+// reverse-proxy access logs, so only a scoped, expiring token belongs there.
+func (h *Handler) sseRoleFromToken(tok string) role {
+	if h.sseTokC == nil {
+		return roleNone
+	}
+	if _, roleStr, ok := h.sseTokC.Lookup(tok); ok {
+		return roleFromString(roleStr)
+	}
+	return roleNone
+}
+
 // tokensConfigured reports whether any role token is set.
 func (h *Handler) tokensConfigured() bool {
 	return h.auth != nil && h.auth.configured()
@@ -143,16 +158,24 @@ func (h *Handler) requireRole(min role) func(http.Handler) http.Handler {
 }
 
 // requireSSE wraps a handler with a minimum-role check for the SSE stream.
-// EventSource cannot set request headers, so the credential may also arrive as
-// a ?token=<jwt> query parameter. The query form is accepted ONLY here, never
-// on the general API (tokens in URLs are logged by proxies/access logs); header
-// auth still works and is preferred.
+// EventSource cannot set request headers, so the credential may also arrive
+// as a ?token=<sse-token> query parameter — a short-lived SSE-scoped token
+// minted by POST /api/v1/auth/sse-token (a full bearer in the URL would
+// leak into reverse-proxy access logs). The query form is accepted ONLY
+// here, never on the general API; header auth still works and is preferred.
 func (h *Handler) requireSSE(min role) func(http.Handler) http.Handler {
 	return h.requireCredential(min, sseToken)
 }
 
 // sseToken reads the bearer credential from the Authorization header or the
-// ?token= query parameter (SSE only).
+// ?token= query parameter (SSE only). Header auth is tried first and is
+// preferred; the query form must be a minted SSE-scoped token (see
+// requireCredential for the role resolution order).
+//
+// DEPRECATED (1.0 beta window): ?token=<full bearer> (session/static/
+// OAuth) no longer authorizes the stream — tokens in URLs leak into
+// reverse-proxy access logs. Mint a scoped token instead:
+// POST /api/v1/auth/sse-token. Header bearer auth is unchanged.
 func sseToken(r *http.Request) string {
 	if tok := bearerToken(r); tok != "" {
 		return tok
@@ -179,7 +202,16 @@ func (h *Handler) requireCredential(min role, source func(*http.Request) string)
 					"missing bearer token (Authorization: Bearer <token>)", nil)
 				return
 			}
-			got := h.roleFromToken(tok)
+			// Header credentials go through the general bearer lookups;
+			// a query credential (?token=, SSE only) must resolve in the
+			// SSE-scoped store — a session/static bearer never authorizes
+			// from a URL (it would leak into proxy access logs).
+			var got role
+			if bearerToken(r) == "" && r.URL.Query().Get("token") != "" {
+				got = h.sseRoleFromToken(tok)
+			} else {
+				got = h.roleFromToken(tok)
+			}
 			if got == roleNone {
 				writeError(w, http.StatusUnauthorized, "unauthorized",
 					"invalid bearer token", nil)

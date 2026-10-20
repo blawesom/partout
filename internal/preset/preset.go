@@ -45,7 +45,8 @@ type DefaultAlert struct {
 }
 
 // Policies is the fleet safety net: high-confidence "never right" denies +
-// one approval gate for host reboot. All scoped to every host, exec class.
+// the approval gates (host reboot; package upgrades on a host whose OS is
+// past end-of-support).
 var Policies = []DefaultPolicy{
 	{
 		Name: "default-deny-rm-rf-root",
@@ -87,6 +88,20 @@ var Policies = []DefaultPolicy{
 		},
 		Effect: policy.EffectRequireApproval,
 	},
+	{
+		Name: "default-require-approval-eol-upgrade",
+		Match: policy.Match{
+			Hosts: "all", Actions: []string{policy.ActionPkgApply},
+			// PRD §5.6: a host whose OS is past end-of-support gets no
+			// unattended package upgrades — an admin must approve each
+			// apply (the upgrade may move the host off an unsupported
+			// state or deliberately pin it). Applies to the packages
+			// surface AND task upgrade steps (kind upgrade / package,
+			// which evaluate as pkg.apply).
+			EOL: policy.EOLEnded,
+		},
+		Effect: policy.EffectRequireApproval,
+	},
 }
 
 // Alerts is the standard observability net (thresholds = the engine's
@@ -110,6 +125,8 @@ var Alerts = []DefaultAlert{
 		Thresholds: `{"min_severity":"high","min_count":1}`, Severity: "warning"},
 	{Name: "default-elevation-drift", Kind: observe.KindElevationDrift, Selector: "all",
 		Thresholds: `{}`, Severity: "warning"},
+	{Name: "default-host-offline", Kind: observe.KindHostOffline, Selector: "all",
+		Thresholds: `{"offline_minutes":30}`, Severity: "critical"},
 }
 
 // slug turns a default name into a deterministic row id
@@ -200,22 +217,73 @@ var Jobs = []struct {
 	},
 }
 
-// ElevationPolicies are the seeded ready-to-apply privilege profiles. The
-// baseline grants exactly what a first-day fleet needs — package updates
-// (both the task step and the packages-apply command forms, apt and dnf),
-// service control for the standard fleet units, hostname changes and a
-// bare reboot — nothing more. Validated in the field (FIELD-REPORT
-// 2026-10-04).
+// ElevationPolicies are the seeded privilege TIERS (P0: broad default,
+// strict + full opt-in). A tier is a product-authored, hash-tracked
+// sudoers document — never hand-crafted sudoers. The tier name rides the
+// agent's partout.elevation fact so the fleet's blast radius is readable
+// at a glance.
+//
+//   - default-broad  — THE DEFAULT. Every command shape Partout itself
+//     invokes for day-2 fleet work (both package managers end-to-end,
+//     systemctl verb-scoped on any unit, user/group steps, hostname,
+//     config validators, reboot) plus the signed-policy self-grant.
+//     Product-owned: the operator never writes an apt incantation.
+//   - default-strict — the exact-argv wall (the old default-baseline,
+//     field-validated 2026-10-04). Narrow blast radius at the cost of
+//     authoring every privileged need before it works.
+//   - default-full   — `NOPASSWD: ALL`: root-equivalent for the agent
+//     user, zero host-local containment. The loud escape hatch; the tier
+//     is visible everywhere (fact, posture table, run rows).
+//   - profile-web / profile-database / profile-minimal — role-shaped
+//     profiles (P3.3): broad-derived web/proxy scope, a strict-derived
+//     database scope (no reboot, no config reads), and the minimal
+//     patch-only strict document. Cloning + trimming these beats
+//     authoring from a blank page.
 var ElevationPolicies = []ElevationPolicyDef{
 	{
-		Name: "default-baseline",
-		Description: "Day-1 fleet baseline: package updates and installs (apt + dnf, task steps and packages-apply forms), " +
-			"systemctl on standard fleet units, hostnamectl set-hostname, config validation (nginx -t, haproxy -c — " +
-			"read-only checks the observe layer uses to prove config health on root-only configs), bare reboot, " +
-			"and the elevation self-grant (`partout ctl elevation apply -` — lets the host accept server-SIGNED policy " +
-			"pushes; the signature, not the path, is the gate). " +
-			"Apply at provisioning (provision new --elevate) or with your config management; " +
-			"edit or clone for tighter scopes.",
+		Name: "default-broad",
+		Description: "BROAD tier (the default): day-2 fleet work with no policy authoring — package updates and installs " +
+			"(apt + dnf, every form the agent invokes: task steps, packages-apply, dry runs, makecache), systemctl on any unit " +
+			"(management verbs only — no link/mask), user/group task steps, hostnamectl, config validators (nginx -t, haproxy -c) " +
+			"with cat for root-owned configs, reboot in all three forms Partout tries, and the signed-policy self-grant. " +
+			"No shell, no arbitrary commands — a compromise of the agent user gets fleet-management verbs, not root.",
+		RulesJSON: `[
+  {"allow":"apt-get","args_prefix":["-y"]},
+  {"allow":"apt-get","args_prefix":["-qq"]},
+  {"allow":"apt-get","args_prefix":["-q"]},
+  {"allow":"apt-get","args_prefix":["-o"]},
+  {"allow":"dnf","args_prefix":["-y"]},
+  {"allow":"dnf","args_prefix":["-q"]},
+  {"allow":"dnf","args":["check-update"]},
+  {"allow":"dnf","args":["upgrade","--assumeno"]},
+  {"allow":"apt-get","args":["-y","upgrade"]},
+  {"allow":"dnf","args":["-y","upgrade"]},
+  {"allow":"nginx","args":["-t"]},
+  {"allow":"haproxy","args_prefix":["-c","-f"]},
+  {"allow":"cat","files":["/etc/*","/etc/*/*","/etc/*/*/*"]},
+  {"allow":"hostnamectl","args":["set-hostname","*"]},
+  {"allow":"systemctl","verbs":["status","show","start","stop","restart","reload","try-restart","enable","disable","is-active","is-enabled"],"units":["*"]},
+  {"allow":"systemctl","args":["daemon-reload"]},
+  {"allow":"useradd","args_prefix":["--system"]},
+  {"allow":"useradd","args_prefix":["*","*"]},
+  {"allow":"useradd","args_prefix":["*","*","*"]},
+  {"allow":"useradd","args_prefix":["*","*","*","*"]},
+  {"allow":"useradd"},
+  {"allow":"groupadd","args_prefix":["*"]},
+  {"allow":"shutdown","args":["-r","now"]},
+  {"allow":"systemctl","args":["reboot"]},
+  {"allow":"reboot"},
+  {"allow":"/usr/local/bin/partout","args":["ctl","elevation","apply","-"]}
+]`,
+	},
+	{
+		Name: "default-strict",
+		Description: "STRICT tier (the old default-baseline, field-validated 2026-10-04): exact-argv grants only — package updates " +
+			"(both the task step and packages-apply forms, apt and dnf), systemctl on standard fleet units, hostnamectl " +
+			"set-hostname, config validation (nginx -t, haproxy -c — read-only checks the observe layer uses to prove config " +
+			"health on root-only configs), bare reboot, and the elevation self-grant (`partout ctl elevation apply -` — lets the " +
+			"host accept server-SIGNED policy pushes; the signature, not the path, is the gate). Narrow blast radius; every new " +
+			"privileged need must be authored before it works. Edit or clone for your scope.",
 		RulesJSON: `[
   {"allow":"apt-get|dnf","args":["-y","upgrade"]},
   {"allow":"apt-get|dnf","args":["-y","install","*"]},
@@ -229,7 +297,75 @@ var ElevationPolicies = []ElevationPolicyDef{
   {"allow":"cat","files":["/etc/nginx/*","/etc/nginx/*/*","/etc/haproxy/*"]},
   {"allow":"hostnamectl","args":["set-hostname","*"]},
   {"allow":"systemctl","verbs":["status","show","start","stop","restart","reload","try-restart","enable","disable","is-active","is-enabled"],"units":["partout-*","fail2ban*","sshd*","nginx*","haproxy*","caddy*"]},
-  {"allow":"reboot"}
+  {"allow":"reboot"},
+  {"allow":"/usr/local/bin/partout","args":["ctl","elevation","apply","-"]}
+]`,
+	},
+	{
+		Name: "default-full",
+		Description: "FULL tier — the loud escape hatch: the agent user can run ANY command as root via sudo (NOPASSWD: ALL). " +
+			"Zero host-local containment for a compromise of the partout user; server-side guardrails (policy deny-list, " +
+			"approvals, audit) still gate every dispatch, and every out-of-band sudo is visible in journald (auth facility). " +
+			"Pick this only when the strict/broad tiers cannot express what you need and you accept the blast radius. " +
+			"The tier is visible on the host posture everywhere — it is never a silent default.",
+		RulesJSON: `[{"full":true}]`,
+	},
+	{
+		Name: "profile-web",
+		Description: "BROAD-derived profile for web/proxy fleets: config validators (nginx -t, haproxy -c, caddy validate) with cat for their root-owned config " +
+			"trees, systemctl on web-ish units, package updates (both families), hostnamectl, reboot, and the signed-policy self-grant. " +
+			"No user/group steps, no shells — a compromised agent user on a web host gets web fleet verbs, not root.",
+		RulesJSON: `[
+  {"allow":"apt-get","args_prefix":["-y"]},
+  {"allow":"apt-get","args_prefix":["-qq"]},
+  {"allow":"apt-get","args_prefix":["-q"]},
+  {"allow":"apt-get","args_prefix":["-o"]},
+  {"allow":"dnf","args_prefix":["-y"]},
+  {"allow":"dnf","args_prefix":["-q"]},
+  {"allow":"dnf","args":["check-update"]},
+  {"allow":"dnf","args":["upgrade","--assumeno"]},
+  {"allow":"apt-get","args":["-y","upgrade"]},
+  {"allow":"dnf","args":["-y","upgrade"]},
+  {"allow":"nginx","args":["-t"]},
+  {"allow":"haproxy","args_prefix":["-c","-f"]},
+  {"allow":"caddy","args":["validate","--config","*"]},
+  {"allow":"cat","files":["/etc/nginx/*","/etc/nginx/*/*","/etc/haproxy/*","/etc/caddy/*"]},
+  {"allow":"hostnamectl","args":["set-hostname","*"]},
+  {"allow":"systemctl","verbs":["status","show","start","stop","restart","reload","try-restart","enable","disable","is-active","is-enabled"],"units":["nginx*","haproxy*","caddy*"]},
+  {"allow":"systemctl","args":["daemon-reload"]},
+  {"allow":"shutdown","args":["-r","now"]},
+  {"allow":"systemctl","args":["reboot"]},
+  {"allow":"reboot"},
+  {"allow":"/usr/local/bin/partout","args":["ctl","elevation","apply","-"]}
+]`,
+	},
+	{
+		Name: "profile-database",
+		Description: "STRICT-derived profile for database hosts: exact-argv package updates (both families), systemctl management verbs on " +
+			"postgres*/mysql*/mariadb*/redis* units, and the signed-policy self-grant. NO config reads, NO reboot — a database host must " +
+			"never take a surprise restart; reboots and restarts stay a deliberate human act through the approval-gated dispatch surface.",
+		RulesJSON: `[
+  {"allow":"apt-get|dnf","args":["-y","upgrade"]},
+  {"allow":"apt-get|dnf","args":["-y","install","*"]},
+  {"allow":"apt-get|dnf","args":["-q","makecache"]},
+  {"allow":"apt-get","args":["-qq","update"]},
+  {"allow":"dnf","args":["check-update"]},
+  {"allow":"dnf","args":["upgrade","--assumeno"]},
+  {"allow":"systemctl","verbs":["status","show","start","stop","restart","reload","try-restart","enable","disable","is-active","is-enabled"],"units":["postgres*","mysql*","mariadb*","redis*"]},
+  {"allow":"/usr/local/bin/partout","args":["ctl","elevation","apply","-"]}
+]`,
+	},
+	{
+		Name: "profile-minimal",
+		Description: "STRICT-derived minimal profile: package upgrades (exact-argv, both families) and the signed-policy self-grant — nothing " +
+			"else. The smallest document that keeps day-2 patching and policy pushes working; every other privileged need must be authored " +
+			"before it works. A good starting point for hand-managed or high-value hosts.",
+		RulesJSON: `[
+  {"allow":"apt-get|dnf","args":["-y","upgrade"]},
+  {"allow":"apt-get|dnf","args":["-q","makecache"]},
+  {"allow":"apt-get","args":["-qq","update"]},
+  {"allow":"dnf","args":["check-update"]},
+  {"allow":"/usr/local/bin/partout","args":["ctl","elevation","apply","-"]}
 ]`,
 	},
 }

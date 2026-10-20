@@ -200,7 +200,7 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   A *blocked* validation (root-only config or includes, no authorized
   elevation) does **not** fire — `config_validated: false` in the fact says
   the validator couldn't complete and the config is not proven invalid.
-  The `default-baseline` elevation policy (0.9.14+) grants `nginx -t` and
+  The `default-broad` elevation policy (the broad tier, 0.9.16+) grants `nginx -t` and
   `haproxy -c -f *` so elevated validation works out of the box.
 - **Config drift**: shipped (R22) as the `config_drift` rule kind — each host's
   `config_sha256` is compared against the fleet majority (lexicographic tie-break)
@@ -216,7 +216,7 @@ gated surface has an approval path: exec, pkg.apply, files (upload/edit/perm —
   2.4+ `ssl-certificates` form, and caddy `tls` directives — each fact labeled
   with the referencing service ("used by nginx:443"). Root-only configs and
   certs are read via elevation when the policy grants `cat` on the path
-  (the `default-baseline` policy covers the standard config trees; cert
+  (the `default-broad` policy covers the standard config trees; cert
   storage in root-only service dirs needs an explicit grant or a
   permissions fix — such referenced-but-unreadable certs are surfaced on
   the certs page with the reason and the remedy, not silently dropped).
@@ -265,6 +265,26 @@ root-only config files — those operations fail closed with a normal non-zero
 exit. When a host needs them, enable elevation (PRD Decision 3) rather than
 running the whole agent as root.
 
+### Privilege tiers (0.9.16+)
+
+Elevation policies come in three shapes, and the seeded presets cover all
+three. The tier rides the `partout.elevation` fact (`"tier":
+"broad"|"strict"|"full"`), shows on the Elevation page posture table, the
+host posture card, and `partout doctor` — the blast radius is readable
+without reading rules.
+
+| Tier | Seeded policy | What the agent user can sudo | Use when |
+|---|---|---|---|
+| **broad** (default) | `default-broad` | Every command shape Partout itself invokes for day-2 work: apt/dnf end-to-end (installs with any package list, upgrades, makecache, dry runs), systemctl management verbs on any unit, user/group task steps, `hostnamectl`, config validators + `cat` of root-owned configs, reboot in all three forms, and the signed-policy self-grant. **No shell, no arbitrary commands.** | The default. Zero policy authoring; a compromise of the agent user gets fleet-management verbs, not root. |
+| **strict** | `default-strict` | The old `default-baseline` document: package updates on the standard forms, systemctl on standard fleet units (`partout-*`, `fail2ban*`, `sshd*`, `nginx*`, `haproxy*`, `caddy*`), bare reboot. Narrower unit scope; exact command forms. | Hosts where you want the narrowest seeded wall and accept authoring any new privileged need before it works. |
+| **full** | `default-full` | `NOPASSWD: ALL` — any command as root. | The explicit escape hatch when the tiers above cannot express what you need. Root-equivalent for the agent user; the Elevation page and host page mark it red, `doctor` warns, and the mint dialog requires a second confirming click. Out-of-band sudo is still visible in journald (auth facility). |
+
+What survives in every tier (the host-local wall is only one layer):
+server-side RBAC, the policy deny-list (`default-deny-rm-rf-root` etc.),
+`require_approval` rules, signed decisions + the agent guardrail re-check,
+and full-fidelity audit — all of it gates every dispatch regardless of
+how wide the host's sudoers is.
+
 **The elevation policy is the single source of truth.** One declarative file
 (`PARTOUT_ELEVATION_POLICY`: a single `.json`, or a dir of `*.json` drop-ins)
 decides what the agent runs elevated, and `partout ctl elevation` renders the
@@ -283,7 +303,35 @@ kernel's wall can be kept, and checked, in sync. Example
     {"allow": "apt-get|dnf", "args": ["-y", "install", "*"], "env": ["DEBIAN_FRONTEND", "LANG"]}
   ]
 }
-```
+
+### Authoring policies: the structured editor + the fleet-aware generator
+
+**The Elevation page's policy form is a rule builder, not a text box** (P3.3).
+Each rule is a row — command (with `|` alternates), a matcher type (exact
+argv / argv prefix / systemctl verbs × units / file globs / no arguments),
+and optional env passthrough — with the canonical rules JSON kept in sync
+behind a Raw JSON toggle for power users. Validation runs **server-side on
+every edit** (`POST /api/v1/elevation/validate`: the same `LoadPolicyJSON`
+the agent runs, so the editor's verdict is the host's verdict), the tier
+badge classifies as you type, and a **Test a command** box answers
+`POST /api/v1/elevation/explain` — the exact matcher the agent uses —
+without touching any host. `partout ctl elevation explain -- <command>`
+is the CLI equivalent against a local policy file.
+
+**The fleet-aware generator** (P3.4) proposes a minimal policy from facts
+the server already holds: pick a selector and a basis (broad or strict),
+and `POST /api/v1/elevation/generate` derives the rule set from what those
+hosts actually run — the observed package-manager family (apt/dnf forms
+only for what the fleet uses), systemctl verbs scoped to the **observed
+custom unit names** (not `*`), validators and config reads only for the
+webservers the fleet actually reports (nginx/haproxy/caddy), plus the
+self-grant and reboot forms Partout itself invokes. Every inclusion and
+exclusion is explained in the response's `notes` (the generator is
+legible, not magic), nothing is applied — the proposal loads into the
+editor for review, and the create is still a manual, audited action.
+Seeded starting points beyond the tiers: `profile-web` (broad-derived),
+`profile-database` (strict, no reboot by design), `profile-minimal`
+(package upgrades + self-grant only).
 
 - **Bare commands**: a rule with no matcher — `{"allow":"reboot"}` — grants the command **with zero arguments only** (rendered in sudoers as `path ""`, the exact no-arguments specifier). Use it for `reboot`/`poweroff`-style entry points.
 - **Invalid policy = degraded, not fatal**: a policy file that fails to load is reported (startup log + the `partout.elevation` fact carries the error) and the agent continues in **legacy elevation mode** — everything through `sudo -n`, the sudoers wall still bounding privilege. Fix the file and re-run `partout ctl elevation install-sudoers`.
@@ -291,12 +339,13 @@ kernel's wall can be kept, and checked, in sync. Example
   provision run's root install; no out-of-band SSH is needed:
   ```
   partout ctl provision new --host deploy@web01 --elevate \
-      --elevation-policy default-baseline \
+      --elevation-policy default-broad \
       --service-labels fail2ban,sshd
   ```
-  `--elevate` defaults to the seeded `default-baseline` policy (the day-1
-  profile: package updates/installs for apt+dnf, standard fleet service
-  control, `hostnamectl set-hostname`, bare `reboot`). `--elevation-policy`
+  `--elevate` defaults to the seeded `default-broad` policy (the broad tier — the day-1
+  profile: every command shape Partout itself invokes — package
+  updates/installs for apt+dnf, service control on any unit, user/group
+  steps, `hostnamectl`, config validators, reboot). `--elevation-policy`
   is repeatable and takes a **server-store name** (see below) or a local
   `.json` file; the wizard has the same section. The policy is
   sha256-verified in transfer, installed to `/etc/partout/elevation.d/`,
@@ -344,7 +393,7 @@ kernel's wall can be kept, and checked, in sync. Example
   elevation check` on the host detects drift either way.
 - **Push policy to fleet (signed, governed).** A host whose policy
   carries the self-grant (`{"allow":"/usr/local/bin/partout","args":
-  ["ctl","elevation","apply","-"]}` — in the seeded `default-baseline`)
+  ["ctl","elevation","apply","-"]}` — in the seeded `default-broad` and `default-strict`)
   accepts server-signed policy pushes: the Elevation page's **Push…**
   button (or `POST /api/v1/elevation/push`) signs the stored policy with
   the server identity key (the same key that signs policy Decisions) and
@@ -860,6 +909,23 @@ Decision tree:
 - **Access controls**: RBAC roles (`viewer|operator|admin`); policy engine deny-by-default
   for writes (architecture A6); defense-in-depth with agent-side re-check (architecture §5.3).
 
+### 9.1 Audit hash chain
+
+The audit log is tamper-evident (PRD Decision 5): every `audit_events` row stores
+`hash` = sha256 over a canonical byte string of (prev_hash ‖ ts ‖ kind ‖ actor ‖
+agent_id ‖ payload ‖ id), with `prev_hash` linking to the preceding row — edit or
+delete any row and every hash after it stops matching. Databases from before the
+chain existed are backfilled lazily and never rewritten. Verify with:
+
+```sh
+partout ctl audit verify        # OK: audit chain intact (N row(s) verified)
+```
+
+or `GET /api/v1/audit/verify` (viewer+), which returns
+`{ok, rows_checked, broken_row_id?, reason?}` — the first row whose payload does
+not match its recorded hash, or whose link is broken, is named by id. Schedule a
+periodic verify (cron/monitoring) and treat a failure as a DB-integrity incident.
+
 ---
 
 ## 10. Go-live checklist
@@ -894,7 +960,6 @@ Current items first; items marked *(P)* track later milestones (M4/M5).
 
 | Feature | Ops impact |
 |---|---|
-| Cryptographic hash-chain for audit (§15.1, Decision 5) | Tamper evidence at rest; WORM becomes verifiable |
 | OIDC integration (Decision 6) | Enterprise SSO / SAML / SCIM provisioning |
 | KMS/HSM for secrets (PRD §5.7) | In-place secret-key rotation; multi-party escrow |
 | Self-HA (PRD §13 non-goal) | Multi-region failover, automatic leader election |

@@ -283,7 +283,7 @@ const elevateTokenPrefix = "par_elev_"
 // elevateBootstrapBody is the mint request for the one-line elevation
 // enablement.
 type elevateBootstrapBody struct {
-	Policy string `json:"policy"` // stored policy name; default default-baseline
+	Policy string `json:"policy"` // stored policy name; default default-broad
 }
 
 // handleElevationBootstrapMint mints a one-time, host-scoped token and
@@ -300,7 +300,7 @@ func (h *Handler) handleElevationBootstrapMint(w http.ResponseWriter, r *http.Re
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 	if body.Policy == "" {
-		body.Policy = "default-baseline"
+		body.Policy = "default-broad"
 	}
 	ep, err := h.resolveJoinPolicy(body.Policy)
 	if err != nil {

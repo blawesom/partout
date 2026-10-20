@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blawesom/partout/internal/agent/elevate"
@@ -159,3 +160,62 @@ func TestRunnerSkipped(t *testing.T) {
 		t.Fatalf("step 1 = %s, want ok", res.Steps[1].State)
 	}
 }
+
+// TestStepSecretRefs: a step whose env/vars/content declare `secret:NAME`
+// refs renders them through the executor's secrets lookup (the E2E cache
+// in the real agent) — the written file contains the plaintext, never the
+// bare ref. An unavailable ref fails the step closed.
+func TestStepSecretRefs(t *testing.T) {
+	secrets := func(ref string, _ int64) (string, error) {
+		if ref == "db-pass" {
+			return "s3cr3t-value", nil
+		}
+		return "", &secretLookupErr{ref}
+	}
+	e := NewExecutor(elevate.None, secrets)
+	root, err := prepareTestRoot(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.SetFileRoot(root)
+
+	// Template step whose var is the ref: the rendered file holds the
+	// plaintext.
+	sr := e.Step(context.Background(), 0, &pb.TaskStep{
+		Kind: "template", Name: "render", Path: "app.conf",
+		Template: "db_password={{.pw}}\n", Vars: map[string]string{"pw": "secret:db-pass"},
+	})
+	if sr.State != StateChanged {
+		t.Fatalf("template step: %s (%s)", sr.State, sr.Detail)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "app.conf")); string(got) != "db_password=s3cr3t-value\n" {
+		t.Fatalf("rendered file = %q, want the secret plaintext", got)
+	}
+
+	// File step whose content is the ref.
+	sr = e.Step(context.Background(), 1, &pb.TaskStep{
+		Kind: "file", Name: "raw", Path: "raw.txt", Content: "secret:db-pass",
+	})
+	if sr.State != StateChanged {
+		t.Fatalf("file step: %s (%s)", sr.State, sr.Detail)
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "raw.txt")); string(got) != "s3cr3t-value" {
+		t.Fatalf("file content = %q, want the secret plaintext", got)
+	}
+
+	// Unavailable ref: fail closed, never run with the bare ref.
+	sr = e.Step(context.Background(), 2, &pb.TaskStep{
+		Kind: "command", Name: "uses missing", Command: "true",
+		Env: map[string]string{"T": "secret:missing"},
+	})
+	if sr.State != StateFailed {
+		t.Fatalf("missing secret: %s (%s), want failed", sr.State, sr.Detail)
+	}
+	if !strings.Contains(sr.Detail, "missing") {
+		t.Fatalf("detail = %q, want the ref named", sr.Detail)
+	}
+}
+
+type secretLookupErr struct{ ref string }
+
+func (e *secretLookupErr) Error() string { return "secret \"" + e.ref + "\" unavailable" }

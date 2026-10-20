@@ -36,6 +36,9 @@ type Controller struct {
 	// extdata provides OSV CVE correlation for list-updates (PRD §6.3).
 	// Nil → no correlation (updates returned unranked).
 	extdata *externaldata.Refresher
+	// eol resolves a host's OS end-of-support state for policy matching
+	// (PRD §5.6). Nil → HostEOL stays "" and EOL-scoped rules never match.
+	eol EOLProvider
 	// opTimeout bounds one apply op (apt/dnf can take minutes).
 	opTimeout time.Duration
 	// listTimeout bounds list-updates (shorter; no mutation).
@@ -73,6 +76,15 @@ func (c *Controller) SetIdentity(ident *certutil.ServerIdentity) { c.ident = ide
 // SetRefresher installs the external-data refresher for CVE correlation on
 // list-updates (PRD §6.3). Nil disables correlation.
 func (c *Controller) SetRefresher(r *externaldata.Refresher) { c.extdata = r }
+
+// EOLProvider resolves a host's OS end-of-support state for policy
+// evaluation ("" = unknown). The packages controller gates applies on it
+// (PRD §5.6); installed from the externaldata refresher by the server
+// assembly. Nil ⇒ no EOL-aware policy matching (rules simply won't match).
+type EOLProvider func(agentID string) string
+
+// SetEOLProvider installs the host EOL state resolver.
+func (c *Controller) SetEOLProvider(p EOLProvider) { c.eol = p }
 
 // Actor carries the requester identity for audit + policy.
 type Actor struct {
@@ -318,6 +330,9 @@ func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opNam
 	action.HostTags, _ = c.st.Tags(host.ID)
 	action.HostRoles, _ = c.st.Roles(host.ID)
 	action.ActorRole = actor.Role
+	if c.eol != nil {
+		action.HostEOL = c.eol(agentID)
+	}
 	rules, err := c.st.GetPolicyRules()
 	if err != nil {
 		return fmt.Errorf("packages: load policies: %w", err)
@@ -339,7 +354,10 @@ func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opNam
 			Actor:        actor.Principal,
 			ActorRole:    actor.Role,
 			MatchedRules: decision.MatchedRules,
-			Payload:      map[string]any{"packages": op.Packages, "dry_run": false},
+			Payload: map[string]any{
+				"packages": op.Packages, "dry_run": false,
+				"reason": EOLReason(action.HostEOL),
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("packages: %s: create approval request: %w", opName, err)
@@ -347,7 +365,9 @@ func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opNam
 		c.audit(agentID, opName, op.OpId, actor, "approval_required", 0, apReq.ID)
 		return &ApprovalRequiredError{ApprovalID: apReq.ID}
 	}
-	// Sign the decision (agent guardrail verifies; arch §5.3).
+	// Sign the decision (agent guardrail verifies; arch §5.3). EolState
+	// carries the host's end-of-support state so the agent-side re-check
+	// evaluates EOL-scoped rules against the same context the server did.
 	if c.ident != nil {
 		version, _ := c.st.PolicyBundleVersion()
 		sig := policy.SignDecision(c.ident.Priv, op.OpId, version,
@@ -359,9 +379,20 @@ func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opNam
 			MatchedRules:  decision.MatchedRules,
 			Sig:           sig,
 			ActorRole:     actor.Role,
+			EolState:      action.HostEOL,
 		}
 	}
 	return nil
+}
+
+// EOLReason names why an EOL-gated action needs approval in plain words
+// (the approval payload must say so; PRD §5.6). Empty when the state is
+// not "ended" (the approval then parks for its usual rule-based reason).
+func EOLReason(hostEOL string) string {
+	if hostEOL == policy.EOLEnded {
+		return "host OS is past end-of-support"
+	}
+	return ""
 }
 
 // audit records a package audit event + SSE event (the package_actions row

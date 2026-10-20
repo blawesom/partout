@@ -828,13 +828,50 @@ async function main() {
   check("secrets: create form", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Create secret")), "no Create secret button");
   check("secrets: rotate action", [...d.querySelectorAll("button")].some((b) => b.textContent.trim() === "Rotate"), "no Rotate button");
 
-  // Elevation page: the server-side policy store (seeded default-baseline)
+  // Elevation page: the server-side policy store (seeded tiers)
   // + the fleet posture table.
   await visit("#/elevation");
-  check("elevation: page", d.body.textContent.includes("privilege documents provisioning ships"), "page copy missing");
-  check("elevation: seeded default-baseline", rowsWithText(d, "default-baseline") > 0, "seeded policy row missing");
+  check("elevation: page", d.body.textContent.includes("Privilege tiers provisioning ships"), "page copy missing");
+  check("elevation: seeded default-broad", rowsWithText(d, "default-broad") > 0, "seeded broad-tier policy row missing");
+  check("elevation: seeded default-full", rowsWithText(d, "default-full") > 0, "seeded full-tier policy row missing");
   check("elevation: fleet posture card", d.body.textContent.includes("Fleet posture"), "posture card missing");
   check("elevation: new-policy button (admin)", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("New policy")), "no New policy button");
+  check("elevation: generator button", [...d.querySelectorAll("button")].some((b) => b.textContent.includes("Generate from fleet")), "no generator button");
+
+  // Structured editor (P3.3): open the form, add a rule via the builder,
+  // verify the parallel JSON stays in sync and the tier badge renders.
+  {
+    const btn = [...d.querySelectorAll("button")].find((b) => b.textContent.includes("New policy"));
+    if (btn) btn.click();
+    await sleep(200);
+    check("editor: form opens", d.body.textContent.includes("New elevation policy"), "form did not open");
+    check("editor: rule builder default", d.body.textContent.includes("Matcher"), "builder fields missing");
+    const inst = w.__partout;
+    if (inst && inst.elev && inst.elev.form) {
+      check("editor: seed rule present", (inst.elev.form.rules || []).length === 1 && inst.elev.form.rules[0].allow === "dnf", "seed rule missing");
+      // Add a verbs rule through the builder and confirm the canonical
+      // rules array gains a verbs+units rule.
+      inst.elevRuleAdd("verbs");
+      await sleep(150);
+      const fr = inst.elevFormRules;
+      const verbsRule = fr.find(r => r._kind === "verbs");
+      check("editor: add verbs rule", !!verbsRule, "verbs rule not added");
+      if (verbsRule) { verbsRule.allow = "systemctl"; verbsRule._verbs = "restart, status"; verbsRule._units = "nginx*"; }
+      inst.elevRulesChanged();
+      await sleep(150);
+      const canon = inst.elev.form.rules.find(r => r.allow === "systemctl");
+      check("editor: canonical sync", !!canon && (canon.verbs || []).length === 2 && (canon.units || [])[0] === "nginx*", "form→rules conversion wrong");
+      check("editor: tier badge strict", inst.elevFormTier === "broad" || inst.elevFormTier === "strict", "tier compute broken");
+      // Raw JSON toggle: the textarea carries the same rules.
+      inst.elevFormToggleRaw();
+      await sleep(150);
+      let rawOk = false;
+      try { rawOk = JSON.parse(inst.elev.form.rulesText).some(r => r.allow === "systemctl"); } catch (e) {}
+      check("editor: raw JSON toggle", rawOk, "raw view out of sync");
+      inst.elevFormToggleRaw();
+      inst.elev.form = null;
+    }
+  }
 
   await visit("#/policies");
   check("policies: name", rowsWithText(d, "deny-rm") > 0, "policy name missing");
@@ -968,15 +1005,15 @@ async function main() {
     // Elevation bootstrap section (D1): checkbox, policy select, extras.
     check("wizard: elevation section (off)", d.body.textContent.includes("Enable elevation"), "no elevation section");
     inst.provWiz.elevate = true;
-    inst.provWiz.elevationPolicies = [{ id: "epl_1", name: "default-baseline", rules: [
+    inst.provWiz.elevationPolicies = [{ id: "epl_1", name: "default-broad", rules: [
       { allow: "dnf", args: ["-y", "upgrade"] },
       { allow: "systemctl", verbs: ["restart"], units: ["fail2ban*"] },
       { allow: "reboot" }
     ] }];
-    inst.provWiz.elevationPolicy = "default-baseline";
+    inst.provWiz.elevationPolicy = "default-broad";
     inst.provWiz.serviceLabels = "fail2ban,sshd";
     await sleep(150);
-    check("wizard: elevation policy select", d.body.textContent.includes("default-baseline (3 rules)"), "policy option not shown");
+    check("wizard: elevation policy select", d.body.textContent.includes("default-broad (3 rules)"), "policy option not shown");
     check("wizard: grant preview renders", d.body.textContent.includes("This grants:"), "grant preview missing");
     check("wizard: grant preview lines", d.body.textContent.includes("dnf -y upgrade"), "grant line not rendered");
     check("wizard: service labels input", !!d.querySelector("input[placeholder=\"fail2ban,sshd\"]"), "labels input missing");
@@ -1127,7 +1164,7 @@ async function main() {
   await sleep(200);
   await visit("#/obs-certs", 1600);
   check("observe certs: real cert",
-    [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("CN =")), "no cert rows");
+    [...d.querySelectorAll("table.tbl tr")].some((tr) => tr.textContent.includes("CN=")), "no cert rows");
   {
     const savedCerts = w.__partout.certs;
     w.__partout.certs = []; await sleep(200);
@@ -1138,7 +1175,7 @@ async function main() {
   // Service-config discovery: the fixture cert (CN=svc-smoke, living outside
   // /etc/ssl) must be found via the fake nginx/caddy configs and carry both
   // service labels in the Used-by cell.
-  const svcRow = [...d.querySelectorAll("table.tbl tr")].find((tr) => tr.textContent.includes("CN = svc-smoke"));
+  const svcRow = [...d.querySelectorAll("table.tbl tr")].find((tr) => tr.textContent.includes("CN=svc-smoke"));
   check("observe certs: service-config cert discovered", !!svcRow, "svc-smoke cert row missing (service-config discovery broken)");
   check("observe certs: nginx label", !!svcRow && svcRow.textContent.includes("nginx"), "nginx label missing in Used by");
   check("observe certs: caddy label", !!svcRow && svcRow.textContent.includes("caddy"), "caddy label missing in Used by");

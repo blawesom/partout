@@ -27,6 +27,7 @@ import (
 	"github.com/blawesom/partout/internal/server/provision"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/sessions"
+	"github.com/blawesom/partout/internal/server/ssetoken"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/updates"
@@ -55,6 +56,7 @@ type Handler struct {
 	mux               *http.ServeMux // the API mux (routes register here, pre-wrapper)
 	auth              *auth
 	authC             *serverauth.Controller // local user identity (PRD Decision 6); nil until set
+	sseTokC           *ssetoken.Controller   // short-lived SSE-scoped tokens for ?token= auth; nil until SetSSETokens
 	usersActive       bool                   // true once the principals table is non-empty
 	ca                *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
 	streamH           *stream.Handler        // stream handler (for mTLS leaf rotation)
@@ -85,8 +87,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 
 	// GET /api/v1/events — SSE event stream (PRD R10). Auth-gated: mirrors the
 	// read surface it exposes (executions/output/audit/hosts), so any
-	// authenticated role may subscribe. Accepts ?token= (EventSource cannot set
-	// headers) in addition to the Authorization header.
+	// authenticated role may subscribe. Accepts ?token=<sse-token> (EventSource
+	// cannot set headers) in addition to the Authorization header; the query
+	// form must be a short-lived SSE-scoped token from
+	// POST /api/v1/auth/sse-token, never a full bearer.
 	mux.Handle("/api/v1/events", handler.requireSSE(roleViewer)(sseB))
 
 	// GET /healthz — health check.

@@ -82,7 +82,7 @@ func (h *Handler) handleRejoin(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if req.Elevate && len(policies) == 0 {
-		p, err := h.st.ElevationPolicy("default-baseline")
+		p, err := h.st.ElevationPolicy("default-broad")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request",
 				"--elevate needs policies or a seeded default-baseline (partout ctl preset apply)", nil)
@@ -196,7 +196,7 @@ func (h *Handler) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	// (ready-to-apply posture: the operator is admin; the grant is visible
 	// in the run detail and revocable by re-provisioning).
 	if req.Elevate && len(policies) == 0 {
-		p, err := h.st.ElevationPolicy("default-baseline")
+		p, err := h.st.ElevationPolicy("default-broad")
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "bad_request",
 				"--elevate needs --elevation-policy or a seeded default-baseline policy (partout ctl preset apply)", nil)

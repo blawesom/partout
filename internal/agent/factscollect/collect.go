@@ -1012,10 +1012,51 @@ func opensslField(timeout time.Duration, path string, flags ...string) string {
 	// one (subject=, issuer=, serial=). Date fields print the value bare.
 	for _, prefix := range []string{"subject=", "issuer=", "serial=", "notBefore=", "notAfter="} {
 		if strings.HasPrefix(line, prefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			return normalizeDN(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
 		}
 	}
 	return line
+}
+
+// normalizeDN canonicalizes an openssl distinguished-name rendering across
+// openssl generations: 3.0 prints `CN = app.example.com` (slash-or-space
+// separated with ` = `), 3.5+ prints `O=Acme, CN=app.example.com` (comma
+// separated with `=`). The canonical form matches Go's pkix.Name.String()
+// (`CN=app.example.com,O=Acme`): one string per cert everywhere, and the
+// same cert parsed via the CLI path and the in-process PEM path
+// (certsvc.go) reports identical subjects.
+func normalizeDN(s string) string {
+	// openssl >= 3.5: comma-separated RDNs already.
+	if strings.Contains(s, ",") && !strings.Contains(s, " = ") {
+		parts := strings.Split(s, ",")
+		for i, p := range parts {
+			parts[i] = strings.TrimSpace(p)
+		}
+		return strings.Join(parts, ",")
+	}
+	// openssl 3.0-era: space-separated `KEY = value` pairs after the first
+	// (which carries no leading separator), e.g. `O = Acme, CN = x` from
+	// `-nameopt` defaults or `CN = x` alone. Re-join with commas.
+	if strings.Contains(s, " = ") {
+		parts := strings.Fields(s)
+		var out []string
+		for i := 0; i < len(parts); i += 3 {
+			if i+2 < len(parts) && parts[i+1] == "=" {
+				out = append(out, parts[i]+"="+parts[i+2])
+				continue
+			}
+			// Odd tail (a value containing spaces): glue the remainder onto
+			// the current pair.
+			if len(out) > 0 {
+				out[len(out)-1] += " " + strings.Join(parts[i:], " ")
+			}
+			break
+		}
+		if len(out) > 0 {
+			return strings.Join(out, ",")
+		}
+	}
+	return s
 }
 
 // isSelfSigned reports whether the certificate is signed by its own key.

@@ -49,8 +49,8 @@ func TestPresetAPI(t *testing.T) {
 		} `json:"alert_rules"`
 	}
 	_ = json.Unmarshal([]byte(body), &st)
-	if len(st.Policies) != 4 || len(st.AlertRules) != 9 {
-		t.Fatalf("status rows = %d policies / %d alerts, want 4/9", len(st.Policies), len(st.AlertRules))
+	if len(st.Policies) != 5 || len(st.AlertRules) != 10 {
+		t.Fatalf("status rows = %d policies / %d alerts, want 5/10", len(st.Policies), len(st.AlertRules))
 	}
 	for _, p := range st.Policies {
 		if p.Present {
@@ -64,12 +64,27 @@ func TestPresetAPI(t *testing.T) {
 		t.Fatalf("apply: %d %s", code, body)
 	}
 	var res struct {
-		CreatedPolicies []string `json:"created_policies"`
-		CreatedAlerts   []string `json:"created_alerts"`
+		CreatedPolicies          []string `json:"created_policies"`
+		CreatedAlerts            []string `json:"created_alerts"`
+		CreatedElevationPolicies []string `json:"created_elevation_policies"`
 	}
 	_ = json.Unmarshal([]byte(body), &res)
-	if len(res.CreatedPolicies) != 4 || len(res.CreatedAlerts) != 9 {
-		t.Fatalf("apply created %d/%d, want 4/9: %s", len(res.CreatedPolicies), len(res.CreatedAlerts), body)
+	if len(res.CreatedPolicies) != 5 || len(res.CreatedAlerts) != 10 {
+		t.Fatalf("apply created %d/%d, want 5/10: %s", len(res.CreatedPolicies), len(res.CreatedAlerts), body)
+	}
+	if len(res.CreatedElevationPolicies) != 6 {
+		t.Fatalf("apply created %d elevation policies, want 6 (3 tiers + 3 profiles): %s", len(res.CreatedElevationPolicies), body)
+	}
+	for _, want := range []string{"default-broad", "default-strict", "default-full", "profile-web", "profile-database", "profile-minimal"} {
+		found := false
+		for _, n := range res.CreatedElevationPolicies {
+			if n == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("apply did not create %s: %v", want, res.CreatedElevationPolicies)
+		}
 	}
 
 	// Apply again: no-op.
@@ -78,11 +93,12 @@ func TestPresetAPI(t *testing.T) {
 		t.Fatalf("re-apply: %d %s", code, body)
 	}
 	var res2 struct {
-		CreatedPolicies []string `json:"created_policies"`
-		CreatedAlerts   []string `json:"created_alerts"`
+		CreatedPolicies          []string `json:"created_policies"`
+		CreatedAlerts            []string `json:"created_alerts"`
+		CreatedElevationPolicies []string `json:"created_elevation_policies"`
 	}
 	_ = json.Unmarshal([]byte(body), &res2)
-	if len(res2.CreatedPolicies) != 0 || len(res2.CreatedAlerts) != 0 {
+	if len(res2.CreatedPolicies) != 0 || len(res2.CreatedAlerts) != 0 || len(res2.CreatedElevationPolicies) != 0 {
 		t.Fatalf("re-apply created rows: %s", body)
 	}
 

@@ -1,9 +1,9 @@
 # PRD — Partout: Remote Host Management
 
 **Product:** Partout
-**Repo:** `hiersoir` (rename to `partout` as a follow-up)
-**Status:** Draft v0.9.7 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation policy shipped; v0.9.6–v0.9.7: onboarding/trust pass (plaintext-default warnings at every layer, complete first-host recipe, first-run guidance), `install-server.sh`, UX quick wins
-**Date:** 2025-09-25
+**Repo:** `partout`
+**Status:** v0.9.15 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation policy shipped; v0.9.6–v0.9.15: onboarding/trust pass (plaintext-default warnings at every layer, complete first-host recipe, first-run guidance), `install-server.sh`, signed release repo + one-command `partout update`, UX quick wins
+**Date:** 2026-10-20
 
 ---
 
@@ -118,7 +118,7 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R9 | **Storage engines** (SQLite default, optional Postgres, one migration version) | One dialect abstraction; replaceable-server rationale. **Decision (v0.9.6): Postgres is post-v1** — SQLite is the 1.0 engine. |
 | R10 | **REST v1 + SSE broker** | New handlers for the control surface; shared broker fan-out. |
 | R11 | **MCP server** (stdio + Streamable HTTP, OAuth2 PKCE) | Monitoring read tools; adds **write** tools under policy. |
-| R12 | **UI stack** (Vue 3 + TS + Pinia + Tailwind + uPlot + PWA) | Vue 3 + TS + Pinia + Tailwind + uPlot + PWA; new pages. |
+| R12 | **UI stack** (Vue 3) | Shipped as a buildless single-file Vue 3 SPA (`internal/api/webui/`, served by the server); xterm.js vendored; no build step. |
 | R13 | **Host OS identification** (`/etc/os-release`, `osImage`, support table) | Feeds package/patch logic and the external data refresh (§6.3). |
 | R14 | **Editions/licensing** | No editions or license keys; every capability is free and self-hosted. |
 | R15 | **Config via env vars; label-driven discovery** | Configuration via env vars; label-driven discovery. |

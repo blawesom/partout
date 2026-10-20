@@ -78,7 +78,7 @@ steps (`connect → preflight → transfer → install → wait-enroll`), stream
 host key pauses the run until you confirm the fingerprint — no silent trust.
 `fresh` mode wipes any existing partout agent on the host (clean slate); `join` updates
 in place, identity preserved. Check **Enable elevation** and pick a policy (the seeded
-`default-baseline` is the day-1 profile) so package updates, service control and
+`default-broad` is the day-1 broad-tier profile) so package updates, service control and
 reboots work from the first minute — the policy, the sudoers drop-in rendered from it,
 and `PARTOUT_ELEVATE=sudo` are all wired through the run's root install; no extra SSH.
 The CLI equivalent:
@@ -112,7 +112,7 @@ tools for AI assistants — same policy gates, same audit trail.
 - **Updates** — CVE-ranked package updates per host, and fleet release rollouts
   (upload an agent release; a draft rollout is pre-armed for you to start).
 - **Elevation** — the privilege documents provisioning ships (the seeded
-  `default-baseline` + your own), with each connected host's effective scope
+  `default-strict` + your own), with each connected host's effective scope
   matched by hash. **Jobs / Tasks** — the seeded library is ready to apply:
   `default-daily-package-updates` (paused; enable it and every host gets the
   04:30 UTC update job) and `default-baseline-tools` (vim, fail2ban, btop —

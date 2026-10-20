@@ -118,10 +118,11 @@
         <span class="mono">NoNewPrivileges</span> from the unit, and restarts the agent. One-time token:
         15 min, single serve, hostname-guarded.</p>
       <div class="toolbar" style="margin:10px 0">
-        <label class="fld" style="max-width:280px"><span>Policy</span>
+        <label class="fld" style="max-width:280px"><span>Policy (tier)</span>
           <select v-model="elevBoot.policy" class="mono" @focus="ahLoadPolicies()">
             <option v-for="p in provWiz.elevationPolicies" :key="p.id" :value="p.name">{{ p.name }}</option>
           </select>
+          <span v-if="elevBootTier()" class="muted small" :class="elevBootTier()==='full' ? 'badge bad' : ''">{{ elevBootTier() }} tier</span>
         </label>
         <button class="btn primary sm" :disabled="!elevBoot.policy || elevBoot.busy" @click="elevBootMint()">
           <span v-if="elevBoot.busy" class="spin"></span>{{ elevBoot.token ? 'Re-mint' : 'Mint bootstrap' }}</button>
@@ -909,7 +910,15 @@
           </div>
 
           <div class="card">
-            <div class="head"><h2>Recent executions</h2></div>
+          <div class="head"><h2>Recent executions</h2>
+            <label class="lbl" style="margin:0"><span class="muted small">Elevation</span>
+              <select v-model="exElevation" style="max-width:160px" @change="loadExecutions()">
+                <option value="">all</option>
+                <option value="true">elevated</option>
+                <option value="false">unprivileged</option>
+              </select>
+            </label>
+          </div>
             <table class="tbl">
               <thead><tr><th>ID</th><th>Command</th><th>Selector</th><th>State</th><th>By</th><th>When</th><th></th></tr></thead>
               <tbody>
@@ -1583,7 +1592,7 @@
         <!-- ============ ELEVATION ============ -->
         <section v-else-if="page==='elevation'">
           <h1 class="page">Elevation</h1>
-          <p class="page-sub">The privilege documents provisioning ships to hosts. The sudoers wall itself is host-owned: updating a policy here does not change already-provisioned hosts — re-provision (join mode) or use your config management; <span class="mono">partout ctl elevation check</span> on the host detects drift.</p>
+          <p class="page-sub">Privilege tiers provisioning ships to hosts — <b>broad</b> (the default: day-2 fleet verbs, no policy authoring), <b>strict</b> (exact-argv wall), <b>full</b> (root-equivalent escape hatch). The sudoers wall itself is host-owned: updating a policy here does not change already-provisioned hosts — push it signed, re-provision (join mode), or use your config management; <span class="mono">partout ctl elevation check</span> on the host detects drift.</p>
 
           <div class="card" style="margin-bottom:12px">
             <div class="toolbar">
@@ -1591,14 +1600,16 @@
               <button class="btn sm" @click="loadElevation">Refresh</button>
             </div>
             <table class="tbl" style="margin-top:8px">
-              <thead><tr><th>Host</th><th>Mode</th><th>Rules</th><th>Policy (hash match)</th><th>SHA-256</th><th></th></tr></thead>
+              <thead><tr><th>Host</th><th>Mode</th><th>Tier</th><th>Rules</th><th>Policy (hash match)</th><th>SHA-256</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="f in elev.fleet" :key="f.id" class="click" @click="go('host/'+f.id)">
                   <td>{{ f.name }}</td>
                   <td><span class="badge" :class="f.mode==='sudo'?'ok':'neutral'">{{ f.mode || '—' }}</span></td>
+                  <td><span v-if="f.tier" class="badge" :class="f.tier==='full'?'bad':(f.tier==='broad'?'ok':'neutral')" :title="tierTooltip(f.tier)">{{ f.tier }}</span><span v-else class="muted small">—</span></td>
                   <td class="mono">{{ f.rules }}</td>
                   <td>
-                    <span v-if="f.matched" class="badge ok">{{ f.matched }}</span>
+                    <span v-if="f.tier==='full'" class="badge bad" title="The full tier is its own posture — no hash match to compare">NOPASSWD: ALL</span>
+                    <span v-else-if="f.matched" class="badge ok">{{ f.matched }}</span>
                     <span v-else-if="f.reported" class="badge neutral" title="No stored policy matches this host's installed scope">custom / unknown</span>
                     <span v-else class="muted small">not reported (pre-0.9.9 agent)</span>
                   </td>
@@ -1607,24 +1618,28 @@
                     <button v-if="isAdmin && f.mode !== 'sudo' && f.reported" class="btn sm" @click="openElevBoot(f.id)">Enable…</button>
                   </td>
                 </tr>
-                <tr v-if="!elev.fleet.length && !pageLoading"><td colspan="6"><div class="empty">No connected hosts.</div></td></tr>
+                <tr v-if="!elev.fleet.length && !pageLoading"><td colspan="7"><div class="empty">No connected hosts.</div></td></tr>
               </tbody>
             </table>
           </div>
 
           <div class="card">
             <div class="toolbar">
-              <div><strong>Policies</strong> <span class="muted"> — seeded <span class="mono">default-baseline</span> is the day-1 profile; clone and edit for tighter scopes.</span></div>
-              <button class="btn primary sm" v-if="isAdmin" @click="elevFormNew()">New policy</button>
+              <div><strong>Policies</strong> <span class="muted"> — seeded tiers: <span class="mono">default-broad</span> (the default), <span class="mono">default-strict</span>, <span class="mono">default-full</span>; clone and edit for your scope.</span></div>
+              <div v-if="isAdmin" class="toolbar" style="gap:6px">
+                <button class="btn primary sm" @click="elevFormNew()">New policy</button>
+                <button class="btn sm" @click="elevGenStart()" title="Propose a minimal policy from observed fleet facts (P3.4) — reviewed in the editor, never auto-applied">Generate from fleet…</button>
+              </div>
             </div>
             <table class="tbl" style="margin-top:8px">
-              <thead><tr><th>Name</th><th>Rules</th><th>Applied on</th><th>SHA-256</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>Tier</th><th>Rules</th><th>Applied on</th><th>SHA-256</th><th></th></tr></thead>
               <tbody>
                 <tr v-for="p in elev.policies" :key="p.id">
                   <td><span class="click" @click.stop="elev.open = (elev.open===p.id ? null : p.id)"><b>{{ p.name }}</b></span>
                       <div v-if="p.description" class="muted small">{{ p.description }}</div>
                       <div v-if="elev.open===p.id" class="mono small" style="white-space:pre-wrap;background:var(--bg2,rgba(127,127,127,.08));padding:8px;border-radius:6px;margin-top:6px;max-height:240px;overflow:auto">{{ elevRulesText(p) }}</div>
                   </td>
+                  <td><span class="badge" :class="elevPolicyTier(p)==='full'?'bad':(elevPolicyTier(p)==='broad'?'ok':'neutral')" :title="tierTooltip(elevPolicyTier(p))">{{ elevPolicyTier(p) || '?' }}</span></td>
                   <td class="mono">{{ (p.rules||[]).length }}</td>
                   <td>{{ elevAppliedCount(p) }} host(s)</td>
                   <td class="mono small">{{ (p.policy_sha256||'').slice(0,12) }}…</td>
@@ -1634,7 +1649,7 @@
                     <button class="btn danger sm" v-if="isAdmin" @click="elevDelete(p)">Delete</button>
                   </td>
                 </tr>
-                <tr v-if="!elev.policies.length && !pageLoading"><td colspan="5"><div class="empty">No elevation policies — apply the preset (<span class="mono">partout ctl preset apply</span>) to seed default-baseline.</div></td></tr>
+                <tr v-if="!elev.policies.length && !pageLoading"><td colspan="6"><div class="empty">No elevation policies — apply the preset (<span class="mono">partout ctl preset apply</span>) to seed the three tiers.</div></td></tr>
               </tbody>
             </table>
             <div v-if="elev.push" class="toolbar" style="margin-top:10px;background:var(--brand-subtle);padding:10px;border-radius:8px;align-items:flex-end">
@@ -1654,22 +1669,148 @@
             </div>
           </div>
 
-          <!-- create/edit form -->
+          <!-- create/edit form (P3.3: structured rule builder + raw JSON) -->
           <div class="card" v-if="elev.form" style="margin-top:12px">
-            <div class="toolbar"><div><strong>{{ elev.form.id ? 'Edit' : 'New' }} elevation policy</strong></div></div>
+            <div class="toolbar">
+              <div><strong>{{ elev.form.id ? 'Edit' : 'New' }} elevation policy</strong>
+                <span v-if="elevFormTier" class="badge" :class="elevFormTier==='full'?'bad':(elevFormTier==='broad'?'ok':'neutral')" :title="tierTooltip(elevFormTier)" style="margin-left:8px">{{ elevFormTier }} tier</span>
+                <span v-if="elevValidateMsg" :class="elevValidateOk ? 'muted small' : 'badge bad'" style="margin-left:8px">{{ elevValidateMsg }}</span>
+              </div>
+              <div class="spacer"></div>
+              <button class="btn sm" @click="elevFormToggleRaw()">{{ elev.form.raw ? 'Rule builder' : 'Raw JSON' }}</button>
+            </div>
             <div class="form-row" style="gap:10px;margin-top:8px">
               <label class="fld" style="max-width:280px"><span>Name</span><input v-model="elev.form.name" class="mono" placeholder="web-baseline" :disabled="!!elev.form.id" /></label>
               <label class="fld" style="flex:1"><span>Description</span><input v-model="elev.form.description" placeholder="what this grants, for humans" /></label>
             </div>
-            <label class="fld" style="margin-top:8px"><span>Rules (JSON array)</span>
-              <textarea v-model="elev.form.rulesText" rows="10" class="mono" style="width:100%" placeholder='[{"allow":"dnf","args":["-y","upgrade"]}]'></textarea>
-            </label>
+
+            <template v-if="!elev.form.raw">
+              <div style="margin-top:10px">
+                <div class="toolbar" style="margin-bottom:6px">
+                  <b class="small">Rules</b> <span class="muted small">— what the agent user may sudo. One matcher per rule.</span>
+                  <div class="spacer"></div>
+                  <button class="btn sm" @click="elevRuleAdd()" :disabled="elevFormRules.length && elevFormRules[0].full">+ Rule</button>
+                  <button class="btn sm" v-if="!elevFormRules.length" @click="elevRuleAdd('full')">Full tier (root)</button>
+                </div>
+                <div v-for="(r, i) in elevFormRules" :key="i" class="toolbar" style="align-items:flex-end;background:var(--bg2,rgba(127,127,127,.06));padding:8px;border-radius:8px;margin-bottom:6px;flex-wrap:wrap">
+                  <template v-if="r.full">
+                    <label class="fld" style="min-width:120px"><span><input type="checkbox" v-model="r.full" disabled /> full:true</span></label>
+                    <div class="small" style="flex:1">Every command as root (NOPASSWD: ALL) — root-equivalent, no host-local containment. Server-side guardrails still gate every dispatch.</div>
+                  </template>
+                  <template v-else>
+                    <label class="fld" style="min-width:200px"><span>Command <span class="muted small">(binary name, | for alternates)</span></span>
+                      <input v-model="r.allow" class="mono" placeholder="apt-get|dnf" @change="elevRulesChanged()" /></label>
+                    <label class="fld" style="min-width:150px"><span>Matcher</span>
+                      <select v-model="r._kind" @change="elevRuleKindChange(r)">
+                        <option value="args">exact argv</option>
+                        <option value="args_prefix">argv prefix (broad)</option>
+                        <option value="verbs">systemctl verbs × units</option>
+                        <option value="files">file paths (read)</option>
+                        <option value="bare">no arguments</option>
+                      </select>
+                    </label>
+                    <label v-if="r._kind==='args' || r._kind==='args_prefix'" class="fld" style="flex:1"><span>Arguments <span class="muted small">(comma-separated, * and ? are globs)</span></span>
+                      <input v-model="r._args" class="mono" :placeholder="r._kind==='args' ? '-y, upgrade' : '-y, install'" @change="elevRulesChanged()" /></label>
+                    <template v-if="r._kind==='verbs'">
+                      <label class="fld" style="flex:1"><span>Verbs <span class="muted small">(comma-separated)</span></span>
+                        <input v-model="r._verbs" class="mono" placeholder="restart, reload, status" @change="elevRulesChanged()" /></label>
+                      <label class="fld" style="flex:1"><span>Units <span class="muted small">(comma-separated globs)</span></span>
+                        <input v-model="r._units" class="mono" placeholder="nginx*, partout-*" @change="elevRulesChanged()" /></label>
+                    </template>
+                    <label v-if="r._kind==='files'" class="fld" style="flex:1"><span>Paths <span class="muted small">(comma-separated globs; * never crosses /)</span></span>
+                      <input v-model="r._files" class="mono" placeholder="/etc/nginx/*, /etc/haproxy/*" @change="elevRulesChanged()" /></label>
+                    <label class="fld" style="min-width:180px"><span>Env passthrough <span class="muted small">(optional)</span></span>
+                      <input v-model="r._env" class="mono" placeholder="DEBIAN_FRONTEND, LANG" @change="elevRulesChanged()" /></label>
+                  </template>
+                  <button class="btn danger sm" @click="elevRuleRemove(i)">✕</button>
+                </div>
+                <div v-if="!elevFormRules.length" class="muted small" style="margin:6px 0">No rules — nothing elevates. Add one, or start from a seeded tier / the fleet-aware generator below.</div>
+              </div>
+              <div class="toolbar" style="margin-top:4px;background:var(--bg2,rgba(127,127,127,.06));padding:8px;border-radius:8px;align-items:flex-end">
+                <label class="fld" style="min-width:260px"><span>Test a command <span class="muted small">(no host is touched)</span></span>
+                  <input v-model="elev.form.testCmd" class="mono" placeholder="systemctl restart nginx" @keyup.enter="elevExplain()" /></label>
+                <button class="btn sm" @click="elevExplain()" :disabled="elev.form.testBusy || !elev.form.testCmd">Explain</button>
+                <div v-if="elev.form.testResult" class="small" style="flex:1">
+                  <span class="badge" :class="elev.form.testResult.elevated ? 'ok' : 'neutral'">{{ elev.form.testResult.elevated ? 'ELEVATED' : 'unprivileged' }}</span>
+                  <span class="muted"> {{ elev.form.testResult.note }}</span>
+                </div>
+              </div>
+            </template>
+
+            <template v-else>
+              <label class="fld" style="margin-top:8px"><span>Rules (JSON array)</span>
+                <textarea v-model="elev.form.rulesText" rows="12" class="mono" style="width:100%" @input="elevRawChanged" placeholder='[{"allow":"dnf","args":["-y","upgrade"]}]'></textarea>
+              </label>
+              <div class="toolbar" style="margin-top:4px;background:var(--bg2,rgba(127,127,127,.06));padding:8px;border-radius:8px;align-items:flex-end">
+                <label class="fld" style="min-width:260px"><span>Test a command <span class="muted small">(no host is touched)</span></span>
+                  <input v-model="elev.form.testCmd" class="mono" placeholder="systemctl restart nginx" @keyup.enter="elevExplain()" /></label>
+                <button class="btn sm" @click="elevExplain()" :disabled="elev.form.testBusy || !elev.form.testCmd">Explain</button>
+                <div v-if="elev.form.testResult" class="small" style="flex:1">
+                  <span class="badge" :class="elev.form.testResult.elevated ? 'ok' : 'neutral'">{{ elev.form.testResult.elevated ? 'ELEVATED' : 'unprivileged' }}</span>
+                  <span class="muted"> {{ elev.form.testResult.note }}</span>
+                </div>
+              </div>
+            </template>
+
             <div class="toolbar" style="margin-top:8px">
               <span v-if="elev.msg" style="color:var(--bad,#b00)">{{ elev.msg }}</span>
               <div class="spacer"></div>
               <button class="btn sm" @click="elev.form=null; elev.msg=''">Cancel</button>
-              <button class="btn primary sm" :disabled="elev.busy" @click="elevSave()">{{ elev.form.id ? 'Save' : 'Create' }}</button>
+              <button class="btn primary sm" :disabled="elev.busy || !elevValidateOk" @click="elevSave()">{{ elev.form.id ? 'Save' : 'Create' }}</button>
             </div>
+          </div>
+
+          <!-- fleet-aware generator (P3.4): propose, never apply -->
+          <div class="card" v-if="elev.gen" style="margin-top:12px">
+            <div class="toolbar"><div><strong>Generate a policy from the fleet</strong> <span class="muted">— observed facts → a minimal rule set, reviewed in the editor. Nothing is applied here.</span></div></div>
+            <div class="toolbar" style="margin-top:8px;flex-wrap:wrap;align-items:flex-end">
+              <label class="fld" style="min-width:220px"><span>Selector</span>
+                <input v-model="elev.gen.selector" class="mono" list="selector-suggestions" placeholder="role:web | tag:env=prod | all" /></label>
+              <label class="fld" style="min-width:140px"><span>Basis</span>
+                <select v-model="elev.gen.basis">
+                  <option value="broad">broad (prefix forms, any package list)</option>
+                  <option value="strict">strict (exact argv)</option>
+                </select></label>
+              <label class="fld" style="max-width:280px"><span>Flags</span>
+                <span class="small">
+                  <label class="lbl" style="display:inline-block;margin-right:10px"><input type="checkbox" v-model="elev.gen.includeSelfGrant" /> self-grant (signed pushes)</label>
+                  <label class="lbl" style="display:inline-block"><input type="checkbox" v-model="elev.gen.includeUserSteps" /> user/group steps</label>
+                </span></label>
+              <button class="btn primary sm" :disabled="elev.gen.busy || !elev.gen.selector" @click="elevGenerate()"><span v-if="elev.gen.busy" class="spin"></span>Generate</button>
+              <button class="btn sm" @click="elev.gen = null">Close</button>
+            </div>
+            <template v-if="elev.gen.result">
+              <div class="toolbar" style="margin-top:8px">
+                <span class="badge ok">{{ elev.gen.result.hosts_matched }} host(s)</span>
+                <span class="badge neutral">{{ elev.gen.result.tier }} tier · {{ (elev.gen.result.rules || []).length }} rules</span>
+                <div class="spacer"></div>
+                <label class="lbl" style="margin:0">Compare with
+                  <select v-model="elev.gen.compare" class="mono" style="max-width:220px">
+                    <option value="">— none —</option>
+                    <option v-for="p in elev.policies" :key="p.id" :value="p.name">{{ p.name }}</option>
+                  </select>
+                </label>
+              </div>
+              <div v-for="h in elev.gen.result.host_details" :key="h.agent_id" class="small muted" style="margin-top:2px">
+                {{ h.hostname || h.agent_id }} — {{ h.distro || "?" }}; units: <span class="mono">{{ (h.units||[]).join(", ") || "none observed" }}</span><template v-if="h.configs && h.configs.length">; configs: <span class="mono">{{ h.configs.join(", ") }}</span></template>
+              </div>
+              <div class="card" style="margin-top:8px;padding:8px 10px;background:var(--bg2,rgba(127,127,127,.06))">
+                <b class="small">Why these rules:</b>
+                <ul class="small" style="margin:4px 0 0 16px;padding:0">
+                  <li v-for="(n, i) in elev.gen.result.notes" :key="i">{{ n }}</li>
+                </ul>
+              </div>
+              <div v-if="elevGenDiff().length" class="card" style="margin-top:8px;padding:8px 10px;background:var(--bg2,rgba(127,127,127,.06))">
+                <b class="small">Diff vs <span class="mono">{{ elev.gen.compare }}</span></b>
+                <div class="mono small" style="white-space:pre-wrap;margin-top:4px"><template v-for="(l, i) in elevGenDiff()" :key="i"><span :style="{color: l[0]==='+' ? 'var(--ok,#080)' : 'var(--bad,#b00)'}">{{ l }}</span>
+</template></div>
+              </div>
+              <div class="toolbar" style="margin-top:8px">
+                <span class="muted small">Review the rules in the editor — nothing is saved or pushed by the generator.</span>
+                <div class="spacer"></div>
+                <button class="btn primary sm" @click="elevGenReview()">Review in editor…</button>
+              </div>
+            </template>
           </div>
         </section>
 
@@ -2262,6 +2403,7 @@
                       <option value="update_drift">update_drift — agents behind the store's latest release (server-level)</option>
                       <option value="security_updates">security_updates — unpatched CVEs on a host (security scan)</option>
                       <option value="elevation_drift">elevation_drift — installed elevation scope matches no stored policy</option>
+                      <option value="host_offline">host_offline — host stopped heartbeating (deadman switch)</option>
                     </select>
                   </label>
                   <label class="fld"><span>Selector</span><input v-model="ruleForm.selector" class="mono" placeholder="all | host:ag_x | role:db | tag:k=v" /></label>
@@ -2294,6 +2436,7 @@
                   <input type="number" v-model.number="ruleForm.thresh" min="1" /></label>
                 <p class="cap" v-if="ruleForm.kind==='security_updates'" style="margin:8px 0 0">Host-scoped: one alert per host with ≥ N packages carrying a CVE at or above the severity floor (from the periodic security scan). Resolves when the host is patched below the floor.</p>
                 <p class="cap" v-if="ruleForm.kind==='elevation_drift'" style="margin:8px 0 0">Host-scoped, no threshold: one alert per host whose installed elevation policy hash matches no stored policy (a stored policy changed after provisioning, or the local policy was changed out-of-band). Resolves when the host reports a matching scope again.</p>
+                <p class="cap" v-if="ruleForm.kind==='host_offline'" style="margin:8px 0 0">Host-scoped deadman switch: one alert per host whose last heartbeat is older than the offline window (default 30 min). Resolves when the host is seen again. Hosts last seen before the current server start do not page (server-restart guard).</p>
                 <label class="fld" style="max-width:420px"><span>Webhook URL <span class="muted">(optional external channel)</span></span>
                   <input v-model="ruleForm.webhook" class="mono" placeholder="https://hooks.example.com/alerts" /></label>
                 <p class="cap" style="margin:0">On firing AND resolved, the alert is POSTed as JSON to this URL (10 s timeout, no retry — failures land in the audit log as <span class="mono">alert.webhook</span>). Empty = in-app only.</p>
@@ -2368,7 +2511,7 @@
         paletteOpen: false, paletteQ: "", paletteIdx: 0,
         hosts: [], hostsLoading: false, host: null, hostFacts: null, hostEol: null, hostElevation: null, serverVersion: "",
         labelDraft: { name: "", service: "" }, roleDraft: "", labelBusy: false,
-        exSel: "all", exCmd: "", exArgs: "", exTimeout: 60,
+        exSel: "all", exCmd: "", exArgs: "", exTimeout: 60, exElevation: "",
         preview: null, previewLoading: false, executions: [],
         execDetail: null, execOutput: [],
         assistantCfg: null, assistantForm: { base_url: "", model: "", api_key: "", max_tool_calls: 15, timeout_s: 120, default_profile: "readonly", enabled: false, key_set: false },
@@ -2397,7 +2540,8 @@
         provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "",
            elevate: false, elevationPolicies: [], elevationPolicy: "", serviceLabels: "", certPaths: "" },
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
-        elev: { policies: [], fleet: [], busy: false, open: null, form: null, msg: "", push: null },
+        elev: { policies: [], fleet: [], busy: false, open: null, form: null, msg: "", push: null, gen: null },
+        elevValidateOk: true, elevValidateMsg: "",
         alerts: [], rules: [], ruleForm: null, ruleBusy: "", ruleErr: "",
         taskRuns: [], taskRunDetail: null, taskMsg: "", taskBusy: "",
         taskFormOpen: false, taskCreateBusy: false, taskForm: { name: "", description: "", steps: [] },
@@ -2414,6 +2558,24 @@
     },
     computed: {
       loggedIn() { return !!this.token; },
+      elevFormRules() {
+        const f = this.elev.form;
+        if (!f) return [];
+        // Builder mode: the persistent form-shaped array (stable object
+        // references — v-model edits land in it; elevRulesChanged syncs
+        // the canonical rules). Raw mode: parse the text.
+        if (!f.raw) return f.formRules || [];
+        try { return JSON.parse(f.rulesText) || []; } catch (e) { return []; }
+      },
+      elevFormTier() {
+        try {
+          const rules = this.elevFormRules || [];
+          if (rules.some(r => r.full)) return "full";
+          if (rules.some(r => (r.args_prefix || []).length > 0 || (r.units || []).length > 0 || (r.files || []).length > 0)) return "broad";
+          if (rules.some(r => (r.args || []).some(a => String(a).includes("*") || String(a).includes("?")))) return "broad";
+          return "strict";
+        } catch (e) { return ""; }
+      },
       // Services header filters: AND-combined client-side over the loaded
       // rows (the API returns the full unpaginated list). Facets are the
       // distinct values actually present, so every option is reachable.
@@ -2972,11 +3134,28 @@
           this.notify("ok", "password updated");
         } catch (e) { this.pwErr = e.message; }
       },
-      startSSE() {
+      // The EventSource credential: mint a short-lived SSE-scoped token
+      // first (POST /auth/sse-token). A full session token in the URL
+      // would leak into reverse-proxy access logs; the scoped token is
+      // single-route and expires fast, so a leaked URL is worthless.
+      // Returns "" when minting is unavailable (e.g. a pre-sse-token
+      // server): the stream then relies on header auth, which an
+      // EventSource cannot send — so the connection will fail visibly
+      // (reconnecting dot) rather than send a long-lived credential in
+      // the URL.
+      async sseToken() {
+        try {
+          const d = await this.api("/auth/sse-token", { method: "POST", silent: true });
+          return (d && d.token) || "";
+        } catch (e) { return ""; }
+      },
+      async startSSE() {
         this.stopSSE();
         this.sseStatus = "reconnecting";
         let opened = false;
-        const es = new EventSource("/api/v1/events" + (this.token ? "?token=" + encodeURIComponent(this.token) : ""));
+        const tok = await this.sseToken();
+        if (!this.token) return; // signed out while minting
+        const es = new EventSource("/api/v1/events" + (tok ? "?token=" + encodeURIComponent(tok) : ""));
         this._es = es;
         es.onopen = () => {
           this.sseStatus = "connected";
@@ -2992,7 +3171,13 @@
           }
           opened = true;
         };
-        es.onerror = () => { this.sseStatus = "reconnecting"; };
+        es.onerror = () => {
+          this.sseStatus = "reconnecting";
+          // The scoped token expires (default 60 s); EventSource retries
+          // the SAME url, so a 401 loop needs a fresh token: close and
+          // re-open with a newly minted one.
+          if (opened) { this.stopSSE(); setTimeout(() => { if (this.token) this.startSSE(); }, 1000); }
+        };
         const kinds = ["host.state", "execution.state", "audit.event", "job.run", "job.run-parked", "task.run", "package.action", "session.data", "session.opened", "session.result", "session.interrupted", "file.action", "approval.requested", "approval.approved", "approval.denied", "alert.firing", "alert.resolved", "provision.start", "provision.step", "provision.key_confirm", "provision.connected", "provision.failed", "provision.cancelled", "provision.handoff", "update.run", "update.host"];
         for (const k of kinds) es.addEventListener(k, (e) => { let p; try { p = JSON.parse(e.data); } catch (err) { p = e.data; } this.onSSEEvent(k, p); });
       },
@@ -3068,7 +3253,7 @@
           const fleet = await Promise.all(connected.map(async h => {
             let e = null;
             try { e = await this.api("/hosts/" + encodeURIComponent(h.id) + "/elevation", { toast: false }); } catch (err) { e = null; }
-            const f = { id: h.id, name: this.hostName(h), mode: e && e.mode, rules: e && e.rules, hash: e && e.hash, reported: !!(e && e.reported), matched: "" };
+            const f = { id: h.id, name: this.hostName(h), mode: e && e.mode, rules: e && e.rules, hash: e && e.hash, tier: e && e.tier || "", reported: !!(e && e.reported), matched: "" };
             if (f.hash) {
               const m = this.elev.policies.find(p => p.policy_sha256 === f.hash);
               f.matched = m ? m.name : "";
@@ -3081,17 +3266,174 @@
         } finally { this.elev.busy = false; }
       },
       elevAppliedCount(p) { return this.elev.fleet.filter(f => f.hash === p.policy_sha256).length; },
-      elevRulesText(p) { try { return JSON.stringify(p.rules, null, 1); } catch (e) { return "" + p.rules; } },
-      elevFormNew() { this.elev.msg = ""; this.elev.form = { name: "", description: "", rulesText: JSON.stringify([{ allow: "dnf", args: ["-y", "upgrade"] }], null, 1) }; },
+      tierTooltip(tier) {
+        return {
+          broad: "Broad tier: day-2 fleet verbs (package managers, systemctl, user/group, reboot, config validators) — no arbitrary commands",
+          strict: "Strict tier: exact-argv grants only — narrow blast radius, every privileged need must be authored",
+          full: "FULL tier: the agent user can run ANY command as root (NOPASSWD: ALL). Server-side guardrails still gate every dispatch; out-of-band sudo lands in journald (auth facility)",
+          legacy: "Legacy: sudo on, no policy file — the hand-installed sudoers drop-in decides",
+        }[tier] || "";
+      },
+      elevPolicyTier(p) {
+        try {
+          const rules = p.rules || [];
+          if (rules.some(r => r.full)) return "full";
+          if (rules.some(r => (r.args_prefix || []).length > 0 || (r.units || []).length > 0 || (r.files || []).length > 0)) return "broad";
+          if (rules.some(r => (r.args || []).some(a => String(a).includes("*") || String(a).includes("?")))) return "broad";
+          return "strict";
+        } catch (e) { return ""; }
+      },
+      elevFormNew() {
+        this.elev.msg = "";
+        const seed = [{ allow: "dnf", args: ["-y", "upgrade"] }];
+        this.elev.form = { id: null, name: "", description: "", rules: seed,
+          rulesText: JSON.stringify(seed, null, 1), formRules: seed.map(r => this._ruleToForm(r)),
+          raw: false, testCmd: "", testResult: null, testBusy: false };
+        this.elevValidate();
+      },
       elevFormEdit(p) {
         this.elev.msg = ""; this.elev.open = p.id;
-        this.elev.form = { id: p.id, name: p.name, description: p.description || "", rulesText: this.elevRulesText(p) };
+        const rules = (p.rules || []).slice();
+        this.elev.form = { id: p.id, name: p.name, description: p.description || "",
+          rules, rulesText: JSON.stringify(rules, null, 1), formRules: rules.map(r => this._ruleToForm(r)),
+          raw: false, testCmd: "", testResult: null, testBusy: false };
+      },
+      // ---- P3.3 structured editor ---------------------------------------
+      // The builder edits a parallel form shape (_kind/_args/_verbs/
+      // _units/_files/_env); the two views stay in sync through
+      // _syncFormRules, and validation runs server-side (the same
+      // LoadPolicyJSON the agent runs — the editor's verdict is the
+      // agent's verdict).
+      _ruleToForm(r) {
+        const kind = r.full ? "full" : (r.args_prefix && r.args_prefix.length) ? "args_prefix"
+          : (r.verbs && r.verbs.length) ? "verbs" : (r.files && r.files.length) ? "files"
+          : (r.args && r.args.length) ? "args" : "bare";
+        return { ...r, _kind: kind,
+          _args: (r.args_prefix && r.args_prefix.join(", ")) || (r.args && r.args.join(", ")) || "",
+          _verbs: (r.verbs && r.verbs.join(", ")) || "", _units: (r.units && r.units.join(", ")) || "",
+          _files: (r.files && r.files.join(", ")) || "", _env: (r.env && r.env.join(", ")) || "" };
+      },
+      _formToRule(r) {
+        const split = (s) => (s || "").split(",").map(x => x.trim()).filter(Boolean);
+        if (r.full) return { full: true };
+        const out = { allow: (r.allow || "").trim() };
+        if (r._kind === "args_prefix") { const a = split(r._args); if (a.length) out.args_prefix = a; }
+        else if (r._kind === "args") { const a = split(r._args); if (a.length) out.args = a; }
+        else if (r._kind === "verbs") { const v = split(r._verbs); const u = split(r._units); if (v.length && u.length) { out.verbs = v; out.units = u; } }
+        else if (r._kind === "files") { const f = split(r._files); if (f.length) out.files = f; }
+        const env = split(r._env); if (env.length) out.env = env;
+        return out;
+      },
+      elevRuleAdd(kind) {
+        const f = this.elev.form; if (!f) return;
+        const rules = (f.formRules || []).slice();
+        if (kind === "full") { rules.length = 0; rules.push({ full: true, _kind: "full" }); }
+        else rules.push({ allow: "", _kind: kind || "args", _args: "", _verbs: "", _units: "", _files: "", _env: "" });
+        f.formRules = rules;
+        this.elevRulesChanged();
+      },
+      elevRuleRemove(i) {
+        const f = this.elev.form; if (!f) return;
+        const rules = (f.formRules || []).slice();
+        if (i >= 0 && i < rules.length) rules.splice(i, 1);
+        f.formRules = rules;
+        this.elevRulesChanged();
+      },
+      elevRuleKindChange() { this.elevRulesChanged(); },
+      // elevRulesChanged: canonical rules + JSON derive from the
+      // form-shaped array after every edit (v-model mutates the array
+      // elements in place; the @change hooks land here).
+      elevRulesChanged() {
+        const f = this.elev.form; if (!f || f.raw) return;
+        f.rules = (f.formRules || []).map(r => this._formToRule(r));
+        f.rulesText = JSON.stringify(f.rules, null, 1);
+        this.elevValidate();
+      },
+      elevFormToggleRaw() {
+        const f = this.elev.form; if (!f) return;
+        if (!f.raw) { f.rulesText = JSON.stringify((f.rules || []), null, 1); }
+        else {
+          try {
+            f.rules = JSON.parse(f.rulesText) || [];
+            f.formRules = f.rules.map(r => this._ruleToForm(r));
+          } catch (e) { /* validation reports it */ }
+        }
+        f.raw = !f.raw;
+        this.elevValidate();
+      },
+      elevRawChanged() { if (this.elev.form && this.elev.form.raw) this.elevValidate(); },
+      async elevValidate() {
+        const f = this.elev.form; if (!f) return;
+        let rules;
+        try { rules = JSON.parse(f.rulesText); } catch (e) { this.elevValidateOk = false; this.elevValidateMsg = "invalid JSON: " + e.message; return; }
+        try {
+          const d = await this.api("/elevation/validate", { method: "POST", body: { rules }, toast: false });
+          this.elevValidateOk = true;
+          this.elevValidateMsg = d.tier ? (d.tier + " tier · " + d.rule_count + " rule(s)") : "valid";
+        } catch (e) {
+          this.elevValidateOk = false; this.elevValidateMsg = e.message;
+        }
+      },
+      async elevExplain() {
+        const f = this.elev.form; if (!f || !f.testCmd) return;
+        f.testBusy = true; f.testResult = null;
+        try {
+          let rules;
+          try { rules = JSON.parse(f.rulesText); } catch (e) { this.elev.msg = "invalid JSON: " + e.message; return; }
+          f.testResult = await this.api("/elevation/explain", { method: "POST", body: { rules, command: f.testCmd }, toast: false });
+        } catch (e) { f.testResult = { elevated: false, note: e.message }; } finally { f.testBusy = false; }
+      },
+      // ---- P3.4 generator ------------------------------------------------
+      elevGenStart() {
+        this.elev.gen = { selector: "all", basis: "broad", includeSelfGrant: true, includeUserSteps: true, compare: "", busy: false, result: null };
+      },
+      // elevGenDiff: the proposal vs a stored policy, as +/- grant lines
+      // (the reviewable-diff requirement from the P3.4 proposal — visible
+      // BEFORE the editor loads it).
+      elevGenDiff() {
+        const g = this.elev.gen;
+        if (!g || !g.result || !g.compare) return [];
+        const base = (this.elev.policies || []).find(p => p.name === g.compare);
+        if (!base) return [];
+        const a = (this.elevGrantLines(base) || []).map(s => s.trim()).filter(Boolean);
+        const b = (this.elevGrantLines({ rules: g.result.rules }) || []).map(s => s.trim()).filter(Boolean);
+        const setA = new Set(a), setB = new Set(b);
+        const out = [];
+        for (const l of a) if (!setB.has(l)) out.push("- " + l);
+        for (const l of b) if (!setA.has(l)) out.push("+ " + l);
+        return out;
+      },
+      async elevGenerate() {
+        const g = this.elev.gen; if (!g || g.busy || !g.selector) return;
+        g.busy = true; g.result = null;
+        try {
+          g.result = await this.api("/elevation/generate", { method: "POST", body: {
+            selector: g.selector, basis: g.basis,
+            include_self_grant: g.includeSelfGrant, include_user_steps: g.includeUserSteps,
+          }, toast: false });
+          this.notify("ok", "generated a " + g.result.tier + "-tier proposal from " + g.result.hosts_matched + " host(s) — review, don't trust");
+        } catch (e) { this.notify("err", "generate failed: " + e.message); } finally { g.busy = false; }
+      },
+      elevGenReview() {
+        const g = this.elev.gen; if (!g || !g.result) return;
+        const base = (g.selector === "all" ? "fleet" : g.selector.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "fleet");
+        this.elev.form = {
+          name: base + "-" + g.basis,
+          description: "Generated from observed fleet facts (" + g.result.hosts_matched + " host(s), basis " + g.basis + ") — review before granting",
+          rules: g.result.rules, rulesText: JSON.stringify(g.result.rules, null, 1),
+          raw: false, testCmd: "", testResult: null, testBusy: false,
+        };
+        this.elevValidate();
+        this.elev.gen = null;
+        this.notify("info", "proposal loaded into the editor — review every rule, then Create");
       },
       async elevSave() {
         this.elev.busy = true; this.elev.msg = "";
         try {
           const f = this.elev.form;
-          const body = { name: f.name, description: f.description, rules: JSON.parse(f.rulesText) };
+          let rules;
+          try { rules = JSON.parse(f.rulesText); } catch (e) { throw new Error("invalid JSON: " + e.message); }
+          const body = { name: f.name, description: f.description, rules };
           if (f.id) await this.api("/elevation/policies/" + encodeURIComponent(f.id), { method: "PUT", body });
           else await this.api("/elevation/policies", { method: "POST", body });
           this.elev.form = null;
@@ -3202,6 +3544,10 @@
             out.push({ key: "elevation-off", cls: "warn", head: "Elevation is off on this host",
               body: "Package applies, service control and reboots run as the unprivileged agent user and fail with permission errors. Enable with one command on the host (mint a bootstrap below) — the policy is installed, the sudoers drop-in rendered from it, and PARTOUT_ELEVATE=sudo wired.",
               act: "elevBoot" });
+          } else if (e.tier === "full") {
+            out.push({ key: "elevation-full", cls: "warn", head: "This host runs the FULL elevation tier (NOPASSWD: ALL)",
+              body: "The agent user can run any command as root. Server-side guardrails (policy deny-list, approvals, audit) still gate every dispatch, and out-of-band sudo lands in journald — but there is no host-local containment. Switch to the broad tier (push default-broad from the Elevation page) unless you need this.",
+              goto: "elevation" });
           }
           // Observe: no custom units reported (OS-managed units are
           // deliberately out of fleet health — PRD Decision 13).
@@ -3226,7 +3572,7 @@
         d[key] = true;
         localStorage.setItem(this.postureDismissKey(this.p1), JSON.stringify(d));
       },
-      async loadExecutions() { try { const d = await this.api("/executions"); this.executions = d.items || []; } catch (e) { this.executions = []; } },
+      async loadExecutions() { try { const d = await this.api("/executions" + (this.exElevation ? "?elevated=" + this.exElevation : "")); this.executions = d.items || []; } catch (e) { this.executions = []; } },
       async loadExecDetail() {
         if (!this.p1) { this.execDetail = null; this.execOutput = []; return; } // id-less route
         // Fetch-then-assign: no flash-of-empty during SSE-triggered re-loads.
@@ -3750,8 +4096,11 @@
       elevGrantLines(p) {
         const out = [];
         for (const r of (p && p.rules) || []) {
-          if (!r || !r.allow) continue;
-          if (r.args && r.args.length) out.push(r.allow + " " + r.args.join(" "));
+          if (!r) continue;
+          if (r.full) { out.push("ANY COMMAND (full tier — NOPASSWD: ALL)"); continue; }
+          if (!r.allow) continue;
+          if (r.args_prefix && r.args_prefix.length) out.push(r.allow + " " + r.args_prefix.join(" ") + " …");
+          else if (r.args && r.args.length) out.push(r.allow + " " + r.args.join(" "));
           else if (r.verbs && r.units) for (const v of r.verbs) for (const u of r.units) out.push(r.allow + " " + v + " " + u);
           else if (r.files && r.files.length) for (const f of r.files) out.push(r.allow + " " + f);
           else out.push(r.allow + "  (no arguments)");
@@ -3759,15 +4108,16 @@
         return out;
       },
       // Fetch the server-side elevation policies so the operator picks a
-      // named privilege document (the seeded default-baseline is the
-      // ready-to-apply day-1 profile).
+      // named privilege document (the seeded default-broad is the
+      // ready-to-apply broad-tier default).
       async provWizLoadElevationPolicies() {
         if (this.provWiz.elevationPolicies.length) return;
         try {
           const list = await this.api("/elevation/policies", { toast: false });
           this.provWiz.elevationPolicies = list || [];
           if (!this.provWiz.elevationPolicy) {
-            const def = this.provWiz.elevationPolicies.find(p => p.name === "default-baseline");
+            const def = this.provWiz.elevationPolicies.find(p => p.name === "default-broad") ||
+              this.provWiz.elevationPolicies.find(p => p.name === "default-baseline");
             if (def) this.provWiz.elevationPolicy = def.name;
           }
         } catch (e) { /* leave the list empty; the checkbox stays usable */ }
@@ -4648,15 +4998,24 @@
       },
       // ---- P1: one-command elevation bootstrap ----
       async openElevBoot(agentId) {
-        this.elevBoot = { open: true, agentId, policy: this.elevBoot.policy || "default-baseline", token: "", url: "", busy: false };
+        this.elevBoot = { open: true, agentId, policy: this.elevBoot.policy || "default-broad", token: "", url: "", busy: false };
         await this.provWizLoadElevationPolicies();
         if (!this.provWiz.elevationPolicies.find(p => p.name === this.elevBoot.policy)) {
           this.elevBoot.policy = this.provWiz.elevationPolicy || (this.provWiz.elevationPolicies[0] || {}).name || "";
         }
       },
+      elevBootTier() {
+        const p = (this.provWiz.elevationPolicies || []).find(x => x.name === this.elevBoot.policy);
+        return p ? this.elevPolicyTier(p) : "";
+      },
       closeElevBoot() { this.elevBoot.open = false; },
       async elevBootMint() {
         if (!this.elevBoot.agentId || !this.elevBoot.policy || this.elevBoot.busy) return;
+        if (this.elevBootTier() === "full" && !this.elevBoot.fullConfirmed) {
+          this.elevBoot.fullConfirmed = true; // one extra click for root-equivalent
+          this.notify("warn", "FULL tier grants root-equivalent sudo — click Mint again to confirm you accept the blast radius");
+          return;
+        }
         this.elevBoot.busy = true;
         try {
           const d = await this.api("/hosts/" + encodeURIComponent(this.elevBoot.agentId) + "/elevation/bootstrap", {

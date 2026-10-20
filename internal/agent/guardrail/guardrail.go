@@ -31,6 +31,7 @@ type Guard struct {
 	serverPub   []byte            // Ed25519 public key (raw 32 bytes)
 	hostTags    map[string]string // this agent's tags (from the bundle)
 	hostRoles   []string          // this agent's roles (from the bundle)
+	hostEOL     string            // host's OS end-of-support state (from the bundle; "" = unknown)
 	loaded      atomic.Bool
 	policyDir   string
 }
@@ -85,11 +86,22 @@ func (g *Guard) OnBundle(b *pb.PolicyBundle) {
 	}
 	g.hostTags = b.HostTags
 	g.hostRoles = b.HostRoles
+	g.hostEOL = b.HostEol
 	if b.AgentId != "" {
 		g.agentID = b.AgentId
 	}
 	g.loaded.Store(true)
 	g.persist()
+}
+
+// eolFor returns the host EOL state to evaluate under: the Decision's state
+// (what the server signed against — authoritative for this dispatch) when
+// the server carried one, else the bundle snapshot. "" = unknown.
+func (g *Guard) eolFor(d *pb.Decision) string {
+	if d != nil && d.EolState != "" {
+		return d.EolState
+	}
+	return g.hostEOL
 }
 
 // approvalCheck handles an approval-authorized decision (M4): the server
@@ -141,9 +153,9 @@ func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 		HostTags:    g.hostTags,
 		HostRoles:   g.hostRoles,
 		ActorRole:   d.ActorRole,
-		Cmd:         cmd.Cmd,
 		Args:        cmd.Args,
 		CommandLine: commandLine(cmd.Cmd, cmd.Args),
+		HostEOL:     g.eolFor(d),
 	}
 	if d.ApprovalId != "" {
 		return g.approvalCheck(d, action)
@@ -195,6 +207,7 @@ func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 	action.HostTags = g.hostTags
 	action.HostRoles = g.hostRoles
 	action.ActorRole = d.ActorRole
+	action.HostEOL = g.eolFor(d)
 	if d.ApprovalId != "" {
 		return g.approvalCheck(d, action)
 	}
@@ -256,6 +269,7 @@ func (g *Guard) RecheckPkg(op *pb.PkgOp) (bool, string) {
 	action.HostTags = g.hostTags
 	action.HostRoles = g.hostRoles
 	action.ActorRole = d.ActorRole
+	action.HostEOL = g.eolFor(d)
 	if d.ApprovalId != "" {
 		return g.approvalCheck(d, action)
 	}
@@ -297,6 +311,7 @@ func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
 		HostRoles:   g.hostRoles,
 		ActorRole:   d.ActorRole,
 		ActionClass: policy.ActionTaskRun,
+		HostEOL:     g.eolFor(d),
 	}
 	if d.ApprovalId != "" {
 		return g.approvalCheck(d, action)
@@ -311,6 +326,18 @@ func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
 	// require-approval) rule gates task steps exactly as it gates dispatched
 	// exec. Fails closed.
 	for _, step := range run.GetSteps() {
+		// Package/upgrade steps are mutation surfaces (they run apt-get/dnf
+		// as root); re-evaluate them as pkg.apply-class actions, mirroring
+		// the server-side gate (EOL-scoped rules apply to task upgrades).
+		switch step.GetKind() {
+		case "package", "upgrade":
+			pa := action
+			pa.ActionClass = policy.ActionPkgApply
+			if pd := policy.Evaluate(g.rules, pa); pd.Effect != policy.EffectAllow {
+				return false, fmt.Sprintf("guardrail: task step (%s) local recheck says %s (%s)",
+					step.GetKind(), pd.Effect, pd.Reason)
+			}
+		}
 		cl, isCmd := stepCommandLine(step)
 		if !isCmd {
 			continue

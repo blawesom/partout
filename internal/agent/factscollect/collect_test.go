@@ -759,9 +759,10 @@ func TestParseCertRealFile(t *testing.T) {
 	if cf == nil {
 		t.Fatal("parseCert returned nil for a valid certificate")
 	}
-	// RDN order depends on how the name was encoded (Go's marshaller and
-	// `openssl req` differ), so assert on content, not ordering.
-	for _, want := range []string{"CN = app.example.com", "O = Acme"} {
+	// The subject is canonicalized to Go's pkix.Name.String() form
+	// (`CN=…,O=…`) regardless of the local openssl generation (3.0 printed
+	// `CN = …`, 3.5+ prints `O=…, CN=…` — normalizeDN handles both).
+	for _, want := range []string{"CN=app.example.com", "O=Acme"} {
 		if !strings.Contains(cf.Subject, want) {
 			t.Errorf("Subject = %q, want it to contain %q (and not the whole openssl blob)", cf.Subject, want)
 		}
@@ -872,11 +873,11 @@ func TestParseCertChainedNotSelfSigned(t *testing.T) {
 	if cf.SelfSigned {
 		t.Error("SelfSigned = true for a CA-signed leaf")
 	}
-	if cf.Subject != "CN = leaf.example.com" {
+	if cf.Subject != "CN=leaf.example.com" {
 		t.Errorf("Subject = %q", cf.Subject)
 	}
-	if cf.Issuer != "CN = Test CA" {
-		t.Errorf("Issuer = %q, want CN = Test CA", cf.Issuer)
+	if cf.Issuer != "CN=Test CA" {
+		t.Errorf("Issuer = %q, want CN=Test CA", cf.Issuer)
 	}
 	if !cf.ChainChecked {
 		t.Error("ChainChecked = false, want true (a bundle was supplied)")

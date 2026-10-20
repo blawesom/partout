@@ -57,6 +57,7 @@ import (
 	"github.com/blawesom/partout/internal/server/provision"
 	serversecrets "github.com/blawesom/partout/internal/server/secrets"
 	"github.com/blawesom/partout/internal/server/sessions"
+	"github.com/blawesom/partout/internal/server/ssetoken"
 	"github.com/blawesom/partout/internal/server/stream"
 	"github.com/blawesom/partout/internal/server/tasks"
 	"github.com/blawesom/partout/internal/server/updates"
@@ -328,7 +329,12 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		}
 	}
 	apiH.SetAuthController(authC)
-	// Drop expired sessions + stale login-throttle entries in the background
+	// Short-lived SSE-scoped tokens (PRD R10): EventSource cannot set
+	// headers, so the web UI authenticates the stream with ?token= —
+	// minted on demand, single-route, expiring fast (PARTOUT_SSE_TOKEN_TTL_S).
+	sseTokC := ssetoken.New(st, time.Duration(cfg.SSETTL)*time.Second, lg)
+	apiH.SetSSETokens(sseTokC)
+	// Drop expired SSE tokens + stale login-throttle entries in the background
 	// (the maps are in-memory and would otherwise only shrink on access).
 	go func() {
 		ticker := time.NewTicker(15 * time.Minute)
@@ -340,6 +346,9 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 			case <-ticker.C:
 				if sess, thr := authC.Sweep(); sess > 0 || thr > 0 {
 					lg.Printf("auth: swept %d expired session(s), %d stale throttle entr(ies)", sess, thr)
+				}
+				if n := sseTokC.Sweep(); n > 0 {
+					lg.Printf("auth: swept %d expired sse token(s)", n)
 				}
 			}
 		}
@@ -492,6 +501,15 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// (air-gapped): the last cached copy applies.
 	eolRefresher := externaldata.New(st, lg)
 	pkgC.SetRefresher(eolRefresher)
+	// EOL→policy gating (PRD §5.6): the refresher's cached endoflife.date
+	// feed resolves each host's end-of-support state for policy matching,
+	// both server-side (dispatch gates below) and agent-side (the state
+	// rides in every policy bundle).
+	apiH.Control().SetEOLProvider(eolRefresher.EOLForHost)
+	pkgC.SetEOLProvider(eolRefresher.EOLForHost)
+	taskC.SetEOLProvider(eolRefresher.EOLForHost)
+	jobC.SetEOLProvider(eolRefresher.EOLForHost)
+	h.SetHostEOLProvider(eolRefresher.EOLForHost)
 	// M5.1: periodic security scan (per-host update list + OSV correlation
 	// -> security_findings, read by the security_updates alert kind).
 	pkgC.RunSecurityLoop(context.Background(), time.Duration(cfg.SecurityScanS)*time.Second)
@@ -542,7 +560,14 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 		if err != nil {
 			return fmt.Errorf("secrets manager: %w", err)
 		}
+		// The REST surface (UI/CLI/MCP) and the task/job dispatch paths
+		// share the manager: the API serves the vault; task/job dispatch
+		// materializes task-declared secrets to the target host before
+		// the run envelope goes out (v0.9.13 known gap: the agent cache
+		// existed but nothing triggered it).
 		apiH.SetSecrets(secMgr)
+		taskC.SetSecrets(secMgr)
+		jobC.SetSecrets(secMgr)
 		lg.Printf("server: secrets feature enabled (master key configured)")
 	} else if !errors.Is(err, serversecrets.ErrDisabled) {
 		return fmt.Errorf("secrets: %w", err)

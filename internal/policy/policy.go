@@ -54,6 +54,23 @@ const (
 	ActionElevationPush = "elevation.push"
 )
 
+// Host end-of-support states (PRD §5.6, computed from the endoflife.date
+// cache). Used as Match.EOL values and as the Action.HostEOL label.
+const (
+	EOLSupported  = "supported"
+	EOLEndingSoon = "ending_soon"
+	EOLEnded      = "ended"
+)
+
+// ValidEOL reports whether v is a legal Match.EOL value ("" = match any).
+func ValidEOL(v string) bool {
+	switch v {
+	case "", EOLSupported, EOLEndingSoon, EOLEnded:
+		return true
+	}
+	return false
+}
+
 // Priority ordering for precedence: lower number = higher priority.
 const DefaultPriority = 0
 
@@ -63,6 +80,10 @@ type Match struct {
 	Actions      []string `json:"actions"`       // action classes ("exec", "file"); empty = all
 	ActorRoles   []string `json:"actor_roles"`   // RBAC roles ("admin", "operator"); empty = all
 	CommandRegex string   `json:"command_regex"` // regex against "cmd args..."; empty = match any
+	// EOL gates on the host's OS end-of-support state, computed from the
+	// endoflife.date cache: "supported" | "ending_soon" | "ended". Empty =
+	// match any host (including one with an unknown state).
+	EOL string `json:"eol,omitempty"`
 }
 
 // Rule is one declarative policy rule.
@@ -88,6 +109,12 @@ type Action struct {
 	ActionClass string
 	// Path is the target path for file actions.
 	Path string
+	// HostEOL is the host's OS end-of-support state ("supported" |
+	// "ending_soon" | "ended"; "" or "unknown" = not computable). Filled by
+	// the server from the endoflife.date cache and by the agent guardrail
+	// from the policy bundle / decision context. An unknown state never
+	// matches an EOL-scoped rule.
+	HostEOL string
 }
 
 // Decision is the outcome of evaluating rules against an action.
@@ -159,7 +186,22 @@ func matchesRule(r Rule, a Action) bool {
 	if !matchCommandRegex(r.Match.CommandRegex, a) {
 		return false
 	}
+	if !matchEOL(r.Match.EOL, a) {
+		return false
+	}
 	return true
+}
+
+// matchEOL checks a rule's eol predicate against the host's current
+// end-of-support state. An EOL-scoped rule only matches a host with a KNOWN
+// state of exactly that value: a host whose state cannot be computed (no
+// facts, unknown distro, empty cache) has HostEOL "" / "unknown" and never
+// matches — a rule author who writes eol=ended wants certainty, not a guess.
+func matchEOL(eol string, a Action) bool {
+	if eol == "" {
+		return true // no EOL filter → matches all
+	}
+	return eol == a.HostEOL
 }
 
 func matchHosts(hostsExpr string, a Action) bool {

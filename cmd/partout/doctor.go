@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blawesom/partout/internal/agent/elevate"
 	"github.com/blawesom/partout/internal/agent/facts"
 	agentfs "github.com/blawesom/partout/internal/agent/fs"
 	"github.com/blawesom/partout/internal/config"
@@ -563,7 +564,22 @@ var sudoProbe = func() error {
 func checkElevation(cfg *config.Config, r *doctorResult) {
 	if cfg.Elevate != "sudo" {
 		r.add(dwarn, "elevation",
-			"off (PARTOUT_ELEVATE unset/none) — package applies and other root-requiring actions fail with permission errors as the unprivileged agent user; to enable: install the sudoers scope (deploy/sudoers/partout-agent, or an elevation policy via `partout ctl elevation install-sudoers`), set PARTOUT_ELEVATE=sudo in the agent env, restart the agent")
+			"off (PARTOUT_ELEVATE unset/none) — package applies and other root-requiring actions fail with permission errors as the unprivileged agent user; to enable: mint the one-command bootstrap from the host page (or `provision --elevate`), which installs the seeded default-broad policy, wires PARTOUT_ELEVATE=sudo and restarts the agent")
+		return
+	}
+	// Tier posture: read the loaded policy (if any) and say which tier the
+	// host is in — the blast radius should be visible from doctor, not
+	// only in the UI.
+	if pol := elevationLoadForDoctor(cfg.ElevationPolicy); pol != nil {
+		switch tier := pol.Tier(); tier {
+		case "full":
+			r.add(dwarn, "elevation",
+				"FULL tier (NOPASSWD: ALL) — the agent user can run any command as root; server-side guardrails still gate every dispatch, but there is no host-local containment. Consider the broad tier (default-broad) unless you need this")
+		case "broad":
+			r.add(dok, "elevation", "broad tier (policy "+pol.PolicyHash()[:12]+"…) — day-2 fleet verbs, no arbitrary commands")
+		default:
+			r.add(dok, "elevation", "strict tier (policy "+pol.PolicyHash()[:12]+"…) — exact-argv grants only")
+		}
 		return
 	}
 	if err := sudoProbe(); err != nil {
@@ -575,7 +591,17 @@ func checkElevation(cfg *config.Config, r *doctorResult) {
 		r.add(dok, "elevation", "sudo -n works — trivially: doctor runs as root; probe again as the agent user for a real check")
 		return
 	}
-	r.add(dok, "elevation", "sudo -n works (privileged actions elevated per the sudoers scope)")
+	r.add(dok, "elevation", "sudo -n works (legacy mode: no policy file — the hand-installed sudoers drop-in decides)")
+}
+
+// elevationLoadForDoctor loads the elevation policy the way the agent
+// would (nil = legacy), without the CLI's fatal-on-error behavior.
+func elevationLoadForDoctor(policy string) *elevate.Policy {
+	pol, err := elevate.Load(policy)
+	if err != nil {
+		return nil
+	}
+	return pol
 }
 
 // loadEnvFile reads a systemd-style environment file (KEY=VALUE lines,
