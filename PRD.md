@@ -2,7 +2,7 @@
 
 **Product:** Partout
 **Repo:** `partout`
-**Status:** v0.9.15 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation policy shipped; v0.9.6–v0.9.15: onboarding/trust pass (plaintext-default warnings at every layer, complete first-host recipe, first-run guidance), `install-server.sh`, signed release repo + one-command `partout update`, UX quick wins
+**Status:** v0.9.16 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation tiers (broad default, strict/full) shipped; v0.9.6–v0.9.16: onboarding/trust pass (plaintext-default warnings at every layer, complete first-host recipe, first-run guidance), `install-server.sh`, signed release repo + one-command `partout update`, UX quick wins; v0.9.16: audit hash chain, host_offline alerts, SSE scoped tokens, EOL-gated upgrades, task↔secrets wired, Docker path, structured policy editor + fleet-aware generator
 **Date:** 2026-10-20
 
 ---

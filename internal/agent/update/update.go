@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	osexec "os/exec"
@@ -22,6 +23,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	pb "github.com/blawesom/partout/internal/proto"
@@ -184,7 +186,22 @@ func ValidateBinary(artifact []byte, wantVersion string) error {
 	defer cancel()
 	out, err := osexec.CommandContext(ctx, cand, "--version").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("candidate binary did not run: %w", err)
+		// ETXTBSY: the just-written file is momentarily held as a text
+		// segment (observed on loaded hosts — the kernel can keep the
+		// inode busy between the write returning and the exec). The
+		// candidate is fine; retry once on a fresh path before failing
+		// the whole update (a fleet update must not die on this).
+		if errors.Is(err, syscall.ETXTBSY) {
+			time.Sleep(250 * time.Millisecond)
+			cand2 := filepath.Join(dir, "partout-retry")
+			if err := os.WriteFile(cand2, artifact, 0o755); err != nil {
+				return err
+			}
+			out, err = osexec.CommandContext(ctx, cand2, "--version").CombinedOutput()
+		}
+		if err != nil {
+			return fmt.Errorf("candidate binary did not run: %w", err)
+		}
 	}
 	line := strings.TrimSpace(string(bytes.TrimSpace(out)))
 	if i := strings.IndexByte(line, '\n'); i >= 0 {

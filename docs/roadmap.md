@@ -687,6 +687,60 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.16 — elevation tiers + the 1.0 hardening pass.** Everything
+  since the v0.9.15 tag:
+
+  - **Elevation tiers (P0)**: `default-broad` is the new default —
+    every command shape Partout itself invokes for day-2 work (apt/dnf
+    end-to-end incl. multi-package installs, systemctl management verbs
+    on any unit, user/group steps, hostnamectl, config validators, reboot
+    in all three forms, the signed-policy self-grant) — **no shell, no
+    arbitrary commands**. `default-strict` (the old baseline, now with
+    its self-grant actually included) and `default-full`
+    (`NOPASSWD: ALL`, the loud escape hatch) complete the tier set. The
+    tier rides the `partout.elevation` fact, the Elevation page, the
+    host posture card, `partout doctor`, and run rows; `elevation_drift`
+    is tier-aware. Engine: `args_prefix` (the argv-head matcher
+    multi-package installs need — `path.Match`'s `*` never crosses `/`,
+    which had made the old baseline's `haproxy -c -f *` rule dead) and
+    the standalone `full:true` grant.
+  - **Audit hash chain** (Decision 5 promoted to a 1.0 gate): every
+    `audit_events` row carries `prev_hash`/`hash` over a canonical
+    domain-separated byte string; `partout ctl audit verify` +
+    `GET /api/v1/audit/verify` walk the chain and name the first broken
+    row; pre-upgrade DBs backfill lazily. Schema v27.
+  - **`host_offline` alert kind** + seeded `default-host-offline`
+    (critical): the deadman switch the observe layer was missing —
+    agents that stop heartbeating page the operator, with a
+    server-restart guard so fleet-wide downtime doesn't false-alarm.
+  - **SSE scoped tokens**: `?token=` on the events stream accepts only
+    short-lived minted tokens (`POST /auth/sse-token`,
+    `PARTOUT_SSE_TOKEN_TTL_S`); full bearer tokens in URLs (reverse-proxy
+    log leak class) are rejected.
+  - **OAuth `redirect_uri` exact-equality validation**.
+  - **EOL→policy gating**: `policy.Match.eol` + the host's EOL state on
+    the signed Decision and the policy bundle; seeded
+    `default-require-approval-eol-upgrade` parks upgrades on
+    past-end-of-support hosts with the reason in the approval payload.
+  - **Task↔secrets wired** (the v0.9.13 known gap): `secret:NAME` refs
+    in step env/args/content/template materialize (E2E-sealed) before
+    the task envelope on run/playbook/job dispatch; unbound refs fail
+    fast naming the ref; the agent renders from its cache, fail-closed.
+  - **Minimal Docker path**: `deploy/docker/{Dockerfile,docker-compose,
+    README}` (built + `--version` verified), wired into deployment.md.
+  - **P3.3/P3.4 elevation legibility**: structured rule-builder editor
+    with raw-JSON toggle + server-side validate/explain (the editor's
+    verdict is the agent's verdict), the fleet-aware generator
+    (observed units/distro/configs → minimal ruleset, every
+    inclusion/exclusion explained, ±diff vs a stored policy,
+    review-in-editor — never auto-applied), seeded
+    `profile-web`/`profile-database`/`profile-minimal`.
+  - **Executions `?elevated=` filter** (what ran privileged on my
+    fleet), **openssl 3.5 cert-subject normalization** (`normalizeDN` —
+    cert facts had broken on modern distros), **jobs bufconn harness
+    session-wait** (race under full-suite load), docs reality pass
+    (architecture §14 test rig, PRD R12 stack, PRD header).
+
 - **v0.9.15 — setup & privilege UX (the onboarding release).** Everything
   since the v0.9.14 tag, answering the two loudest beta complaints: *first-node
   enrollment is tedious* and *privilege management is hard to set up

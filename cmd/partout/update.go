@@ -249,10 +249,28 @@ Flags:
 		runArgs := append([]string{sc}, args...)
 		if os.Getuid() != 0 {
 			if _, err := exec.LookPath("sudo"); err == nil {
-				// sudo -n env PATH=$PATH: the -E flag is often stripped by
-				// sudoers (env_reset), so pass PATH explicitly — mock systemctl
-				// on a custom PATH (CI rigs) keeps working under sudo.
-				runArgs = append([]string{"sudo", "-n", "-E", "env", "PATH=" + os.Getenv("PATH")}, runArgs...)
+				// sudo -n env PATH=… VAR=…: -E is stripped by sudoers
+				// env_reset AND silently ignored by sudo-rs (Ubuntu's
+				// default sudo: "preserving the entire environment is not
+				// supported"), so the variables the update script and the
+				// service launcher need are forwarded EXPLICITLY — mock
+				// systemctl on a custom PATH (CI rigs) and PARTOUT_PORT
+				// (the e2e's server on a non-default port) both keep
+				// working under either sudo.
+				envArgs := []string{"sudo", "-n", "-E", "env",
+					"PATH=" + os.Getenv("PATH"),
+					"HOME=" + os.Getenv("HOME"),
+				}
+				for _, k := range []string{"PARTOUT_PORT", "PARTOUT_ADDR", "PARTOUT_DB_PATH",
+					"PARTOUT_DATA_DIR", "PARTOUT_MODE", "PARTOUT_TLS", "PARTOUT_TLS_CA",
+					"PARTOUT_ADMIN_TOKEN", "PARTOUT_TOKEN_ADMIN", "PARTOUT_TOKEN",
+					"PARTOUT_SERVER", "PARTOUT_SERVER_HOST", "PARTOUT_RELEASE_KEY",
+					"PARTOUT_RELEASE_REPO", "PARTOUT_UPDATE_GUARD_BIN"} {
+					if v := os.Getenv(k); v != "" {
+						envArgs = append(envArgs, k+"="+v)
+					}
+				}
+				runArgs = append(envArgs, runArgs...)
 			}
 		}
 		cmd := exec.Command(runArgs[0], runArgs[1:]...)
