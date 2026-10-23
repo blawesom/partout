@@ -11,6 +11,9 @@ admin_password.txt
 *.out
 coverage.*
 
+# Diagram work products (archify candidate + rendered HTML + receipts)
+/.archify/
+
 # TLS material generated at runtime (server + agent data dirs)
 **/tls/ca.crt
 **/tls/ca.key

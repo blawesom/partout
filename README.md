@@ -43,29 +43,11 @@ One binary, three modes (`--mode=server|agent|embedded`). The control plane talk
 agent on each host over an authenticated gRPC stream; the browser and AI assistants talk to the
 same control plane over REST.
 
-```
-   Browser (Vue 3 SPA)              MCP client (Claude Code / Cursor / CI)
-            │  REST + SSE                      │  JSON-RPC (stdio / HTTP, OAuth2 PKCE)
-            ▼                                  ▼
-  ┌───────────────────────────────────────────────────────┐
-  │  CONTROL PLANE  (one Go binary)                       │
-  │  REST API · SSE · embedded Web UI · MCP server        │
-  │  policy deny-list · approvals · audit · scheduled jobs│
-  │  alert engine · secrets vault · fact store            │
-  │  SQLite (WAL) — Postgres planned                      │
-  └───────────────────────────────────────────────────────┘
-                              │
-                              │  gRPC + mTLS  (Enroll · Exec · Files · Sessions ·
-                              │            Packages · Tasks · Jobs · Secrets · Facts · Revoke)
-                              ▼
-                   ┌────────────────────┐
-                   │  AGENT  (per host) │
-                   │  runs the work     │
-                   │  collects facts    │
-                   │  guardrail re-check│
-                   │  offline spool     │
-                   └────────────────────┘
-```
+![Partout architecture — control plane (REST + SSE API, dispatch engine, policy + approvals, MCP server, secrets vault, alert engine, SQLite with its audit hash chain, AgentStream) and the managed host's agent plus offline spool](partout-architecture.svg)
+
+The `AgentStream` channel (gRPC + mTLS) carries Enroll · Exec · Files · Sessions · Packages ·
+Tasks · Jobs · Secrets · Facts · Revoke. The SVG is dual-theme and follows the reader's
+light/dark preference.
 
 - **Single binary** — the same build runs as `server`, `agent`, or `embedded` (server + a local
   agent in one process for instant demos).
