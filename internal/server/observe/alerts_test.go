@@ -4,6 +4,7 @@ package observe
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -998,6 +999,169 @@ func TestAlertWebhookDelivery(t *testing.T) {
 	if res, _ = c.EvaluateOnce(); res.Fired != 1 {
 		t.Fatalf("re-fire with dead receiver: %+v", res)
 	}
+}
+
+// TestAlertNtfyDelivery: a rule with an ntfy_url publishes on firing AND on
+// resolve via the ntfy JSON API (title/message/priority/tags), with the
+// optional bearer token on protected topics; the outcome is recorded as an
+// alert.ntfy audit row (fire-and-record, same doctrine as the webhook).
+func TestAlertNtfyDelivery(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+
+	var mu sync.Mutex
+	var got []map[string]any
+	var auths []string
+	rcv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		m["_path"] = r.URL.Path
+		mu.Lock()
+		got = append(got, m)
+		auths = append(auths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer rcv.Close()
+
+	rule := makeRule(t, st, KindServiceFailed, "all", `{"service_failed_minutes":0}`, "critical", true)
+	rule.NtfyURL = rcv.URL + "/my-fleet"
+	rule.NtfyToken = "tk_test"
+	if err := st.UpdateAlertRule(rule); err != nil {
+		t.Fatalf("UpdateAlertRule: %v", err)
+	}
+
+	seedHost(t, st, "ag_ntfy", unitFacts("failed"))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("ntfy tick: %+v, want 1 fired", res)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 1
+	})
+	f := got[0]
+	if f["_path"] != "/my-fleet" {
+		t.Fatalf("ntfy path = %v, want the topic path from the URL", f["_path"])
+	}
+	if f["message"] == "" || f["message"] == nil {
+		t.Fatalf("ntfy message missing: %+v", f)
+	}
+	if !contains(str(f["title"]), KindServiceFailed) || !contains(str(f["title"]), "firing") {
+		t.Fatalf("ntfy title = %v, want kind + event", f["title"])
+	}
+	if p, ok := f["priority"].(float64); !ok || int(p) != 4 {
+		t.Fatalf("ntfy priority = %v, want 4 (critical → urgent)", f["priority"])
+	}
+	if tags, ok := f["tags"].([]any); !ok || len(tags) != 1 || tags[0] != "rotating_light" {
+		t.Fatalf("ntfy tags = %v, want [rotating_light]", f["tags"])
+	}
+	if _, hasTopic := f["topic"]; hasTopic {
+		t.Fatalf("ntfy payload must not carry a topic field (URL is authoritative): %+v", f)
+	}
+	if auths[0] != "Bearer tk_test" {
+		t.Fatalf("ntfy Authorization = %q, want Bearer tk_test", auths[0])
+	}
+
+	// Host heals -> resolve -> second delivery, event in the title.
+	seedHost(t, st, "ag_ntfy", unitFacts("active"))
+	_, _ = c.EvaluateOnce()
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) == 2
+	})
+	if !contains(str(got[1]["title"]), "resolved") {
+		t.Fatalf("resolved ntfy title = %v", got[1]["title"])
+	}
+
+	// The delivery is audited as alert.ntfy rows.
+	audits, _ := st.ListAudit("alert.ntfy", 10)
+	if len(audits) < 2 {
+		t.Fatalf("alert.ntfy audit rows = %d, want >= 2 (firing + resolved)", len(audits))
+	}
+}
+
+// TestMutedRuleSuppressesDelivery: while now < muted_until, external
+// deliveries (webhook AND ntfy) are suppressed, but the alert still fires
+// in-app (row + SSE + audit). After the window passes, delivery resumes on
+// the next transition — no catch-up replay of the muted period.
+func TestMutedRuleSuppressesDelivery(t *testing.T) {
+	c, st := newEngine(t, time.Hour)
+
+	var mu sync.Mutex
+	delivered := 0
+	rcv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		delivered++
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer rcv.Close()
+
+	rule := makeRule(t, st, KindServiceFailed, "all", `{"service_failed_minutes":0}`, "warning", true)
+	rule.WebhookURL = rcv.URL
+	rule.NtfyURL = rcv.URL + "/topic"
+	rule.MutedUntil = time.Now().Add(time.Hour).Unix() // muted for an hour
+	if err := st.UpdateAlertRule(rule); err != nil {
+		t.Fatalf("UpdateAlertRule: %v", err)
+	}
+
+	// Fires in-app while muted.
+	seedHost(t, st, "ag_mute", unitFacts("failed"))
+	res, _ := c.EvaluateOnce()
+	if res.Fired != 1 {
+		t.Fatalf("muted tick: %+v, want 1 fired in-app", res)
+	}
+	alerts, _ := st.ListAlerts("firing", "", "", 10)
+	if len(alerts) != 1 {
+		t.Fatalf("firing alerts = %d, want 1 (mute is a delivery gate, not an evaluation gate)", len(alerts))
+	}
+
+	// Heals while still muted: resolves in-app, no external delivery either way.
+	seedHost(t, st, "ag_mute", unitFacts("active"))
+	if res, _ = c.EvaluateOnce(); res.Resolved != 1 {
+		t.Fatalf("heal tick: %+v, want 1 resolved in-app", res)
+	}
+
+	// No webhook/ntfy delivery at all during the window.
+	mu.Lock()
+	d := delivered
+	mu.Unlock()
+	if d != 0 {
+		t.Fatalf("deliveries during mute = %d, want 0", d)
+	}
+
+	// Window expires -> a fresh fire/resolve delivers again.
+	rule.MutedUntil = time.Now().Add(-time.Minute).Unix()
+	if err := st.UpdateAlertRule(rule); err != nil {
+		t.Fatal(err)
+	}
+	seedHost(t, st, "ag_mute", unitFacts("failed"))
+	if res, _ = c.EvaluateOnce(); res.Fired != 1 {
+		t.Fatalf("post-mute fire: %+v, want 1 fired", res)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return delivered >= 2 // webhook + ntfy both deliver
+	})
+
+	// The muted period is not replayed: only the post-mute transitions
+	// produced deliveries.
+	mu.Lock()
+	d = delivered
+	mu.Unlock()
+	if d != 2 {
+		t.Fatalf("post-mute deliveries = %d, want exactly 2 (no catch-up replay)", d)
+	}
+}
+
+func str(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
 }
 
 func waitFor(t *testing.T, cond func() bool) {

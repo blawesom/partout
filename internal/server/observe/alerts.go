@@ -1050,7 +1050,7 @@ func (c *Controller) fire(r *store.AlertRule, agentID, dedup, message string) bo
 	}
 	c.emit(got, "alert.firing")
 	c.audit(got)
-	c.deliverWebhook(r, got, "firing")
+	c.deliverChannels(r, got, "firing")
 	return true
 }
 
@@ -1068,7 +1068,7 @@ func (c *Controller) resolve(dedupKeys []string) int {
 			c.emit(a, "alert.resolved")
 			c.audit(a)
 			if rule, rerr := c.st.GetAlertRule(a.RuleID); rerr == nil && rule != nil {
-				c.deliverWebhook(rule, a, "resolved")
+				c.deliverChannels(rule, a, "resolved")
 			}
 		}
 	}
@@ -1129,37 +1129,123 @@ func (c *Controller) audit(a *store.Alert) {
 // goroutine, but the timeout bounds the goroutine's life).
 var webhookClient = &http.Client{Timeout: 10 * time.Second}
 
-// deliverWebhook POSTs the alert to the rule's external channel (PRD §5.4
-// "alert channel system" — first channel: webhook). Fire-and-record: NO
-// retry (a missed delivery is visible as an alert.webhook audit row with
-// the error), and a failed delivery never blocks or fails the alert
-// itself — the in-app alert fired regardless. Async: the engine's tick
-// never waits on a receiver.
-func (c *Controller) deliverWebhook(r *store.AlertRule, a *store.Alert, event string) {
-	if r == nil || r.WebhookURL == "" {
+// deliverChannels pushes the alert to the rule's external channels (PRD §5.4
+// "alert channel system": webhook + ntfy). Fire-and-record: NO retry (a
+// missed delivery is visible as an alert.webhook / alert.ntfy audit row with
+// the error), and a failed delivery never blocks or fails the alert itself —
+// the in-app alert fired regardless. Async: the engine's tick never waits
+// on a receiver.
+//
+// Maintenance-window mute: while now < r.MutedUntil, external deliveries
+// are suppressed — the alert still fires in-app/SSE/audit (delivery gate,
+// not an evaluation gate: Alertmanager semantics).
+func (c *Controller) deliverChannels(r *store.AlertRule, a *store.Alert, event string) {
+	if r == nil {
 		return
 	}
+	if r.MutedUntil > time.Now().Unix() {
+		return
+	}
+	c.deliverWebhook(r, a, event)
+	c.deliverNtfy(r, a, event)
+}
+
+// deliverWebhook POSTs the alert to the rule's webhook_url as JSON.
+func (c *Controller) deliverWebhook(r *store.AlertRule, a *store.Alert, event string) {
+	if r.WebhookURL == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{
+		"event": event, "alert_id": a.ID, "rule_id": r.ID,
+		"rule": r.Name, "kind": r.Kind, "severity": r.Severity,
+		"host_id": a.AgentID, "message": a.Message,
+		"started_at": a.StartedAt,
+	})
+	if err != nil {
+		return
+	}
+	c.deliverAsync(r.WebhookURL, "application/json", body, "", "alert.webhook", r, a, event)
+}
+
+// ntfyPriority maps the alert severity onto ntfy's priority scale
+// (urgent/max-4 renders with a persistent pop-up on phones, low/min-1 is
+// a quiet notification).
+func ntfyPriority(severity string) int {
+	switch severity {
+	case "critical":
+		return 4 // urgent
+	case "info":
+		return 1 // low
+	default:
+		return 3 // default (warning)
+	}
+}
+
+// ntfyTags maps the severity onto ntfy's emoji tags.
+func ntfyTags(severity string) string {
+	switch severity {
+	case "critical":
+		return "rotating_light"
+	case "info":
+		return "information_source"
+	default:
+		return "warning"
+	}
+}
+
+// deliverNtfy publishes the alert to the rule's ntfy topic (ntfy publish
+// JSON API: https://docs.ntfy.sh/publish/). Self-hosted ntfy servers work
+// (air-gap friendly); ntfy_token is the optional bearer token for
+// protected topics. Same fire-and-record doctrine as the webhook.
+func (c *Controller) deliverNtfy(r *store.AlertRule, a *store.Alert, event string) {
+	if r.NtfyURL == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]any{
+		"topic":   "", // set by the URL path; ntfy accepts an explicit topic too
+		"title":   fmt.Sprintf("Partout · %s · %s", r.Kind, event),
+		"message": a.Message,
+		"priority": ntfyPriority(r.Severity),
+		"tags":    []string{ntfyTags(r.Severity)},
+	})
+	if err != nil {
+		return
+	}
+	// ntfy's JSON publish endpoint takes the topic from the URL path
+	// (/topic) or the JSON "topic" field; the URL is authoritative (the
+	// user pasted it including the topic), so clear the empty field.
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return
+	}
+	delete(m, "topic")
+	body, err = json.Marshal(m)
+	if err != nil {
+		return
+	}
+	c.deliverAsync(r.NtfyURL, "application/json", body, r.NtfyToken, "alert.ntfy", r, a, event)
+}
+
+// deliverAsync POSTs body to url on its own goroutine (bounded by
+// webhookClient's 10 s timeout so a slow receiver cannot stall the engine)
+// and records the outcome as an audit row of the given kind. token, when
+// non-empty, is sent as a bearer Authorization header.
+func (c *Controller) deliverAsync(url, contentType string, body []byte, token, auditKind string, r *store.AlertRule, a *store.Alert, event string) {
 	go func() {
 		defer func() {
 			if rec := recover(); rec != nil && c.log != nil {
-				c.log.Printf("observe/alerts: webhook panic: %v", rec)
+				c.log.Printf("observe/alerts: %s panic: %v", auditKind, rec)
 			}
 		}()
-		body, err := json.Marshal(map[string]any{
-			"event": event, "alert_id": a.ID, "rule_id": r.ID,
-			"rule": r.Name, "kind": r.Kind, "severity": r.Severity,
-			"host_id": a.AgentID, "message": a.Message,
-			"started_at": a.StartedAt,
-		})
-		if err != nil {
-			return
-		}
 		outcome := ""
 		status := 0
-		req, err := http.NewRequest(http.MethodPost, r.WebhookURL, bytes.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Type", contentType)
 			req.Header.Set("User-Agent", "partout-alerts")
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
 			var resp *http.Response
 			resp, err = webhookClient.Do(req)
 			if resp != nil {
@@ -1170,13 +1256,13 @@ func (c *Controller) deliverWebhook(r *store.AlertRule, a *store.Alert, event st
 		if err != nil || status < 200 || status > 299 {
 			outcome = fmt.Sprintf("error: %v (status %d)", err, status)
 			if c.log != nil {
-				c.log.Printf("observe/alerts: webhook %s %s: %s", event, r.WebhookURL, outcome)
+				c.log.Printf("observe/alerts: %s %s %s: %s", auditKind, event, url, outcome)
 			}
 		}
 		_ = c.st.AppendAudit(store.AuditEvent{
-			TS: time.Now().Unix(), Kind: "alert.webhook", AgentID: a.AgentID, Actor: "system",
+			TS: time.Now().Unix(), Kind: auditKind, AgentID: a.AgentID, Actor: "system",
 			Payload: fmt.Sprintf(`{"alert_id":%q,"rule_id":%q,"event":%q,"url":%q,"status":%d,"outcome":%q}`,
-				a.ID, r.ID, event, r.WebhookURL, status, outcome),
+				a.ID, r.ID, event, url, status, outcome),
 		})
 	}()
 }

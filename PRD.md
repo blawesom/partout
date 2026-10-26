@@ -131,7 +131,7 @@ observability concerns; C1–C9 cover the control-plane capabilities unique to P
 | R22 | **Config drift detection** (per-host hash, cross-host comparison, time series) | config_sha256 change-detection over time; alerts on divergence |
 | R23 | **Alert rules over service/config/cert domains** | Thresholds: service failed > N min, restarting in loop, cert expiring in N days, chain broken, OCSP revoked, config invalid, drift detected |
 | R24 | **UI pages: Services, Certificates, Configs** (fleet view, health, custom filter) | Sidebar nav section "Observe" with sub-pages |
-| R25 | **Alert engine** (threshold rules, alert store, SSE fan-out) | M6; the vehicle that makes observe data actionable |
+| R25 | **Alert engine** (threshold rules, alert store, SSE fan-out, external channels) | M6; the vehicle that makes observe data actionable. External channels: per-rule `webhook_url` (JSON POST on firing + resolved) and `ntfy_url` (push, severity→priority, optional bearer token); per-rule maintenance-window mute (`muted_until`) suppresses external deliveries only — in-app/SSE/audit continue (delivery gate, not an evaluation gate). |
 | R26 | **LLM assistant** (operator-configured endpoint, governed tool reuse) | Any OpenAI-compatible endpoint (incl. local); the assistant reuses the R11 tool surface through the same control plane — RBAC, policy, approvals, audit. Profiles cap the tool set; `decide_approval` is never assistant-reachable. Design: `docs/assistant.md`. |
 | C1 | **Remote command execution** (ad-hoc, sessions, scripts) | The core control primitive. |
 | C2 | **File management** (upload/download/edit/perm/checksum) | |

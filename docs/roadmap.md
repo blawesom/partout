@@ -741,6 +741,16 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     session-wait** (race under full-suite load), docs reality pass
     (architecture §14 test rig, PRD R12 stack, PRD header).
 
+  - **Alert channels — ntfy + maintenance-window mute**: alert rules gain
+    an `ntfy_url` (+ optional `ntfy_token`) external channel — ntfy JSON
+    publish on firing + resolved, severity → priority (critical → urgent),
+    self-hosted servers work (air-gap friendly), failures audited as
+    `alert.ntfy` — and a per-rule `muted_until` mute: while active,
+    webhook + ntfy deliveries are suppressed while in-app/SSE/audit
+    continue (delivery gate, not an evaluation gate; auto-expires, no
+    catch-up replay). CLI: `partout ctl alerts mute <id> --for 90m` /
+    `unmute`; UI rule form carries both. Schema v28.
+
 - **v0.9.15 — setup & privilege UX (the onboarding release).** Everything
   since the v0.9.14 tag, answering the two loudest beta complaints: *first-node
   enrollment is tedious* and *privilege management is hard to set up

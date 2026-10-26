@@ -232,3 +232,68 @@ func TestMigration_UpgradeAddsElevationColumns(t *testing.T) {
 		t.Errorf("SetRunElevation did not stick after migration: %+v", r.Elevated)
 	}
 }
+
+func TestMigration_UpgradeAddsAlertChannelColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/old.db"
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// v0.9.16-era alert_rules (no ntfy_url / ntfy_token / muted_until).
+	stmts := []string{
+		`CREATE TABLE schema_version (version INTEGER NOT NULL)`,
+		`INSERT INTO schema_version(version) VALUES (27)`,
+		`CREATE TABLE alert_rules (id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+			selector TEXT NOT NULL DEFAULT 'all', thresholds TEXT NOT NULL DEFAULT '{}',
+			severity TEXT NOT NULL DEFAULT 'warning', enabled INTEGER NOT NULL DEFAULT 1,
+			webhook_url TEXT NOT NULL DEFAULT '', created_by TEXT, created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL)`,
+		`INSERT INTO alert_rules(id, name, kind, selector, thresholds, severity, enabled, webhook_url, created_by, created_at, updated_at)
+		 VALUES ('rule_old', 'old', 'service_failed', 'all', '{}', 'warning', 1, 'https://example.com/hook', 'admin', 1, 2)`,
+	}
+	for _, s := range stmts {
+		if _, err := raw.Exec(s); err != nil {
+			raw.Close()
+			t.Fatalf("seed old db: %v", err)
+		}
+	}
+	raw.Close()
+
+	st, err := New("sqlite:" + path)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	defer st.Close()
+
+	for _, col := range []string{"ntfy_url", "ntfy_token", "muted_until"} {
+		if !hasColumn(t, st.db, "alert_rules", col) {
+			t.Fatalf("alert_rules.%s missing after migration", col)
+		}
+	}
+	// Pre-existing row reads back with the not-muted / no-channel defaults,
+	// and the full rule round-trips through the migrated columns.
+	r, err := st.GetAlertRule("rule_old")
+	if err != nil || r == nil {
+		t.Fatalf("GetAlertRule: %v %v", r, err)
+	}
+	if r.MutedUntil != 0 || r.NtfyURL != "" || r.NtfyToken != "" {
+		t.Fatalf("legacy rule = muted %d ntfy %q token %q, want zero values", r.MutedUntil, r.NtfyURL, r.NtfyToken)
+	}
+	if r.WebhookURL != "https://example.com/hook" {
+		t.Fatalf("legacy webhook_url = %q, want preserved", r.WebhookURL)
+	}
+	r.NtfyURL = "https://ntfy.example.com/fleet"
+	r.NtfyToken = "tk_test"
+	r.MutedUntil = 42
+	if err := st.UpdateAlertRule(r); err != nil {
+		t.Fatalf("update migrated rule: %v", err)
+	}
+	got, err := st.GetAlertRule("rule_old")
+	if err != nil || got == nil {
+		t.Fatalf("re-GetAlertRule: %v %v", got, err)
+	}
+	if got.NtfyURL != "https://ntfy.example.com/fleet" || got.NtfyToken != "tk_test" || got.MutedUntil != 42 {
+		t.Fatalf("round-trip = ntfy %q token %q muted %d", got.NtfyURL, got.NtfyToken, got.MutedUntil)
+	}
+}

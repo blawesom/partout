@@ -2372,7 +2372,7 @@
                 <thead><tr><th>Name</th><th>Kind</th><th>Selector</th><th>Threshold</th><th>Severity</th><th>Enabled</th><th></th></tr></thead>
                 <tbody>
                   <tr v-for="r in rules" :key="r.id">
-                    <td>{{ r.name }}</td>
+                    <td>{{ r.name }} <span v-if="ruleMutedFor(r)" class="badge warn">muted {{ ruleMutedFor(r) }}</span></td>
                     <td><span class="chip brand">{{ r.kind }}</span></td>
                     <td class="mono">{{ r.selector }}</td>
                     <td class="mono small">{{ thresholdsLabel(r) }}</td>
@@ -2440,6 +2440,25 @@
                 <label class="fld" style="max-width:420px"><span>Webhook URL <span class="muted">(optional external channel)</span></span>
                   <input v-model="ruleForm.webhook" class="mono" placeholder="https://hooks.example.com/alerts" /></label>
                 <p class="cap" style="margin:0">On firing AND resolved, the alert is POSTed as JSON to this URL (10 s timeout, no retry — failures land in the audit log as <span class="mono">alert.webhook</span>). Empty = in-app only.</p>
+                <label class="fld" style="max-width:420px"><span>ntfy URL <span class="muted">(optional push channel)</span></span>
+                  <input v-model="ruleForm.ntfy" class="mono" placeholder="https://ntfy.sh/my-topic" /></label>
+                <label class="fld" style="max-width:420px"><span>ntfy token <span class="muted">(optional, protected topics)</span></span>
+                  <input v-model="ruleForm.ntfyToken" class="mono" placeholder="tk_…" autocomplete="off" /></label>
+                <p class="cap" style="margin:0">Push notification to the ntfy topic (self-hosted server works) on firing AND resolved; severity maps to ntfy priority (critical → urgent). Failures land in the audit log as <span class="mono">alert.ntfy</span>. Empty = in-app only.</p>
+                <div class="grid cols-2">
+                  <label class="fld"><span>Mute external channels</span>
+                    <select v-model="ruleForm.muteFor">
+                      <option value="">not muted</option>
+                      <option value="30m">for 30 minutes</option>
+                      <option value="2h">for 2 hours</option>
+                      <option value="24h">for 24 hours</option>
+                      <option value="keep">keep current mute</option>
+                    </select></label>
+                  <div v-if="ruleMutedFor(r) && ruleForm.muteFor!=='keep'" class="cap" style="align-self:end;padding-bottom:6px">
+                    currently muted {{ ruleMutedFor(r) }} remaining
+                  </div>
+                </div>
+                <p class="cap" style="margin:0">A maintenance window: while muted, webhook + ntfy deliveries are suppressed — in-app alerts, live updates, and audit keep flowing. Auto-expires; no catch-up replay.</p>
                 <div class="toolbar" style="margin-top:10px">
                   <label class="lbl" style="margin:0"><input type="checkbox" v-model="ruleForm.enabled" /> enabled</label>
                   <div class="spacer"></div>
@@ -4344,7 +4363,7 @@
       ruleDefaultThresh(kind) { return ({ service_failed: 5, service_restarting: 10, cert_expiring: 30, config_drift: 0, config_invalid: 0, update_drift: 1 })[kind] || 0; },
       newRuleForm() {
         this.ruleErr = "";
-        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", severityMin: "high", enabled: true, webhook: "" };
+        this.ruleForm = { id: "", name: "", kind: "service_failed", selector: "all", severity: "warning", thresh: 5, status: "paused_failure,failed", severityMin: "high", enabled: true, webhook: "", ntfy: "", ntfyToken: "", muteFor: "" };
       },
       editRule(r) {
         this.ruleErr = "";
@@ -4357,6 +4376,9 @@
           status: (t.status != null) ? t.status : "paused_failure,failed",
           severityMin: (t.min_severity != null) ? t.min_severity : "high",
           webhook: r.webhook_url || "",
+          ntfy: r.ntfy_url || "",
+          ntfyToken: r.ntfy_token || "",
+          muteFor: (r.muted_until && r.muted_until > Math.floor(Date.now() / 1000)) ? "keep" : "",
         };
       },
       thresholdsFor(kind) {
@@ -4376,7 +4398,11 @@
         const f = this.ruleForm;
         if (!f || !f.name) return;
         this.ruleBusy = f.id || "new"; this.ruleErr = "";
-        const body = { name: f.name, kind: f.kind, selector: f.selector || "all", severity: f.severity, enabled: f.enabled, thresholds: this.thresholdsFor(f.kind), webhook_url: f.webhook || "" };
+        let mutedUntil = 0;
+        if (f.muteFor && f.muteFor !== "keep") {
+          mutedUntil = Math.floor(Date.now() / 1000) + (({ "30m": 1800, "2h": 7200, "24h": 86400 })[f.muteFor] || 0);
+        }
+        const body = { name: f.name, kind: f.kind, selector: f.selector || "all", severity: f.severity, enabled: f.enabled, thresholds: this.thresholdsFor(f.kind), webhook_url: f.webhook || "", ntfy_url: f.ntfy || "", ntfy_token: f.ntfyToken || "", muted_until: mutedUntil };
         try {
           if (f.id) await this.api("/alerts/rules/" + encodeURIComponent(f.id), { method: "PUT", body });
           else await this.api("/alerts/rules", { body });
@@ -4388,9 +4414,17 @@
       async toggleRule(r) {
         this.ruleBusy = r.id; this.ruleErr = "";
         try {
-          await this.api("/alerts/rules/" + encodeURIComponent(r.id), { method: "PUT", body: { name: r.name, kind: r.kind, selector: r.selector, severity: r.severity, enabled: !r.enabled, thresholds: r.thresholds || {}, webhook_url: r.webhook_url || "" } });
+          await this.api("/alerts/rules/" + encodeURIComponent(r.id), { method: "PUT", body: { name: r.name, kind: r.kind, selector: r.selector, severity: r.severity, enabled: !r.enabled, thresholds: r.thresholds || {}, webhook_url: r.webhook_url || "", ntfy_url: r.ntfy_url || "", ntfy_token: r.ntfy_token || "", muted_until: r.muted_until || 0 } });
           this.loadRules();
         } catch (e) { this.ruleErr = e.message; } finally { this.ruleBusy = ""; }
+      },
+      ruleMutedFor(r) {
+        if (!r || !r.muted_until) return "";
+        const left = r.muted_until - Math.floor(Date.now() / 1000);
+        if (left <= 0) return "";
+        if (left < 3600) return Math.max(1, Math.round(left / 60)) + "m";
+        if (left < 86400) return Math.round(left / 3600) + "h";
+        return Math.round(left / 86400) + "d";
       },
       async deleteRule(id) {
         if (!await this.askConfirm({ title: "Delete alert rule", body: "Firing alerts from it are left as-is.", mono: id, confirmLabel: "Delete rule", variant: "danger" })) return;

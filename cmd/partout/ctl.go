@@ -62,7 +62,8 @@ commands:
   preset <show|status|apply> first-boot fleet defaults (safety-net policies + alerts);
                            apply is idempotent — creates only what is missing
   approvals <list|get|approve|deny>          manage approval requests (M4; decide = admin)
-  alerts <list|rules>                         view alerts + alert rules (M6)
+  alerts <list|rules|mute|unmute>            view alerts + rules; mute/unmute a rule's external
+                           channels for a maintenance window (in-app alerts continue)
   provision <new|list|get|key|cancel|rejoin>  host provisioning over fleet SSH (admin)
            rejoin --selector all [--elevate ...] — join-mode fan-out to every
            matched host using its own provisioning history (the migration
@@ -1358,7 +1359,7 @@ func (c *ctl) approvalDecide(id, verb, reason string) {
 
 func (c *ctl) cmdAlerts(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: partout ctl alerts <list|rules>")
+		fmt.Fprintln(os.Stderr, "usage: partout ctl alerts <list|rules|mute|unmute>")
 		os.Exit(2)
 	}
 	sub, rest := args[0], args[1:]
@@ -1367,6 +1368,10 @@ func (c *ctl) cmdAlerts(args []string) {
 		c.alertsList(rest)
 	case "rules":
 		c.alertRules(rest)
+	case "mute":
+		c.alertMute(rest, true)
+	case "unmute":
+		c.alertMute(rest, false)
 	default:
 		fmt.Fprintf(os.Stderr, "ctl: unknown alerts command %q\n", sub)
 		os.Exit(2)
@@ -1427,6 +1432,75 @@ func (c *ctl) alertRules(args []string) {
 	}
 	w.Flush()
 	fmt.Printf("\n%d rule(s)\n", len(page.Rules))
+}
+
+// alertMute sets/clears a rule's maintenance-window mute. Muting suppresses
+// external deliveries (webhook + ntfy) until the deadline; in-app alerts,
+// SSE, and audit keep flowing. --for accepts a Go duration (90m, 2h);
+// --until accepts an epoch or RFC3339 timestamp; default 1h.
+func (c *ctl) alertMute(args []string, mute bool) {
+	verb := "mute"
+	if !mute {
+		verb = "unmute"
+	}
+	fs := flag.NewFlagSet("alerts "+verb, flag.ExitOnError)
+	forDur := fs.String("for", "", "duration to mute for (e.g. 90m, 2h)")
+	untilTs := fs.String("until", "", "mute deadline: epoch seconds or RFC3339")
+	// Split positionals from flags so both `mute <id> --for 90m` and
+	// `mute --for 90m <id>` work (Go's flag package alone stops at the
+	// first positional).
+	var pos, flg []string
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "-") {
+			flg = append(flg, args[i])
+			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++ // consume the space-form flag value
+				flg = append(flg, args[i])
+			}
+			continue
+		}
+		pos = append(pos, args[i])
+	}
+	_ = fs.Parse(flg)
+	if len(pos) != 1 {
+		fmt.Fprintf(os.Stderr, "usage: partout ctl alerts %s <rule-id> [--for 90m | --until <ts>]\n", verb)
+		os.Exit(2)
+	}
+	ruleID := pos[0]
+
+	var mutedUntil int64
+	if mute {
+		mutedUntil = time.Now().Add(time.Hour).Unix() // default 1h
+		switch {
+		case *forDur != "":
+			d, err := time.ParseDuration(*forDur)
+			if err != nil || d <= 0 {
+				fmt.Fprintf(os.Stderr, "ctl: invalid --for %q (want e.g. 90m, 2h)\n", *forDur)
+				os.Exit(2)
+			}
+			mutedUntil = time.Now().Add(d).Unix()
+		case *untilTs != "":
+			if ts, err := strconv.ParseInt(*untilTs, 10, 64); err == nil {
+				mutedUntil = ts
+			} else if t, err := time.Parse(time.RFC3339, *untilTs); err == nil {
+				mutedUntil = t.Unix()
+			} else {
+				fmt.Fprintf(os.Stderr, "ctl: invalid --until %q (want epoch seconds or RFC3339)\n", *untilTs)
+				os.Exit(2)
+			}
+		}
+	}
+
+	var res map[string]any
+	if err := c.do("PUT", "/api/v1/alerts/rules/"+url.PathEscape(ruleID),
+		map[string]any{"muted_until": mutedUntil}, &res); err != nil {
+		fatal(err)
+	}
+	if !mute {
+		fmt.Printf("rule %s unmuted\n", ruleID)
+		return
+	}
+	fmt.Printf("rule %s muted until %s (in-app alerts continue)\n", ruleID, unixTime(mutedUntil))
 }
 
 // ---- provision -----------------------------------------------------------

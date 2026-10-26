@@ -73,6 +73,8 @@ func ruleJSON(r *store.AlertRule) map[string]any {
 		"id": r.ID, "name": r.Name, "kind": r.Kind, "selector": r.Selector,
 		"thresholds": thresholds, "severity": r.Severity, "enabled": r.Enabled,
 		"webhook_url": r.WebhookURL,
+		"ntfy_url":    r.NtfyURL, "ntfy_token": r.NtfyToken,
+		"muted_until": r.MutedUntil,
 		"created_at":  r.CreatedAt, "updated_at": r.UpdatedAt,
 	}
 }
@@ -154,6 +156,9 @@ type ruleBody struct {
 	Severity   string  `json:"severity"`
 	Enabled    *bool   `json:"enabled"`
 	WebhookURL *string `json:"webhook_url"` // optional external channel (POST on firing + resolved)
+	NtfyURL    *string `json:"ntfy_url"`    // optional ntfy channel (URL incl. topic)
+	NtfyToken  *string `json:"ntfy_token"` // optional bearer token for protected ntfy topics
+	MutedUntil *int64  `json:"muted_until"` // epoch s; while now < muted_until external deliveries are suppressed
 }
 
 func (b *ruleBody) validate() error {
@@ -177,6 +182,18 @@ func (b *ruleBody) validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return errors.New("webhook_url must be an http(s) URL")
 		}
+	}
+	if b.NtfyURL != nil && *b.NtfyURL != "" {
+		u, err := url.Parse(*b.NtfyURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("ntfy_url must be an http(s) URL (including the topic path)")
+		}
+		if u.Path == "" || u.Path == "/" {
+			return errors.New("ntfy_url must include the topic path (e.g. https://ntfy.sh/my-topic)")
+		}
+	}
+	if b.MutedUntil != nil && *b.MutedUntil < 0 {
+		return errors.New("muted_until must be a non-negative epoch timestamp")
 	}
 	return validateThresholds(b.Kind, b.Thresholds)
 }
@@ -251,12 +268,22 @@ func (b *ruleBody) toRule(actor string) *store.AlertRule {
 		Thresholds: string(thresholds), Severity: b.Severity,
 		Enabled: enabled, CreatedBy: actor,
 		WebhookURL: derefStr(b.WebhookURL),
+		NtfyURL:    derefStr(b.NtfyURL),
+		NtfyToken:  derefStr(b.NtfyToken),
+		MutedUntil: derefInt64(b.MutedUntil),
 	}
 }
 
 func derefStr(p *string) string {
 	if p == nil {
 		return ""
+	}
+	return *p
+}
+
+func derefInt64(p *int64) int64 {
+	if p == nil {
+		return 0
 	}
 	return *p
 }
@@ -324,6 +351,15 @@ func (h *Handler) ruleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if b.WebhookURL == nil {
 		b.WebhookURL = &existing.WebhookURL
+	}
+	if b.NtfyURL == nil {
+		b.NtfyURL = &existing.NtfyURL
+	}
+	if b.NtfyToken == nil {
+		b.NtfyToken = &existing.NtfyToken
+	}
+	if b.MutedUntil == nil {
+		b.MutedUntil = &existing.MutedUntil
 	}
 	if err := b.validate(); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)

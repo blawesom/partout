@@ -477,9 +477,18 @@ CREATE TABLE IF NOT EXISTS alert_rules (
                -- JSON: {"service_failed_minutes":0|5}, {"service_restart_rate_per_hour":10},
                --       {"cert_days_remaining":30}, {"config_drift_tolerance":0}
   severity   TEXT NOT NULL DEFAULT 'warning' CHECK (severity IN ('info','warning','critical')),
-  enabled    INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
   webhook_url TEXT NOT NULL DEFAULT '',
                -- optional external channel: POST on firing + resolved
+  ntfy_url TEXT NOT NULL DEFAULT '',
+               -- optional ntfy channel: full URL including topic
+               -- (https://ntfy.sh/my-topic or a self-hosted server)
+  ntfy_token TEXT NOT NULL DEFAULT '',
+               -- optional bearer token for protected ntfy topics
+  muted_until INTEGER NOT NULL DEFAULT 0,
+               -- epoch s; while now < muted_until, external deliveries
+               -- (webhook + ntfy) are suppressed — the alert still fires
+               -- in-app/SSE/audit (maintenance window)
   created_by TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -666,7 +675,7 @@ CREATE TABLE IF NOT EXISTS elevation_tokens (
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 27
+const currentSchemaVersion = 28
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

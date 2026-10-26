@@ -39,7 +39,7 @@ partout/
 │   │   │   ├── config.go        # config fact aggregation, drift detection, cross-host compare
 │   │   │   ├── cert.go          # cert fact aggregation, expiry tracking, chain validation
 │   │   │   ├── alerts.go        # alert rule store, rule evaluation, firing/resolved states
-│   │   │   └── channels.go      # alert channels (SSE fan-out, future: webhook, email)
+│   │   │   └── channels.go      # alert channels (SSE fan-out; delivered: webhook + ntfy, per-rule mute)
 │   │   └── web/            # embed.FS of the built UI
 │   ├── agent/
 │   │   ├── stream/         # gRPC client, reconnect/backoff, handshake, flow control
@@ -773,7 +773,7 @@ my hosts" and "something is wrong" — the observe side of the "observe → act 
 │       │                                                       │
 │       ▼                                                       │
 │  alerts.go ──► rule evaluation ──► firing/resolved states    │
-│  channels.go ─► SSE fan-out + future webhook/email           │
+│  channels.go ─► SSE fan-out + webhook + ntfy (per-rule mute) │
 └──────────────────┬───────────────────────────────────────────┘
                    │
       ┌────────────▼────────────┐    ┌──────────────────────┐

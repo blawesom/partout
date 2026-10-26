@@ -22,6 +22,16 @@ type AlertRule struct {
 	// resolved, the engine POSTs the alert as JSON (no retry — a missed
 	// delivery is visible in the audit log). Empty = in-app only.
 	WebhookURL string
+	// NtfyURL is the rule's optional ntfy channel: the full URL including
+	// the topic (https://ntfy.sh/my-topic or self-hosted). Delivered on
+	// firing AND resolved, same fire-and-record doctrine as the webhook.
+	NtfyURL string
+	// NtfyToken is the optional bearer token for protected ntfy topics.
+	NtfyToken string
+	// MutedUntil is the epoch-seconds end of a maintenance-window mute.
+	// While now < MutedUntil, external deliveries (webhook + ntfy) are
+	// suppressed; the alert still fires in-app/SSE/audit. 0 = never muted.
+	MutedUntil int64
 	CreatedBy  string
 	CreatedAt  int64
 	UpdatedAt  int64
@@ -45,10 +55,10 @@ type Alert struct {
 
 func (s *Store) CreateAlertRule(r *AlertRule) error {
 	_, err := s.db.Exec(
-		`INSERT INTO alert_rules (id, name, kind, selector, thresholds, severity, enabled, webhook_url, created_by, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO alert_rules (id, name, kind, selector, thresholds, severity, enabled, webhook_url, ntfy_url, ntfy_token, muted_until, created_by, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, r.Name, r.Kind, r.Selector, r.Thresholds, r.Severity,
-		boolInt(r.Enabled), r.WebhookURL, r.CreatedBy, r.CreatedAt, r.UpdatedAt)
+		boolInt(r.Enabled), r.WebhookURL, r.NtfyURL, r.NtfyToken, r.MutedUntil, r.CreatedBy, r.CreatedAt, r.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store: create alert rule: %w", err)
 	}
@@ -57,14 +67,14 @@ func (s *Store) CreateAlertRule(r *AlertRule) error {
 
 func (s *Store) GetAlertRule(id string) (*AlertRule, error) {
 	row := s.db.QueryRow(
-		`SELECT id, name, kind, selector, thresholds, severity, enabled, webhook_url, created_by, created_at, updated_at
+		`SELECT id, name, kind, selector, thresholds, severity, enabled, webhook_url, ntfy_url, ntfy_token, muted_until, created_by, created_at, updated_at
 		 FROM alert_rules WHERE id=?`, id)
 	return scanAlertRule(row)
 }
 
 func (s *Store) ListAlertRules() ([]*AlertRule, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, kind, selector, thresholds, severity, enabled, webhook_url, created_by, created_at, updated_at
+		`SELECT id, name, kind, selector, thresholds, severity, enabled, webhook_url, ntfy_url, ntfy_token, muted_until, created_by, created_at, updated_at
 		 FROM alert_rules ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list alert rules: %w", err)
@@ -83,10 +93,10 @@ func (s *Store) ListAlertRules() ([]*AlertRule, error) {
 
 func (s *Store) UpdateAlertRule(r *AlertRule) error {
 	res, err := s.db.Exec(
-		`UPDATE alert_rules SET name=?, kind=?, selector=?, thresholds=?, severity=?, enabled=?, webhook_url=?, updated_at=?
+		`UPDATE alert_rules SET name=?, kind=?, selector=?, thresholds=?, severity=?, enabled=?, webhook_url=?, ntfy_url=?, ntfy_token=?, muted_until=?, updated_at=?
 		 WHERE id=?`,
 		r.Name, r.Kind, r.Selector, r.Thresholds, r.Severity,
-		boolInt(r.Enabled), r.WebhookURL, r.UpdatedAt, r.ID)
+		boolInt(r.Enabled), r.WebhookURL, r.NtfyURL, r.NtfyToken, r.MutedUntil, r.UpdatedAt, r.ID)
 	if err != nil {
 		return fmt.Errorf("store: update alert rule: %w", err)
 	}
@@ -111,7 +121,7 @@ func scanAlertRule(row scanRow) (*AlertRule, error) {
 	var r AlertRule
 	var enabled int
 	err := row.Scan(&r.ID, &r.Name, &r.Kind, &r.Selector, &r.Thresholds,
-		&r.Severity, &enabled, &r.WebhookURL, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
+		&r.Severity, &enabled, &r.WebhookURL, &r.NtfyURL, &r.NtfyToken, &r.MutedUntil, &r.CreatedBy, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil

@@ -221,6 +221,7 @@ partout ctl tasks run <task_id> <agent_id>          # run a versioned task/playb
 
 # Observe
 partout ctl alerts list --state firing
+partout ctl alerts mute <rule-id> --for 90m      # maintenance window (in-app alerts continue)
 partout ctl audit --kind policy.deny --limit 50
 partout ctl audit verify                              # tamper-evidence check
 ```

@@ -653,6 +653,21 @@ Partout observes **hosts**; you also need to observe the control plane:
   timeout — fire-and-record, no retry: a missed delivery appears as an `alert.webhook`
   audit row with the error. Point it at your chatops receiver (Slack/Discord/Teams
   gateways, Alertmanager webhook format adapters) or anything that accepts JSON POST.
+- **External alert channel (ntfy)**: any alert rule may carry an `ntfy_url` — the full URL
+  including the topic (`https://ntfy.sh/my-fleet`, or a self-hosted ntfy server for
+  air-gapped fleets), plus an optional `ntfy_token` (bearer) for protected topics. On
+  firing **and** resolved, the engine publishes via ntfy's JSON API (`title` =
+  `Partout · <kind> · <event>`, `message` = the alert message; severity maps to priority:
+  critical → urgent, warning → default, info → low). Same fire-and-record doctrine:
+  failures appear as an `alert.ntfy` audit row. Subscribe to the topic on your phone
+  (the ntfy app) or desktop.
+- **Maintenance-window mute (per rule)**: a rule may carry a `muted_until` epoch
+  timestamp (UI rule form "Mute external channels", or `partout ctl alerts mute <rule-id>
+  --for 90m` / `--until <epoch|RFC3339>`; `unmute` clears it). While `now < muted_until`,
+  webhook + ntfy deliveries are suppressed — the alert still fires in-app, on SSE, and
+  in the audit log (a delivery gate, not an evaluation gate). The window auto-expires;
+  transitions during the mute are **not** replayed afterwards (no catch-up pages). Use
+  it before planned work on a fleet segment so a known-brief failure does not page you.
 
 ---
 
