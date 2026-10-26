@@ -294,7 +294,7 @@ check_grep "agent: policy loaded (B2: readable)" "$(tail -50 /var/log/partout-mo
 # --- 8. the sudoers wall (F6: unquoted wildcards, F11: bare reboot) -------------
 step "sudoers drop-in"
 SUDOERS=$(cat /etc/sudoers.d/partout-agent 2>/dev/null)
-check_grep "sudoers: unquoted wildcard grant (F6)" "$SUDOERS" "dnf -y install \*"
+check_grep "sudoers: unquoted wildcard grant (F6)" "$SUDOERS" "dnf -y \*"
 check_grep "sudoers: bare reboot renders as the no-args specifier (F11)" "$SUDOERS" 'reboot ""'
 check_not_grep "sudoers: no quoted globs (F6)" "$SUDOERS" '"\*"'
 
