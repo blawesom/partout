@@ -157,7 +157,7 @@ type ruleBody struct {
 	Enabled    *bool   `json:"enabled"`
 	WebhookURL *string `json:"webhook_url"` // optional external channel (POST on firing + resolved)
 	NtfyURL    *string `json:"ntfy_url"`    // optional ntfy channel (URL incl. topic)
-	NtfyToken  *string `json:"ntfy_token"` // optional bearer token for protected ntfy topics
+	NtfyToken  *string `json:"ntfy_token"`  // optional bearer token for protected ntfy topics
 	MutedUntil *int64  `json:"muted_until"` // epoch s; while now < muted_until external deliveries are suppressed
 }
 

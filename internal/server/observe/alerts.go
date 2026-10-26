@@ -1202,11 +1202,11 @@ func (c *Controller) deliverNtfy(r *store.AlertRule, a *store.Alert, event strin
 		return
 	}
 	body, err := json.Marshal(map[string]any{
-		"topic":   "", // set by the URL path; ntfy accepts an explicit topic too
-		"title":   fmt.Sprintf("Partout · %s · %s", r.Kind, event),
-		"message": a.Message,
+		"topic":    "", // set by the URL path; ntfy accepts an explicit topic too
+		"title":    fmt.Sprintf("Partout · %s · %s", r.Kind, event),
+		"message":  a.Message,
 		"priority": ntfyPriority(r.Severity),
-		"tags":    []string{ntfyTags(r.Severity)},
+		"tags":     []string{ntfyTags(r.Severity)},
 	})
 	if err != nil {
 		return
