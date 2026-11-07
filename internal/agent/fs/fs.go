@@ -91,6 +91,24 @@ func PrepareFileRoot(root string) (string, error) {
 	return abs, nil
 }
 
+// RootWritable reports whether the agent's user can create files in the
+// root — a root that exists but cannot be written (e.g. a root-owned
+// /home/partout on a dev box) would fail every file op mid-flight instead
+// of being caught up front. Probe only; no lasting side effects.
+func RootWritable(root string) bool {
+	if root == "" {
+		return false
+	}
+	f, err := os.CreateTemp(root, ".partout-probe-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
+	return true
+}
+
 // ResolvePath resolves a root-relative path against the canonical file root
 // and returns the absolute path. It implements the spec-file-root
 // resolution algorithm:

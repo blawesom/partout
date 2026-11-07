@@ -236,8 +236,41 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 	// re-applied there (regression: the file-root fact used to vanish on
 	// the first facts batch, making every 0.9.5+ agent look legacy).
 	if fr, err := fs.PrepareFileRoot(cfg.FileRoot); err != nil {
-		lg.Printf("agent: file root unavailable: %v — file surface disabled (fail closed)", err)
-		a.staticFacts["partout.file_root_error"] = err.Error()
+		// Unprivileged default fallback (review §2.4): /home/partout cannot
+		// be created by a non-root user, which used to disable the file
+		// surface for every demo/manual agent (the UI then explains how to
+		// create a partout service user — useless advice mid-demo). When the
+		// operator chose no root explicitly, confine to <data-dir>/files:
+		// still a dedicated confinement dir, just one we can always create.
+		// A root/service install keeps the real default (it prepares
+		// /home/partout successfully), so this only catches the fail case.
+		fellBack := false
+		if strings.TrimSpace(cfg.FileRoot) == "" && cfg.DataDir != "" {
+			if fr2, err2 := fs.PrepareFileRoot(filepath.Join(cfg.DataDir, "files")); err2 == nil {
+				a.fileRoot = fr2
+				lg.Printf("agent: file root: %s (default %s unusable here: %v — fell back under the data dir; set PARTOUT_FILE_ROOT to choose another)", fr2, fs.DefaultFileRoot, err)
+				a.staticFacts["partout.file_root"] = fr2
+				fellBack = true
+			}
+		}
+		if !fellBack {
+			lg.Printf("agent: file root unavailable: %v — file surface disabled (fail closed)", err)
+			a.staticFacts["partout.file_root_error"] = err.Error()
+		}
+	} else if strings.TrimSpace(cfg.FileRoot) == "" && !fs.RootWritable(fr) && cfg.DataDir != "" {
+		// The default root exists but this user cannot write it (e.g. a
+		// root-owned /home/partout left on a dev box): every file op would
+		// fail mid-flight instead of disabling up front. Same fallback —
+		// explicit PARTOUT_FILE_ROOT is still honored as-is.
+		if fr2, err2 := fs.PrepareFileRoot(filepath.Join(cfg.DataDir, "files")); err2 == nil {
+			a.fileRoot = fr2
+			lg.Printf("agent: file root: %s (default %s is not writable by this user — fell back under the data dir; set PARTOUT_FILE_ROOT to choose another)", fr2, fs.DefaultFileRoot)
+			a.staticFacts["partout.file_root"] = fr2
+		} else {
+			a.fileRoot = fr
+			lg.Printf("agent: file root: %s (not writable by this user; no fallback available: %v)", fr, err2)
+			a.staticFacts["partout.file_root"] = fr
+		}
 	} else {
 		a.fileRoot = fr
 		lg.Printf("agent: file root: %s (all file operations are confined to this directory)", fr)

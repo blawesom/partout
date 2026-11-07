@@ -65,6 +65,32 @@ func TestPrepareFileRootRejectsNonDir(t *testing.T) {
 	}
 }
 
+// RootWritable gates the default-root fallback (review §2.4): a root that
+// exists but cannot be written by the agent's user must read false — the
+// root-run and prepared-install cases (writable) read true. Skipped for
+// root, where every directory is writable.
+func TestRootWritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: every root is writable")
+	}
+	writable := t.TempDir()
+	if !RootWritable(writable) {
+		t.Error("writable root reported unwritable")
+	}
+	// Root-owned, mode 0500 (r-x, no write): a leftover-style unusable root.
+	unwritable := filepath.Join(t.TempDir(), "unwritable")
+	if err := os.Mkdir(unwritable, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unwritable, 0o700) })
+	if RootWritable(unwritable) {
+		t.Error("unwritable root reported writable — the fallback would never trigger for it")
+	}
+	if RootWritable(filepath.Join(t.TempDir(), "missing")) {
+		t.Error("missing root reported writable")
+	}
+}
+
 // ---- ResolvePath -----------------------------------------------------------
 
 func TestResolvePathRootItself(t *testing.T) {
