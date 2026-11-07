@@ -30,14 +30,15 @@ an unresolvable `PARTOUT_SERVER_HOST` would doom every run):
 ./partout doctor
 ```
 
-> **Plain HTTP is the default.** A fresh server binds all interfaces without TLS, so
-> the login password and session tokens cross the network in cleartext the moment you
-> reach it from another machine. `doctor` warns about exactly this; the login page and
-> the UI warn too. For anything beyond this machine, either:
+> **Loopback is the default when TLS is off.** A fresh server with no `PARTOUT_ADDR`
+> binds 127.0.0.1 (with TLS on, the default is all interfaces). Plaintext on a
+> non-loopback bind still puts the login password and session tokens on the network
+> in cleartext — `doctor` warns about exactly this; the login page and
+> the UI warn too. To serve beyond this machine, either:
 >
-> - `PARTOUT_TLS=on` — bootstraps a local root CA; the server serves HTTPS and the
->   agent stream gets mTLS (no per-host cert work), **or**
-> - `PARTOUT_ADDR=127.0.0.1` behind your own TLS-terminating proxy
+> - `PARTOUT_TLS=on` — bootstraps a local root CA; the server serves HTTPS on all
+>   interfaces and the agent stream gets mTLS (no per-host cert work), **or**
+> - your own TLS-terminating proxy in front of an explicit bind
 >   (Caddy/nginx/HAProxy patterns: [deployment.md](deployment.md) §1.3).
 
 **Fastest path — one-process demo** (server + a co-located agent; the fleet is
@@ -70,7 +71,7 @@ Open the UI (**Fleet → + Add host**) — two paths, pick by how you reach the 
 curl -fsSL 'https://<server>/api/v1/join/<one-time-token>' | sudo bash
 ```
 
-The server-served script detects the arch, fetches the agent binary **from the control plane** (newest release in the M8.1 store, else the server's own executable on a matching arch — no GitHub round-trip, works on dev builds), verifies its sha256, and runs the same field-proven installer SSH provisioning uses: M8.1 layout, update guard, persistent systemd service, TLS CA inline — and, if you tick *enable elevation*, the chosen elevation policy + sudoers + `PARTOUT_ELEVATE=sudo` wired. Inspect the script first if you like (the dialog links it). The one-liner is offered **only over HTTPS** — a plaintext server shows the manual steps instead (download the release tarball, place `ca.crt`, run the foreground agent one-liner; use `scripts/install-agent.sh` for a persistent manual install). The dialog watches for the host and flips to **✓ Connected**; if nothing connects within 90 s it tells you what to check (token validity, host→server reachability, the CA, agent logs).
+The server-served script detects the arch, fetches the agent binary **from the control plane** (newest release in the M8.1 store, else the server's own executable on a matching arch — no GitHub round-trip, works on dev builds), verifies its sha256, and runs the same field-proven installer SSH provisioning uses: M8.1 layout, update guard, persistent systemd service, TLS CA inline — and, if you tick *enable elevation* (it is pre-checked, with the seeded `default-broad` policy), the chosen elevation policy + sudoers + `PARTOUT_ELEVATE=sudo` wired. Inspect the script first if you like (the dialog links it). The one-liner is offered **only over HTTPS** — a plaintext server shows the manual steps instead (fetch the binary from the server itself via the per-token `/api/v1/join/<token>/binary` URL — or the release tarball — then `./partout --mode=agent …`; use `scripts/install-agent.sh` for a persistent manual install). The dialog watches for the host and flips to **✓ Connected**; if nothing connects within 90 s it tells you what to check (token validity, host→server reachability, the CA, agent logs).
 
 **B · Onboard over SSH** (admin; the server's own `~/.ssh` reaches the host): the
 guided wizard walks target → plan (with a live SSH-key readiness check) → the five

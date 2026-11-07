@@ -3,6 +3,10 @@
 > The milestone **plan and steps**: what is built, what each milestone shipped, and what is
 > next. This is the working plan of record — keep it current as milestones land.
 >
+> **Single status source:** this file is the only place that restates release status
+> (version + what shipped). The [README](../README.md) and [PRD](../PRD.md) link here
+> instead of restating it — the copies used to drift apart.
+>
 > Design rationale lives in [architecture.md](architecture.md); day-2 operations in
 > [operations.md](operations.md); deployment topologies in [deployment.md](deployment.md).
 > The [README](../README.md) is a short overview (objectives, problem, architecture, deploy,
@@ -687,6 +691,23 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.18 — toolchain hygiene.** gofmt fix + Go toolchain go1.26.10
+  (GO-2026-6809, crypto/x509 intermediate-cert distrust; follows the
+  go1.26.9 net/http stdlib fixes GO-2026-6617/6613/6612/6611).
+
+- **v0.9.17 — alert channels: ntfy + per-rule maintenance-window mute.**
+  Also: the README architecture sketch replaced with the Archify SVG (docs).
+
+  - **Alert channels — ntfy + maintenance-window mute**: alert rules gain
+    an `ntfy_url` (+ optional `ntfy_token`) external channel — ntfy JSON
+    publish on firing + resolved, severity → priority (critical → urgent),
+    self-hosted servers work (air-gap friendly), failures audited as
+    `alert.ntfy` — and a per-rule `muted_until` mute: while active,
+    webhook + ntfy deliveries are suppressed while in-app/SSE/audit
+    continue (delivery gate, not an evaluation gate; auto-expires, no
+    catch-up replay). CLI: `partout ctl alerts mute <id> --for 90m` /
+    `unmute`; UI rule form carries both. Schema v28.
+
 - **v0.9.16 — elevation tiers + the 1.0 hardening pass.** Everything
   since the v0.9.15 tag:
 
@@ -740,16 +761,6 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     cert facts had broken on modern distros), **jobs bufconn harness
     session-wait** (race under full-suite load), docs reality pass
     (architecture §14 test rig, PRD R12 stack, PRD header).
-
-  - **Alert channels — ntfy + maintenance-window mute**: alert rules gain
-    an `ntfy_url` (+ optional `ntfy_token`) external channel — ntfy JSON
-    publish on firing + resolved, severity → priority (critical → urgent),
-    self-hosted servers work (air-gap friendly), failures audited as
-    `alert.ntfy` — and a per-rule `muted_until` mute: while active,
-    webhook + ntfy deliveries are suppressed while in-app/SSE/audit
-    continue (delivery gate, not an evaluation gate; auto-expires, no
-    catch-up replay). CLI: `partout ctl alerts mute <id> --for 90m` /
-    `unmute`; UI rule form carries both. Schema v28.
 
 - **v0.9.15 — setup & privilege UX (the onboarding release).** Everything
   since the v0.9.14 tag, answering the two loudest beta complaints: *first-node

@@ -1,14 +1,13 @@
 # Partout
 
-> **Status: beta (v0.9.16 — the 1.0-scoped beta: all 1.0 features in, gathering feedback
-> before the 1.0 GA flip; v0.9.16 is the elevation-tiers + 1.0-hardening release: broad
-> sudo as the friction-free default with strict/full as visible tiers, the audit-log
-> hash chain (`partout ctl audit verify`), host_offline deadman alerts, short-lived
-> SSE tokens, EOL-gated upgrades, task↔secrets wired, a minimal Docker path, and the
-> structured policy editor + fleet-aware generator)** — the full feature set (observe,
-> execute, patch, update rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
+> **Status: beta — the 1.0-scoped beta: all 1.0 features in, gathering feedback
+> before the 1.0 GA flip.** The full feature set (observe, execute, patch, update
+> rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
 > occasional rough edge and occasional breaking change before 1.0. Back up your
 > `partout.db` regularly.
+> **What shipped in which release: [docs/roadmap.md](docs/roadmap.md) — the single
+> status source.** This README and the PRD link there instead of restating it
+> (the copies used to drift: three docs, three different versions).
 
 **Partout** is a remote host-management control plane: one Go binary to discover, observe,
 execute against, configure, patch, and orchestrate work across Linux hosts — safely,
@@ -16,8 +15,11 @@ auditably, and verifiably — with a web UI, an MCP server for AI assistants, an
 LLM assistant (bring any OpenAI-compatible endpoint — a local Ollama keeps all data on-host).
 
 It ships as a single self-hosted binary (no editions, everything free) with an embedded
-observe layer, a full write/control path, and an append-only audit log (a cryptographic
-hash-chain is a documented post-v1 enhancement, PRD Decision 5).
+observe layer, a full write/control path, and an append-only audit log sealed by a
+cryptographic hash chain (`partout ctl audit verify`; PRD Decision 5, amended).
+
+New here? **[docs/getting-started.md](docs/getting-started.md)** is the guided 5-minute
+walkthrough (first host, first command, the audit check).
 
 ## The problem it solves
 
@@ -108,16 +110,18 @@ non-zero on a hard failure — the "start it and see" step, made visible:
 ./partout doctor && ./partout   # doctor reports exactly what would stop a start
 ```
 
-> **Plain HTTP is the default — and loopback-only is the safe default.** A fresh
-> server binds **all interfaces** with **no TLS**, so the login password and session
-> tokens cross the network in cleartext the moment you reach it from another
-> machine. `partout doctor` warns about exactly this. For anything beyond this
-> machine, do one of:
+> **Loopback is the default when TLS is off.** A fresh server with no `PARTOUT_ADDR`
+> and no TLS binds **127.0.0.1** — reachable from that machine only. (With TLS on,
+> the default is all interfaces: agents on other hosts must reach the server.)
+> Plaintext on a non-loopback bind still puts the login password and session tokens
+> on the wire in cleartext — `partout doctor` warns about exactly this. To serve
+> beyond this machine, do one of:
 >
 > - `PARTOUT_TLS=on` — bootstraps a local root CA; the server then serves HTTPS
->   and the agent stream gets mTLS (no per-host cert work), or
-> - `PARTOUT_ADDR=127.0.0.1` — keep it on loopback behind your own TLS-terminating
->   reverse proxy (Caddy/nginx/HAProxy patterns in [docs/deployment.md](docs/deployment.md) §1.3).
+>   on all interfaces and the agent stream gets mTLS (no per-host cert work), or
+> - `PARTOUT_ADDR=<ip>` — put it behind your own TLS-terminating
+>   reverse proxy (Caddy/nginx/HAProxy patterns in [docs/deployment.md](docs/deployment.md) §1.3), or
+> - `PARTOUT_ADDR=0.0.0.0` — plaintext on all interfaces (lab only; doctor warns).
 >
 > The browser also warns: the login page shows an amber banner when it is served
 > over cleartext from a non-loopback host.
@@ -177,18 +181,16 @@ also runs a periodic **security scan** (default every 6 h,
 `PARTOUT_SECURITY_SCAN_S`) that correlates each host's packages against OSV
 CVE data — see the fleet Security card on the Updates page.
 
-New here? **[docs/getting-started.md](docs/getting-started.md)** is the guided
-5-minute walkthrough (first host, first command, the audit check).
-
-For systemd units (and maybe-future Docker/compose, cloud-init, Helm sketches), see [docs/deployment.md](docs/deployment.md).
+For systemd units, Docker/compose, cloud-init and Helm sketches, see [docs/deployment.md](docs/deployment.md).
 
 ### Deployment notes
 
-- **Bind address**: the default listens on all interfaces. Behind a reverse proxy on
-  the same host, set `PARTOUT_ADDR=127.0.0.1` so the control plane is only reachable
+- **Bind address**: with TLS off, the default binds loopback (127.0.0.1); with TLS
+  on, all interfaces. Behind a reverse proxy on the same host, set
+  `PARTOUT_ADDR=127.0.0.1` so the control plane is only reachable
   through the edge (see docs/deployment.md §1.3 for the Caddy/nginx/HAProxy patterns).
 - **Turn on TLS before exposing it**: `PARTOUT_TLS=on` bootstraps a local root CA and serves
-  HTTPS + mTLS (the default is plaintext HTTP on all interfaces — fine for loopback/dev).
+  HTTPS + mTLS (plaintext HTTP is for loopback/dev only — and the default keeps you there).
 - **Token env vars** (server): `PARTOUT_ADMIN_PASSWORD` bootstraps the web-UI `admin` user;
   `PARTOUT_TOKEN_ADMIN/_OPERATOR/_VIEWER` are static bearer tokens for the CLI/scripts. The UI
   login form takes only username/password; the CLI takes `--token` / `PARTOUT_CTL_TOKEN`.

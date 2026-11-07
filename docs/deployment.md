@@ -609,7 +609,7 @@ All configuration is env + flags (PRD R15). Precedence: **flag > env > default**
 | Var / Flag | Default | Notes |
 |---|---|---|
 | `PARTOUT_PORT` / `--port` | **8443** | single listener (REST + SSE + gRPC) |
-| `PARTOUT_ADDR` / `--addr` | *(empty = all interfaces)* | bind address for the single listener; set `127.0.0.1` when the server sits behind a reverse proxy on the same host — keeps a plaintext (or TLS) control plane off the public interface. **Incompatible with provisioning remote hosts**: a loopback bind is unreachable from any other machine, so fleet-provisioned agents can never connect (the server warns at boot, `doctor` flags it, and preflight fails with a specific bind error — not a firewall hint) |
+| `PARTOUT_ADDR` / `--addr` | *(empty = loopback when TLS is off; all interfaces when TLS is on)* | bind address for the single listener; set `127.0.0.1` when the server sits behind a reverse proxy on the same host — keeps a plaintext (or TLS) control plane off the public interface. **Incompatible with provisioning remote hosts**: a loopback bind is unreachable from any other machine, so fleet-provisioned agents can never connect (the server warns at boot, `doctor` flags it, and preflight fails with a specific bind error — not a firewall hint) |
 | `PARTOUT_DB_PATH` / `--db` | **./partout.db** | SQLite path; `tls/` CA material is created in `<db dir>/tls/` |
 | `PARTOUT_TLS` / `--tls` | **off** | `on` → local root-CA bootstrap + mTLS on the gRPC stream; REST/SSE stay bearer-auth |
 | `PARTOUT_TLS_SERVER_NAMES` / `--tls-names` | **localhost,127.0.0.1,\<hostname\>** | comma-separated SANs for the server leaf |
