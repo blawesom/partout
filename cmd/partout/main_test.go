@@ -712,6 +712,7 @@ func TestDisplayHost(t *testing.T) {
 func TestFirstRunBlock(t *testing.T) {
 	cases := []struct {
 		name        string
+		mode        string
 		scheme      string
 		host        string
 		port        int
@@ -722,25 +723,33 @@ func TestFirstRunBlock(t *testing.T) {
 		notWant     []string
 	}{
 		{
-			name: "first run, env password, TLS on", scheme: "https", host: "127.0.0.1", port: 8443,
+			name: "first run, env password, TLS on", mode: "server", scheme: "https", host: "127.0.0.1", port: 8443,
 			adminSource: "env", tlsOn: true, bindAddr: "",
 			want: []string{"https://127.0.0.1:8443/", "set via PARTOUT_ADMIN_PASSWORD", "local root CA", "PARTOUT_TLS_CA", "Onboard a host", "partout doctor"},
 		},
 		{
-			name: "first run, generated password file, TLS off + exposed bind", scheme: "http", host: "127.0.0.1", port: 8443,
+			name: "first run, generated password file, TLS off + exposed bind", mode: "server", scheme: "http", host: "127.0.0.1", port: 8443,
 			adminSource: "/srv/partout/admin_password.txt", tlsOn: false, bindAddr: "",
 			want: []string{"http://127.0.0.1:8443/", "/srv/partout/admin_password.txt", "cleartext", "PARTOUT_TLS=on", "PARTOUT_ADDR=127.0.0.1"},
 		},
 		{
-			name: "existing users, TLS off on loopback", scheme: "http", host: "localhost", port: 8443,
+			name: "existing users, TLS off on loopback", mode: "server", scheme: "http", host: "localhost", port: 8443,
 			adminSource: "", tlsOn: false, bindAddr: "127.0.0.1",
 			want:    []string{"existing local users", "plain HTTP on loopback"},
 			notWant: []string{"cleartext"},
 		},
+		{
+			// §2.4: the embedded host enrolls seconds after the banner
+			// prints — step 1 must not send the operator onboarding hunting.
+			name: "embedded demo: step 1 is the first command, not onboarding", mode: "embedded", scheme: "http", host: "127.0.0.1", port: 8443,
+			adminSource: "env", tlsOn: false, bindAddr: "127.0.0.1",
+			want:    []string{"Run your first command", "already enrolled"},
+			notWant: []string{"Onboard a host"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := firstRunBlock(c.scheme, c.host, c.port, c.adminSource, c.tlsOn, c.bindAddr)
+			got := firstRunBlock(c.mode, c.scheme, c.host, c.port, c.adminSource, c.tlsOn, c.bindAddr)
 			for _, w := range c.want {
 				if !strings.Contains(got, w) {
 					t.Errorf("block missing %q:\n%s", w, got)

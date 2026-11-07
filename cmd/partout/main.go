@@ -851,7 +851,7 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	} else {
 		lg.Printf("gRPC + REST + SSE on %s:%d, db %s", cfg.Addr, cfg.Port, cfg.DBPath)
 	}
-	lg.Print(firstRunBlock(scheme, displayHost(cfg.Addr), cfg.Port, adminSource, serveTLS, cfg.Addr))
+	lg.Print(firstRunBlock(cfg.Mode, scheme, displayHost(cfg.Addr), cfg.Port, adminSource, serveTLS, cfg.Addr))
 
 	// shutdownDone is closed once the gRPC server has fully stopped and the
 	// listening socket is released. Callers that restart on the same port
@@ -1214,8 +1214,11 @@ func runMCP(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 // password came from, the TLS posture (with the loopback/plain-HTTP caveat
 // doctor warns about), and the three-step path into the product. adminSource:
 // "" = existing users; "env" = PARTOUT_ADMIN_PASSWORD; otherwise the path of
-// the generated admin_password.txt.
-func firstRunBlock(scheme, host string, port int, adminSource string, tlsOn bool, bindAddr string) string {
+// the generated admin_password.txt. mode picks the first next-step: an
+// embedded server has a co-located agent enrolling right now, so "onboard a
+// host" would send the operator hunting for a step that already happened
+// (review §2.4).
+func firstRunBlock(mode, scheme, host string, port int, adminSource string, tlsOn bool, bindAddr string) string {
 	var b strings.Builder
 	b.WriteString("──────────────────────────────────────────────────────────────────────\n")
 	fmt.Fprintf(&b, " Partout %s is running.\n\n", agentfacts.Version)
@@ -1238,7 +1241,12 @@ func firstRunBlock(scheme, host string, port int, adminSource string, tlsOn bool
 		b.WriteString("             PARTOUT_ADDR=127.0.0.1 behind a TLS proxy. (partout doctor warns.)\n")
 	}
 	b.WriteString("\n Next steps\n")
-	b.WriteString("   1. Onboard a host       UI: Fleet → + Add host (one-time token or the SSH wizard)\n")
+	if mode == "embedded" {
+		b.WriteString("   1. Run your first command UI: Execute — the demo host on this machine is\n")
+		b.WriteString("                             already enrolled (try `uptime`)\n")
+	} else {
+		b.WriteString("   1. Onboard a host        UI: Fleet → + Add host (one-time token or the SSH wizard)\n")
+	}
 	b.WriteString("   2. Review the guardrails UI: Policies / Alerts (a preset is seeded on first run)\n")
 	b.WriteString("   3. Keep the fleet current UI: Updates (upload a release → canary rollout)\n")
 	b.WriteString("\n Pre-flight future starts with: partout doctor\n")
