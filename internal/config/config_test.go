@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -162,6 +163,24 @@ func TestAgentMissingServer(t *testing.T) {
 	setenv(t, "PARTOUT_MODE", "agent", "PARTOUT_SERVER", "-")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for missing PARTOUT_SERVER in agent mode")
+	}
+}
+
+// TestAgentRejectsSchemeInServer: the enrollment HTTP client accepts a
+// scheme in the base URL but the gRPC stream dial does not — the mismatch
+// used to surface only after the one-time enrollment token was spent
+// (review §1.1). Validate must refuse a schemed PARTOUT_SERVER up front.
+func TestAgentRejectsSchemeInServer(t *testing.T) {
+	clearPartout(t)
+	for _, server := range []string{"https://192.0.2.1:8443", "http://192.0.2.1:8443"} {
+		setenv(t, "PARTOUT_MODE", "agent", "PARTOUT_SERVER", server)
+		_, err := Load()
+		if err == nil {
+			t.Fatalf("PARTOUT_SERVER=%q: expected an error, got none", server)
+		}
+		if !strings.Contains(err.Error(), "host:port") {
+			t.Errorf("PARTOUT_SERVER=%q: error should say host:port, got: %v", server, err)
+		}
 	}
 }
 

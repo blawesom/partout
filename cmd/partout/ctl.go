@@ -606,8 +606,22 @@ func (c *ctl) cmdEnrollToken(args []string) {
 	fmt.Printf("expires:   %s (ttl %ds)\n", unixTime(res.Expires), *ttl)
 	fmt.Println()
 	fmt.Println("install on the target host:")
-	fmt.Printf("  PARTOUT_SERVER=%s PARTOUT_TOKEN=%s partout --mode=agent\n",
-		strings.TrimPrefix(c.base, "http://"), res.Token)
+	// The agent takes host:port in PARTOUT_SERVER — never a scheme (the
+	// gRPC stream rejects one) — and on a TLS server it also needs the
+	// root CA shipped next to the binary as ca.crt. ./partout: the manual
+	// path leaves the binary in the cwd, not on PATH.
+	hostPort := strings.TrimPrefix(strings.TrimPrefix(c.base, "https://"), "http://")
+	caEnv := ""
+	if strings.HasPrefix(c.base, "https://") {
+		caEnv = " PARTOUT_TLS_CA=ca.crt"
+	}
+	fmt.Printf("  PARTOUT_SERVER=%s%s PARTOUT_TOKEN=%s ./partout --mode=agent\n",
+		hostPort, caEnv, res.Token)
+	if caEnv != "" {
+		fmt.Println()
+		fmt.Println("TLS server — ship the root CA to the host as ca.crt next to the")
+		fmt.Println("binary (fetch it here with: partout ctl ca > ca.crt)")
+	}
 }
 
 func (c *ctl) cmdHosts(args []string) {

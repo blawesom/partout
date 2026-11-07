@@ -233,6 +233,13 @@ func (c *Config) Validate() error {
 		if c.ServerURL == "" {
 			return errors.New("agent mode requires PARTOUT_SERVER (or --server) to be set")
 		}
+		// The enrollment HTTP client would happily accept a scheme in the
+		// URL, but the gRPC stream dial rejects one — and the mismatch only
+		// surfaces AFTER the one-time token is spent. Reject it up front,
+		// before any network call (TLS is implied by PARTOUT_TLS_CA).
+		if strings.Contains(c.ServerURL, "://") {
+			return fmt.Errorf("agent mode: PARTOUT_SERVER must be host:port without a scheme (got %q) — TLS is selected by PARTOUT_TLS_CA, not by the URL", c.ServerURL)
+		}
 	case "mcp":
 		if c.ServerURL == "" {
 			return errors.New("mcp mode requires PARTOUT_SERVER (or --server) to be set")
