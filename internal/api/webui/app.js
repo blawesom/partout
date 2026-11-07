@@ -180,11 +180,17 @@
           </template>
           <p v-else class="warn-box"><b>This server is not serving TLS.</b> The one-line installer is only offered over HTTPS (a plaintext <span class="mono">curl | sudo bash</span> can be tampered with mid-flight). Use the manual steps below, or turn on <span class="mono">PARTOUT_TLS=on</span>.</p>
 
-          <p class="cap" style="margin-top:12px"><b>{{ locProtocol==='https:' ? '2 · Manual:' : '1 ·' }} Get the binary onto the host</b> <span class="muted small">— advanced: only if you can't pipe the one-liner</span></p>
-          <div v-if="ahDownloadCmd" class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahDownloadCmd }}</div>
-          <p v-else class="muted small">Download the static linux build from the
+          <p class="cap" style="margin-top:12px"><b>{{ locProtocol==='https:' ? '2 · Manual:' : '1 ·' }} Get the binary onto the host</b>
+            <span v-if="locProtocol==='https:'" class="muted small">— advanced: only if you can't pipe the one-liner</span>
+            <span v-else class="muted small">— served by this server behind the same one-time token; no published release needed</span></p>
+          <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahBinaryCmd }}</div>
+          <template v-if="ahDownloadCmd">
+            <p class="muted small" style="margin-top:6px">or from GitHub releases:</p>
+            <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahDownloadCmd }}</div>
+          </template>
+          <p v-else class="muted small">or copy a static build from the
             <a :href="'https://github.com/blawesom/partout/releases'" target="_blank" rel="noopener">releases page</a>
-            (amd64 / arm64) and copy it to the host.</p>
+            (amd64 / arm64) to the host as <span class="mono">./partout</span>.</p>
 
           <template v-if="locProtocol==='https:'">
             <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '3' : '2' }} · Trust the server CA</b> <span class="muted small">— the agent verifies the server before enrolling</span></p>
@@ -196,12 +202,18 @@
             <p v-else-if="ahCaErr" class="muted small">CA not fetched: {{ ahCaErr }} — ship it to the host as <span class="mono">ca.crt</span> next to the command.</p>
           </template>
 
-          <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '4' : '3' }} · Run the agent</b> <span class="muted small">— one-time, expires in {{ ahTtlLeft }} s; foreground only — the one-liner above installs the persistent service</span></p>
+          <p class="cap" style="margin-top:10px"><b>{{ locProtocol==='https:' ? '4' : '3' }} · Run the agent</b> <span class="muted small">— one-time, expires in {{ ahTtlLeft }} s; foreground only<span v-if="locProtocol==='https:'"> — the one-liner above installs the persistent service</span></span></p>
           <div class="console" style="white-space:pre-wrap;word-break:break-all">{{ ahCmd }}</div>
           <div class="toolbar" style="margin-top:8px">
             <button class="btn sm" @click="copyAhCmd">Copy command</button>
             <span class="muted small">shown once</span>
           </div>
+          <p v-if="locProtocol!=='https:'" class="muted small" style="margin-top:8px">For a persistent
+            install instead of the foreground run (systemd service, starts on boot), use the same
+            token with the installer script from a repo checkout:
+            <span class="mono">sudo bash scripts/install-agent.sh --binary ./partout --server {{ locationHost }} --token {{ ahToken }}</span>
+            (add <span class="mono">--elevate</span> to wire sudo). Once the host is enrolled, the
+            Elevation page can enable it in one command.</p>
 
           <!-- Connection watch: the dialog that handed the recipe reports the
                outcome, so the operator is never left staring at an empty fleet. -->
@@ -2551,13 +2563,13 @@
         addHostOpen: false, addHostTab: "manual",
         ahToken: null, ahTokenExpiry: 0, ahTokenBusy: false, ahNow: Date.now(), ahTickInt: null,
         ahCa: "", ahCaErr: "", ahCaBusy: false, // server root CA for TLS-mode recipes
-        ahElevate: false, ahElevationPolicy: "", // one-line join: elevation wiring
+        ahElevate: true, ahElevationPolicy: "", // one-line join: elevation wiring — on by default (first commands like systemctl/apt need it; uncheck to opt out)
         elevBoot: { open: false, agentId: "", policy: "", token: "", url: "", busy: false }, // P1 one-command elevation enablement
         ahKnownIds: null, ahWatchStarted: 0, ahConnect: "idle", ahHostId: "", // connection watch
         provRuns: [],
         batchText: "", batchMode: "fresh", batchBusy: false, batchMsg: "",
         provWiz: { open: false, phase: "target", host: "", mode: "fresh", runId: "", busy: false, run: null, steps: [], sshStatus: null, sshBusy: false, sshErr: "",
-           elevate: false, elevationPolicies: [], elevationPolicy: "", serviceLabels: "", certPaths: "" },
+           elevate: true, elevationPolicies: [], elevationPolicy: "", serviceLabels: "", certPaths: "" }, // D1 bootstrap pre-checked: same default-broad posture as the manual tab
         approvals: [], apprState: "pending", apprBusy: "", apprMsg: "",
         elev: { policies: [], fleet: [], busy: false, open: null, form: null, msg: "", push: null, gen: null },
         elevValidateOk: true, elevValidateMsg: "",
@@ -2716,7 +2728,25 @@
         // TLS-mode servers require the CA before the agent can verify the
         // enroll connection; the recipe ships it as ca.crt next to the command.
         const ca = this.locProtocol === "https:" ? " PARTOUT_TLS_CA=ca.crt" : "";
-        return "PARTOUT_SERVER=" + this.locationHost + ca + " PARTOUT_TOKEN=" + this.ahToken + " partout --mode=agent";
+        // ./partout: the download recipe leaves the binary in the cwd — a
+        // bare `partout` is only on PATH after a persistent install.
+        return "PARTOUT_SERVER=" + this.locationHost + ca + " PARTOUT_TOKEN=" + this.ahToken + " ./partout --mode=agent";
+      },
+      // The manual "get the binary" step (review §1.2): the server serves a
+      // per-token agent binary at /api/v1/join/{token}/binary — gated by the
+      // same one-time token the recipe already carries, always
+      // arch-matching, and with no published release required (it falls
+      // back to the server's own executable). This is the only download
+      // path that works on a plaintext server AND a release build: the old
+      // GitHub-tarball command 404'd (bare-version tag path) and never
+      // showed at all (the v-prefixed regex missed the bare version stamp).
+      ahBinaryCmd() {
+        if (!this.ahToken) return "";
+        const https = this.locProtocol === "https:";
+        return "curl -fsS" + (https ? " --cacert ca.crt" : "") + " -o ./partout " +
+          (https ? "https://" : "http://") + this.locationHost +
+          "/api/v1/join/" + this.ahToken + "/binary?arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" +
+          " && chmod +x ./partout";
       },
       // The one-line join URL (E1): the loader detects the arch server-side
       // and fetches the arch-specific installer. Elevation policy rides as a
@@ -2734,11 +2764,17 @@
       },
       // A release build knows its exact assets (partout_<ver>_linux_<arch>.tar.gz);
       // a dev build ("dev" or unstamped) falls back to the releases-page link.
-      ahIsRelease() { return /^v\d+\.\d+/.test(this.serverVersion || ""); },
+      // Release binaries stamp the version WITHOUT the leading v
+      // (scripts/release-github.sh: VER="${TAG#v}") while the GitHub release
+      // lives under the v-PREFIXED tag — so accept either stamp shape, and
+      // build the URL with the tag (v-prefixed) and the asset name (bare)
+      // each in the form release-github.sh actually publishes.
+      ahIsRelease() { return /^v?\d+\.\d+/.test(this.serverVersion || ""); },
       ahDownloadCmd() {
         if (!this.ahIsRelease) return "";
-        const v = this.serverVersion;
-        return "curl -LO https://github.com/blawesom/partout/releases/download/" + v + "/partout_" + v + "_linux_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz\ntar xzf partout_" + v + "_linux_*.tar.gz";
+        const v = String(this.serverVersion || "").replace(/^v/, "");
+        return "curl -LO https://github.com/blawesom/partout/releases/download/v" + v + "/partout_" + v + "_linux_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz\n" +
+          "tar xzf partout_" + v + "_linux_*.tar.gz && mv partout_linux_*/partout ./partout";
       },
       // Waiting >90s with no new host: flip to troubleshooting hints. (The
       // token has a 15-min TTL; 90s is enough for a reachable host + operator
@@ -4978,6 +5014,7 @@
           this.ahKnownIds = new Set((this.hosts || []).map((h) => h.id));
           this.ahConnect = "waiting"; this.ahWatchStarted = Date.now(); this.ahHostId = "";
           this.notify("ok", "enrollment token created — shown once, 15 min TTL");
+          this.ahLoadPolicies(); // elevation is pre-checked: populate the policy picker now
           if (this.locProtocol === "https:") this.loadAhCa(); // TLS recipe needs the CA
         } catch (e) { /* toast shown by api() */ } finally { this.ahTokenBusy = false; }
       },

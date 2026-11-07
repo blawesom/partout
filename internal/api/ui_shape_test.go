@@ -521,6 +521,44 @@ func TestUIShape_AddHostSurface(t *testing.T) {
 	}
 }
 
+// TestUIShape_AddHostRecipes pins the first-use recipes in the Add-host
+// dialog and the exec-detail privilege hint (review §1.2–§1.4). The manual
+// path must work on a plaintext server AND a release build: the old GitHub
+// download command never rendered on releases (v-prefixed regex vs the bare
+// version stamp) and 404'd when it did (bare-version tag path), the run step
+// assumed the binary was on PATH, elevation was opt-in everywhere, and a
+// permission failure on Execute never explained itself.
+func TestUIShape_AddHostRecipes(t *testing.T) {
+	appJS, err := os.ReadFile(filepath.Join(repoRoot(t), "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	s := string(appJS)
+	for _, want := range []string{
+		// the binary step is served by this server behind the same
+		// one-time token — works on plaintext + dev builds, no release needed
+		"ahBinaryCmd()",
+		"/api/v1/join/\" + this.ahToken + \"/binary",
+		// run step: the binary sits in the cwd (tarballs extract to
+		// partout_linux_<arch>/partout), not on PATH
+		"\" ./partout --mode=agent\"",
+		// release detection must accept the bare semver stamp
+		// (release-github.sh: VER="${TAG#v}")
+		"/^v?\\d+\\.\\d+/",
+		// GitHub fallback: v-prefixed tag path, bare-version asset names
+		"releases/download/v\" + v + \"/partout_\" + v + \"_linux_",
+		// elevation pre-checked in both Add-host tabs
+		"ahElevate: true,",
+		"elevate: true, elevationPolicies: []",
+		// persistent-install pointer for the plaintext path
+		"install-agent.sh",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("app.js missing first-use recipe element %q", want)
+		}
+	}
+}
+
 // TestUIShape_CleartextLoginBanner guards the login-page cleartext warning:
 // when the SPA was served over plain http from a non-loopback host, the login
 // card must show a warn-box telling the operator the password would cross
