@@ -964,24 +964,40 @@
             <table class="tbl">
               <thead><tr><th>Host</th><th>State</th><th>Exit</th><th>Elevation</th><th>Duration</th><th>Output</th></tr></thead>
               <tbody>
-                <tr v-for="r in (execDetail.runs||[])" :key="r.run_id">
-                  <td class="mono">{{ hostNameById(r.agent_id) }}</td>
-                  <td><span class="badge" :class="runBadge(r.state)">{{ r.state }}</span></td>
-                  <td class="mono">{{ r.state==='succeeded' ? (r.exit_code||0) : '—' }}</td>
-                  <td>
-                    <span v-if="r.elevation_note" class="badge" :class="r.elevated ? 'ok' : 'warn'" :title="r.elevation_note">{{ r.elevated ? '⤴ elevated' : 'unprivileged' }}</span>
-                    <span v-else class="muted small" title="This agent predates elevation reporting">—</span>
-                  </td>
-                  <td class="mono">{{ r.duration_ms ? (r.duration_ms/1000).toFixed(2)+'s' : '—' }}</td>
-                  <td>
-                    <div class="console" style="max-width:520px;max-height:180px">
-                      <template v-for="o in outFor(r.run_id)" :key="o.run_id">
-                        <div v-if="o.stdout">{{ o.stdout }}</div>
-                        <div v-if="o.stderr" class="line-err">{{ o.stderr }}</div>
-                      </template>
+                <template v-for="r in (execDetail.runs||[])" :key="r.run_id">
+                  <tr>
+                    <td class="mono">{{ hostNameById(r.agent_id) }}</td>
+                    <td><span class="badge" :class="runBadge(r.state)">{{ r.state }}</span></td>
+                    <td class="mono">{{ r.state==='succeeded' ? (r.exit_code||0) : '—' }}</td>
+                    <td>
+                      <span v-if="r.elevation_note" class="badge" :class="r.elevated ? 'ok' : 'warn'" :title="r.elevation_note">{{ r.elevated ? '⤴ elevated' : 'unprivileged' }}</span>
+                      <span v-else class="muted small" title="This agent predates elevation reporting">—</span>
+                    </td>
+                    <td class="mono">{{ r.duration_ms ? (r.duration_ms/1000).toFixed(2)+'s' : '—' }}</td>
+                    <td>
+                      <div class="console" style="max-width:520px;max-height:180px">
+                        <template v-for="o in outFor(r.run_id)" :key="o.run_id">
+                          <div v-if="o.stdout">{{ o.stdout }}</div>
+                          <div v-if="o.stderr" class="line-err">{{ o.stderr }}</div>
+                        </template>
+                      </div>
+                    </td>
+                  </tr>
+                  <!-- Privilege-failure hint (review §1.4): the same affordance
+                       the Updates page and host attention items already have —
+                       raw "Permission denied"/"interactive authentication"
+                       output never says the fix is one command away. -->
+                  <tr v-if="execPermHint(r)"><td colspan="6" style="padding:0 8px 12px">
+                    <div class="warn-box"><b>This looks like a privilege failure.</b> The command ran as
+                      the unprivileged agent user — elevation is off on this host, so privileged verbs
+                      (systemctl, apt/dnf, …) fail with OS permission errors.
+                      <template v-if="isAdmin">Enable it with one command on the host:
+                        <button class="btn sm" @click="openElevBoot(r.agent_id)">Enable elevation…</button>
+                        (mint a one-time bootstrap; the policy + sudoers + <span class="mono">PARTOUT_ELEVATE=sudo</span> are wired by the script).</template>
+                      <template v-else>Ask an admin to enable it (host page → Enable elevation…).</template>
                     </div>
-                  </td>
-                </tr>
+                  </td></tr>
+                </template>
               </tbody>
             </table>
           </div>
@@ -2554,6 +2570,7 @@
         updHost: "", updElevation: null, jobs: [], jobRuns: [], jobForm: null, jobBusy: false, jobRunBusy: "", jobErr: "", jobRunsDetail: null, jobNote: {}, // per-job dispatch outcome, rendered under the affected row
         updTab: "packages", releases: [], relForm: { version: "", arch: "linux-amd64", kind: "agent", signature: "", file: null, fileB64: "" }, relBusy: false,
         runs: [], runDetail: null, runDetailId: null, runForm: { release_id: "", selector: "all", canary: 1, wave: 25 }, runBusy: false, runNotice: "",
+        execElevation: {}, // agent_id → elevation posture (privilege-failure hint on the exec detail)
         pkgSel: "", pkgDryRun: false, pkgBusy: false, pkgMsg: "", pkgActions: [], pkgActionDetail: null, pkgChecked: {},
         tasks: [], playbooks: [], updates: [], taskNote: {}, // per-task/playbook dispatch outcome, rendered under the affected row
         secrets: [], policies: [], users: [], presetStatus: null,
@@ -3633,6 +3650,33 @@
         // Fetch-then-assign: no flash-of-empty during SSE-triggered re-loads.
         try { this.execDetail = await this.api("/executions/" + encodeURIComponent(this.p1)); } catch (e) { this.execDetail = null; return; }
         try { this.execOutput = (await this.api("/executions/" + encodeURIComponent(this.p1) + "/output")) || []; } catch (e) { this.execOutput = []; }
+        this.loadExecElevation();
+      },
+      // Posture for the privilege-failure hint (review §1.4): fetch the
+      // elevation mode of each host whose run failed looking like a
+      // permission error. Dedup + silent — unknown posture just keeps the
+      // hint off (same convention as the Updates-page banner).
+      async loadExecElevation() {
+        if (!this.execDetail) return;
+        const ids = [...new Set((this.execDetail.runs || [])
+          .filter(r => this.runLooksPrivileged(r) && !(r.agent_id in this.execElevation))
+          .map(r => r.agent_id))];
+        await Promise.all(ids.map(async id => {
+          try { this.execElevation[id] = await this.api("/hosts/" + encodeURIComponent(id) + "/elevation", { toast: false }); }
+          catch (e) { this.execElevation[id] = null; }
+        }));
+      },
+      // The OS-level texts a first user actually hits when elevation is off
+      // (systemctl/apt/sssd all phrase it differently). Matched against the
+      // run's combined output; only a heuristic — the hint says "looks like".
+      runLooksPrivileged(r) {
+        if (r.state === "succeeded" && !(r.exit_code > 0)) return false;
+        const out = this.outFor(r.run_id).map(o => ((o.stderr || "") + "\n" + (o.stdout || "")).toLowerCase()).join("\n");
+        return /permission denied|interactive authentication|a password is required|not in the sudoers file|authentication failure|access denied/.test(out);
+      },
+      execPermHint(r) {
+        const e = this.execElevation[r.agent_id];
+        return !!e && e.mode !== "sudo" && this.runLooksPrivileged(r);
       },
       outFor(runId) { return this.execOutput.filter(o => o.run_id === runId); },
       async saveHostLabels() {

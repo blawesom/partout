@@ -559,6 +559,31 @@ func TestUIShape_AddHostRecipes(t *testing.T) {
 	}
 }
 
+// TestUIShape_ExecPrivilegeHint pins the Execute-detail privilege-failure
+// affordance (review §1.4): a run that failed with an OS permission text on
+// a host whose elevation mode isn't sudo must offer the one-command
+// elevation bootstrap — the same openElevBoot affordance the Updates page
+// and host attention items already have. Ad-hoc Execute already runs through
+// runElevated agent-side, so the fix is the hint, not a new code path.
+func TestUIShape_ExecPrivilegeHint(t *testing.T) {
+	appJS, err := os.ReadFile(filepath.Join(repoRoot(t), "internal", "api", "webui", "app.js"))
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	s := string(appJS)
+	for _, want := range []string{
+		"execPermHint(r)",
+		"runLooksPrivileged(r)",
+		"openElevBoot(r.agent_id)",
+		// one of the OS permission texts the heuristic matches
+		"interactive authentication",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("app.js missing exec privilege-hint element %q", want)
+		}
+	}
+}
+
 // TestUIShape_CleartextLoginBanner guards the login-page cleartext warning:
 // when the SPA was served over plain http from a non-loopback host, the login
 // card must show a warn-box telling the operator the password would cross
