@@ -2,8 +2,11 @@
 
 **Product:** Partout
 **Repo:** `partout`
-**Status:** v0.9.16 — observe layer (services, configs, TLS certs) + Web UI + M4 complete (approvals engine on all policy-gated surfaces, MCP server stdio + HTTP + OAuth2 PKCE) + **M6 alert engine** + M7 write actions + **M8.1 fleet self-update** + Decision 3 elevation tiers (broad default, strict/full) shipped; v0.9.6–v0.9.16: onboarding/trust pass (plaintext-default warnings at every layer, complete first-host recipe, first-run guidance), `install-server.sh`, signed release repo + one-command `partout update`, UX quick wins; v0.9.16: audit hash chain, host_offline alerts, SSE scoped tokens, EOL-gated upgrades, task↔secrets wired, Docker path, structured policy editor + fleet-aware generator
-**Date:** 2026-10-20
+**Status:** beta, 1.0 scope complete — **what shipped in which release:
+[docs/roadmap.md](docs/roadmap.md) (the single status source; this header used
+to restate it and drift from the README).** Scope markers in this document:
+unshipped promises are tagged **not yet shipped** rather than cut.
+**Date:** 2026-10-20 · status line amended 2026-11-07
 
 ---
 
@@ -18,6 +21,11 @@ certificates, systemd service health, webservice configurations, resources, aler
 own, adds a **write/control path** on top of it, and sources facts from **external public data**
 (OS end-of-support dates, package vulnerability feeds) wherever doing so beats embedding
 stale tables.
+
+*Scope status (2026-11): the shipped observe layer covers **services, configs, and TLS
+certs** (plus resources via facts and alerts). Containers, endpoint probes, heartbeat
+monitors and the status page are **not yet shipped** — the scope stands, tracked in
+[docs/roadmap.md](docs/roadmap.md).*
 
 > **The one-sentence positioning:**
 > Partout answers *"how do I reach every host, run things, and make them converge to a state I
@@ -63,7 +71,9 @@ control plane.
 (containers, endpoints, heartbeats, certificates, resources, alerts) as a first-class layer, so
 the product loop is *"observe → act → verify"* in one dashboard. There is no dependency on a
 separate monitoring tool; the control plane consumes the same inventory and facts the observe
-layer collects.
+layer collects. *(Shipped so far: services, configs, TLS certs, resources, alerts; containers,
+endpoints, heartbeats and the status page are **not yet shipped** — scope stands, see
+[docs/roadmap.md](docs/roadmap.md).)*
 
 ### 2.3 Personas
 
@@ -79,13 +89,16 @@ layer collects.
 
 1. **Single binary** — Vue 3 frontend embedded via `embed.FS`; one file to deploy.
 2. **Zero external dependencies** — SQLite by default; optional PostgreSQL for the
-   server data set; no Redis, no queue, no control node beyond the server.
+   server data set (**post-v1 per R9** — SQLite is the 1.0 engine); no Redis, no queue,
+   no control node beyond the server.
 3. **Real-time by default** — state changes pushed via SSE; no polling.
 4. **Agent-based, no inbound SSH** — hosts run a lightweight agent that holds an
    outbound connection; the server never needs SSH credentials to the hosts.
 5. **Label/declarative-driven** — targeting and task intent expressed declaratively
    (labels, tags, roles, selectors), not as imperative shell one-offs.
 6. **Runtime-agnostic** — the agent auto-detects environment (systemd, Docker, K8s node).
+   *(Shipped: systemd. Docker/K8s node detection is **not yet shipped** — see roadmap;
+   the promise stands.)*
 7. **Read-before-write observability** — every mutation is grounded in a live read of host
    state, so "make it so" is checkable, not fire-and-forget.
 8. **Everything is auditable** — every command, file change, job, and package action is
@@ -644,6 +657,9 @@ provision run steps (R17), audit events, and alert events (alert engine).
 - Transport + OAuth2 (PKCE) scaffolding (R11): stdio + Streamable HTTP.
 - All **read** monitoring tools (containers, endpoints, heartbeats, certificates,
   resources, alerts, updates, security) for the embedded observe layer.
+  *(Shipped: certificates, services, updates, security. Containers, endpoints and
+  heartbeats tools are **not yet shipped** — they arrive with the corresponding
+  observe-layer scope, see roadmap.)*
 - Add **read** tools: `list_hosts`, `get_host_facts`, `list_groups`, `list_updates`,
   `list_jobs`, `list_tasks`, `get_audit`, `list_sessions`, `get_session`,
   `list_services` (fleet service health, filterable by label),
@@ -854,6 +870,13 @@ feature paywall (R14). Consequences that follow from "everything free":
    A host-level default (`--elevate=none|sudoers|sudo`) can loosen *or tighten* the base posture
    for the whole host; per-command overrides can always tighten (never loosen) the host default.
    Precedence: `per-command > host-level`, and `sudoers` wins over `sudo` at any level.
+
+   > **Amended 2026-11-07 (as shipped):** the host-level default is `--elevate none|sudo`
+   > (no `sudoers` mode), and the per-command scope ships as named **elevation policies**
+   > (tiers: broad / strict / full) that the sudoers drop-in is rendered from
+   > (`ctl elevation install-sudoers`, the Elevation page). Broad is the friction-free
+   > default; per-command tightening is policy rules, not per-dispatch flags. The original
+   > decision text above is kept for history; this amendment is the shipped shape.
 4. **Task language — minimal + `when`.** Tasks are ordered idempotent steps with a
    single optional `when` guard per step — a constrained, fact-based expression evaluated
    agent-side (never free-form code). No loops and no branching beyond `when`; anything more
@@ -864,6 +887,12 @@ feature paywall (R14). Consequences that follow from "everything free":
    Tamper evidence relies on restricting DB access and, optionally, exporting the log to a
    secure sink. A content-addressed/WORM hash-chain is recorded as a **deferred post-v1**
    enhancement, not a v1 requirement.
+
+   > **Amended 2026-11-07:** the hash chain **shipped** in v0.9.16 (schema v27) and was
+   > promoted to a **1.0 gate**: every `audit_events` row carries `prev_hash`/`hash` over a
+   > canonical domain-separated byte string; `partout ctl audit verify` and
+   > `GET /api/v1/audit/verify` walk the chain and name the first broken row; pre-upgrade
+   > DBs backfill lazily. The original decision text above is kept for history.
 6. **Human identity — local users only.** First-run creates an admin user; the server
    maintains its own user database with role assignment. OIDC is deferred to a **post-v1**
    enhancement, keeping the product self-contained.
