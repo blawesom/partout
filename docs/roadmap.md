@@ -691,6 +691,39 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     beta-labeled for user feedback before the 1.0.0 GA flip.
 ### Polish items (closed this cycle)
 
+- **v0.9.19 — first-use & onboarding fixes (review-driven).** Answers the
+  beta feedback that first nodes couldn't be onboarded and first commands
+  failed — full findings and fix table in the review (`partout.review.md`
+  at the release commit); every fix verified end-to-end against a live
+  plaintext and a TLS server:
+
+  - **Elevation on by default**: both Add-host tabs pre-check it
+    (seeded `default-broad`); the Execute detail explains privilege
+    failures with the one-command bootstrap; the agent-side dispatch
+    path was already elevation-capable, so no new code path.
+  - **A working first-host recipe everywhere**: `ctl enroll-token`
+    prints host:port + CA + `./partout` (the agent rejects a schemed
+    PARTOUT_SERVER before the token is spent); the plaintext Add-host
+    path downloads the token-gated binary from the server itself
+    (`/api/v1/join/{token}/binary`); the GitHub download command is
+    fixed (bare-semver stamp, v-prefixed tag path) with a
+    persistent-install pointer to `scripts/install-agent.sh`.
+  - **CLI first-use guards**: unknown arguments no longer boot a
+    plaintext server; `--help` lists the subcommands; bare `ctl`
+    prints usage; `mcp` documented in `-mode`.
+  - **Loopback bind by default when TLS is off** (explicit
+    `PARTOUT_ADDR=0.0.0.0` or TLS keeps the old posture; `doctor`
+    resolves the same way). Behavior change — release-note item.
+  - **Embedded demo**: the banner leads with the first command; the
+    file root falls back to `<data-dir>/files` when `/home/partout` is
+    unusable by the running user.
+  - **Docs/spec alignment**: roadmap is the single status source
+    (README/PRD link there); PRD Decisions 3 and 5 amended in place;
+    unshipped observe-layer scope (containers, endpoints, heartbeats,
+    status page) kept but marked not-yet-shipped; README
+    contradictions (hash chain, Docker, loopback) fixed; missing
+    v0.9.17/v0.9.18 roadmap entries added.
+
 - **v0.9.18 — toolchain hygiene.** gofmt fix + Go toolchain go1.26.10
   (GO-2026-6809, crypto/x509 intermediate-cert distrust; follows the
   go1.26.9 net/http stdlib fixes GO-2026-6617/6613/6612/6611).
