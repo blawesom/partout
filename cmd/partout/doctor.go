@@ -268,9 +268,9 @@ func checkTLS(cfg *config.Config, r *doctorResult) {
 	if !cfg.TLS {
 		// Plain HTTP is fine on loopback (local dev) but a silent credential
 		// exposure on a reachable interface: the login password and every
-		// session token would cross the network in cleartext. The default bind
-		// is all interfaces, so this is the state a first-run operator is most
-		// likely to be in — warn loudly instead of noting it in passing.
+		// session token would cross the network in cleartext. With the
+		// loopback-when-plaintext default this is now an explicit operator
+		// choice (PARTOUT_ADDR=0.0.0.0) — still warn loudly when it's made.
 		if loopbackOnly(cfg.Addr) {
 			r.add(dinfo, "tls", "off (plain HTTP on loopback; set PARTOUT_TLS=on for a local root CA)")
 		} else {
@@ -519,7 +519,7 @@ func newDoctorFlagSet(cfg *config.Config) *doctorFlagSet {
 	return &doctorFlagSet{
 		fs:    fs,
 		port:  fs.Int("port", cfg.Port, "server: single listener port"),
-		addr:  fs.String("addr", cfg.Addr, "server: bind address (empty = all interfaces)"),
+		addr:  fs.String("addr", cfg.Addr, "server: bind address (empty = loopback when TLS is off, all interfaces when on)"),
 		db:    fs.String("db", cfg.DBPath, "server: SQLite path"),
 		tls:   fs.String("tls", tlsDefault(cfg.TLS), "server: TLS mode on|off"),
 		names: fs.String("tls-names", cfg.TLSNames, "server: comma-separated SAN names"),
@@ -545,6 +545,12 @@ func applyDoctorFlags(cfg *config.Config, d *doctorFlagSet) {
 	default:
 		// Unknown value: keep the config as-is (doctor only reports; it never
 		// starts a server, so an unrecognized --tls does not need to be fatal).
+	}
+	// Resolve the bind exactly like the server would (review §2.3): unset +
+	// no TLS is now loopback by default, so doctor must not warn "all
+	// interfaces" about a server that will actually bind 127.0.0.1.
+	if a, defaulted := config.EffectiveAddr(cfg.Addr, cfg.TLS); defaulted {
+		cfg.Addr = a
 	}
 }
 

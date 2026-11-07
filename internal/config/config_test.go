@@ -57,7 +57,7 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("port = %d, want 8443", c.Port)
 	}
 	if c.Addr != "" {
-		t.Errorf("addr = %q, want empty (all interfaces) by default", c.Addr)
+		t.Errorf("addr = %q, want empty by default (main/doctor resolve the effective bind via EffectiveAddr)", c.Addr)
 	}
 	if c.DBPath != "./partout.db" {
 		t.Errorf("db = %q, want ./partout.db", c.DBPath)
@@ -180,6 +180,33 @@ func TestAgentRejectsSchemeInServer(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "host:port") {
 			t.Errorf("PARTOUT_SERVER=%q: error should say host:port, got: %v", server, err)
+		}
+	}
+}
+
+// TestEffectiveAddr pins the secure-by-default bind (review §2.3/§1.6):
+// unset + plaintext used to bind ALL interfaces, putting every first user's
+// admin password on the wire in the clear. Unset + TLS keeps all interfaces
+// (agents on other hosts must reach the server), and an explicit address
+// always wins.
+func TestEffectiveAddr(t *testing.T) {
+	cases := []struct {
+		addr          string
+		tls           bool
+		want          string
+		wantDefaulted bool
+	}{
+		{"", false, "127.0.0.1", true},
+		{"", true, "", false},
+		{"0.0.0.0", false, "0.0.0.0", false},
+		{"10.0.0.5", true, "10.0.0.5", false},
+		{"127.0.0.1", true, "127.0.0.1", false},
+		{"  ", false, "127.0.0.1", true}, // whitespace-only counts as unset
+	}
+	for _, c := range cases {
+		got, defaulted := EffectiveAddr(c.addr, c.tls)
+		if got != c.want || defaulted != c.wantDefaulted {
+			t.Errorf("EffectiveAddr(%q, tls=%v) = (%q, %v), want (%q, %v)", c.addr, c.tls, got, defaulted, c.want, c.wantDefaulted)
 		}
 	}
 }

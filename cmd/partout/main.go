@@ -142,7 +142,7 @@ flags:
 	}
 	mode := fs.String("mode", cfg.Mode, "server|agent|embedded|mcp")
 	port := fs.Int("port", cfg.Port, "server: single listener port")
-	addr := fs.String("addr", cfg.Addr, "server: bind address (empty = all interfaces; use 127.0.0.1 behind a reverse proxy)")
+	addr := fs.String("addr", cfg.Addr, "server: bind address (empty = loopback when TLS is off, all interfaces when on; use 127.0.0.1 behind a reverse proxy)")
 	db := fs.String("db", cfg.DBPath, "server: SQLite path")
 	dataDir := fs.String("data-dir", cfg.DataDir, "agent: identity/policy dir (default ~/.partout/agent)")
 	fileRoot := fs.String("file-root", cfg.FileRoot, "agent: file surface root — all file ops are confined to this directory (default /home/partout)")
@@ -215,6 +215,17 @@ flags:
 	default:
 		fmt.Fprintf(os.Stderr, "partout: invalid --tls %q (want on|off)\n", *tlsOn)
 		os.Exit(2)
+	}
+
+	// Secure-by-default bind (review §2.3/§1.6): with no address and no TLS,
+	// a fresh server used to bind ALL interfaces in plaintext. Default to
+	// loopback instead — opening up stays an explicit choice.
+	if cfg.Mode == "server" || cfg.Mode == "embedded" {
+		if a, defaulted := config.EffectiveAddr(cfg.Addr, cfg.TLS); defaulted {
+			cfg.Addr = a
+			fmt.Fprintln(os.Stderr, "partout: TLS is off and no --addr/PARTOUT_ADDR is set — binding 127.0.0.1 (loopback only).")
+			fmt.Fprintln(os.Stderr, "partout: reach it from this machine only; to expose it: PARTOUT_TLS=on (recommended), or PARTOUT_ADDR=0.0.0.0.")
+		}
 	}
 
 	// Re-validate (e.g. --mode=agent without --server).

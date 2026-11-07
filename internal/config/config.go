@@ -301,6 +301,24 @@ func LoopbackBind(addr string) bool {
 	return false
 }
 
+// EffectiveAddr resolves the server bind address after flags are applied
+// (review §2.3/§1.6): an explicit address always wins; an unset one used to
+// mean "all interfaces", which put every first user's login password on the
+// wire in plaintext. Now unset + TLS off defaults to loopback, and unset +
+// TLS on keeps all interfaces (agents on other hosts must reach the
+// server). The bool reports whether the value was defaulted, so callers can
+// explain the choice. main() and doctor both resolve through here so the
+// running server and its pre-flight report always agree.
+func EffectiveAddr(addr string, tlsOn bool) (string, bool) {
+	if strings.TrimSpace(addr) != "" {
+		return addr, false
+	}
+	if tlsOn {
+		return "", false
+	}
+	return "127.0.0.1", true
+}
+
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
