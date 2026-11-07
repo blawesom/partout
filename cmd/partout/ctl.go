@@ -119,15 +119,18 @@ commands:
 
 	// db-backup and the local update subcommands (keygen/sign/verify) need no
 	// server round-trip; every other command needs the server address.
+	// Bare `partout ctl` prints the command list instead of demanding a
+	// server first (review §2.2): the operator's next move is to read the
+	// usage, not to fix connectivity.
+	if fs.NArg() < 1 {
+		fs.Usage()
+		os.Exit(2)
+	}
 	localOnly := fs.Arg(0) == "db-backup" || fs.Arg(0) == "help" ||
 		(fs.Arg(0) == "elevation" && fs.Arg(1) != "policy") || // show/check/install-sudoers are local; `policy` is the remote store
 		(fs.Arg(0) == "update" && (fs.Arg(1) == "keygen" || fs.Arg(1) == "sign" || fs.Arg(1) == "verify"))
 	if *server == "" && !localOnly {
 		fmt.Fprintln(os.Stderr, "ctl: --server (or PARTOUT_SERVER) is required")
-		os.Exit(2)
-	}
-	if fs.NArg() < 1 {
-		fs.Usage()
 		os.Exit(2)
 	}
 

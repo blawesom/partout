@@ -139,6 +139,184 @@ func TestCtlHelpRendersWithoutServer(t *testing.T) {
 	}
 }
 
+// TestTopLevelUsageContract pins the §2.1/§2.2 first-use guards on the
+// top-level binary:
+//
+//   - a positional-argument guard (fs.NArg) must exist in main() BEFORE the
+//     mode dispatch — otherwise `partout help` / `partout version` / any typo
+//     silently boots a plaintext server on all interfaces;
+//   - the fs.Usage text must name every intercepted subcommand (os.Args[1]
+//     comparisons), so `partout --help` is a real map of the binary;
+//   - the -mode flag help must list mcp (accepted since the MCP server
+//     landed; the help used to say server|agent|embedded only).
+func TestTopLevelUsageContract(t *testing.T) {
+	wd, _ := os.Getwd()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(wd, "main.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+
+	var mainFn *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "main" {
+			mainFn = fd
+			break
+		}
+	}
+	if mainFn == nil {
+		t.Fatal("func main not found")
+	}
+
+	// 1. Intercepted subcommands: every `os.Args[1] == "x"` comparison.
+	intercepted := map[string]bool{}
+	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
+		be, ok := n.(*ast.BinaryExpr)
+		if !ok || be.Op != token.EQL {
+			return true
+		}
+		idx, ok := be.X.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := idx.X.(*ast.SelectorExpr); !ok || sel.Sel.Name != "Args" {
+			return true
+		}
+		if lit, ok := be.Y.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			intercepted[unquote(t, lit.Value)] = true
+		}
+		return true
+	})
+	if len(intercepted) == 0 {
+		t.Fatal("no os.Args[1] subcommand interceptions found in main()")
+	}
+
+	// 2. The usage text must name every intercepted subcommand.
+	var usage string
+	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if v := lit.Value; strings.HasPrefix(v, "`partout —") {
+			usage = strings.Trim(v, "`")
+			return false
+		}
+		return true
+	})
+	if usage == "" {
+		t.Fatal("top-level usage text not found in main()")
+	}
+	for sub := range intercepted {
+		if strings.HasPrefix(sub, "-") {
+			continue // flag-form aliases (--ctl) are documented as flags, not subcommands
+		}
+		if !strings.Contains(usage, sub) {
+			t.Errorf("top-level usage does not mention subcommand %q", sub)
+		}
+	}
+	for _, ghost := range []string{"help", "version"} {
+		if intercepted[ghost] {
+			t.Errorf("%q must not be an intercepted subcommand (the flag/NArg path handles it)", ghost)
+		}
+	}
+
+	// 3. The fs.NArg() guard must precede the mode dispatch (the switch on
+	// cfg.Mode that calls runServer/runAgent/…).
+	nargPos, switchPos := token.NoPos, token.NoPos
+	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NArg" {
+				if nargPos == token.NoPos {
+					nargPos = e.Pos()
+				}
+			}
+		case *ast.SwitchStmt:
+			if sel, ok := e.Tag.(*ast.SelectorExpr); ok && sel.Sel.Name == "Mode" && switchPos == token.NoPos {
+				switchPos = e.Pos()
+			}
+		}
+		return true
+	})
+	if nargPos == token.NoPos {
+		t.Fatal("main() has no fs.NArg() guard — unknown arguments would boot a server")
+	}
+	if switchPos == token.NoPos {
+		t.Fatal("mode dispatch switch not found in main()")
+	}
+	if nargPos > switchPos {
+		t.Error("fs.NArg() guard must run BEFORE the mode dispatch (otherwise a typo boots a server)")
+	}
+
+	// 4. The -mode flag help must accept-document mcp.
+	ast.Inspect(mainFn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for _, rhs := range as.Rhs {
+			call, ok := rhs.(*ast.CallExpr)
+			if !ok || len(call.Args) != 3 {
+				continue
+			}
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && unquote(t, lit.Value) == "mode" {
+				help := unquote(t, call.Args[2].(*ast.BasicLit).Value)
+				if !strings.Contains(help, "mcp") {
+					t.Errorf("-mode help = %q, must document the mcp mode", help)
+				}
+			}
+		}
+		return true
+	})
+}
+
+// TestCtlBareUsageBeforeServerCheck pins §2.2: bare `partout ctl` prints the
+// usage (fs.NArg branch) BEFORE the --server-required error, so the first
+// thing a new operator sees is the command list, not a connectivity demand.
+// (runCtl os.Exits on both paths, so this is checked structurally.)
+func TestCtlBareUsageBeforeServerCheck(t *testing.T) {
+	wd, _ := os.Getwd()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(wd, "ctl.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse ctl.go: %v", err)
+	}
+	var runCtlFn *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok && fd.Name.Name == "runCtl" {
+			runCtlFn = fd
+			break
+		}
+	}
+	if runCtlFn == nil {
+		t.Fatal("func runCtl not found")
+	}
+	var nargPos, reqPos token.Pos
+	ast.Inspect(runCtlFn.Body, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NArg" && nargPos == 0 {
+				nargPos = e.Pos()
+			}
+		case *ast.BasicLit:
+			if e.Kind == token.STRING && strings.Contains(e.Value, "is required") && reqPos == 0 {
+				reqPos = e.Pos()
+			}
+		}
+		return true
+	})
+	if nargPos == 0 {
+		t.Fatal("fs.NArg() usage branch not found in runCtl")
+	}
+	if reqPos == 0 {
+		t.Fatal("--server-required message not found in runCtl")
+	}
+	if nargPos > reqPos {
+		t.Error("bare-ctl usage branch must come before the --server-required check")
+	}
+}
+
 // --- helpers ---------------------------------------------------------------
 
 // dispatchTable returns the real top-level commands (set) and command→handler

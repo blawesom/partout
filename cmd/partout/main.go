@@ -1,9 +1,10 @@
-// Command partout is the single Partout binary, run in one of three modes
+// Command partout is the single Partout binary, run in one of four modes
 // (architecture §1):
 //
 //	partout --mode=server            # control plane: gRPC + REST + SSE on one listener
 //	partout --mode=agent             # host agent: outbound gRPC to the server
 //	partout --mode=embedded          # server + co-located local agent (one process)
+//	partout --mode=mcp               # MCP server for AI assistants (stdio/HTTP)
 //
 // The server multiplexes gRPC (HTTP/2, application/grpc) and REST/SSE
 // (HTTP/1.1 + h2c) on a single TCP listener (PRD §4, architecture §2).
@@ -118,7 +119,28 @@ func main() {
 	}
 
 	fs := flag.NewFlagSet("partout", flag.ContinueOnError)
-	mode := fs.String("mode", cfg.Mode, "server|agent|embedded")
+	// Usage lists the subcommands too: `partout --help` used to print flags
+	// only, so `ctl`/`doctor`/`update`/`uninstall`/`selftest` were invisible
+	// unless already known (review §2.2).
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, `partout — single-binary control plane for Linux host fleets
+
+usage:
+  partout [flags]              run a mode (default: --mode=server)
+  partout <subcommand> [args]  one of:
+
+subcommands:
+  ctl         client for a running server (run, hosts, audit, policy, …)
+  doctor      pre-flight readiness check — starts nothing
+  selftest    embedded pre-install suite (config, store, crypto, API)
+  update      fetch + verify a signed release, swap the server, roll the fleet
+  uninstall   remove this host's installation (units, env, state, binary)
+
+flags:
+`)
+		fs.PrintDefaults()
+	}
+	mode := fs.String("mode", cfg.Mode, "server|agent|embedded|mcp")
 	port := fs.Int("port", cfg.Port, "server: single listener port")
 	addr := fs.String("addr", cfg.Addr, "server: bind address (empty = all interfaces; use 127.0.0.1 behind a reverse proxy)")
 	db := fs.String("db", cfg.DBPath, "server: SQLite path")
@@ -138,12 +160,27 @@ func main() {
 	caFile := fs.String("ca-file", cfg.TLSCAFile, "agent: path to the server root CA (PEM); enables TLS enrollment + mTLS stream")
 	version := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return // -h/--help: usage already printed via fs.Usage
+		}
 		fmt.Fprintln(os.Stderr, "partout:", err)
 		os.Exit(2)
 	}
 	if *version {
 		fmt.Println("partout " + agentfacts.Version)
 		return
+	}
+	// No top-level invocation takes positional arguments — anything left
+	// over is a typo or an unknown subcommand, never a reason to silently
+	// boot a server (review §2.1: `partout help` used to start one).
+	if fs.NArg() > 0 {
+		if fs.Arg(0) == "help" {
+			fs.Usage()
+			return
+		}
+		fmt.Fprintf(os.Stderr, "partout: unrecognized argument %q — not a subcommand (ctl, doctor, selftest, update, uninstall) or flag; see -h\n\n", fs.Arg(0))
+		fs.Usage()
+		os.Exit(2)
 	}
 
 	// Apply effective values (flag > env > default: each flag was seeded with
