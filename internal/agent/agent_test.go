@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/blawesom/partout/internal/agent"
+	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
 	"github.com/blawesom/partout/internal/control"
 	"github.com/blawesom/partout/internal/identity"
@@ -25,6 +26,32 @@ import (
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
+
+// newTestServer builds a stream handler + control plane sharing one server
+// identity: the policy bundles pushed to agents carry the server pubkey and
+// decisions are signed with the matching key. The agent guardrail fails
+// closed without a known server key, exactly like a production server (main.go
+// always installs an identity via LoadOrCreateServerIdentity).
+func newTestServer(t *testing.T, st *store.Store, sseB *sse.Broker, srvLog, ctlLog *log.Logger) (*stream.Handler, *control.Control) {
+	t.Helper()
+	// Never pass a nil *log.Logger downstream (control.New logs through it on
+	// audit failures) — default to a discard logger.
+	if srvLog == nil {
+		srvLog = log.New(io.Discard, "srv: ", 0)
+	}
+	if ctlLog == nil {
+		ctlLog = log.New(io.Discard, "ctl: ", 0)
+	}
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatalf("server identity: %v", err)
+	}
+	h := stream.NewHandler(st, sseB, srvLog)
+	h.SetServerPubKey(ident.PubB64())
+	ctl := control.New(st, h, sseB, ctlLog)
+	ctl.SetIdentity(ident)
+	return h, ctl
+}
 
 // TestAgentRunLoop runs the real agent run loop against a real (localhost
 // TCP) server: connect, handshake, facts, command execution, output capture.
@@ -37,8 +64,7 @@ func TestAgentRunLoop(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 
 	sseB := sse.New()
-	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
-	ctl := control.New(st, h, sseB, log.New(io.Discard, "ctl: ", 0))
+	h, ctl := newTestServer(t, st, sseB, log.New(io.Discard, "srv: ", 0), log.New(io.Discard, "ctl: ", 0))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -190,7 +216,7 @@ func TestAgentRunRevoked(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 
 	sseB := sse.New()
-	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	h, _ := newTestServer(t, st, sseB, log.New(io.Discard, "srv: ", 0), nil)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -272,8 +298,7 @@ func TestOfflineSpoolReplay(t *testing.T) {
 	ctlW := &testLogWriter{t: t}
 	agW := &testLogWriter{t: t}
 	t.Cleanup(func() { srvW.close(); ctlW.close(); agW.close() })
-	h := stream.NewHandler(st, sseB, newTestLogger(srvW, "srv: "))
-	ctl := control.New(st, h, sseB, newTestLogger(ctlW, "ctl: "))
+	h, ctl := newTestServer(t, st, sseB, newTestLogger(srvW, "srv: "), newTestLogger(ctlW, "ctl: "))
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -522,7 +547,7 @@ func TestAgentObserveFactsUpload(t *testing.T) {
 	defer st.Close()
 
 	sseB := sse.New()
-	h := stream.NewHandler(st, sseB, log.New(io.Discard, "srv: ", 0))
+	h, _ := newTestServer(t, st, sseB, log.New(io.Discard, "srv: ", 0), nil)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -590,3 +615,4 @@ func TestAgentObserveFactsUpload(t *testing.T) {
 		t.Errorf("blob has no known domain key: %s", blob)
 	}
 }
+

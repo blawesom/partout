@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/blawesom/partout/internal/policy"
@@ -446,5 +447,25 @@ func TestRecheckApprovedEOLPkgApply(t *testing.T) {
 	}
 	if ok, reason := g.RecheckPkg(op); !ok {
 		t.Fatalf("approved ended-host pkg.apply should pass; reason: %s", reason)
+	}
+}
+
+// TestRecheckNoServerPubkeyFailsClosed: a loaded bundle without a server
+// public key must deny — otherwise a MITM on a plaintext stream could push
+// its own bundle+pubkey and sign decisions itself.
+func TestRecheckNoServerPubkeyFailsClosed(t *testing.T) {
+	_, priv := testServerKey(t)
+	g := NewGuard("ag_test", t.TempDir())
+	// Bundle WITHOUT ServerPubkey.
+	g.OnBundle(&pb.PolicyBundle{Version: 7, RulesJson: "[]"})
+	sig := policy.SignDecision(priv, "r1", 7, policy.EffectAllow, nil, "admin", "")
+	cmd := &pb.Command{RunId: "r1", Cmd: "ls"}
+	cmd.Decision = &pb.Decision{RunId: "r1", BundleVersion: 7, Effect: policy.EffectAllow, ActorRole: "admin", Sig: sig}
+	ok, reason := g.Recheck(cmd)
+	if ok {
+		t.Fatal("must deny when the server pubkey is unknown")
+	}
+	if !strings.Contains(reason, "public key") {
+		t.Fatalf("reason = %q, want a public-key failure", reason)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -510,3 +512,59 @@ func TestPartialSendKeepsRunAndUsage(t *testing.T) {
 }
 
 var errStop = errors.New("stop")
+
+// TestSpoolFileNameTraversal: a hostile run id (path separators etc.) must
+// never steer the spool file outside the spool dir.
+func TestSpoolFileNameTraversal(t *testing.T) {
+	for _, id := range []string{"../../etc/cron.d/evil", "/abs/path", "..", "a/b", "run with spaces", string(make([]byte, 300))} {
+		name := spoolFileName(id)
+		if strings.ContainsAny(name, "/\\") || name == ".sp" || strings.HasPrefix(name, ".") && name != ".sp" {
+			if strings.ContainsAny(name, "/\\") {
+				t.Fatalf("spoolFileName(%q) = %q contains a path separator", id, name)
+			}
+		}
+		if filepath.Base(name) != name {
+			t.Fatalf("spoolFileName(%q) = %q is not a plain file name", id, name)
+		}
+	}
+	// Well-formed ids pass through unchanged.
+	if got := spoolFileName("run_abc123"); got != "run_abc123.sp" {
+		t.Fatalf("spoolFileName(run_abc123) = %q", got)
+	}
+}
+
+// TestAppendHostileRunID: appending under a hostile run id writes only inside
+// the spool dir.
+func TestAppendHostileRunID(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	evil := "../../outside"
+	if err := s.Append(evil, makeOutput(evil, 0, []byte("x"))); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	// Force the disk tier so the file is actually created.
+	s.mu.Lock()
+	r := s.runs[evil]
+	s.spillLocked(r)
+	s.mu.Unlock()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "..") || strings.ContainsAny(e.Name(), "/\\") {
+			t.Fatalf("spool dir contains unsafe name %q", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("spool dir has %d entries, want 1 (the hashed file)", len(entries))
+	}
+	// Nothing was written outside the dir.
+	if _, err := os.Stat(filepath.Join(dir, "..", "outside.sp")); err == nil {
+		t.Fatal("file escaped the spool dir")
+	}
+}

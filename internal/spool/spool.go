@@ -31,12 +31,15 @@ package spool
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -45,6 +48,23 @@ import (
 
 	pb "github.com/blawesom/partout/internal/proto"
 )
+
+// safeRunIDRe bounds what a server-supplied run id may look like when it
+// becomes a spool file name. Anything else is hashed into a safe name, so a
+// malicious or compromised server cannot steer file writes outside the
+// spool dir with a crafted run_id (e.g. "../../x").
+var safeRunIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// spoolFileName maps a run id to its on-disk spool file name inside the spool
+// dir. Well-formed ids pass through; anything else (path separators, dots,
+// overlong, non-ASCII) is replaced by a sha256-derived name.
+func spoolFileName(id string) string {
+	if safeRunIDRe.MatchString(id) {
+		return id + ".sp"
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "x_" + hex.EncodeToString(sum[:8]) + ".sp"
+}
 
 // Proposed defaults (architecture §15), now implemented.
 const (
@@ -385,7 +405,7 @@ func (s *Spool) openFileLocked(r *run) (*os.File, error) {
 	if r.file != nil {
 		return r.file, nil
 	}
-	f, err := os.OpenFile(filepath.Join(s.cfg.Dir, r.id+".sp"),
+	f, err := os.OpenFile(filepath.Join(s.cfg.Dir, spoolFileName(r.id)),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
@@ -403,7 +423,7 @@ func (s *Spool) snapshotLocked(r *run) ([]*record, error) {
 		copy(out, r.recs)
 		return out, nil
 	}
-	return readSpoolFile(filepath.Join(s.cfg.Dir, r.id+".sp"))
+	return readSpoolFile(filepath.Join(s.cfg.Dir, spoolFileName(r.id)))
 }
 
 // dropPrefixLocked removes the first n records of a run (those just sent by
@@ -437,7 +457,7 @@ func (s *Spool) dropPrefixLocked(id string, n int) (gone bool) {
 	}
 
 	// Disk tier: rewrite the file with the records after the drained prefix.
-	recs, err := readSpoolFile(filepath.Join(s.cfg.Dir, id+".sp"))
+	recs, err := readSpoolFile(filepath.Join(s.cfg.Dir, spoolFileName(id)))
 	if err != nil {
 		// Unreadable: drop the run rather than wedge the spool.
 		s.dropLocked(id)
@@ -470,7 +490,7 @@ func (s *Spool) dropPrefixLocked(id string, n int) (gone bool) {
 // rewriteFileLocked atomically replaces a disk run's log with the given
 // records (temp file + rename), re-syncing the open append handle.
 func (s *Spool) rewriteFileLocked(r *run, recs []*record) error {
-	path := filepath.Join(s.cfg.Dir, r.id+".sp")
+	path := filepath.Join(s.cfg.Dir, spoolFileName(r.id))
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -538,7 +558,7 @@ func (s *Spool) dropLocked(id string) {
 	}
 	s.mem -= r.memBytes
 	s.disk -= r.diskBytes
-	_ = os.Remove(filepath.Join(s.cfg.Dir, id+".sp"))
+	_ = os.Remove(filepath.Join(s.cfg.Dir, spoolFileName(id)))
 }
 
 // pruneLocked drops runs older than the TTL.

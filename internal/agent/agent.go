@@ -137,6 +137,19 @@ type Agent struct {
 	activeMu      sync.Mutex
 	activeRunners map[string]context.CancelFunc
 
+	// uploadsMu guards uploads: the set of agent-created upload temp paths
+	// (from FILE_OP_UPLOAD_BEGIN), each tagged with the stream generation
+	// that created it. CHUNK/COMMIT/ABORT must reference one of them on the
+	// CURRENT stream — the wire-supplied TempPath is otherwise an absolute
+	// path a malicious server could steer anywhere the agent user can write,
+	// and a stale registration must not survive a reconnect.
+	uploadsMu sync.Mutex
+	uploads   map[string]uploadReg
+
+	// streamGen counts stream attempts (incremented per Run-loop iteration);
+	// upload registrations are valid only on the generation that created them.
+	streamGen atomic.Uint64
+
 	// sessions manages live PTY sessions (PRD §5.2.2). Killed on every
 	// stream end (D2): a PTY without a stream cannot be meaningfully resumed.
 	sessions *session.Manager
@@ -221,6 +234,7 @@ func New(id *identity.Identity, cfg *config.Config, lg *log.Logger) *Agent {
 		secrets:       secCache,
 		spooled:       make(map[string]bool),
 		activeRunners: make(map[string]context.CancelFunc),
+		uploads:       make(map[string]uploadReg),
 		fsCfg:         fs.Config{},
 		staticFacts:   map[string]string{},
 	}
@@ -456,12 +470,17 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	backoff := backoffBase
 	for {
+		a.streamGen.Add(1) // upload registrations bind to this stream generation
 		err := a.connectAndStream(ctx)
 		// D2: PTY sessions die with the stream (a dead terminal cannot be
 		// resumed); the server marks them interrupted on disconnect.
 		if n := a.sessions.KillAll(); n > 0 {
 			a.log.Printf("agent: killed %d session(s) on stream end", n)
 		}
+		// In-flight uploads die with the stream too: drop their registrations
+		// (a later CHUNK/COMMIT on the old temp path gets 403) and remove the
+		// orphaned temp files. The server re-BEGINs on the new stream.
+		a.clearStreamUploads()
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -1571,6 +1590,95 @@ func fileOpError(op *pb.FileOp, err error) *pb.FileOpResult {
 // execFileOp executes one FileOp and sends its result (PRD §5.3). It runs
 // off the envelope loop so a slow transfer cannot starve CANCEL/heartbeat
 // traffic.
+// uploadReg is one active upload temp path: the stream generation that
+// created it and when (abandoned uploads expire after uploadTTL).
+type uploadReg struct {
+	gen   uint64
+	since time.Time
+}
+
+const (
+	// maxLiveUploads bounds concurrent BEGINs per stream — a hostile server
+	// must not grow the registration map (and the temp files) without limit.
+	maxLiveUploads = 16
+	// uploadTTL expires abandoned upload registrations on a live stream.
+	uploadTTL = time.Hour
+)
+
+// knownUpload reports whether tempPath is an upload temp this agent created
+// via FILE_OP_UPLOAD_BEGIN on the CURRENT stream. Uploads are stream-bound:
+// a registration from a previous stream (before a reconnect) never matches.
+func (a *Agent) knownUpload(tempPath string) bool {
+	gen := a.streamGen.Load()
+	a.uploadsMu.Lock()
+	defer a.uploadsMu.Unlock()
+	e, ok := a.uploads[tempPath]
+	return ok && e.gen == gen
+}
+
+// registerUpload binds an agent-created temp path to the current stream,
+// expiring abandoned uploads (TTL) and enforcing the live-upload cap. On
+// failure the caller must remove the temp file (it is NOT registered).
+func (a *Agent) registerUpload(tempPath string) error {
+	gen := a.streamGen.Load()
+	now := time.Now()
+	a.uploadsMu.Lock()
+	defer a.uploadsMu.Unlock()
+	live := 0
+	for p, e := range a.uploads {
+		if e.gen != gen {
+			continue
+		}
+		if now.Sub(e.since) > uploadTTL {
+			_ = fs.UploadAbort(p) // best-effort temp removal
+			delete(a.uploads, p)
+			continue
+		}
+		live++
+	}
+	if live >= maxLiveUploads {
+		return fmt.Errorf("agent: %d live uploads on this stream (cap %d)", live, maxLiveUploads)
+	}
+	a.uploads[tempPath] = uploadReg{gen: gen, since: now}
+	return nil
+}
+
+// forgetUpload drops a temp path from the active upload set (after a
+// successful commit/abort, or once the temp file is confirmed gone).
+func (a *Agent) forgetUpload(tempPath string) {
+	a.uploadsMu.Lock()
+	defer a.uploadsMu.Unlock()
+	delete(a.uploads, tempPath)
+}
+
+// forgetUploadIfGone drops the registration only if the temp file no longer
+// exists on disk (the commit path removes it on most failure paths). A failed
+// commit/abort whose temp still exists keeps the registration, so the
+// operation can be retried or cleaned up with ABORT instead of 403-ing.
+func (a *Agent) forgetUploadIfGone(tempPath string) {
+	if _, err := os.Lstat(tempPath); os.IsNotExist(err) {
+		a.forgetUpload(tempPath)
+	}
+}
+
+// clearStreamUploads drops every upload registration at stream teardown (an
+// upload cannot span a reconnect — the server must re-BEGIN on the new
+// stream) and removes the orphaned temp files.
+func (a *Agent) clearStreamUploads() {
+	a.uploadsMu.Lock()
+	paths := make([]string, 0, len(a.uploads))
+	for p := range a.uploads {
+		paths = append(paths, p)
+	}
+	a.uploads = make(map[string]uploadReg)
+	a.uploadsMu.Unlock()
+	for _, p := range paths {
+		if err := fs.UploadAbort(p); err != nil && !os.IsNotExist(err) {
+			a.log.Printf("agent: remove orphaned upload temp %s: %v", p, err)
+		}
+	}
+}
+
 func (a *Agent) execFileOp(op *pb.FileOp) {
 	// Fail closed when the file root is unavailable: no file operation may
 	// proceed without a confinement root (docs/spec-file-root.md).
@@ -1633,7 +1741,16 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		temp, err := fs.UploadBegin(root, op.Path, op.TotalSize, cfg)
 		if err != nil {
 			res = fileOpError(op, err)
+		} else if rerr := a.registerUpload(temp); rerr != nil {
+			// Cap/expiry rejection: never leave an unregistered temp behind.
+			_ = fs.UploadAbort(temp)
+			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 409, Error: rerr.Error()}
 		} else {
+			// Bind the agent-created temp path to the current stream: later
+			// CHUNK/COMMIT/ABORT envelopes must reference exactly this path
+			// (the wire-supplied TempPath is an absolute path — without this
+			// binding a malicious server could write chunk bytes anywhere the
+			// agent can).
 			res = &pb.FileOpResult{
 				OpId: op.OpId, Kind: op.Kind, Code: 0,
 				TempPath: temp,
@@ -1641,6 +1758,11 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_UPLOAD_CHUNK:
+		if !a.knownUpload(op.TempPath) {
+			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 403,
+				Error: "upload chunk for unknown temp path (no matching UPLOAD_BEGIN)"}
+			break
+		}
 		recv, err := fs.UploadChunk(op.TempPath, int64(op.Offset), op.Data, cfg)
 		if err != nil {
 			res = fileOpError(op, err)
@@ -1652,7 +1774,21 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_UPLOAD_COMMIT:
+		if !a.knownUpload(op.TempPath) {
+			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 403,
+				Error: "upload commit for unknown temp path (no matching UPLOAD_BEGIN)"}
+			break
+		}
 		sha, err := fs.UploadCommit(root, op.TempPath, op.Path, op.Mode, op.TotalSize)
+		if err == nil {
+			a.forgetUpload(op.TempPath) // renamed into place — consumed
+		} else {
+			// The commit path removes the temp on most failure paths; forget
+			// the registration only once the temp is confirmed gone. If it
+			// still exists, keep the registration so COMMIT can be retried or
+			// ABORT can clean it up (instead of 403-ing every retry).
+			a.forgetUploadIfGone(op.TempPath)
+		}
 		if err != nil {
 			res = fileOpError(op, err)
 		} else {
@@ -1663,7 +1799,21 @@ func (a *Agent) execFileOp(op *pb.FileOp) {
 		}
 
 	case pb.FileOpKind_FILE_OP_UPLOAD_ABORT:
-		if err := fs.UploadAbort(op.TempPath); err != nil {
+		if !a.knownUpload(op.TempPath) {
+			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 403,
+				Error: "upload abort for unknown temp path (no matching UPLOAD_BEGIN)"}
+			break
+		}
+		err := fs.UploadAbort(op.TempPath)
+		if err != nil && os.IsNotExist(err) {
+			err = nil // temp already gone — ABORT is idempotent
+		}
+		if err == nil {
+			a.forgetUpload(op.TempPath) // temp removed (or already gone) — consumed
+		}
+		// else: the temp still exists → keep the registration so ABORT can be
+		// retried rather than 403-ing.
+		if err != nil {
 			res = fileOpError(op, err)
 		} else {
 			res = &pb.FileOpResult{OpId: op.OpId, Kind: op.Kind, Code: 0}

@@ -4,6 +4,14 @@
 // signature, (b) that the decision's bundle version matches its cached
 // bundle, and (c) re-evaluates the rule set over the local action.  Any
 // mismatch → deny, emit ACK_DENIED_AGENT.
+//
+// Rollout note (fail-closed signature check): the check in (a) denies when
+// the cached bundle carries NO server public key. Every server since v0.9.19
+// pushes its Ed25519 public key in POLICY_BUNDLE (stream.Handler.SetServerPubKey,
+// wired in cmd/partout/main.go), so this never fires against a current
+// server. Upgrade order is therefore servers-first; an agent running ahead of
+// a keyless (misconfigured/test) server stays denied until the server is
+// fixed — intended, not a fleet-wide hazard.
 package guardrail
 
 import (
@@ -139,15 +147,22 @@ func (g *Guard) Recheck(cmd *pb.Command) (bool, string) {
 		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
 			d.BundleVersion, g.version)
 	}
-	// (a) verify the decision signature (when the server public key is known).
-	if len(g.serverPub) > 0 {
-		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
-			return false, "guardrail: decision signature invalid"
-		}
+	// (a) verify the decision signature. Fail closed when the server public
+	// key is unknown: without it a forged decision (e.g. injected over a
+	// plaintext stream by a MITM pushing its own bundle) would be accepted.
+	// Every bundle pushed by a current server carries the key, so a loaded
+	// guard without one means legacy state — deny until the next bundle.
+	if len(g.serverPub) == 0 {
+		return false, "guardrail: server public key unknown (fail closed)"
+	}
+	if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+		d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
+		return false, "guardrail: decision signature invalid"
 	}
 	// (c) re-evaluate the rule set over the local action (the bundle
 	// carries this agent's tags/roles; the decision carries the actor role).
+	// Groups is nil: group:<name> predicates resolve server-side; the signed
+	// server decision above is the authoritative agent-side gate.
 	action := policy.Action{
 		HostID:      g.agentID,
 		HostTags:    g.hostTags,
@@ -192,11 +207,12 @@ func (g *Guard) RecheckFile(op *pb.FileOp) (bool, string) {
 		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
 			d.BundleVersion, g.version)
 	}
-	if len(g.serverPub) > 0 {
-		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
-			return false, "guardrail: decision signature invalid"
-		}
+	if len(g.serverPub) == 0 {
+		return false, "guardrail: server public key unknown (fail closed)"
+	}
+	if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+		d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
+		return false, "guardrail: decision signature invalid"
 	}
 	class, ok := policy.FileOpClass(op.Kind)
 	if !ok {
@@ -254,11 +270,12 @@ func (g *Guard) RecheckPkg(op *pb.PkgOp) (bool, string) {
 		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
 			d.BundleVersion, g.version)
 	}
-	if len(g.serverPub) > 0 {
-		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
-			return false, "guardrail: decision signature invalid"
-		}
+	if len(g.serverPub) == 0 {
+		return false, "guardrail: server public key unknown (fail closed)"
+	}
+	if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+		d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
+		return false, "guardrail: decision signature invalid"
 	}
 	class, ok := policy.PkgOpClass(op.Kind)
 	if !ok {
@@ -299,11 +316,12 @@ func (g *Guard) RecheckTask(run *pb.TaskRun) (bool, string) {
 		return false, fmt.Sprintf("guardrail: bundle version mismatch (decision=%d cached=%d)",
 			d.BundleVersion, g.version)
 	}
-	if len(g.serverPub) > 0 {
-		if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
-			d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
-			return false, "guardrail: decision signature invalid"
-		}
+	if len(g.serverPub) == 0 {
+		return false, "guardrail: server public key unknown (fail closed)"
+	}
+	if !policy.VerifyDecision(g.serverPub, d.RunId, d.BundleVersion,
+		d.Effect, d.MatchedRules, d.ActorRole, d.ApprovalId, d.Sig) {
+		return false, "guardrail: decision signature invalid"
 	}
 	action := policy.Action{
 		HostID:      g.agentID,
