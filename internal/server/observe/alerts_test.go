@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -14,9 +15,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blawesom/partout/internal/safehttp"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
 )
+
+// TestMain swaps the delivery client for the loopback-allowing test variant:
+// httptest receivers bind 127.0.0.1, which the production safehttp guard
+// (correctly) refuses to dial.
+func TestMain(m *testing.M) {
+	webhookClient = safehttp.NewClientAllowLoopback(10 * time.Second)
+	os.Exit(m.Run())
+}
 
 func newEngine(t *testing.T, tick time.Duration) (*Controller, *store.Store) {
 	t.Helper()

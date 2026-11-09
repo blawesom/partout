@@ -21,6 +21,7 @@ import (
 
 	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/id"
+	"github.com/blawesom/partout/internal/safehttp"
 	"github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/sse"
 	"github.com/blawesom/partout/internal/store"
@@ -1118,7 +1119,7 @@ func (c *Controller) emit(a *store.Alert, event string) {
 }
 
 func (c *Controller) audit(a *store.Alert) {
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: "alert", AgentID: a.AgentID, Actor: "system",
 		Payload: `{"alert_id":"` + a.ID + `","rule_id":"` + a.RuleID + `","state":"` + a.State + `","kind":"` + a.Kind + `"}`,
 	})
@@ -1126,8 +1127,11 @@ func (c *Controller) audit(a *store.Alert) {
 
 // webhookClient is the delivery HTTP client: bounded so a slow receiver
 // cannot stall the engine's evaluate loop (deliveries run on their own
-// goroutine, but the timeout bounds the goroutine's life).
-var webhookClient = &http.Client{Timeout: 10 * time.Second}
+// goroutine, but the timeout bounds the goroutine's life). It is built with
+// safehttp so the server-side POST to an operator-configured URL can never
+// reach loopback / link-local (cloud metadata) addresses — the dial-time
+// guard defeats DNS rebinding between rule validation and delivery.
+var webhookClient = safehttp.NewClient(10 * time.Second)
 
 // deliverChannels pushes the alert to the rule's external channels (PRD §5.4
 // "alert channel system": webhook + ntfy). Fire-and-record: NO retry (a
@@ -1259,7 +1263,7 @@ func (c *Controller) deliverAsync(url, contentType string, body []byte, token, a
 				c.log.Printf("observe/alerts: %s %s %s: %s", auditKind, event, url, outcome)
 			}
 		}
-		_ = c.st.AppendAudit(store.AuditEvent{
+		c.st.AppendAuditLogged(c.log, store.AuditEvent{
 			TS: time.Now().Unix(), Kind: auditKind, AgentID: a.AgentID, Actor: "system",
 			Payload: fmt.Sprintf(`{"alert_id":%q,"rule_id":%q,"event":%q,"url":%q,"status":%d,"outcome":%q}`,
 				a.ID, r.ID, event, url, status, outcome),
