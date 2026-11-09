@@ -8,9 +8,13 @@
 package api
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 	"sync/atomic"
+
+	"github.com/blawesom/partout/internal/sse"
 )
 
 type role int
@@ -65,14 +69,30 @@ func (a *auth) configured() bool {
 	return a.admin != "" || a.operator != "" || a.viewer != ""
 }
 
+// roleFor maps a static bearer token to its role. Tokens are compared as
+// sha256 hashes in constant time so a timing side channel cannot leak how
+// much of a token prefix matched (the tokens are high-entropy, but the
+// comparison should not rely on that).
 func (a *auth) roleFor(tok string) role {
-	switch tok {
-	case a.admin:
-		return roleAdmin
-	case a.operator:
-		return roleOperator
-	case a.viewer:
-		return roleViewer
+	if tok == "" {
+		return roleNone
+	}
+	tokH := sha256.Sum256([]byte(tok))
+	for _, c := range []struct {
+		stored string
+		role   role
+	}{
+		{a.admin, roleAdmin},
+		{a.operator, roleOperator},
+		{a.viewer, roleViewer},
+	} {
+		if c.stored == "" {
+			continue
+		}
+		storedH := sha256.Sum256([]byte(c.stored))
+		if subtle.ConstantTimeCompare(tokH[:], storedH[:]) == 1 {
+			return c.role
+		}
 	}
 	return roleNone
 }
@@ -193,7 +213,9 @@ func (h *Handler) requireCredential(min role, source func(*http.Request) string)
 				if warnedOnce.CompareAndSwap(false, true) && h.log != nil {
 					h.log.Printf("api: no RBAC tokens or local users configured; running in single-user local mode (all requests allowed)")
 				}
-				next.ServeHTTP(w, r)
+				// Single-user local mode: full clearance (the SSE stream sees
+				// every event kind, as before role-gating existed).
+				next.ServeHTTP(w, sse.ContextWithClearance(r, int(roleAdmin)))
 				return
 			}
 			tok := source(r)
@@ -222,7 +244,9 @@ func (h *Handler) requireCredential(min role, source func(*http.Request) string)
 					"insufficient role (need "+min.String()+", got "+got.String()+")", nil)
 				return
 			}
-			next.ServeHTTP(w, r)
+			// Attach the role as the SSE clearance so the broker can
+			// role-gate event kinds on the stream (e.g. session.* → operator).
+			next.ServeHTTP(w, sse.ContextWithClearance(r, int(got)))
 		})
 	}
 }
