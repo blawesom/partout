@@ -495,6 +495,26 @@ forward. If the server was down longer than the retention window, some output/se
 may be gone (by design; PRD §9). The audit log (the immutable record) is the recovery
 anchor for forensics.
 
+**Audit hash-chain keys (v0.9.19+).** New `audit_events` rows are chained with HMAC-SHA256
+(algo=2) under a 32-byte key, so database write access alone can no longer rewrite the
+chain. The default key is derived from the server Ed25519 identity (`<db dir>/identity`);
+`PARTOUT_AUDIT_KEY` (base64, exactly 32 bytes) is the explicit override/recovery key and
+wins when set. Legacy rows (algo=1, unkeyed sha256) always verify. `GET /api/v1/audit/verify`
+returns the chain head with a `key_id` (`k:<fingerprint of the key material>`) and an
+Ed25519 signature over the head — anchor the signed head out-of-band (cron → external
+store) to also detect a whole-DB rewrite.
+- **Key changes are refused on an existing chain**: at startup the server compares the
+  resolved key id with the one pinned in `audit_chain_state.key_id` and refuses to start on
+  a mismatch (otherwise every old algo=2 row would fail closed as "tampered"). Recovery:
+  restore the original identity dir or set `PARTOUT_AUDIT_KEY` to the original key.
+- **Rotation / new chain**: there is no in-place rotation. To move to a new key, archive
+  the DB (it stays verifiable offline with the old key), start a fresh DB with the new
+  key, and anchor the old chain's signed head before archiving.
+- **Losing the key** makes algo=2 rows unverifiable — the verify endpoint fails closed
+  (indistinguishable from tampering). Algo=1 legacy rows remain verifiable. Back up the
+  identity dir (or the env key) offsite alongside the DB if you need long-term
+  verifiability of keyed rows.
+
 ### 4.2 Upgrades (M8.1: signed one-command)
 
 **Pre-release: run the gate.** `scripts/beta-gate.sh` — the one-command
@@ -747,7 +767,25 @@ wrong predicate).
 - **Leak**: treat it as a security incident. Rotate the master key (loss of the store —
   re-create all secrets). Review audit logs for any unauthorized use.
 
-### 6.6 Spool full (agent-side)
+### 6.6 Audit chain key mismatch / loss (identity dir lost/regenerated)
+
+Symptom A — **startup refused**: `audit chain key mismatch: this DB's chain was written with
+key k:… but the server resolves k:…`. The server deliberately will not start with a
+different key on an existing chain (old algo=2 rows would fail closed as tampered).
+
+1. Restore the original identity dir from backup, or set `PARTOUT_AUDIT_KEY` to the original
+   32-byte key — the server logs the active key id (`k:<fp>`) at startup.
+2. If you intend a NEW key (rotation): archive the current DB first (it remains verifiable
+   offline with the old key; anchor its signed head via `GET /api/v1/audit/verify`), then
+   start with an empty DB. There is no in-place rotation.
+
+Symptom B — **verify fails closed**: `partout ctl audit verify` reports keyed-chain rows
+that cannot be verified. Same remedy: the key id in the verify response (`head.key_id`)
+names the key the chain was written with. If no copy of that key exists, algo=2 rows are
+unverifiable by design; algo=1 legacy rows still verify, and previously anchored signed
+heads remain valid.
+
+### 6.7 Spool full (agent-side)
 
 Symptom: spooled runs dropped wholesale (oldest first); their server-side runs stay
 `interrupted` instead of reaching a final state.
