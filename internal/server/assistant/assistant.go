@@ -310,7 +310,7 @@ func (s *Service) RunTurn(ctx context.Context, sessID, userText, token, userID, 
 		egressHost = u.Host
 	}
 	emit(Event{Type: "egress", Content: egressHost, Detail: c.Model})
-	_ = s.st.AppendAudit(store.AuditEvent{TS: time.Now().Unix(), Kind: "assistant.egress", Actor: userID,
+	s.st.AppendAuditLogged(s.lg, store.AuditEvent{TS: time.Now().Unix(), Kind: "assistant.egress", Actor: userID,
 		Payload: fmt.Sprintf(`{"session":%q,"endpoint":%q,"model":%q}`, sessID, egressHost, c.Model)})
 
 	deadline := time.Now().Add(time.Duration(c.TimeoutS) * time.Second)

@@ -21,6 +21,7 @@ import (
 
 	"github.com/blawesom/partout/internal/policy"
 	pb "github.com/blawesom/partout/internal/proto"
+	"github.com/blawesom/partout/internal/selector"
 	"github.com/blawesom/partout/internal/server/approvals"
 	"github.com/blawesom/partout/internal/server/jobs"
 	"github.com/blawesom/partout/internal/server/stream"
@@ -163,12 +164,14 @@ func (m *Manager) StartRun(p Params) (*store.UpdateRun, *store.ApprovalRequest, 
 
 	// Per-host policy gate (update.apply class).
 	rules, _ := m.st.GetPolicyRules()
+	groups := m.st.SelectorGroups()
 	var denied, approval []string
 	for _, id := range ids {
 		dec := policy.Evaluate(rules, policy.Action{
 			ActionClass: policy.ActionUpdateApply,
 			HostID:      id,
 			ActorRole:   p.ActorRole,
+			Groups:      groups,
 		})
 		switch dec.Effect {
 		case policy.EffectDeny:
@@ -203,7 +206,7 @@ func (m *Manager) StartRun(p Params) (*store.UpdateRun, *store.ApprovalRequest, 
 	}
 	for _, c := range cohort {
 		if contains(denied, c) {
-			return nil, nil, fmt.Errorf("policy denied update.apply for canary host %s (%s)", c, decReason(rules, c, p.ActorRole))
+			return nil, nil, fmt.Errorf("policy denied update.apply for canary host %s (%s)", c, decReason(rules, c, p.ActorRole, groups))
 		}
 	}
 	run.CanaryHosts = strings.Join(cohort, ",")
@@ -215,7 +218,7 @@ func (m *Manager) StartRun(p Params) (*store.UpdateRun, *store.ApprovalRequest, 
 		if contains(denied, id) {
 			// Non-canary denials are excluded up front, recorded as skipped.
 			uh.Status = HostSkipped
-			uh.Error = "policy: " + decReason(rules, id, p.ActorRole)
+			uh.Error = "policy: " + decReason(rules, id, p.ActorRole, groups)
 		}
 		uhs = append(uhs, uh)
 	}
@@ -249,7 +252,7 @@ func (m *Manager) StartRun(p Params) (*store.UpdateRun, *store.ApprovalRequest, 
 			RunID:        run.ID,
 			Actor:        p.Actor,
 			ActorRole:    p.ActorRole,
-			MatchedRules: matchedRuleIDs(rules, approval, p.ActorRole),
+			MatchedRules: matchedRuleIDs(rules, approval, p.ActorRole, groups),
 			Payload: map[string]any{
 				"params":   p,
 				"run_id":   run.ID,
@@ -379,11 +382,11 @@ func (m *Manager) resolveRelease(id, version string) (store.Release, error) {
 
 // matchedRuleIDs returns the rule IDs that forced approval for the given
 // hosts (carried on the approval request for traceability).
-func matchedRuleIDs(rules []policy.Rule, hostIDs []string, actorRole string) []string {
+func matchedRuleIDs(rules []policy.Rule, hostIDs []string, actorRole string, groups selector.Groups) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, id := range hostIDs {
-		dec := policy.Evaluate(rules, policy.Action{ActionClass: policy.ActionUpdateApply, HostID: id, ActorRole: actorRole})
+		dec := policy.Evaluate(rules, policy.Action{ActionClass: policy.ActionUpdateApply, HostID: id, ActorRole: actorRole, Groups: groups})
 		for _, r := range dec.MatchedRules {
 			if !seen[r] {
 				seen[r] = true
@@ -394,8 +397,8 @@ func matchedRuleIDs(rules []policy.Rule, hostIDs []string, actorRole string) []s
 	return out
 }
 
-func decReason(rules []policy.Rule, hostID, actorRole string) string {
-	dec := policy.Evaluate(rules, policy.Action{ActionClass: policy.ActionUpdateApply, HostID: hostID, ActorRole: actorRole})
+func decReason(rules []policy.Rule, hostID, actorRole string, groups selector.Groups) string {
+	dec := policy.Evaluate(rules, policy.Action{ActionClass: policy.ActionUpdateApply, HostID: hostID, ActorRole: actorRole, Groups: groups})
 	if dec.Reason != "" {
 		return dec.Reason
 	}
@@ -616,10 +619,11 @@ func (m *Manager) Start(runID, actor string) error {
 			ActionClass: policy.ActionUpdateApply,
 			HostID:      uh.HostID,
 			ActorRole:   "admin",
+			Groups:      m.st.SelectorGroups(),
 		})
 		switch dec.Effect {
 		case policy.EffectDeny:
-			if err := m.st.SetUpdateHostStatus(uh.ID, HostSkipped, "", "policy: "+decReason(rules, uh.HostID, "admin")); err == nil {
+			if err := m.st.SetUpdateHostStatus(uh.ID, HostSkipped, "", "policy: "+decReason(rules, uh.HostID, "admin", m.st.SelectorGroups())); err == nil {
 				m.clearPending(uh.HostID)
 				denied++
 			}
@@ -640,7 +644,7 @@ func (m *Manager) Start(runID, actor string) error {
 			RunID:        run.ID,
 			Actor:        actor,
 			ActorRole:    "admin",
-			MatchedRules: matchedRuleIDs(rules, approval, "admin"),
+			MatchedRules: matchedRuleIDs(rules, approval, "admin", m.st.SelectorGroups()),
 			Payload: map[string]any{
 				"run_id":   run.ID,
 				"release":  run.ReleaseID,
@@ -1019,7 +1023,7 @@ func (m *Manager) emitRunStatus(runID, status string) {
 
 func (m *Manager) audit(kind, actor string, payload map[string]any) {
 	b, _ := json.Marshal(payload)
-	_ = m.st.AppendAudit(store.AuditEvent{
+	m.st.AppendAuditLogged(m.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: kind, Actor: actor, Payload: string(b),
 	})
 }

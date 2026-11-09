@@ -111,6 +111,7 @@ func (c *Controller) Run(ctx context.Context, agentID, taskID string, version in
 		act := policy.Action{
 			ActorRole:   actor.Role,
 			ActionClass: policy.ActionTaskRun,
+			Groups:      c.st.SelectorGroups(),
 		}
 		if host != nil {
 			act.HostID = host.ID
@@ -415,7 +416,7 @@ func (c *Controller) audit(agentID, runID string, actor Actor, state string, app
 		"state":  state,
 		"error":  errMsg,
 	})
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: "task", Actor: actor.Principal,
 		AgentID: agentID, Payload: string(payload),
 	})

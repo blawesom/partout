@@ -6,6 +6,9 @@ package control
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,6 +162,9 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 	if err != nil {
 		return nil, fmt.Errorf("control: bundle version: %w", err)
 	}
+	// Fleet group map for group:<name> predicates in policy rules (server-side
+	// resolution; the agent guardrail relies on the signed decision).
+	groups := c.st.SelectorGroups()
 
 	// 4. Create a run per host, policy-gated, and dispatch.
 	res := &DispatchResult{ExecutionID: execID}
@@ -173,6 +179,7 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 			Cmd:         req.Cmd,
 			Args:        req.Args,
 			CommandLine: commandLine(req.Cmd, req.Args),
+			Groups:      groups,
 		}
 		if c.eol != nil {
 			action.HostEOL = c.eol(host.ID)
@@ -314,12 +321,16 @@ func (c *Control) Dispatch(ctx context.Context, req DispatchRequest) (*DispatchR
 		}
 	}
 
-	// 4. Audit.
+	// 4. Audit. Args/env are recorded as sha256 hashes, never raw: env can
+	// carry secret material (task secret: refs materialize into env), and the
+	// audit log must remain safe to export to viewers.
 	c.audit("exec.dispatch", req.CreatedBy, map[string]string{
 		"execution_id": execID,
 		"selector":     req.Selector,
 		"cmd":          req.Cmd,
 		"hosts":        fmt.Sprint(len(hosts)),
+		"args_sha256":  sha256Hex(req.Args),
+		"env_sha256":   sha256Hex(req.Env),
 	})
 
 	// 5. SSE.
@@ -599,15 +610,45 @@ func (c *Control) onAgentDisconnect(agentID string) {
 	}
 }
 
-// Audit appends an audit event.
+// Audit appends an audit event. A failed append is logged loudly — the audit
+// log is the tamper-evident record of every governed action.
 func (c *Control) audit(kind, actor string, payload map[string]string) {
 	b, _ := json.Marshal(payload)
-	c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS:      time.Now().Unix(),
 		Kind:    kind,
 		Actor:   actor,
 		Payload: string(b),
 	})
+}
+
+// sha256Hex returns the hex sha256 of a JSON-marshalable value ("" for nil).
+func sha256Hex(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// auditHeadDomain separates the signed chain-head anchor from any other
+// Ed25519 signature (decisions, elevation pushes, releases).
+var auditHeadDomain = []byte("partout.audit.head.v1\x00")
+
+// SignAuditHead signs the audit chain head (last row id + hash) with the
+// server identity so an operator can anchor it out-of-band (e.g. cron +
+// external store) and detect whole-DB rewrites. Returns nil when the server
+// has no signing identity (tests).
+func (c *Control) SignAuditHead(lastID int64, lastHash string) []byte {
+	if c.ident == nil {
+		return nil
+	}
+	msg := append(auditHeadDomain, []byte(fmt.Sprintf("%d\x00%s", lastID, lastHash))...)
+	return ed25519.Sign(c.ident.Priv, msg)
 }
 
 // commandLine joins cmd + args into the "cmd args..." string used for

@@ -610,7 +610,7 @@ func validUsername(u string) bool {
 }
 
 func (c *Controller) audit(kind, actor, detail string) {
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: kind, Actor: actor, Payload: detail,
 	})
 }

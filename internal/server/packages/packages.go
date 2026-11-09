@@ -330,6 +330,7 @@ func (c *Controller) policyGate(agentID string, op *pb.PkgOp, actor Actor, opNam
 	action.HostTags, _ = c.st.Tags(host.ID)
 	action.HostRoles, _ = c.st.Roles(host.ID)
 	action.ActorRole = actor.Role
+	action.Groups = c.st.SelectorGroups()
 	if c.eol != nil {
 		action.HostEOL = c.eol(agentID)
 	}
@@ -405,7 +406,7 @@ func (c *Controller) audit(agentID, opName, opID string, actor Actor, state stri
 		"applied": applied,
 		"error":   errMsg,
 	})
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: "package", Actor: actor.Principal,
 		AgentID: agentID, Payload: string(payload),
 	})

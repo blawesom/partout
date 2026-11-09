@@ -58,12 +58,14 @@ func (c *Control) PushElevationPolicy(policyName, selector, actor, actorRole str
 	}
 
 	rules, _ := c.st.GetPolicyRules()
+	groups := c.st.SelectorGroups()
 	for _, hi := range infos {
 		res := PushHostResult{AgentID: hi.ID}
 		dec := policy.Evaluate(rules, policy.Action{
 			ActionClass: policy.ActionElevationPush,
 			HostID:      hi.ID,
 			ActorRole:   actorRole,
+			Groups:      groups,
 		})
 		switch dec.Effect {
 		case policy.EffectDeny:

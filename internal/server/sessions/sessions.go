@@ -119,6 +119,7 @@ func (m *Manager) Open(ctx context.Context, req OpenRequest) (*store.Session, er
 		Cmd:         req.Cmd,
 		Args:        req.Args,
 		CommandLine: joinCommandLine(req.Cmd, req.Args),
+		Groups:      m.st.SelectorGroups(),
 	}
 	rules, err := m.st.GetPolicyRules()
 	if err != nil {
@@ -427,7 +428,7 @@ func (m *Manager) audit(sessionID, agentID, state, errMsg string) {
 	payload, _ := json.Marshal(map[string]any{
 		"session_id": sessionID, "state": state, "error": errMsg,
 	})
-	_ = m.st.AppendAudit(store.AuditEvent{
+	m.st.AppendAuditLogged(m.log, store.AuditEvent{
 		TS: now(), Kind: "session", AgentID: agentID, Actor: "system",
 		Payload: string(payload),
 	})

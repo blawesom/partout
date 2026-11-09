@@ -465,7 +465,7 @@ func (m *Manager) audit(kind, secretID string, version int64, agentID, ref, acto
 		p["ref"] = ref
 	}
 	b, _ := json.Marshal(p)
-	_ = m.st.AppendAudit(store.AuditEvent{
+	m.st.AppendAuditLogged(m.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: kind, Actor: actor, AgentID: agentID, Payload: string(b),
 	})
 }

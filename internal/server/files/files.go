@@ -386,6 +386,7 @@ func (c *Controller) policyGate(ctx context.Context, agentID string, op *pb.File
 	action.HostTags, _ = c.st.Tags(host.ID)
 	action.HostRoles, _ = c.st.Roles(host.ID)
 	action.ActorRole = actor.Role
+	action.Groups = c.st.SelectorGroups()
 	rules, err := c.st.GetPolicyRules()
 	if err != nil {
 		return fmt.Errorf("files: load policies: %w", err)
@@ -708,7 +709,7 @@ func (c *Controller) audit(agentID, kind, opName, path, opID string, actor Actor
 		"sha256": sha,
 		"error":  errMsg,
 	})
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: kind, Actor: actor.Principal,
 		AgentID: agentID, Payload: string(payload),
 	})

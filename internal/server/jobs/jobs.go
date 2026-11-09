@@ -397,11 +397,13 @@ func (c *Controller) gatePolicy(jobID, selector, actorRole string, steps []*pb.T
 	}
 	d := make(map[string]*pb.Decision, len(agents))
 	var denied []string
+	groups := c.st.SelectorGroups()
 	for _, a := range agents {
 		host, _ := c.st.Agent(a.ID)
 		act := policy.Action{
 			ActorRole:   actorRole,
 			ActionClass: policy.ActionTaskRun,
+			Groups:      groups,
 		}
 		if host != nil {
 			act.HostID = host.ID
@@ -617,7 +619,7 @@ func (c *Controller) ReissueForHost(hostID string) error {
 // hostTaskRunDecision signs a fresh task.run decision for one host against
 // the current policy bundle (or returns the denial reason).
 func (c *Controller) hostTaskRunDecision(jobID, hostID string) (*pb.Decision, string) {
-	act := policy.Action{HostID: hostID, ActionClass: policy.ActionTaskRun}
+	act := policy.Action{HostID: hostID, ActionClass: policy.ActionTaskRun, Groups: c.st.SelectorGroups()}
 	var pbSteps []*pb.TaskStep
 	if job, err := c.st.GetJob(jobID); err == nil && job != nil {
 		if ver, err := c.st.TaskVersion(job.TaskID, job.TaskVersion); err == nil && ver != nil {
@@ -679,6 +681,7 @@ func (c *Controller) RunNow(ctx context.Context, jobID, agentID string, actor Ac
 	act := policy.Action{
 		ActorRole:   actor.Role,
 		ActionClass: policy.ActionTaskRun,
+		Groups:      c.st.SelectorGroups(),
 	}
 	if host != nil {
 		act.HostID = host.ID
@@ -883,7 +886,7 @@ func (c *Controller) audit(kind, jobID, selectorText string, n int, actor string
 	if actor == "" {
 		actor = "system"
 	}
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: "job", Actor: actor, Payload: string(payload),
 	})
 	if c.sse != nil {

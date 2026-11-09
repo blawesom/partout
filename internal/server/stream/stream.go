@@ -525,7 +525,7 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 			h.UpdateResultHook(sess.AgentID, ur)
 		}
 		h.log.Printf("stream: update result %s (release %s, error=%q)", ur.Phase, ur.ReleaseId, ur.Error)
-		_ = h.st.AppendAudit(store.AuditEvent{
+		h.st.AppendAuditLogged(h.log, store.AuditEvent{
 			TS: time.Now().Unix(), Kind: "update.result", Actor: "agent", AgentID: sess.AgentID,
 			Payload: fmt.Sprintf(`{"release_id":%q,"phase":%q,"error":%q,"version":%q}`,
 				ur.ReleaseId, ur.Phase, ur.Error, ur.Version),
@@ -541,7 +541,7 @@ func (h *Handler) handleUp(ctx context.Context, sess *Session, msg *pb.Envelope)
 		// scope hash (the partout.elevation fact).
 		er := msg.GetElevationPushResult()
 		h.log.Printf("stream: elevation push result %s (ok=%t, %s)", er.PushId, er.Ok, er.Detail)
-		_ = h.st.AppendAudit(store.AuditEvent{
+		h.st.AppendAuditLogged(h.log, store.AuditEvent{
 			TS: time.Now().Unix(), Kind: "elevation.push.result", Actor: "agent", AgentID: sess.AgentID,
 			Payload: fmt.Sprintf(`{"push_id":%q,"ok":%t,"detail":%q}`, er.PushId, er.Ok, er.Detail),
 		})
