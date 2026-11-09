@@ -1,249 +1,128 @@
 # Partout
 
+[![CI](https://github.com/blawesom/partout/actions/workflows/ci.yml/badge.svg)](https://github.com/blawesom/partout/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/blawesom/partout)](https://github.com/blawesom/partout/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 > **Status: beta — the 1.0-scoped beta: all 1.0 features in, gathering feedback
-> before the 1.0 GA flip.** The full feature set (observe, execute, patch, update
-> rollouts, MCP, and the LLM assistant) is available and self-hosted; expect the
-> occasional rough edge and occasional breaking change before 1.0. Back up your
-> `partout.db` regularly.
-> **What shipped in which release: [docs/roadmap.md](docs/roadmap.md) — the single
-> status source.** This README and the PRD link there instead of restating it
-> (the copies used to drift: three docs, three different versions).
+> before the 1.0 GA flip.** Expect the occasional rough edge and occasional breaking
+> change before 1.0; back up your `partout.db` regularly. What shipped in which
+> release: [docs/roadmap.md](docs/roadmap.md) — the single status source.
 
-**Partout** is a remote host-management control plane: one Go binary to discover, observe,
-execute against, configure, patch, and orchestrate work across Linux hosts — safely,
+**Partout** is a self-hosted control plane for Linux fleets: one Go binary to discover,
+observe, execute against, configure, patch, and orchestrate work across hosts — safely,
 auditably, and verifiably — with a web UI, an MCP server for AI assistants, and a built-in
-LLM assistant (bring any OpenAI-compatible endpoint — a local Ollama keeps all data on-host).
+LLM assistant. Single binary, no editions, everything free
+([LICENSE](LICENSE), [PRD.md](PRD.md)).
 
-It ships as a single self-hosted binary (no editions, everything free) with an embedded
-observe layer, a full write/control path, and an append-only audit log sealed by a
-cryptographic hash chain (`partout ctl audit verify`; PRD Decision 5, amended).
+It unifies the **observe → act → verify** loop in one place: a policy deny-list gates
+every dispatch (with optional human approval), the agent re-checks each action locally
+(fail-closed), and every action lands in an append-only audit log sealed by a
+cryptographic hash chain (`partout ctl audit verify`).
 
-New here? **[docs/getting-started.md](docs/getting-started.md)** is the guided 5-minute
-walkthrough (first host, first command, the audit check).
+## Requirements
 
-## The problem it solves
+- Linux (amd64/arm64) for server and agents; Go 1.26+ only if building from source.
+- No database to install (embedded SQLite), no CDN at runtime (the UI is served
+  same-origin, works fully offline).
 
-Running a fleet of Linux hosts today means scattered, fragile tooling: `ssh` + copy-pasted
-commands (no policy, no audit, nothing to replay), one-off scripts, and a monitoring patchwork.
-There is no single system that **reads** (is a service up? is a cert about to expire? does this
-config match the rest of the fleet?), **writes** (run a command, ship a file, apply a package,
-schedule a job), and **proves it** (an append-only audit trail + live alerts) — with safety
-rails on the way through.
+## Quick start (60 seconds)
 
-Partout unifies that loop — **observe → act → verify** — in one place:
-
-- **Safe** — a policy deny-list gates every dispatch; a `require_approval` rule parks the action
-  for a human; the agent re-checks every action locally (fail-closed). A fresh server boots with a
-  **preset** of sensible safety-net rules + standard alerts (all `default-*`, editable).
-- **Auditable** — every action is an append-only, filterable, exportable audit row.
-- **Verifiable** — the agent continuously reports facts (services, TLS certs, webservice configs,
-  resources); a server-side alert engine turns them into firing/resolved alerts.
-
-## Architecture
-
-One binary, three modes (`--mode=server|agent|embedded`). The control plane talks to a small
-agent on each host over an authenticated gRPC stream; the browser and AI assistants talk to the
-same control plane over REST.
-
-![Partout architecture — control plane (REST + SSE API, dispatch engine, policy + approvals, MCP server, secrets vault, alert engine, SQLite with its audit hash chain, AgentStream) and the managed host's agent plus offline spool](partout-architecture.svg)
-
-The `AgentStream` channel (gRPC + mTLS) carries Enroll · Exec · Files · Sessions · Packages ·
-Tasks · Jobs · Secrets · Facts · Revoke. The SVG is dual-theme and follows the reader's
-light/dark preference.
-
-- **Single binary** — the same build runs as `server`, `agent`, or `embedded` (server + a local
-  agent in one process for instant demos).
-- **Auth** — Ed25519 handshake gates every stream; optional local root-CA bootstrap gives mTLS
-  on the agent stream with **no per-host cert work** (the CA is the only trust anchor).
-- **Write path** — commands, files, PTY sessions, packages, tasks/playbooks, and cron jobs all
-  flow through the same policy → (optional) approval → signed-decision → agent guardrail chain.
-- **Offline-tolerant** — if the stream drops, in-flight work keeps running and is spooled on the
-  host, replayed on reconnect.
-
-## Web UI
-
-A buildless Vue 3 SPA, served same-origin (no CDN, no build step). Fleet + health cards, live
-command execution, an xterm.js terminal, files browser (jailed to the host's file root,
-default `/home/partout`), jobs/tasks/updates, secrets, policies,
-approvals, provisioning, users, and the Observe pages (Services, Certificates, Configs, Alerts).
-Light + dark themes — the topbar toggle persists per-browser and defaults to the OS
-`prefers-color-scheme`.
-
-| | |
-|---|---|
-| ![Fleet](docs/screenshots/fleet.png) | ![Execute](docs/screenshots/execute.png) |
-| ![Services](docs/screenshots/services.png) | ![Alerts](docs/screenshots/alerts.png) |
-| ![Configs](docs/screenshots/configs.png) | ![Updates](docs/screenshots/updates-runs.png) |
-| ![Fleet — dark mode](docs/screenshots/fleet-dark.png) | ![Execute — dark mode](docs/screenshots/execute-dark.png) |
-
-## Quick start
-
-**Installing a server on a fresh Linux host — no toolchain, no git checkout
-needed:** grab the **installer bundle** from the latest
-[release](https://github.com/blawesom/partout/releases) —
-`partout_install_<version>_linux_<arch>.tar.gz` ships the static binary +
-`install-server.sh` + the systemd units side by side:
-
-```bash
-curl -sLO https://github.com/blawesom/partout/releases/latest/download/partout_install_<version>_linux_amd64.tar.gz \
-     -O https://github.com/blawesom/partout/releases/latest/download/SHA-256SUMS
-sha256sum -c SHA-256SUMS --ignore-missing
-tar xzf partout_install_<version>_linux_amd64.tar.gz
-sudo bash install_<version>_linux_amd64/install-server.sh \
-     --binary install_<version>_linux_amd64/partout --tls on \
-     --tls-names <server-ip-or-fqdn>
-```
-
-From a repo checkout instead: build once (or grab the bare
-`partout_<version>_linux_<arch>` binary), then run a server and an
-agent (or an all-in-one demo process).
+One-process demo — server **and** a co-located agent, no enrollment needed:
 
 ```bash
 go build -o partout ./cmd/partout
-```
-
-**Check the host first.** `partout doctor` runs a pre-flight (port free, DB
-writable, TLS, outbound CVE/EOL data, SSH key for provisioning) and exits
-non-zero on a hard failure — the "start it and see" step, made visible:
-
-```bash
-./partout doctor && ./partout   # doctor reports exactly what would stop a start
-```
-
-> **Loopback is the default when TLS is off.** A fresh server with no `PARTOUT_ADDR`
-> and no TLS binds **127.0.0.1** — reachable from that machine only. (With TLS on,
-> the default is all interfaces: agents on other hosts must reach the server.)
-> Plaintext on a non-loopback bind still puts the login password and session tokens
-> on the wire in cleartext — `partout doctor` warns about exactly this. To serve
-> beyond this machine, do one of:
->
-> - `PARTOUT_TLS=on` — bootstraps a local root CA; the server then serves HTTPS
->   on all interfaces and the agent stream gets mTLS (no per-host cert work), or
-> - `PARTOUT_ADDR=<ip>` — put it behind your own TLS-terminating
->   reverse proxy (Caddy/nginx/HAProxy patterns in [docs/deployment.md](docs/deployment.md) §1.3), or
-> - `PARTOUT_ADDR=0.0.0.0` — plaintext on all interfaces (lab only; doctor warns).
->
-> The browser also warns: the login page shows an amber banner when it is served
-> over cleartext from a non-loopback host.
-
-**Fastest path — one-process demo.** Server **and** a co-located local agent; the fleet is
-populated the moment you open the UI. No enrollment token or second process needed.
-
-```bash
 PARTOUT_MODE=embedded PARTOUT_ADMIN_PASSWORD='change-me-123' ./partout
-# → open http://localhost:8443, sign in as admin / change-me-123
-# (loopback + plaintext is the local-dev posture; add PARTOUT_TLS=on to try HTTPS)
 ```
 
-**Server + agent (multiple hosts).** TLS on from the start — the CA is bootstrapped
-on first run and the agent picks it up at enrollment (`partout ctl ca` fetches it for
-existing hosts):
+Expected output: the server listens on `127.0.0.1:8443` (loopback + plaintext is the
+local-dev posture). Open **http://localhost:8443**, sign in as `admin` /
+`change-me-123` — the Fleet page shows one host, state `connected`.
+
+Verify it works from the CLI:
 
 ```bash
-# 1) Start the server with TLS
-PARTOUT_TLS=on PARTOUT_PORT=8443 PARTOUT_DB_PATH=./partout.db PARTOUT_MODE=server \
-  PARTOUT_ADMIN_PASSWORD='change-me-123' PARTOUT_TOKEN_ADMIN='cli-admin-token' ./partout
-
-# 2) Mint a one-time enrollment token
-PARTOUT_SERVER=localhost:8443 PARTOUT_CTL_TOKEN='cli-admin-token' ./partout ctl enroll-token
-# → token: par_enr_…
-
-# 3) Run the agent on the host you want to manage
-PARTOUT_SERVER=localhost:8443 PARTOUT_TOKEN='par_enr_…' \
-  PARTOUT_TLS_CA=<the server CA — `partout ctl ca` prints it> ./partout --mode=agent
+PARTOUT_SERVER=localhost:8443 ./partout ctl auth login --username admin --password 'change-me-123'
+PARTOUT_SERVER=localhost:8443 ./partout ctl hosts                        # saved session token is used automatically
+PARTOUT_SERVER=localhost:8443 ./partout ctl run --selector all -- hostname
+PARTOUT_SERVER=localhost:8443 ./partout ctl audit verify                  # tamper-evidence check on the audit chain
 ```
 
-If you deliberately want plaintext (air-gapped lab, SSH tunnel, testing), the same
-flow works without `PARTOUT_TLS`/`PARTOUT_TLS_CA` — but keep it on loopback.
+(For a real server, see below. Full walkthrough: [docs/getting-started.md](docs/getting-started.md).)
 
-> **Can't reach `https://<server>:8443` from your workstation?** The port is
-> often firewalled to the fleet only (cloud security groups commonly open
-> just SSH). The one-liner tunnel, from the operator machine:
->
-> ```bash
-> ssh -N -L 8443:<server-ip>:8443 <user>@<server-ip> &      # tunnel
-> grep -q my-partout /etc/hosts || echo 127.0.0.1 my-partout | sudo tee -a /etc/hosts
-> partout ctl hosts --server https://my-partout:8443 --ca-file ca.crt --token $ADMIN
-> ```
->
-> The `/etc/hosts` alias must be one of the server's TLS SAN names
-> (`--tls-names`) — see [docs/deployment.md](docs/deployment.md) §1.2 for
-> the full pattern (agents never need this: they reach the server directly).
+## Install a server on a real host
 
-The host appears in the **Fleet** page; Observe facts fill in after the first upload.
+No toolchain or git checkout needed — the release installer bundle ships the static
+binary + `install-server.sh` + systemd units:
 
-A fresh server also seeds a fleet-management **preset** (safety-net policies +
-standard alert rules, all named `default-*` — including update-run, update-drift
-and security-update alerts) on first boot — review it under **Policies** and
-**Alerts**, or `partout ctl preset show`. Uploading an agent release pre-arms a
-parked rollout draft (Start it from the Updates page when ready). The server
-also runs a periodic **security scan** (default every 6 h,
-`PARTOUT_SECURITY_SCAN_S`) that correlates each host's packages against OSV
-CVE data — see the fleet Security card on the Updates page.
+```bash
+VERSION="$(curl -s https://api.github.com/repos/blawesom/partout/releases/latest | grep '"tag_name"' | cut -d'"' -f4)"
+curl -sLO "https://github.com/blawesom/partout/releases/latest/download/partout_install_${VERSION#v}_linux_amd64.tar.gz" \
+     -O "https://github.com/blawesom/partout/releases/latest/download/SHA-256SUMS"
+sha256sum -c SHA-256SUMS --ignore-missing
+tar xzf "partout_install_${VERSION#v}_linux_amd64.tar.gz"
+sudo bash "install_${VERSION#v}_linux_amd64/install-server.sh" \
+     --binary "install_${VERSION#v}_linux_amd64/partout" --tls on \
+     --tls-names <server-ip-or-fqdn>
+```
 
-For systemd units, Docker/compose, cloud-init and Helm sketches, see [docs/deployment.md](docs/deployment.md).
+Then enroll agents over the fleet's SSH (one command, fingerprint-confirmed — no silent
+TOFU): `partout ctl provision new --host user@web01`. Details, mTLS bootstrap, reverse
+proxies, Docker/systemd/Helm: [docs/deployment.md](docs/deployment.md).
 
-### Deployment notes
+## When to use / not use
 
-- **Bind address**: with TLS off, the default binds loopback (127.0.0.1); with TLS
-  on, all interfaces. Behind a reverse proxy on the same host, set
-  `PARTOUT_ADDR=127.0.0.1` so the control plane is only reachable
-  through the edge (see docs/deployment.md §1.3 for the Caddy/nginx/HAProxy patterns).
-- **Turn on TLS before exposing it**: `PARTOUT_TLS=on` bootstraps a local root CA and serves
-  HTTPS + mTLS (plaintext HTTP is for loopback/dev only — and the default keeps you there).
-- **Token env vars** (server): `PARTOUT_ADMIN_PASSWORD` bootstraps the web-UI `admin` user;
-  `PARTOUT_TOKEN_ADMIN/_OPERATOR/_VIEWER` are static bearer tokens for the CLI/scripts. The UI
-  login form takes only username/password; the CLI takes `--token` / `PARTOUT_CTL_TOKEN`.
-- **Agent TLS**: `partout ctl ca` fetches the root CA; ship it to the host as `PARTOUT_TLS_CA`.
+- **Use it** when you want one system that reads (facts, certs, services), writes
+  (commands, files, packages, jobs — all policy-gated and audited), and proves it
+  (hash-chained audit log, live alerts) across a fleet of Linux hosts.
+- **Not yet** if you need non-Linux agents, a hosted/SaaS control plane, or
+  multi-region HA — see non-goals in [PRD.md](PRD.md) §13. Beta caveat: breaking changes
+  are still possible before 1.0 ([docs/roadmap.md](docs/roadmap.md)).
+
+## Troubleshooting the top stalls
+
+- **TLS off → binds loopback only** (safe default). To serve beyond the machine:
+  `PARTOUT_TLS=on` (bootstraps a local root CA, HTTPS + mTLS) or put it behind your own
+  reverse proxy — [docs/deployment.md](docs/deployment.md) §1.3. `partout doctor`
+  pre-flights a start and names exactly what would block it.
+- **Can't reach the UI from your workstation?** the port is often firewalled to the
+  fleet — SSH-tunnel it (`ssh -N -L 8443:<server>:8443 user@<server>`); see
+  [docs/deployment.md](docs/deployment.md) §1.2.
+- **Host shows disconnected?** check the agent unit and `partout ctl hosts`; runbooks in
+  [docs/operations.md](docs/operations.md) §6.
 
 ## CLI
 
-`partout ctl` drives everything the UI does. A representative set:
-
-```bash
-# Auth + discovery
-partout ctl auth login --username admin            # store a session token
-partout ctl hosts                                   # id, state, version, last seen, tags
-
-# Run a command across a selector, stream output
-partout ctl run --selector 'tag:env=prod' -- systemctl status haproxy
-
-# Safety rails
-partout ctl policy create --name no-secret --effect deny --command-regex 'secret'
-partout ctl approvals list                          # then approve/deny (admin)
-
-# Provision a new host over your existing fleet SSH
-partout ctl provision new --host deploy@web01
-partout ctl provision key prv_ab12cd34ef56 confirm  # confirm a new host key (no silent TOFU)
-
-# Packages, jobs, tasks
-partout ctl packages apply <agent> --dry-run        # apt/dnf dry-run before apply
-partout ctl jobs create job.json                    # cron-scheduled task
-partout ctl tasks run <task_id> <agent_id>          # run a versioned task/playbook
-
-# Observe
-partout ctl alerts list --state firing
-partout ctl alerts mute <rule-id> --for 90m      # maintenance window (in-app alerts continue)
-partout ctl audit --kind policy.deny --limit 50
-partout ctl audit verify                              # tamper-evidence check
-```
-
-The full command set: `auth · enroll-token · hosts · run · exec · audit · policy ·
+`partout ctl` drives everything the UI does. The full command set: `auth · enroll-token · hosts · run · exec · audit · policy ·
 preset · approvals · alerts · provision · ca · tls · files · sessions · jobs · tasks ·
 playbooks · packages · cve · services · secrets · update · elevation · db-backup · external-data` (plus the
 top-level `partout doctor`, `partout selftest`, `partout update`, and
-`partout uninstall` (local removal: `--dry-run`, `--purge`, `--keep-binary`)). `partout ctl
-help` prints the full reference.
+`partout uninstall`). Full reference: `partout ctl help`, plus a
+representative tour in [docs/operations.md](docs/operations.md). (This list is pinned
+against the dispatch by `TestCtlUsageContract` in CI — update both together.)
 
 ## Documentation
 
 | Doc | What it covers |
 |---|---|
-| [docs/getting-started.md](docs/getting-started.md) | **Guided 5-minute walkthrough**: first host, first command, the audit check |
-| [PRD.md](PRD.md) | Product spec, positioning, capabilities, decisions |
-| [docs/roadmap.md](docs/roadmap.md) | **Milestone plan & status** (M0–M8.1 done; 1.0 in preparation) + shipped feature deep-dives |
-| [docs/architecture.md](docs/architecture.md) | Module layout, stream protocol, state machines, storage, security, testing |
-| [docs/deployment.md](docs/deployment.md) | Topology, install paths (systemd; Docker/compose/cloud-init/Helm sketches), config reference |
+| [docs/getting-started.md](docs/getting-started.md) | Guided 5-minute walkthrough (first host, first command, audit check) |
+| [docs/architecture.md](docs/architecture.md) | Architecture: modes, AgentStream protocol, policy chain, storage, security |
+| [docs/deployment.md](docs/deployment.md) | Install paths, TLS/reverse proxy, topology, full config reference |
 | [docs/operations.md](docs/operations.md) | Day-2 ops: backups, upgrades, runbooks, troubleshooting, compliance |
-| [docs/ui-guidelines.md](docs/ui-guidelines.md) | Web UI definition: IA, tokens, components, slice plan |
-| [docs/ux-improvements.md](docs/ux-improvements.md) | **UX evaluation & improvement plan** (research; quick wins + later areas) |
+| [docs/roadmap.md](docs/roadmap.md) | Milestone plan & status + shipped feature deep-dives |
+| [docs/assistant.md](docs/assistant.md) | The built-in LLM assistant + MCP server |
+| [PRD.md](PRD.md) | Product spec, positioning, decisions log, non-goals |
+| [docs/dev/](docs/dev/) | Internal: UX research, walkthrough instrument, proposals |
+
+Screenshots: [docs/screenshots/](docs/screenshots/). Architecture diagram:
+[partout-architecture.svg](partout-architecture.svg).
+
+## Contributing & security
+
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (docs change in the same
+PR as behavior; CI runs tests, link checks, and the quickstart snippet). Security issues:
+see [SECURITY.md](SECURITY.md) — please report privately, do not open public issues.
+
+## License
+
+[MIT](LICENSE) — single binary, all features free, self-hosted.
