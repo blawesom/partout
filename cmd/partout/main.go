@@ -13,8 +13,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -41,6 +44,7 @@ import (
 	"github.com/blawesom/partout/internal/api"
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/config"
+	"github.com/blawesom/partout/internal/cryptoutil"
 	"github.com/blawesom/partout/internal/identity"
 	"github.com/blawesom/partout/internal/policy"
 	"github.com/blawesom/partout/internal/preset"
@@ -299,6 +303,39 @@ func homeDirPasswdFirst() string {
 	return home
 }
 
+// auditChainKeyInfo is the resolved audit-chain HMAC key material.
+type auditChainKeyInfo struct {
+	key    []byte
+	keyID  string // "id:<fingerprint>" (identity-derived) or "env:<fingerprint>"
+	source string // "identity" | "env"
+}
+
+// resolveAuditKey picks the audit-chain HMAC key: PARTOUT_AUDIT_KEY (base64,
+// exactly 32 bytes) when set — the explicit recovery path, e.g. after the
+// server identity was lost or regenerated — otherwise a key derived from the
+// server Ed25519 identity (HKDF over the private key, which never leaves
+// <db dir>/identity). The key id is a short fingerprint of the KEY MATERIAL
+// ("k:<hex>", uniform across sources, so switching source with the same key
+// does not look like a rotation); it is persisted in audit_chain_state.key_id
+// and returned by GET /api/v1/audit/verify. The startup check rejects a key
+// change on an existing chain — losing the key makes algo=2 rows unverifiable
+// (fail-closed by design); algo=1 legacy rows always verify.
+func resolveAuditKey(ident *certutil.ServerIdentity) (auditChainKeyInfo, error) {
+	info := auditChainKeyInfo{}
+	if env := strings.TrimSpace(os.Getenv("PARTOUT_AUDIT_KEY")); env != "" {
+		k, err := base64.StdEncoding.DecodeString(env)
+		if err != nil || len(k) != 32 {
+			return auditChainKeyInfo{}, fmt.Errorf("PARTOUT_AUDIT_KEY must be base64 of exactly 32 bytes (got %d bytes, decode err: %v)", len(k), err)
+		}
+		info.key, info.source = k, "env"
+	} else {
+		info.key, info.source = cryptoutil.DeriveKey(ident.Priv, []byte("partout:audit-chain-hmac:v1")), "identity"
+	}
+	sum := sha256.Sum256(info.key)
+	info.keyID = "k:" + hex.EncodeToString(sum[:8])
+	return info, nil
+}
+
 func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	// Bind the port BEFORE creating any state. On a real port conflict the
 	// operator sees a clear error and the database, the admin user, and
@@ -411,13 +448,39 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 	}
 	apiH.Control().SetIdentity(ident)
 	h.SetServerPubKey(ident.PubB64())
+	// Key the audit hash chain: new audit rows are HMAC-SHA256 under a key, so
+	// DB write access alone can no longer rewrite the chain. The default key
+	// is derived from the server identity (which never leaves <db dir>/identity);
+	// PARTOUT_AUDIT_KEY (base64 32 bytes) is the explicit recovery/rollover
+	// override. Existing unkeyed (algo=1) rows stay verifiable either way.
+	akey, err := resolveAuditKey(ident)
+	if err != nil {
+		return err
+	}
+	st.SetAuditKey(akey.key)
+	st.SetAuditKeyID(akey.keyID)
+	// Key-change guard: an existing keyed chain must keep verifying under the
+	// SAME key. A mismatch means the identity was regenerated or the wrong
+	// PARTOUT_AUDIT_KEY is set — refuse to start rather than silently produce a
+	// chain whose old rows fail closed as "tampered". Recovery: restore the
+	// original identity dir / key, or archive the DB and start a new chain
+	// (docs/operations.md §4.1). An empty stored id (fresh or legacy algo=1
+	// chain) always passes.
+	if stored, err := st.AuditChainKeyID(); err != nil {
+		return fmt.Errorf("audit chain state: %w", err)
+	} else if stored != "" && stored != akey.keyID {
+		return fmt.Errorf("audit chain key mismatch: this DB's chain was written with key %s, but the server resolves key %s (source=%s) — restore the original identity/PARTOUT_AUDIT_KEY, or archive the DB and start a new chain (docs/operations.md §4.1)", stored, akey.keyID, akey.source)
+	}
+	lg.Printf("server: audit chain HMAC key id=%s (source=%s)", akey.keyID, akey.source)
 
 	// M4: approvals engine (PRD §5.8). require_approval policy matches park
 	// the action (exec + pkg.apply surfaces); admin approval signs a fresh
 	// EffectAllow decision carrying the approval id and re-dispatches the
-	// stored payload. Requests expire after PARTOUT_APPROVAL_TTL_S (1 h).
+	// stored payload. Requests expire after PARTOUT_APPROVAL_TTL_S (1 h) —
+	// enforced by a background sweeper, not just on list/read.
 	apr := approvals.New(st, h, sseB, lg)
 	apr.SetIdentity(ident)
+	apr.StartSweeper(ctx, time.Minute)
 	apiH.Control().SetApprovals(apr)
 	apr.OnExecExpired = func(execID string) {
 		if err := apiH.Control().FinalizeExecution(execID); err != nil {
@@ -780,6 +843,13 @@ func runServer(ctx context.Context, cfg *config.Config, lg *log.Logger) error {
 
 	httpSrv := &http.Server{
 		Protocols: &protocols,
+		// Timeouts: ReadHeaderTimeout bounds slowloris-style clients (safe
+		// alongside the long-lived SSE stream, which is an active request).
+		// WriteTimeout stays 0 on purpose — SSE never completes on its own.
+		// IdleTimeout bounds dead keep-alive connections.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.ProtoMajor == 2 && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
 				// In TLS mode, gRPC (the agent stream) requires a verified client

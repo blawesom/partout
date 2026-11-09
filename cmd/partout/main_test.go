@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +20,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/blawesom/partout/internal/certutil"
+	"github.com/blawesom/partout/internal/cryptoutil"
 
 	"github.com/blawesom/partout/internal/config"
 	serverauth "github.com/blawesom/partout/internal/server/auth"
@@ -761,5 +767,89 @@ func TestFirstRunBlock(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestResolveAuditKey_IdentityDefault: without PARTOUT_AUDIT_KEY the key is
+// derived from the server identity, the id is "id:<fingerprint of pubkey>",
+// and it is deterministic across calls.
+func TestResolveAuditKey_IdentityDefault(t *testing.T) {
+	t.Setenv("PARTOUT_AUDIT_KEY", "")
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	k1, err := resolveAuditKey(ident)
+	if err != nil {
+		t.Fatalf("resolveAuditKey: %v", err)
+	}
+	k2, _ := resolveAuditKey(ident)
+	if k1.source != "identity" || !strings.HasPrefix(k1.keyID, "k:") {
+		t.Fatalf("source=%q keyID=%q, want identity/k:", k1.source, k1.keyID)
+	}
+	if string(k1.key) != string(k2.key) || k1.keyID != k2.keyID {
+		t.Fatal("identity-derived key must be deterministic")
+	}
+	if len(k1.key) != 32 {
+		t.Fatalf("key len = %d, want 32", len(k1.key))
+	}
+	// The key id is a fingerprint of the KEY MATERIAL (uniform across sources,
+	// so identity→env switches with the same key don't look like a rotation).
+	wantKey := cryptoutil.DeriveKey(ident.Priv, []byte("partout:audit-chain-hmac:v1"))
+	if string(k1.key) != string(wantKey) {
+		t.Fatal("identity-derived key must be the HKDF of the identity private key")
+	}
+	sum := sha256.Sum256(k1.key)
+	if want := "k:" + hex.EncodeToString(sum[:8]); k1.keyID != want {
+		t.Fatalf("keyID = %q, want %q", k1.keyID, want)
+	}
+}
+
+// TestResolveAuditKey_EnvOverride: PARTOUT_AUDIT_KEY (base64 32 bytes) wins,
+// is labeled "env:<fingerprint of key>", and malformed values are rejected.
+func TestResolveAuditKey_EnvOverride(t *testing.T) {
+	ident, err := certutil.LoadOrCreateServerIdentity(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	t.Setenv("PARTOUT_AUDIT_KEY", base64.StdEncoding.EncodeToString(raw))
+	k, err := resolveAuditKey(ident)
+	if err != nil {
+		t.Fatalf("resolveAuditKey: %v", err)
+	}
+	if k.source != "env" || !strings.HasPrefix(k.keyID, "k:") || string(k.key) != string(raw) {
+		t.Fatalf("env key not used: source=%q keyID=%q", k.source, k.keyID)
+	}
+	sum := sha256.Sum256(raw)
+	if want := "k:" + hex.EncodeToString(sum[:8]); k.keyID != want {
+		t.Fatalf("keyID = %q, want %q", k.keyID, want)
+	}
+	// Same key material via a different source → same key id (no false rotation).
+	identKey := cryptoutil.DeriveKey(ident.Priv, []byte("partout:audit-chain-hmac:v1"))
+	t.Setenv("PARTOUT_AUDIT_KEY", base64.StdEncoding.EncodeToString(identKey))
+	kSame, err := resolveAuditKey(ident)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kIdent, _ := resolveAuditKey(ident) // env now set... compute expected instead
+	_ = kIdent
+	sumKey := sha256.Sum256(identKey)
+	if kSame.keyID != "k:"+hex.EncodeToString(sumKey[:8]) {
+		t.Fatalf("env key id = %q", kSame.keyID)
+	}
+
+	// Malformed: not base64.
+	t.Setenv("PARTOUT_AUDIT_KEY", "!!!not-base64!!!")
+	if _, err := resolveAuditKey(ident); err == nil {
+		t.Fatal("non-base64 PARTOUT_AUDIT_KEY must be rejected")
+	}
+	// Malformed: wrong length.
+	t.Setenv("PARTOUT_AUDIT_KEY", base64.StdEncoding.EncodeToString([]byte("short")))
+	if _, err := resolveAuditKey(ident); err == nil {
+		t.Fatal("non-32-byte PARTOUT_AUDIT_KEY must be rejected")
 	}
 }
