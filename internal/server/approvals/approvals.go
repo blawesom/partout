@@ -10,10 +10,18 @@
 // audit-logged and SSE-broadcast.
 //
 // Requests carry a TTL (PARTOUT_APPROVAL_TTL_S, default 1 h); expired
-// requests can never be retroactively honored (lazy expiry on list/read).
+// requests can never be retroactively honored (lazy expiry on list/read plus
+// a background sweeper started with StartSweeper).
+//
+// Separation of duties: a named principal (a real local user or OAuth
+// subject) may not approve their own request — PARTOUT_ALLOW_SELF_APPROVAL=1
+// lifts it for single-admin setups. Role-label principals (static env tokens
+// and single-user local mode, where the principal IS the role: "admin",
+// "local") are exempt because they carry no distinct identity to separate.
 package approvals
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -49,6 +57,10 @@ type Controller struct {
 	// OnExecExpired finalizes an execution whose parked run just expired
 	// (wired to control.FinalizeExecution so the aggregate recomputes).
 	OnExecExpired func(executionID string)
+
+	// allowSelfApproval lifts the requester≠approver rule for named
+	// principals (PARTOUT_ALLOW_SELF_APPROVAL=1, e.g. single-admin fleets).
+	allowSelfApproval bool
 }
 
 // New builds a Controller.
@@ -64,8 +76,20 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	}
 	return &Controller{
 		st: st, h: h, sse: sseB, log: lg, ttl: ttl,
-		Dispatchers: make(map[string]func(*store.ApprovalRequest, *pb.Decision) error),
+		Dispatchers:       make(map[string]func(*store.ApprovalRequest, *pb.Decision) error),
+		allowSelfApproval: os.Getenv("PARTOUT_ALLOW_SELF_APPROVAL") == "1" || os.Getenv("PARTOUT_ALLOW_SELF_APPROVAL") == "true",
 	}
+}
+
+// namedPrincipal reports whether p is a real user identity rather than a
+// role label produced for static tokens / local mode ("admin", "local",
+// "system", …). Only named principals are subject to separation of duties.
+func namedPrincipal(p string) bool {
+	switch p {
+	case "", "local", "system", "unknown", "admin", "operator", "viewer":
+		return false
+	}
+	return true
 }
 
 // SetIdentity installs the server's Ed25519 signing key (signs the
@@ -146,6 +170,12 @@ func (c *Controller) Approve(requestID string, actor Actor) (*store.ApprovalRequ
 	}
 	if req.State != "pending" {
 		return req, fmt.Errorf("approvals: request %s is %s, not pending", req.ID, req.State)
+	}
+	// Separation of duties: a named principal cannot approve their own
+	// request (role-label principals from static tokens / local mode have no
+	// distinct identity to separate).
+	if !c.allowSelfApproval && namedPrincipal(req.Actor) && req.Actor == actor.Principal {
+		return req, fmt.Errorf("approvals: request %s was made by %q — separation of duties requires a different admin to decide it (PARTOUT_ALLOW_SELF_APPROVAL=1 lifts this)", req.ID, req.Actor)
 	}
 	// The parked run may have been finalized meanwhile (execution cancelled,
 	// agent disconnect, …): approving it would dispatch into the void.
@@ -231,12 +261,46 @@ func (c *Controller) Deny(requestID, reason string, actor Actor) (*store.Approva
 // requests are finalized first: parked exec runs are marked failed and
 // their executions re-finalized.
 func (c *Controller) List(state string, limit int) ([]*store.ApprovalRequest, error) {
-	if expired, err := c.st.ExpireApprovalRequests(); err == nil {
-		for _, r := range expired {
-			c.finalizeParked(r, "expired", "approval expired")
-		}
-	}
+	c.expirePending()
 	return c.st.ListApprovalRequests(state, limit)
+}
+
+// expirePending finalizes every pending request past its TTL: the parked run
+// is failed, an audit row is written, and an approval.expired SSE event is
+// broadcast (so the UI badge clears without anyone listing the queue).
+func (c *Controller) expirePending() {
+	expired, err := c.st.ExpireApprovalRequests()
+	if err != nil {
+		if c.log != nil {
+			c.log.Printf("approvals: expire scan: %v", err)
+		}
+		return
+	}
+	for _, r := range expired {
+		c.finalizeParked(r, "expired", "approval expired")
+		c.emit(r, "approval.expired")
+	}
+}
+
+// StartSweeper runs expirePending on an interval until ctx is done, so parked
+// requests expire on time even when nobody lists the queue (expiry was
+// previously lazy — only List/Approve triggered it).
+func (c *Controller) StartSweeper(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				c.expirePending()
+			}
+		}
+	}()
 }
 
 // finalizeParked finalizes the run rows a parked (denied or expired)
@@ -297,7 +361,7 @@ func (c *Controller) audit(req *store.ApprovalRequest, kind, decidedBy, reason s
 		"decided_by":   decidedBy,
 		"reason":       reason,
 	})
-	_ = c.st.AppendAudit(store.AuditEvent{
+	c.st.AppendAuditLogged(c.log, store.AuditEvent{
 		TS: time.Now().Unix(), Kind: "approval", Actor: decidedBy,
 		AgentID: req.AgentID, Payload: string(payload),
 	})

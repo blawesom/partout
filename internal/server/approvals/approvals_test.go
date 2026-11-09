@@ -3,6 +3,7 @@ package approvals
 import (
 	"log"
 	"testing"
+	"time"
 
 	"github.com/blawesom/partout/internal/certutil"
 	"github.com/blawesom/partout/internal/policy"
@@ -238,6 +239,88 @@ func TestExpiredCannotApprove(t *testing.T) {
 	}
 
 	// Approve must now fail.
+	if _, err := c.Approve(req.ID, Actor{Principal: "bob", Role: "admin"}); err == nil {
+		t.Fatal("expired request must not be approvable")
+	}
+}
+
+// TestApproveSelfApprovalRejected: a NAMED principal (real user) cannot
+// approve their own request — separation of duties.
+func TestApproveSelfApprovalRejected(t *testing.T) {
+	c, _, _ := newTestController(t)
+	req, err := c.NewRequest(NewRequestParams{
+		ActionClass: policy.ActionExec, AgentID: "ag_1", Actor: "alice", ActorRole: "admin",
+		Payload: map[string]any{"cmd": "reboot"},
+	})
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if _, err := c.Approve(req.ID, Actor{Principal: "alice", Role: "admin"}); err == nil {
+		t.Fatal("self-approval by a named principal must be rejected")
+	}
+	// A different admin can approve.
+	c.RegisterDispatcher(policy.ActionExec, func(req *store.ApprovalRequest, dec *pb.Decision) error { return nil })
+	if _, err := c.Approve(req.ID, Actor{Principal: "bob", Role: "admin"}); err != nil {
+		t.Fatalf("approval by a different admin should succeed: %v", err)
+	}
+}
+
+// TestApproveSelfApprovalRoleLabelExempt: static-token / local-mode principals
+// are role labels ("admin", "local") with no distinct identity — exempt from
+// SoD (there is nobody else to separate from).
+func TestApproveSelfApprovalRoleLabelExempt(t *testing.T) {
+	c, _, _ := newTestController(t)
+	req, err := c.NewRequest(NewRequestParams{
+		ActionClass: policy.ActionExec, AgentID: "ag_1", Actor: "admin", ActorRole: "admin",
+		Payload: map[string]any{"cmd": "reboot"},
+	})
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	c.RegisterDispatcher(policy.ActionExec, func(req *store.ApprovalRequest, dec *pb.Decision) error { return nil })
+	if _, err := c.Approve(req.ID, Actor{Principal: "admin", Role: "admin"}); err != nil {
+		t.Fatalf("role-label principal self-approval should be allowed: %v", err)
+	}
+}
+
+// TestExpirePendingSweeps: expirePending finalizes requests past their TTL
+// (the background sweeper path — expiry must not depend on someone listing).
+func TestExpirePendingSweeps(t *testing.T) {
+	c, st, _ := newTestController(t)
+	c.ttl = time.Millisecond
+	req, err := c.NewRequest(NewRequestParams{
+		ActionClass: policy.ActionExec, AgentID: "ag_sweep", RunID: "run_sweep", Actor: "alice", ActorRole: "admin",
+		Payload: map[string]any{"cmd": "reboot"},
+	})
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := st.CreateExecution(store.Execution{ID: "exec_sweep", Selector: "all", Cmd: "reboot", State: "dispatching"}); err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+	if err := st.UpsertAgent(store.Agent{ID: "ag_sweep", UUID: "u-sweep"}); err != nil {
+		t.Fatalf("UpsertAgent: %v", err)
+	}
+	if err := st.CreateExecutionRun(store.ExecutionRun{ID: "run_sweep", ExecutionID: "exec_sweep", AgentID: "ag_sweep", State: "awaiting_approval"}); err != nil {
+		t.Fatalf("CreateExecutionRun: %v", err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	c.expirePending()
+	got, err := st.GetApprovalRequest(req.ID)
+	if err != nil || got == nil {
+		t.Fatalf("GetApprovalRequest: %v %v", got, err)
+	}
+	if got.State != "expired" {
+		t.Fatalf("state = %q, want expired", got.State)
+	}
+	run, err := st.GetExecutionRun("run_sweep")
+	if err != nil || run == nil {
+		t.Fatalf("GetExecutionRun: %v", err)
+	}
+	if run.State != "failed" {
+		t.Fatalf("parked run state = %q, want failed", run.State)
+	}
+	// And it can no longer be approved.
 	if _, err := c.Approve(req.ID, Actor{Principal: "bob", Role: "admin"}); err == nil {
 		t.Fatal("expired request must not be approvable")
 	}
