@@ -13,7 +13,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -38,7 +37,7 @@ func (h *Handler) oauthCreateClient(w http.ResponseWriter, r *http.Request) {
 		Scope       string `json:"scope"`
 		RedirectURI string `json:"redirect_uri"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -82,7 +81,7 @@ func (h *Handler) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallengeMethod string `json:"code_challenge_method"`
 		Scope               string `json:"scope"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -118,7 +117,7 @@ func (h *Handler) oauthToken(w http.ResponseWriter, r *http.Request) {
 		Code         string `json:"code"`
 		CodeVerifier string `json:"code_verifier"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}

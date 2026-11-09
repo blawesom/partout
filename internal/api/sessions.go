@@ -52,7 +52,7 @@ func (h *Handler) sessionOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body sessionOpenBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json: "+err.Error(), nil)
 		return
 	}
@@ -82,7 +82,7 @@ func (h *Handler) sessionInput(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DataB64 string `json:"data_b64"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json: "+err.Error(), nil)
 		return
 	}
@@ -107,7 +107,7 @@ func (h *Handler) sessionResize(w http.ResponseWriter, r *http.Request) {
 		Cols int32 `json:"cols"`
 		Rows int32 `json:"rows"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid json: "+err.Error(), nil)
 		return
 	}

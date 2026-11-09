@@ -50,6 +50,21 @@ func decodeJSON(r *http.Request, v any) error {
 	return nil
 }
 
+// decodeJSONMax is decodeJSON without DisallowUnknownFields, with a caller-set
+// body cap. Used on the small public endpoints (login, OAuth, enrollment,
+// session input, …) that previously read r.Body with no bound at all — a
+// memory-DoS vector on unauthenticated routes.
+func decodeJSONMax(r *http.Request, v any, max int64) error {
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, max))
+	if err := dec.Decode(v); err != nil {
+		if _, ok := err.(*http.MaxBytesError); ok {
+			return fmt.Errorf("request body too large (max %d bytes)", max)
+		}
+		return err
+	}
+	return nil
+}
+
 // ---- helpers -----------------------------------------------------------------
 
 // isNotFound reports whether err is a store not-found.
@@ -79,6 +94,3 @@ func pageParams(r *http.Request, defaultLimit int) (limit int, cursor string) {
 	cursor = r.URL.Query().Get("cursor")
 	return
 }
-
-// hasMore reports whether more pages exist (len == requested limit).
-func hasMore(limit, n int) bool { return n == limit }

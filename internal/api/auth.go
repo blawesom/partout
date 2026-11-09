@@ -13,7 +13,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -56,7 +55,7 @@ func (h *Handler) authLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Username == "" {
+	if err := decodeJSONMax(r, &body, 16<<10); err != nil || body.Username == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "username and password required", nil)
 		return
 	}
@@ -150,7 +149,7 @@ func (h *Handler) authChangePassword(w http.ResponseWriter, r *http.Request) {
 		OldPassword string `json:"old_password"`
 		NewPassword string `json:"new_password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.OldPassword == "" || body.NewPassword == "" {
+	if err := decodeJSONMax(r, &body, 16<<10); err != nil || body.OldPassword == "" || body.NewPassword == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "old_password and new_password required", nil)
 		return
 	}
@@ -233,7 +232,7 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Role     string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 16<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -257,7 +256,7 @@ func (h *Handler) userPatch(w http.ResponseWriter, r *http.Request) {
 		Disabled *bool  `json:"disabled"`
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 16<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}

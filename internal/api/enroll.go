@@ -49,7 +49,7 @@ type createTokenResponse struct {
 func (h *Handler) handleCreateEnrollmentToken(w http.ResponseWriter, r *http.Request) {
 	var req createTokenRequest
 	if r.Body != nil {
-		json.NewDecoder(r.Body).Decode(&req)
+		decodeJSONMax(r, &req, 256<<10)
 	}
 	if req.TTLS <= 0 {
 		req.TTLS = 900
@@ -114,7 +114,7 @@ type enrollTLS struct {
 
 func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req enrollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONMax(r, &req, 256<<10); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -230,7 +230,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request) {
 // audit appends an audit row.
 func (h *Handler) audit(kind, actor string, payload map[string]string) {
 	b, _ := json.Marshal(payload)
-	h.st.AppendAudit(store.AuditEvent{
+	h.st.AppendAuditLogged(h.log, store.AuditEvent{
 		TS:      time.Now().Unix(),
 		Kind:    kind,
 		Actor:   actor,

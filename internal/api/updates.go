@@ -145,9 +145,10 @@ func (h *Handler) handleUploadRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(body.Signature))
 	if err != nil || len(sig) != 64 {
-		// GA: unsigned releases are the exception
-		// (PARTOUT_ALLOW_UNSIGNED_RELEASES=true, default false). The sha256
-		// integrity check still binds the artifact; a signature adds provenance.
+		// Unsigned releases are a beta-window exception
+		// (PARTOUT_ALLOW_UNSIGNED_RELEASES=true is the BETA default; it flips
+		// to false = signed-only at 1.0 GA). The sha256 integrity check still
+		// binds the artifact; a signature adds provenance.
 		if strings.TrimSpace(body.Signature) == "" && h.allowUnsigned {
 			sig = nil
 		} else {

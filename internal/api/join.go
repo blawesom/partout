@@ -297,7 +297,7 @@ func (h *Handler) handleElevationBootstrapMint(w http.ResponseWriter, r *http.Re
 	}
 	var body elevateBootstrapBody
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = decodeJSONMax(r, &body, 16<<10)
 	}
 	if body.Policy == "" {
 		body.Policy = "default-broad"

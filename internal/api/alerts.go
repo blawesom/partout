@@ -177,6 +177,11 @@ func (b *ruleBody) validate() error {
 	if !validSeverities[b.Severity] {
 		return errors.New("severity must be one of: info, warning, critical")
 	}
+	// Scheme/host validation here; the authoritative guard is at dial time
+	// (safehttp): loopback/link-local/metadata targets are refused when the
+	// server actually connects, so DNS rebinding cannot bypass this check.
+	// RFC1918 targets stay allowed — air-gapped fleets point these at
+	// self-hosted receivers on the LAN.
 	if b.WebhookURL != nil && *b.WebhookURL != "" {
 		u, err := url.Parse(*b.WebhookURL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -290,7 +295,7 @@ func derefInt64(p *int64) int64 {
 
 func (h *Handler) ruleCreate(w http.ResponseWriter, r *http.Request) {
 	var b ruleBody
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONMax(r, &b, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body", nil)
 		return
 	}
@@ -322,7 +327,7 @@ func (h *Handler) ruleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b ruleBody
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+	if err := decodeJSONMax(r, &b, 64<<10); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body", nil)
 		return
 	}

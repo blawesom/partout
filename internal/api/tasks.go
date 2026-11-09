@@ -71,7 +71,7 @@ func (h *Handler) taskCreate(w http.ResponseWriter, r *http.Request) {
 		Description string           `json:"description"`
 		Steps       []store.TaskStep `json:"steps"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -118,7 +118,7 @@ func (h *Handler) taskRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AgentID string `json:"agent_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -268,7 +268,7 @@ func (h *Handler) playbookCreate(w http.ResponseWriter, r *http.Request) {
 		TaskVersion int    `json:"task_version"`
 		Selector    string `json:"selector"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}

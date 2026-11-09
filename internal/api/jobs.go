@@ -12,7 +12,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -86,7 +85,7 @@ func (h *Handler) jobCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var spec jobs.Job
-	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+	if err := decodeJSONMax(r, &spec, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -121,7 +120,7 @@ func (h *Handler) jobGet(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) jobUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var spec jobs.Job
-	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+	if err := decodeJSONMax(r, &spec, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
@@ -165,7 +164,7 @@ func (h *Handler) jobRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AgentID string `json:"agent_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONMax(r, &body, 1<<20); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 		return
 	}
