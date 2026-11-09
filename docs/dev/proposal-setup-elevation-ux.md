@@ -9,8 +9,8 @@
 > followed (broad default + strict/full tiers). The text below is the
 > reviewed proposal, kept as the design record.
 >
-> Design rationale lives in [architecture.md](architecture.md); day-2 operations in
-> [operations.md](operations.md); deployment topologies in [deployment.md](deployment.md).
+> Design rationale lives in [architecture.md,](../architecture.md); day-2 operations in
+> [operations.md,](../operations.md); deployment topologies in [deployment.md,](../deployment.md).
 > The [README](../README.md) is a short overview (objectives, problem, architecture, deploy,
 > UI, CLI).
 

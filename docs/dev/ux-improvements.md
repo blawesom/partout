@@ -2,13 +2,13 @@
 
 **Status:** living evaluation + roadmap. Recommendations start as proposals; **as they
 ship, their sections get the ✅ treatment** (roadmap convention) and the guards move to
-[ui-guidelines.md](ui-guidelines.md) — the ✅ rows below are already shipped, so do not
+[ui-guidelines.md,](../ui-guidelines.md) — the ✅ rows below are already shipped, so do not
 treat this file as a purely-unimplemented wishlist. This is a heuristic evaluation of
 the shipped UI with ranked recommendations: quick wins for the near term, larger areas
 for later versions.
-**Companion docs:** [ui-guidelines.md](ui-guidelines.md) (the UI definition — IA, tokens,
-components, state vocabulary), [getting-started.md](getting-started.md) (the flow this
-evaluation starts from), [roadmap.md](roadmap.md) (milestone plan).
+**Companion docs:** [ui-guidelines.md,](../ui-guidelines.md) (the UI definition — IA, tokens,
+components, state vocabulary), [getting-started.md,](../getting-started.md) (the flow this
+evaluation starts from), [roadmap.md,](../roadmap.md) (milestone plan).
 
 ---
 

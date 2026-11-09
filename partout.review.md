@@ -199,7 +199,7 @@ the decision log stale.
 
 - ~7.6k lines of docs, including a 958-line PRD; release status is restated in the
   README, PRD header, roadmap and several docs, and the copies drift.
-- `docs/ux-improvements.md` header says "nothing in this document is implemented yet"
+- `docs/dev/ux-improvements.md` header says "nothing in this document is implemented yet"
   above rows marked ✅ shipped.
 - Recommendation: one status source (`docs/roadmap.md`) that the README and PRD link to
   rather than restate; trim the README to the embedded demo + a link to

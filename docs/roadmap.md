@@ -798,7 +798,7 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
 - **v0.9.15 — setup & privilege UX (the onboarding release).** Everything
   since the v0.9.14 tag, answering the two loudest beta complaints: *first-node
   enrollment is tedious* and *privilege management is hard to set up
-  correctly*. Design record: `docs/proposal-setup-elevation-ux.md` (reviewed,
+  correctly*. Design record: `docs/dev/proposal-setup-elevation-ux.md` (reviewed,
   then implemented in three phases).
 
   - **One-line join (E1 + E2)**: `curl -fsSL 'https://srv/api/v1/join/<token>' |
@@ -1023,7 +1023,7 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
     `file.exists` matches exactly.
   - **Standing instruments**: `scripts/beta-gate.sh` (the one-command
     release battery), `scripts/check-config-docs.sh` (env-var ↔ docs
-    lint), `docs/walkthrough.md` (the moderated-operator instrument).
+    lint), `docs/dev/walkthrough.md` (the moderated-operator instrument).
 
 - **v0.9.9 — the 1.0-scoped beta: item 20 + the LLM assistant.** Everything
   since the v0.9.8 tag:
@@ -1085,7 +1085,7 @@ Design + mockup: `docs/assistant.md`, `docs/mockups/assistant.html`.
   - **Teaching surfaces** — the first-command nudge (fleet 0→1) walks the core
     loop; observe empty states explain how facts arrive;
     `docs/getting-started.md` is the guided 5-minute walkthrough.
-  - **UX quick wins** (`docs/ux-improvements.md`, heuristic evaluation): WCAG
+  - **UX quick wins** (`docs/dev/ux-improvements.md`, heuristic evaluation): WCAG
     AA contrast for the de-emphasis token in both themes; selector
     autocomplete from live fleet data + an offline grammar help dialog;
     re-run from recent executions; audit actor/time filters + Load-more
