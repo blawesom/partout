@@ -77,6 +77,28 @@ jobs:
       - name: Dependency licenses
         run: bash scripts/check-licenses.sh
 
+  docs:
+    name: Docs (links + README quickstart smoke + config-doc coverage)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Every relative link in README/root docs/docs/ must resolve, and the
+      # README quickstart is executed for real: build the binary, boot the
+      # embedded demo on a scratch port, then run the documented
+      # auth login / hosts / run / audit verify commands against it.
+      - name: README links + quickstart smoke
+        run: bash scripts/check-readme.sh
+
+      # Every PARTOUT_* the code reads must be in the deployment config table.
+      - name: Config-doc coverage
+        run: bash scripts/check-config-docs.sh
+
   e2e:
     name: E2E (install + update + systemd + backup-restore)
     needs: test
