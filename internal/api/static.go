@@ -9,12 +9,14 @@
 package api
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
 
+	"github.com/blawesom/partout/internal/agent/facts"
 	"github.com/blawesom/partout/internal/api/webui"
 )
 
@@ -43,7 +45,7 @@ func (h *Handler) RegisterStatic() {
 func (h *Handler) serveUI(w http.ResponseWriter, r *http.Request) {
 	p := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
 	if p == "" || p == "." || p == "index.html" {
-		writeUI(w, "text/html; charset=utf-8", webui.IndexHTML())
+		writeUI(w, "text/html; charset=utf-8", h.indexHTML())
 		return
 	}
 
@@ -65,7 +67,44 @@ func (h *Handler) serveUI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Not an asset → SPA route (client router).
-	writeUI(w, "text/html; charset=utf-8", webui.IndexHTML())
+	writeUI(w, "text/html; charset=utf-8", h.indexHTML())
+}
+
+// indexHTML serves the SPA entry document with the build stamp filled in:
+// versioned release builds get content="release", which makes app.js keep the
+// window.__partout / window.__partoutTerm debug hooks (and the bearer token
+// they expose) out of the page. Dev builds ("0.0.0-dev" etc.) keep "dev" so
+// the headless smoke harness can drive the app.
+func (h *Handler) indexHTML() []byte {
+	b := webui.IndexHTML()
+	if isReleaseVersion(facts.Version) {
+		return bytes.Replace(b, []byte(`name="partout-build" content="dev"`),
+			[]byte(`name="partout-build" content="release"`), 1)
+	}
+	return b
+}
+
+// isReleaseVersion reports whether v is a stamped release semver (set via
+// -ldflags at release time), as opposed to a dev build ("0.0.0-dev").
+func isReleaseVersion(v string) bool {
+	if v == "" {
+		return false
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // contentType picks the MIME type for the asset kinds the SPA ships.

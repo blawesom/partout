@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Stamped to "release" by the server for versioned builds; dev builds
+       keep "dev", which is what enables the window.__partout* debug hooks. -->
+  <meta name="partout-build" content="dev" />
   <title>Partout Fleet Management</title>
   <!-- Apply the persisted theme before first paint (no flash). -->
   <script>document.documentElement.dataset.theme = localStorage.getItem("partout_theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");</script>

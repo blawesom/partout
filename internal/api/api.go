@@ -5,7 +5,6 @@ package api
 
 import (
 	"crypto/ed25519"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -61,7 +60,7 @@ type Handler struct {
 	ca                *certutil.CA           // TLS root CA; nil when the server runs in plaintext mode
 	streamH           *stream.Handler        // stream handler (for mTLS leaf rotation)
 	updatesMgr        *updates.Manager       // M8.1 rollout orchestrator
-	allowUnsigned     bool                   // GA: unsigned releases accepted only when PARTOUT_ALLOW_UNSIGNED_RELEASES=true (default false = signed-only)
+	allowUnsigned     bool                   // PARTOUT_ALLOW_UNSIGNED_RELEASES: beta default TRUE (keyless agents accept unsigned on sha256 alone); flips to false (signed-only) at 1.0 GA
 	releaseVerifyKey  ed25519.PublicKey      // optional: verify upload signatures at registration (PARTOUT_RELEASE_VERIFY_KEY); nil = store-and-forward
 	autoDraftRollouts bool                   // M8.1.1: auto-draft a parked rollout on agent release upload
 	assistant         *assistant.Service     // R26 LLM assistant; nil until SetAssistant (routes 503)
@@ -91,6 +90,11 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	// cannot set headers) in addition to the Authorization header; the query
 	// form must be a short-lived SSE-scoped token from
 	// POST /api/v1/auth/sse-token, never a full bearer.
+	//
+	// Some event kinds are role-gated on the stream: live PTY traffic
+	// (session.*) is operator+ only — a viewer can list sessions and read
+	// replays over REST, but must not tap other operators' live terminals.
+	sseB.SetKindMinRole("session.", int(roleOperator))
 	mux.Handle("/api/v1/events", handler.requireSSE(roleViewer)(sseB))
 
 	// GET /healthz — health check.
@@ -154,7 +158,7 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 			AgentID string `json:"agent_id"`
 			All     bool   `json:"all"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+		if err := decodeJSONMax(r, &body, 16<<10); err != nil && err.Error() != "EOF" {
 			writeError(w, http.StatusBadRequest, "bad_request", err.Error(), nil)
 			return
 		}
@@ -277,8 +281,10 @@ func New(st *store.Store, h *stream.Handler, sseB *sse.Broker, lg *log.Logger) *
 	return handler
 }
 
-// ServeHTTP implements http.Handler.
+// ServeHTTP implements http.Handler. Every response (API JSON, SSE, SPA)
+// carries the baseline security headers — see headers.go.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.setSecurityHeaders(w)
 	h.router.ServeHTTP(w, r)
 }
 

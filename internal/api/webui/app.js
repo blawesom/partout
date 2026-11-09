@@ -12,6 +12,17 @@
   const LS_NAV_COLLAPSED = "partout_nav_collapsed";
   const LS_THEME = "partout_theme";
 
+  // Debug hooks (window.__partout / __partoutTerm, used by the headless smoke
+  // harness) expose the component including its bearer token — dev builds
+  // only. The server stamps <meta name="partout-build" content="release"> on
+  // versioned builds (see internal/api/static.go), and then these stay unset.
+  const DEV_BUILD = (() => {
+    try {
+      const m = document.querySelector('meta[name="partout-build"]');
+      return !m || m.content !== "release";
+    } catch (e) { return true; }
+  })();
+
   // ---------------- formatting + state vocab (exposed to template) --------
   function fmtAgo(ts) {
     if (!ts) return "—";
@@ -3355,6 +3366,15 @@
           return "strict";
         } catch (e) { return ""; }
       },
+      // Pretty-print a policy's rules for the expandable row (the template
+      // calls this at app.js's elevation table; it used to be missing, which
+      // threw on every expand).
+      elevRulesText(p) {
+        try {
+          const r = typeof p.rules === "string" ? JSON.parse(p.rules) : p.rules;
+          return JSON.stringify(r, null, 2);
+        } catch (e) { return String(p.rules || ""); }
+      },
       elevFormNew() {
         this.elev.msg = "";
         const seed = [{ allow: "dnf", args: ["-y", "upgrade"] }];
@@ -3526,7 +3546,7 @@
         } finally { if (this.elev.push) this.elev.push.busy = false; }
       },
       async elevDelete(p) {
-        if (!confirm("Delete elevation policy " + p.name + "? Hosts already provisioned with it keep running their installed copy.")) return;
+        if (!await this.askConfirm({ title: "Delete elevation policy", body: "Hosts already provisioned with it keep running their installed copy.", mono: p.name, confirmLabel: "Delete policy", variant: "danger", requireText: p.name })) return;
         try {
           await this.api("/elevation/policies/" + encodeURIComponent(p.id), { method: "DELETE" });
           this.notify("ok", "deleted " + p.name);
@@ -3790,7 +3810,7 @@
         });
         term.open(el);
         this._term = term;
-        window.__partoutTerm = term; // debug/test hook (read terminal buffer headlessly)
+        if (DEV_BUILD) window.__partoutTerm = term; // dev-only test hook (read terminal buffer headlessly)
         term.onData((d) => this._sendInput(d));
         term.onResize(({ cols, rows }) => {
           this.api("/sessions/" + encodeURIComponent(this.p1) + "/resize", { method: "POST", body: { cols, rows }, silent: true }).catch(() => {});
@@ -3825,7 +3845,7 @@
       _termFinalize(p) {
         try { this._term.write("\r\n\x1b[90m[session ended" + (p.exit_code != null ? " (exit " + p.exit_code + ")" : "") + "]\x1b[0m\r\n"); } catch (e) { }
       },
-      _destroyTerm() { if (this._term) { try { this._term.dispose(); } catch (e) { } this._term = null; } },
+      _destroyTerm() { if (this._term) { try { this._term.dispose(); } catch (e) { } this._term = null; } if (window.__partoutTerm) delete window.__partoutTerm; },
       replayText() {
         const fr = this.sessionReplay && this.sessionReplay.frames;
         if (!fr) return (this.sessionReplay ? JSON.stringify(this.sessionReplay) : "");
@@ -4037,7 +4057,7 @@
         try {
           await this.api("/provision-runs/" + encodeURIComponent(id) + "/rekey", { method: "POST" });
           await this.loadProvDetail(id);
-        } catch (e) { this.toast(e.message, "error"); }
+        } catch (e) { this.notify("err", e.message); }
         finally { this.provRekeyBusy = false; }
       },
       async createProvRun() {
@@ -5186,7 +5206,7 @@
       window.addEventListener("hashchange", () => { this.route = (location.hash || "#/fleet").replace(/^#\/?/, ""); });
     },
     mounted() {
-      if (typeof window !== "undefined") window.__partout = this; // test hook: component instance
+      if (typeof window !== "undefined" && DEV_BUILD) window.__partout = this; // dev-only test hook: component instance
       // Capture how this page was actually served: cleartextLogin warns on
       // the login card when the operator is about to send a password over an
       // unencrypted network path (same condition doctor warns on server-side).
@@ -5234,7 +5254,8 @@
   });
 
   app.config.errorHandler = (err) => { console.error("partout ui:", err); };
-  // Test hook: expose the app so the headless smoke harness can drive it.
-  if (typeof window !== "undefined") window.__partout = app;
+  // Test hook: expose the app so the headless smoke harness can drive it —
+  // dev builds only (the handle carries the bearer token).
+  if (typeof window !== "undefined" && DEV_BUILD) window.__partout = app;
   app.mount("#app");
 })();

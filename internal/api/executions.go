@@ -2,6 +2,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -229,6 +230,10 @@ func (h *Handler) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 // handleAuditVerify walks the audit hash chain and reports whether the log
 // is intact (PRD Decision 5). Read-only; viewer+ role like the audit list.
+// The response also carries the chain head (last row id + hash) and, when the
+// server identity is installed, an Ed25519 signature over it — operators can
+// anchor that signed head out-of-band (cron + external store) to detect a
+// whole-database rewrite, which an in-DB hash chain alone cannot.
 func (h *Handler) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	res, err := h.st.VerifyAuditChain()
 	if err != nil {
@@ -242,6 +247,16 @@ func (h *Handler) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 	if !res.OK {
 		out["broken_row_id"] = res.BrokenRowID
 		out["reason"] = res.Reason
+	}
+	if lastID, lastHash, keyID, err := h.st.AuditChainHeadFull(); err == nil {
+		head := map[string]any{"last_id": lastID, "last_hash": lastHash}
+		if keyID != "" {
+			head["key_id"] = keyID // which HMAC key verifies algo=2 rows
+		}
+		if sig := h.ctrl.SignAuditHead(lastID, lastHash); sig != nil {
+			head["signature_b64"] = base64.StdEncoding.EncodeToString(sig)
+		}
+		out["head"] = head
 	}
 	writeJSON(w, http.StatusOK, out)
 }

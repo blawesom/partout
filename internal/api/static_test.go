@@ -115,3 +115,30 @@ func TestSelectorResolveB2(t *testing.T) {
 		t.Errorf("selector=nope: status %d, want 400 (%s)", code, b)
 	}
 }
+
+// TestSecurityHeaders: every response through the handler carries the
+// baseline security headers.
+func TestSecurityHeaders(t *testing.T) {
+	_, _, srv := startAPITest(t)
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	for k, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+	} {
+		if got := resp.Header.Get(k); got != want {
+			t.Errorf("header %s = %q, want %q", k, got, want)
+		}
+	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP header missing/weak: %q", csp)
+	}
+	// Plaintext test server → no HSTS.
+	if hsts := resp.Header.Get("Strict-Transport-Security"); hsts != "" {
+		t.Errorf("HSTS on plaintext = %q, want empty", hsts)
+	}
+}
