@@ -21,6 +21,27 @@ import (
 type Store struct {
 	db      *sql.DB
 	dialect string // "sqlite" | "postgres"
+
+	// auditKey, when set (derived from the server Ed25519 identity in
+	// main.go, or from PARTOUT_AUDIT_KEY for recovery/rollover), switches NEW
+	// audit rows to the keyed HMAC chain (algo=2). Existing algo=1 rows stay
+	// verifiable without the key. See auditchain.go.
+	auditKey   []byte
+	auditKeyID string
+}
+
+// SetAuditKey installs the HMAC key for the audit hash chain (algo=2 rows).
+// Called once at startup; a nil key keeps the unkeyed v1 chain for new rows.
+func (s *Store) SetAuditKey(key []byte) {
+	s.auditKey = key
+}
+
+// SetAuditKeyID records the public key id (persisted in
+// audit_chain_state.key_id and surfaced by the verify endpoint, so an operator
+// can tell WHICH key verifies the log). Called once at startup, after
+// SetAuditKey.
+func (s *Store) SetAuditKeyID(keyID string) {
+	s.auditKeyID = keyID
 }
 
 // New opens (or creates) the database at dsn and applies migrations.
@@ -180,6 +201,8 @@ func (s *Store) applySchema() error {
 		{table: "execution_runs", column: "elevation_note", def: "TEXT NOT NULL DEFAULT ''"},
 		{table: "audit_events", column: "prev_hash", def: "TEXT NOT NULL DEFAULT ''"},
 		{table: "audit_events", column: "hash", def: "TEXT NOT NULL DEFAULT ''"},
+		{table: "audit_events", column: "algo", def: "INTEGER NOT NULL DEFAULT 1"},
+		{table: "audit_chain_state", column: "key_id", def: "TEXT NOT NULL DEFAULT ''"},
 		{table: "mcp_clients", column: "redirect_uri", def: "TEXT NOT NULL DEFAULT ''"},
 	}); err != nil {
 		return fmt.Errorf("store: ensure columns: %w", err)

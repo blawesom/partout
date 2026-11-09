@@ -101,7 +101,11 @@ CREATE TABLE IF NOT EXISTS audit_events (
   agent_id      TEXT,
   payload       TEXT NOT NULL,
   prev_hash     TEXT NOT NULL DEFAULT '',
-  hash          TEXT NOT NULL DEFAULT ''
+  hash          TEXT NOT NULL DEFAULT '',
+  -- algo: 1 = unkeyed sha256 chain ("partout.audit.v1"), 2 = HMAC-SHA256
+  -- keyed chain ("partout.audit.v2", key derived from the server identity).
+  -- Existing rows keep algo=1; new rows get algo=2 when an audit key is set.
+  algo          INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit_events(kind);
@@ -113,7 +117,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit_events(kind);
 CREATE TABLE IF NOT EXISTS audit_chain_state (
   id        INTEGER PRIMARY KEY CHECK (id = 1),
   last_id   INTEGER NOT NULL,
-  last_hash TEXT NOT NULL
+  last_hash TEXT NOT NULL,
+  -- key_id identifies the HMAC key that verifies algo=2 rows ("id:<fp>" for
+  -- the identity-derived key, "env:<fp>" for PARTOUT_AUDIT_KEY). Empty on
+  -- logs that predate keyed rows or run unkeyed. Informational: verification
+  -- uses the key installed in this process, and fails closed on algo=2 rows
+  -- when it does not match.
+  key_id    TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS policies (
@@ -675,7 +685,7 @@ CREATE TABLE IF NOT EXISTS elevation_tokens (
 `
 
 // currentSchemaVersion is applied on first migrate.
-const currentSchemaVersion = 28
+const currentSchemaVersion = 30
 
 // CurrentSchemaVersion exposes the constant (selftest, ops tooling).
 func CurrentSchemaVersion() int { return currentSchemaVersion }

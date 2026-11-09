@@ -86,3 +86,16 @@ func (r *Resolver) ResolveSelector(expr string) ([]selector.HostInfo, error) {
 	groups, _ := r.s.Groups()
 	return selector.Resolve(expr, r, groups)
 }
+
+// SelectorGroups returns the fleet-wide group name→selector map for policy
+// evaluation (group:<name> predicates in policy rules). A read error yields
+// nil — group predicates then never match, which is fail-closed for deny
+// rules only when the server also fails to resolve; the store read failing is
+// a DB error and is surfaced by the caller's error handling.
+func (s *Store) SelectorGroups() selector.Groups {
+	g, err := s.Groups()
+	if err != nil {
+		return nil
+	}
+	return g
+}

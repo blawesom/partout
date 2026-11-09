@@ -180,3 +180,211 @@ func TestAuditChain_EmptyLog(t *testing.T) {
 		t.Fatalf("verify = {OK:%v rows:%d}, want {OK:true rows:0}", res.OK, res.RowsChecked)
 	}
 }
+
+// TestAuditChain_KeyedV2 appends rows with an audit key set (algo=2, HMAC) and
+// verifies the chain holds; a direct-SQL rewrite of the chain head must NOT
+// verify without the key (an attacker with DB write access cannot recompute
+// algo=2 rows).
+func TestAuditChain_KeyedV2(t *testing.T) {
+	s, _ := setupTestDB(t)
+	defer s.Close()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	s.SetAuditKey(key)
+	s.SetAuditKeyID("test:keyid")
+
+	appendAuditEvents(t, s, 5)
+
+	// All rows are algo=2 now.
+	var algo int
+	if err := s.db.QueryRow(`SELECT algo FROM audit_events ORDER BY id DESC LIMIT 1`).Scan(&algo); err != nil {
+		t.Fatalf("algo scan: %v", err)
+	}
+	if algo != AuditAlgoV2 {
+		t.Fatalf("algo = %d, want %d", algo, AuditAlgoV2)
+	}
+
+	res, err := s.VerifyAuditChain()
+	if err != nil || !res.OK || res.RowsChecked != 5 {
+		t.Fatalf("verify = {OK:%v rows:%d err:%v}, want OK with 5 rows", res.OK, res.RowsChecked, err)
+	}
+
+	// Tamper a payload: verify must fail at that row even with the key (the
+	// attacker in this test does not have it, but the recompute check is the
+	// same code path).
+	if _, err := s.db.Exec(`UPDATE audit_events SET payload='{"i":"tampered"}' WHERE id=3`); err != nil {
+		t.Fatalf("tamper: %v", err)
+	}
+	res, err = s.VerifyAuditChain()
+	if err != nil || res.OK || res.BrokenRowID != 3 {
+		t.Fatalf("tampered verify = {OK:%v row:%d err:%v}, want broken at 3", res.OK, res.BrokenRowID, err)
+	}
+}
+
+// TestAuditChain_KeyedVerifyWithoutKey: a database written WITH a key fails
+// closed on algo=2 rows when verified without the key (e.g. wrong deployment
+// restored without the identity dir).
+func TestAuditChain_KeyedVerifyWithoutKey(t *testing.T) {
+	s, _ := setupTestDB(t)
+	defer s.Close()
+	s.SetAuditKey([]byte("0123456789abcdef0123456789abcdef"))
+	s.SetAuditKeyID("test:keyid")
+	appendAuditEvents(t, s, 3)
+
+	// Reopen without the key, with the chain-state row present (a real
+	// restored DB carries it; its presence also stops the legacy backfill
+	// from recomputing the chain as algo=1).
+	s2, _ := setupTestDB(t)
+	defer s2.Close()
+	headID, headHash, headKeyID, err := s.AuditChainHeadFull()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if headKeyID != "test:keyid" {
+		t.Fatalf("head keyID = %q, want test:keyid", headKeyID)
+	}
+	if _, err := s2.db.Exec(`INSERT INTO audit_chain_state(id, last_id, last_hash, key_id) VALUES(1, ?, ?, ?)`, headID, headHash, headKeyID); err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	// Copy rows over to simulate a restored DB file.
+	for i := 1; i <= 3; i++ {
+		var ts int64
+		var kind, actor, payload, prev, hash string
+		var algo int
+		if err := s.db.QueryRow(`SELECT ts, kind, actor, payload, prev_hash, hash, algo FROM audit_events WHERE id=?`, i).
+			Scan(&ts, &kind, &actor, &payload, &prev, &hash, &algo); err != nil {
+			t.Fatalf("copy row %d: %v", i, err)
+		}
+		if _, err := s2.db.Exec(`INSERT INTO audit_events(id, ts, kind, actor, agent_id, payload, prev_hash, hash, algo) VALUES(?,?,?,?,?,?,?,?,?)`,
+			i, ts, kind, actor, "", payload, prev, hash, algo); err != nil {
+			t.Fatalf("insert row %d: %v", i, err)
+		}
+	}
+	res, err := s2.VerifyAuditChain()
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.OK {
+		t.Fatal("keyed rows verified OK without the key — must fail closed")
+	}
+	if res.Reason == "" {
+		t.Fatal("empty reason")
+	}
+}
+
+// TestAuditChain_MixedV1V2: legacy algo=1 rows followed by keyed algo=2 rows
+// verify together when the key is set (the upgrade path).
+func TestAuditChain_MixedV1V2(t *testing.T) {
+	s, _ := setupTestDB(t)
+	defer s.Close()
+	appendAuditEvents(t, s, 3) // algo=1 (no key yet)
+	s.SetAuditKey([]byte("0123456789abcdef0123456789abcdef"))
+	s.SetAuditKeyID("test:keyid")
+	appendAuditEvents(t, s, 3) // algo=2
+
+	res, err := s.VerifyAuditChain()
+	if err != nil || !res.OK || res.RowsChecked != 6 {
+		t.Fatalf("verify = {OK:%v rows:%d err:%v}, want OK with 6 rows", res.OK, res.RowsChecked, err)
+	}
+}
+
+// TestAuditChain_Head verifies AuditChainHead tracks the last row and the
+// installed key id.
+func TestAuditChain_Head(t *testing.T) {
+	s, _ := setupTestDB(t)
+	defer s.Close()
+	s.SetAuditKey([]byte("0123456789abcdef0123456789abcdef"))
+	s.SetAuditKeyID("test:keyid")
+	appendAuditEvents(t, s, 4)
+	id, hash, keyID2, err := s.AuditChainHeadFull()
+	if err != nil {
+		t.Fatalf("AuditChainHead: %v", err)
+	}
+	if keyID2 != "test:keyid" {
+		t.Fatalf("head keyID = %q, want test:keyid", keyID2)
+	}
+	if id != 4 || hash == "" {
+		t.Fatalf("head = (%d, %q), want (4, non-empty)", id, hash)
+	}
+}
+
+// TestAuditChain_KeyRotationGuard: the chain state pins the key id — a store
+// reopened with a DIFFERENT key sees the stored id (main.go refuses to start
+// on mismatch) and fails closed on verify; the same key verifies fine.
+func TestAuditChain_KeyRotationGuard(t *testing.T) {
+	s, dir := setupTestDB(t)
+	keyA := []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	s.SetAuditKey(keyA)
+	s.SetAuditKeyID("k:aaaa")
+	appendAuditEvents(t, s, 3)
+
+	stored, err := s.AuditChainKeyID()
+	if err != nil || stored != "k:aaaa" {
+		t.Fatalf("AuditChainKeyID = %q, %v; want k:aaaa", stored, err)
+	}
+
+	// Reopen the same DB file with a different key: stored id is still the
+	// old one (that is what main.go's startup guard compares), and verify
+	// fails closed on the algo=2 rows.
+	s2, err := New("sqlite:" + dir + "/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	keyB := []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	s2.SetAuditKey(keyB)
+	s2.SetAuditKeyID("k:bbbb")
+	stored2, err := s2.AuditChainKeyID()
+	if err != nil || stored2 != "k:aaaa" {
+		t.Fatalf("reopened AuditChainKeyID = %q, %v; want k:aaaa (chain pins its key)", stored2, err)
+	}
+	res, err := s2.VerifyAuditChain()
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if res.OK {
+		t.Fatal("verify with the wrong key must fail closed on algo=2 rows")
+	}
+
+	// Fresh DB: no pinned key yet — any key is accepted.
+	s3, _ := setupTestDB(t)
+	defer s3.Close()
+	if id, err := s3.AuditChainKeyID(); err != nil || id != "" {
+		t.Fatalf("fresh AuditChainKeyID = %q, %v; want empty", id, err)
+	}
+}
+
+// TestAuditChain_RestartSameKeyVerifies: rows written under a keyed chain
+// still verify after a process restart with the SAME key (persistence of the
+// chain + state row across reopen).
+func TestAuditChain_RestartSameKeyVerifies(t *testing.T) {
+	s, dir := setupTestDB(t)
+	key := []byte("cccccccccccccccccccccccccccccccc")
+	s.SetAuditKey(key)
+	s.SetAuditKeyID("k:cccc")
+	appendAuditEvents(t, s, 5)
+	s.Close()
+
+	s2, err := New("sqlite:" + dir + "/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	s2.SetAuditKey(key)
+	s2.SetAuditKeyID("k:cccc")
+	res, err := s2.VerifyAuditChain()
+	if err != nil || !res.OK || res.RowsChecked != 5 {
+		t.Fatalf("verify after restart = {OK:%v rows:%d err:%v}, want OK with 5 rows", res.OK, res.RowsChecked, err)
+	}
+	if id, _ := s2.AuditChainKeyID(); id != "k:cccc" {
+		t.Fatalf("key id after restart = %q, want k:cccc", id)
+	}
+	// And new appends continue the same chain.
+	appendAuditEvents(t, s2, 2)
+	res, err = s2.VerifyAuditChain()
+	if err != nil || !res.OK || res.RowsChecked != 7 {
+		t.Fatalf("verify after post-restart appends = {OK:%v rows:%d err:%v}, want OK with 7", res.OK, res.RowsChecked, err)
+	}
+}

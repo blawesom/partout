@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -361,6 +362,15 @@ func (s *Store) ListOutput(runID string) ([]*OutputChunk, error) {
 // hash-chain fields.
 func (s *Store) AppendAudit(a AuditEvent) error {
 	return s.AppendAuditChained(a)
+}
+
+// AppendAuditLogged appends an audit event and logs (never swallows) a
+// failure: the audit log is the tamper-evident record of every governed
+// action, so a lost append must be visible, not silent.
+func (s *Store) AppendAuditLogged(lg *log.Logger, a AuditEvent) {
+	if err := s.AppendAudit(a); err != nil && lg != nil {
+		lg.Printf("store: AUDIT APPEND FAILED (event lost): %v", err)
+	}
 }
 
 // ListAudit returns audit events, optionally filtered by kind.
