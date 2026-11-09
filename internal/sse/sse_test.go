@@ -113,8 +113,10 @@ func TestEmitRoleGated(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	readKind := func(resp *http.Response) string {
-		sc := bufio.NewScanner(resp.Body)
+	// One scanner per stream: a bufio.Scanner buffers ahead, so creating a
+	// fresh scanner per read can swallow a buffered event (flaky hang under
+	// load) — reuse a single scanner per response body.
+	readKind := func(sc *bufio.Scanner) string {
 		for sc.Scan() {
 			line := sc.Text()
 			if strings.HasPrefix(line, "event: ") {
@@ -130,7 +132,8 @@ func TestEmitRoleGated(t *testing.T) {
 		t.Fatalf("viewer connect: %v", err)
 	}
 	defer viewerResp.Body.Close()
-	if k := readKind(viewerResp); k != "connected" {
+	scViewer := bufio.NewScanner(viewerResp.Body)
+	if k := readKind(scViewer); k != "connected" {
 		t.Fatalf("viewer first event = %q, want connected", k)
 	}
 
@@ -140,7 +143,8 @@ func TestEmitRoleGated(t *testing.T) {
 		t.Fatalf("operator connect: %v", err)
 	}
 	defer opResp.Body.Close()
-	if k := readKind(opResp); k != "connected" {
+	scOp := bufio.NewScanner(opResp.Body)
+	if k := readKind(scOp); k != "connected" {
 		t.Fatalf("operator first event = %q, want connected", k)
 	}
 
@@ -148,14 +152,14 @@ func TestEmitRoleGated(t *testing.T) {
 	b.Emit("alert.firing", map[string]string{"rule": "r1"})
 
 	// Operator receives both.
-	if k := readKind(opResp); k != "session.data" {
+	if k := readKind(scOp); k != "session.data" {
 		t.Fatalf("operator got %q, want session.data", k)
 	}
-	if k := readKind(opResp); k != "alert.firing" {
+	if k := readKind(scOp); k != "alert.firing" {
 		t.Fatalf("operator got %q, want alert.firing", k)
 	}
 	// Viewer receives only the ungated kind.
-	if k := readKind(viewerResp); k != "alert.firing" {
+	if k := readKind(scViewer); k != "alert.firing" {
 		t.Fatalf("viewer got %q, want alert.firing (session.data must be filtered)", k)
 	}
 }
