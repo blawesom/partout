@@ -182,3 +182,41 @@ func ids(hosts []HostInfo) []string {
 	}
 	return out
 }
+
+// TestMatchesHost covers the single-host predicate check used by the policy
+// engine, including group expansion.
+func TestMatchesHost(t *testing.T) {
+	groups := Groups{"web": "role:web", "prod": "tag:env=prod", "webprod": "group:web,tag:env=prod"}
+	web := HostInfo{ID: "ag_1", Tags: map[string]string{"env": "prod"}, Roles: []string{"web"}}
+	db := HostInfo{ID: "ag_2", Tags: map[string]string{"env": "dev"}, Roles: []string{"db"}}
+
+	cases := []struct {
+		expr string
+		host HostInfo
+		want bool
+	}{
+		{"all", web, true},
+		{"host:ag_1", web, true},
+		{"host:ag_2", web, false},
+		{"role:web", web, true},
+		{"role:web", db, false},
+		{"tag:env=prod", web, true},
+		{"tag:env=dev", web, false},
+		{"group:web", web, true},
+		{"group:web", db, false},
+		{"group:webprod", web, true},   // nested group + tag
+		{"group:webprod", db, false},   // db is neither web nor prod
+		{"group:nosuch", web, false},   // unknown group → no match
+		{"role:web,tag:env=dev", web, false},
+		{"bogus predicate", web, false},
+	}
+	for _, c := range cases {
+		if got := MatchesHost(c.expr, c.host, groups); got != c.want {
+			t.Errorf("MatchesHost(%q, %s) = %v, want %v", c.expr, c.host.ID, got, c.want)
+		}
+	}
+	// Nil groups: group predicates never match.
+	if MatchesHost("group:web", web, nil) {
+		t.Error("MatchesHost(group:web, nil groups) = true, want false")
+	}
+}

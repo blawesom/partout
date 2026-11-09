@@ -184,6 +184,56 @@ func resolvePreds(preds []Predicate, r Resolver, groups Groups, groupDepth int) 
 	return set, nil
 }
 
+// MatchesHost reports whether the selector expression matches the single
+// given host. It is the per-host counterpart of Resolve (used by the policy
+// engine, which evaluates rules against one host at a time — including
+// group:<name> predicates, expanded against the same groups map). A parse
+// error, unknown group, or empty match all return false (fail-closed for
+// deny rules: a rule whose selector cannot be evaluated never matches).
+func MatchesHost(expr string, info HostInfo, groups Groups) bool {
+	preds, err := Parse(expr)
+	if err != nil {
+		return false
+	}
+	set, err := resolvePreds(preds, singleResolver{info: info}, groups, 0)
+	if err != nil {
+		return false
+	}
+	return len(set) > 0
+}
+
+// singleResolver adapts one HostInfo to the Resolver interface so a selector
+// can be evaluated against a single host.
+type singleResolver struct{ info HostInfo }
+
+func (r singleResolver) All() []HostInfo { return []HostInfo{r.info} }
+func (r singleResolver) ByIDs(ids ...string) []HostInfo {
+	for _, id := range ids {
+		if id == r.info.ID {
+			return []HostInfo{r.info}
+		}
+	}
+	return nil
+}
+func (r singleResolver) ByTag(key, value string) []HostInfo {
+	v, ok := r.info.Tags[key]
+	if !ok {
+		return nil
+	}
+	if value != "" && v != value {
+		return nil
+	}
+	return []HostInfo{r.info}
+}
+func (r singleResolver) ByRole(role string) []HostInfo {
+	for _, rl := range r.info.Roles {
+		if rl == role {
+			return []HostInfo{r.info}
+		}
+	}
+	return nil
+}
+
 // intersect returns the hosts present in both a and b.
 func intersect(a, b []HostInfo) []HostInfo {
 	bset := make(map[string]bool, len(b))

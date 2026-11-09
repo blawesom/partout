@@ -5,9 +5,20 @@
 //
 // Evaluation: all matching rules are considered.  If any deny rule matches
 // → deny (with the matched rule IDs).  Otherwise require_approval.  Then allow.
+// Effect precedence always wins over Priority: a deny can never be overridden
+// by an allow rule, whatever their priorities. Priority (lower number = more
+// important) only orders the matched rules within the winning effect, which
+// decides which rule is named first in the Reason and in MatchedRules.
 //
 // Default posture (v1): **allow when no rules match**.  Full default-deny
 // for writes is gated on the M4 approvals engine (PRD §7).
+//
+// Host scoping: host:/tag:/role: predicates are evaluated directly against
+// the Action; group:<name> predicates are expanded via Action.Groups (the
+// fleet's group name→selector map, filled server-side from the store). When
+// Groups is nil (e.g. the agent-side guardrail, which has no store), a
+// group: predicate never matches locally — the signed server Decision remains
+// the authoritative agent-side gate (fail-closed).
 //
 // The same IR and evaluator are used server-side (dispatch gating) and
 // agent-side (guardrail re-check).
@@ -71,7 +82,10 @@ func ValidEOL(v string) bool {
 	return false
 }
 
-// Priority ordering for precedence: lower number = higher priority.
+// DefaultPriority is the priority assigned to rules that don't set one.
+// Lower number = more important, but only WITHIN the winning effect class:
+// effect precedence (deny > require_approval > allow) always wins over
+// priority — see Evaluate.
 const DefaultPriority = 0
 
 // Match describes what a rule targets.
@@ -115,6 +129,11 @@ type Action struct {
 	// from the policy bundle / decision context. An unknown state never
 	// matches an EOL-scoped rule.
 	HostEOL string
+	// Groups is the fleet-wide group name→selector map used to expand
+	// group:<name> predicates in Match.Hosts. Filled server-side from the
+	// store; nil on the agent (group predicates then never match locally —
+	// the signed server Decision is the authoritative agent-side gate).
+	Groups selector.Groups
 }
 
 // Decision is the outcome of evaluating rules against an action.
@@ -125,46 +144,55 @@ type Decision struct {
 }
 
 // Evaluate returns the decision for a given action, given a list of rules.
-// Rules are evaluated in order; all matching rules are gathered, then
-// precedence is applied: deny > require_approval > allow.
+// All matching rules are gathered, then precedence is applied:
+// deny > require_approval > allow. Within the winning effect, matches are
+// ordered by (priority asc, id asc) so the most important rule is named
+// first — but effect precedence always wins over priority.
 //
 // Default-deny is NOT the v1 default — a write with no matching rule is
 // allowed (the operator must explicitly deny via rules).
 func Evaluate(rules []Rule, a Action) Decision {
-	var denyRules, reqApproval, allowRules []string
+	var denyRules, reqApproval, allowRules []Rule
 	for _, r := range rules {
 		if !matchesRule(r, a) {
 			continue
 		}
 		switch r.Effect {
 		case EffectDeny:
-			denyRules = append(denyRules, r.ID)
+			denyRules = append(denyRules, r)
 		case EffectRequireApproval:
-			reqApproval = append(reqApproval, r.ID)
+			reqApproval = append(reqApproval, r)
 		case EffectAllow:
-			allowRules = append(allowRules, r.ID)
+			allowRules = append(allowRules, r)
 		}
+	}
+	ids := func(rs []Rule) []string {
+		sort.Slice(rs, func(i, j int) bool {
+			if rs[i].Priority != rs[j].Priority {
+				return rs[i].Priority < rs[j].Priority // lower = more important
+			}
+			return rs[i].ID < rs[j].ID
+		})
+		out := make([]string, len(rs))
+		for i, r := range rs {
+			out[i] = r.ID
+		}
+		return out
 	}
 	if len(denyRules) > 0 {
-		return Decision{
-			Effect:       EffectDeny,
-			MatchedRules: denyRules,
-			Reason:       fmt.Sprintf("denied by rules: %s", strings.Join(denyRules, ", ")),
-		}
+		m := ids(denyRules)
+		return Decision{Effect: EffectDeny, MatchedRules: m,
+			Reason: fmt.Sprintf("denied by rules: %s", strings.Join(m, ", "))}
 	}
 	if len(reqApproval) > 0 {
-		return Decision{
-			Effect:       EffectRequireApproval,
-			MatchedRules: reqApproval,
-			Reason:       fmt.Sprintf("require_approval by rules: %s (not yet available — M4)", strings.Join(reqApproval, ", ")),
-		}
+		m := ids(reqApproval)
+		return Decision{Effect: EffectRequireApproval, MatchedRules: m,
+			Reason: fmt.Sprintf("require_approval by rules: %s — parked for an admin decision", strings.Join(m, ", "))}
 	}
 	if len(allowRules) > 0 {
-		return Decision{
-			Effect:       EffectAllow,
-			MatchedRules: allowRules,
-			Reason:       fmt.Sprintf("allowed by rules: %s", strings.Join(allowRules, ", ")),
-		}
+		m := ids(allowRules)
+		return Decision{Effect: EffectAllow, MatchedRules: m,
+			Reason: fmt.Sprintf("allowed by rules: %s", strings.Join(m, ", "))}
 	}
 	return Decision{
 		Effect:       EffectAllow,
@@ -218,9 +246,12 @@ func matchHosts(hostsExpr string, a Action) bool {
 }
 
 // selectorResolveSingle checks whether a HostInfo would be returned by
-// selector.Resolve for a given set of parsed predicates.  Only
-// PHost/PTag/PRole predicates are supported for single-host checks;
-// PGroup is treated as non-matching (groups require store resolution).
+// selector.Resolve for a given set of parsed predicates. PGroup predicates
+// are expanded against Action.Groups (the fleet's group name→selector map)
+// via selector.MatchesHost; an unknown group, a nil Groups map, or a parse
+// error never matches (fail-closed: a deny scoped to an unresolvable group
+// is treated as non-matching locally, and server-side the store always
+// provides Groups so the rule fires there).
 //
 // Predicates are conjunctions (AND) — all must hold.
 func selectorResolveSingle(predicates []selector.Predicate, a Action) bool {
@@ -258,9 +289,13 @@ func selectorResolveSingle(predicates []selector.Predicate, a Action) bool {
 				return false
 			}
 		case selector.PGroup:
-			// Groups require store resolution — can't evaluate here.
-			// Treat as non-matching (the rule won't fire for groups).
-			return false
+			sub, ok := a.Groups[p.Key]
+			if !ok || a.Groups == nil {
+				return false // unknown group (or no group map) → non-matching
+			}
+			if !selector.MatchesHost(sub, info, a.Groups) {
+				return false
+			}
 		}
 	}
 	return true

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/blawesom/partout/internal/selector"
 )
 
 func keypair() (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -298,5 +300,59 @@ func TestValidEOL(t *testing.T) {
 		if ValidEOL(bad) {
 			t.Errorf("ValidEOL(%q) = true, want false", bad)
 		}
+	}
+}
+
+// TestEvaluateGroupScopedRule: a group:<name> predicate matches via
+// Action.Groups (server-side), and never matches when Groups is nil
+// (agent-side guardrail — the signed server decision is authoritative there).
+func TestEvaluateGroupScopedRule(t *testing.T) {
+	rules := []Rule{{
+		ID: "pol_deny_web", Name: "deny on webservers", Effect: EffectDeny,
+		Match: Match{Hosts: "group:webservers", Actions: []string{ActionExec}, CommandRegex: "rm"},
+	}}
+	groups := selector.Groups{"webservers": "role:web"}
+
+	// Host with role web → in group → deny fires.
+	d := Evaluate(rules, Action{HostID: "ag_1", HostRoles: []string{"web"}, Cmd: "rm", CommandLine: "rm -rf /", Groups: groups})
+	if d.Effect != EffectDeny || len(d.MatchedRules) != 1 {
+		t.Fatalf("in-group host: effect=%s matched=%v, want deny with 1 rule", d.Effect, d.MatchedRules)
+	}
+	// Host without the role → not in group → default allow.
+	d = Evaluate(rules, Action{HostID: "ag_2", HostRoles: []string{"db"}, Cmd: "rm", CommandLine: "rm -rf /", Groups: groups})
+	if d.Effect != EffectAllow {
+		t.Fatalf("out-of-group host: effect=%s, want allow", d.Effect)
+	}
+	// Nil groups (agent-side) → non-matching, never a silent deny-from-nothing.
+	d = Evaluate(rules, Action{HostID: "ag_1", HostRoles: []string{"web"}, Cmd: "rm", CommandLine: "rm -rf /"})
+	if d.Effect != EffectAllow {
+		t.Fatalf("nil groups: effect=%s, want allow (group resolves server-side)", d.Effect)
+	}
+	// Unknown group name → non-matching (fail-closed for the deny to not
+	// misfire on a typo'd group is a server-side listing concern; evaluation
+	// itself must not match).
+	d = Evaluate(rules, Action{HostID: "ag_1", HostRoles: []string{"web"}, Cmd: "rm", CommandLine: "rm -rf /", Groups: selector.Groups{"other": "all"}})
+	if d.Effect != EffectAllow {
+		t.Fatalf("unknown group: effect=%s, want allow", d.Effect)
+	}
+}
+
+// TestEvaluatePriorityOrderingWithinEffect: effect precedence always wins
+// (deny beats allow regardless of priority), but within the winning effect
+// the lower-priority-number rule is named first.
+func TestEvaluatePriorityOrderingWithinEffect(t *testing.T) {
+	rules := []Rule{
+		{ID: "pol_allow_low", Effect: EffectAllow, Priority: 10, Match: Match{Actions: []string{ActionExec}}},
+		{ID: "pol_allow_high", Effect: EffectAllow, Priority: 1, Match: Match{Actions: []string{ActionExec}}},
+		{ID: "pol_deny", Effect: EffectDeny, Priority: 99, Match: Match{Actions: []string{ActionExec}, CommandRegex: "rm"}},
+	}
+	d := Evaluate(rules, Action{CommandLine: "ls", ActionClass: ActionExec})
+	if d.Effect != EffectAllow || d.MatchedRules[0] != "pol_allow_high" {
+		t.Fatalf("allow ordering: effect=%s matched=%v, want allow with pol_allow_high first", d.Effect, d.MatchedRules)
+	}
+	// deny wins even with the worst priority number.
+	d = Evaluate(rules, Action{CommandLine: "rm -rf /", ActionClass: ActionExec})
+	if d.Effect != EffectDeny || d.MatchedRules[0] != "pol_deny" {
+		t.Fatalf("deny precedence: effect=%s matched=%v, want deny", d.Effect, d.MatchedRules)
 	}
 }
